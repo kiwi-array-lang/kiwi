@@ -1,0 +1,10 @@
+[repos.mlx]
+url = "https://github.com/ml-explore/mlx.git"
+rev = "ce45c52505c8158ea48d2a54e8caae05efd86bfe"
+patches = [
+  "deps/patches/mlx/0003-space-safe-compiled-preamble.patch",
+]
+
+[repos.mlx_c]
+url = "https://github.com/ml-explore/mlx-c.git"
+rev = "0726ca922fc902c4c61ef9c27d94132be418e945"

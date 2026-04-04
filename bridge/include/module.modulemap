@@ -1,0 +1,4 @@
+module KiwiBridge {
+  header "kiwi_bridge.h"
+  export *
+}
