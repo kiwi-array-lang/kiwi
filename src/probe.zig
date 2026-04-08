@@ -12,14 +12,14 @@ pub const ProbeResult = struct {
     err_name: ?[]const u8,
     host_realization_count: usize,
     structural_host_realization_count: usize,
-    mlx_realization_count: usize,
-    structural_mlx_realization_count: usize,
+    backend_realization_count: usize,
+    structural_backend_realization_count: usize,
     host_realization_reuse_count: usize,
     host_readback_count: usize,
-    mlx_realization_reuse_count: usize,
-    mlx_promotion_count: usize,
+    backend_realization_reuse_count: usize,
+    backend_promotion_count: usize,
     host_eviction_count: usize,
-    mlx_eviction_count: usize,
+    backend_eviction_count: usize,
     dual_resident_peak_count: usize,
     flat_concat_dense_view_count: usize,
     first_axis_slice_dense_view_count: usize,
@@ -57,13 +57,13 @@ pub const ProbeResult = struct {
     host_fold_fast_count: usize,
     host_scan_fast_count: usize,
     host_fold_scan_miss_unsupported_builtin_count: usize,
-    host_fold_scan_miss_backend_override_mlx_count: usize,
+    host_fold_scan_miss_backend_override_count: usize,
     host_fold_scan_miss_non_numeric_or_shape_count: usize,
     host_fold_scan_miss_planner_non_host_count: usize,
     host_fold_scan_miss_preserve_generic_semantics_count: usize,
     host_fold_scan_miss_unsupported_input_count: usize,
     host_dense_dyad_host_count: usize,
-    host_dense_dyad_miss_planner_mlx_count: usize,
+    host_dense_dyad_miss_planner_backend_count: usize,
     host_dense_dyad_miss_mode_count: usize,
     host_dense_dyad_miss_view_count: usize,
     host_string_view_alloc_count: usize,
@@ -108,29 +108,29 @@ pub const ProbeResult = struct {
     dense_autodiff_reject_capture_or_global_dependency_count: usize,
     dense_autodiff_reject_non_dense_operand_count: usize,
     planner_numeric_dyad_host_count: usize,
-    planner_numeric_dyad_mlx_count: usize,
+    planner_numeric_dyad_backend_count: usize,
     planner_compare_mask_host_count: usize,
-    planner_compare_mask_mlx_count: usize,
+    planner_compare_mask_backend_count: usize,
     planner_reduce_host_count: usize,
-    planner_reduce_mlx_count: usize,
+    planner_reduce_backend_count: usize,
     exec_numeric_dyad_host_count: usize,
-    exec_numeric_dyad_mlx_count: usize,
+    exec_numeric_dyad_backend_count: usize,
     exec_compare_mask_host_count: usize,
-    exec_compare_mask_mlx_count: usize,
+    exec_compare_mask_backend_count: usize,
     exec_reduce_host_count: usize,
-    exec_reduce_mlx_count: usize,
+    exec_reduce_backend_count: usize,
     exec_scan_host_count: usize,
-    exec_scan_mlx_count: usize,
+    exec_scan_backend_count: usize,
     exec_matmul_host_count: usize,
-    exec_matmul_mlx_count: usize,
+    exec_matmul_backend_count: usize,
     exec_dense_autodiff_host_count: usize,
-    exec_dense_autodiff_mlx_count: usize,
+    exec_dense_autodiff_backend_count: usize,
     planner_scan_host_count: usize,
-    planner_scan_mlx_count: usize,
+    planner_scan_backend_count: usize,
     planner_matmul_host_count: usize,
-    planner_matmul_mlx_count: usize,
+    planner_matmul_backend_count: usize,
     planner_dense_autodiff_host_count: usize,
-    planner_dense_autodiff_mlx_count: usize,
+    planner_dense_autodiff_backend_count: usize,
     last_dense_plan_region: ?[]const u8,
     last_dense_plan_backend: ?[]const u8,
     last_dense_exec_backend: ?[]const u8,
@@ -154,14 +154,14 @@ pub fn collectProbeResult(session: *runtime.Session, name: []const u8, err_name:
         .err_name = err_name,
         .host_realization_count = session.debugHostRealizationCount(),
         .structural_host_realization_count = session.debugStructuralHostRealizationCount(),
-        .mlx_realization_count = session.debugMlxRealizationCount(),
-        .structural_mlx_realization_count = session.debugStructuralMlxRealizationCount(),
+        .backend_realization_count = session.debugBackendRealizationCount(),
+        .structural_backend_realization_count = session.debugStructuralBackendRealizationCount(),
         .host_realization_reuse_count = session.debugHostRealizationReuseCount(),
         .host_readback_count = session.debugHostReadbackCount(),
-        .mlx_realization_reuse_count = session.debugMlxRealizationReuseCount(),
-        .mlx_promotion_count = session.debugMlxPromotionCount(),
+        .backend_realization_reuse_count = session.debugBackendRealizationReuseCount(),
+        .backend_promotion_count = session.debugBackendPromotionCount(),
         .host_eviction_count = session.debugHostEvictionCount(),
-        .mlx_eviction_count = session.debugMlxEvictionCount(),
+        .backend_eviction_count = session.debugBackendEvictionCount(),
         .dual_resident_peak_count = session.debugDualResidentPeakCount(),
         .flat_concat_dense_view_count = session.debugFlatConcatDenseViewCount(),
         .first_axis_slice_dense_view_count = session.debugFirstAxisSliceDenseViewCount(),
@@ -199,13 +199,13 @@ pub fn collectProbeResult(session: *runtime.Session, name: []const u8, err_name:
         .host_fold_fast_count = session.debugHostFoldFastCount(),
         .host_scan_fast_count = session.debugHostScanFastCount(),
         .host_fold_scan_miss_unsupported_builtin_count = session.debugHostFoldScanMissCount(.unsupported_builtin),
-        .host_fold_scan_miss_backend_override_mlx_count = session.debugHostFoldScanMissCount(.backend_override_mlx),
+        .host_fold_scan_miss_backend_override_count = session.debugHostFoldScanMissCount(.backend_override),
         .host_fold_scan_miss_non_numeric_or_shape_count = session.debugHostFoldScanMissCount(.non_numeric_or_shape),
         .host_fold_scan_miss_planner_non_host_count = session.debugHostFoldScanMissCount(.planner_non_host),
         .host_fold_scan_miss_preserve_generic_semantics_count = session.debugHostFoldScanMissCount(.preserve_generic_semantics),
         .host_fold_scan_miss_unsupported_input_count = session.debugHostFoldScanMissCount(.unsupported_input),
         .host_dense_dyad_host_count = session.debugHostDenseDyadHostCount(),
-        .host_dense_dyad_miss_planner_mlx_count = session.debugHostDenseDyadMissCount(.planner_mlx),
+        .host_dense_dyad_miss_planner_backend_count = session.debugHostDenseDyadMissCount(.planner_backend),
         .host_dense_dyad_miss_mode_count = session.debugHostDenseDyadMissCount(.mode),
         .host_dense_dyad_miss_view_count = session.debugHostDenseDyadMissCount(.view),
         .host_string_view_alloc_count = session.debugHostStringViewAllocCount(),
@@ -250,29 +250,29 @@ pub fn collectProbeResult(session: *runtime.Session, name: []const u8, err_name:
         .dense_autodiff_reject_capture_or_global_dependency_count = session.debugDenseAutodiffRejectCount(.capture_or_global_dependency),
         .dense_autodiff_reject_non_dense_operand_count = session.debugDenseAutodiffRejectCount(.non_dense_operand),
         .planner_numeric_dyad_host_count = session.debugDensePlanCount(.numeric_dyad, .host),
-        .planner_numeric_dyad_mlx_count = session.debugDensePlanCount(.numeric_dyad, .mlx),
+        .planner_numeric_dyad_backend_count = session.debugDensePlanCount(.numeric_dyad, .mlx),
         .planner_compare_mask_host_count = session.debugDensePlanCount(.compare_mask, .host),
-        .planner_compare_mask_mlx_count = session.debugDensePlanCount(.compare_mask, .mlx),
+        .planner_compare_mask_backend_count = session.debugDensePlanCount(.compare_mask, .mlx),
         .planner_reduce_host_count = session.debugDensePlanCount(.reduce, .host),
-        .planner_reduce_mlx_count = session.debugDensePlanCount(.reduce, .mlx),
+        .planner_reduce_backend_count = session.debugDensePlanCount(.reduce, .mlx),
         .exec_numeric_dyad_host_count = session.debugDenseExecCount(.numeric_dyad, .host),
-        .exec_numeric_dyad_mlx_count = session.debugDenseExecCount(.numeric_dyad, .mlx),
+        .exec_numeric_dyad_backend_count = session.debugDenseExecCount(.numeric_dyad, .mlx),
         .exec_compare_mask_host_count = session.debugDenseExecCount(.compare_mask, .host),
-        .exec_compare_mask_mlx_count = session.debugDenseExecCount(.compare_mask, .mlx),
+        .exec_compare_mask_backend_count = session.debugDenseExecCount(.compare_mask, .mlx),
         .exec_reduce_host_count = session.debugDenseExecCount(.reduce, .host),
-        .exec_reduce_mlx_count = session.debugDenseExecCount(.reduce, .mlx),
+        .exec_reduce_backend_count = session.debugDenseExecCount(.reduce, .mlx),
         .exec_scan_host_count = session.debugDenseExecCount(.scan, .host),
-        .exec_scan_mlx_count = session.debugDenseExecCount(.scan, .mlx),
+        .exec_scan_backend_count = session.debugDenseExecCount(.scan, .mlx),
         .exec_matmul_host_count = session.debugDenseExecCount(.matmul, .host),
-        .exec_matmul_mlx_count = session.debugDenseExecCount(.matmul, .mlx),
+        .exec_matmul_backend_count = session.debugDenseExecCount(.matmul, .mlx),
         .exec_dense_autodiff_host_count = session.debugDenseExecCount(.dense_autodiff, .host),
-        .exec_dense_autodiff_mlx_count = session.debugDenseExecCount(.dense_autodiff, .mlx),
+        .exec_dense_autodiff_backend_count = session.debugDenseExecCount(.dense_autodiff, .mlx),
         .planner_scan_host_count = session.debugDensePlanCount(.scan, .host),
-        .planner_scan_mlx_count = session.debugDensePlanCount(.scan, .mlx),
+        .planner_scan_backend_count = session.debugDensePlanCount(.scan, .mlx),
         .planner_matmul_host_count = session.debugDensePlanCount(.matmul, .host),
-        .planner_matmul_mlx_count = session.debugDensePlanCount(.matmul, .mlx),
+        .planner_matmul_backend_count = session.debugDensePlanCount(.matmul, .mlx),
         .planner_dense_autodiff_host_count = session.debugDensePlanCount(.dense_autodiff, .host),
-        .planner_dense_autodiff_mlx_count = session.debugDensePlanCount(.dense_autodiff, .mlx),
+        .planner_dense_autodiff_backend_count = session.debugDensePlanCount(.dense_autodiff, .mlx),
         .last_dense_plan_region = session.lastDensePlanRegion(),
         .last_dense_plan_backend = session.lastDensePlanBackend(),
         .last_dense_exec_backend = session.lastDenseExecBackend(),
@@ -289,14 +289,14 @@ pub fn writeProbeResultText(writer: anytype, result: ProbeResult) !void {
 
     try writer.print("host_realization_count={d}\n", .{result.host_realization_count});
     try writer.print("structural_host_realization_count={d}\n", .{result.structural_host_realization_count});
-    try writer.print("mlx_realization_count={d}\n", .{result.mlx_realization_count});
-    try writer.print("structural_mlx_realization_count={d}\n", .{result.structural_mlx_realization_count});
+    try writer.print("backend_realization_count={d}\n", .{result.backend_realization_count});
+    try writer.print("structural_backend_realization_count={d}\n", .{result.structural_backend_realization_count});
     try writer.print("host_realization_reuse_count={d}\n", .{result.host_realization_reuse_count});
     try writer.print("host_readback_count={d}\n", .{result.host_readback_count});
-    try writer.print("mlx_realization_reuse_count={d}\n", .{result.mlx_realization_reuse_count});
-    try writer.print("mlx_promotion_count={d}\n", .{result.mlx_promotion_count});
+    try writer.print("backend_realization_reuse_count={d}\n", .{result.backend_realization_reuse_count});
+    try writer.print("backend_promotion_count={d}\n", .{result.backend_promotion_count});
     try writer.print("host_eviction_count={d}\n", .{result.host_eviction_count});
-    try writer.print("mlx_eviction_count={d}\n", .{result.mlx_eviction_count});
+    try writer.print("backend_eviction_count={d}\n", .{result.backend_eviction_count});
     try writer.print("dual_resident_peak_count={d}\n", .{result.dual_resident_peak_count});
     try writer.print("flat_concat_dense_view_count={d}\n", .{result.flat_concat_dense_view_count});
     try writer.print("first_axis_slice_dense_view_count={d}\n", .{result.first_axis_slice_dense_view_count});
@@ -334,13 +334,13 @@ pub fn writeProbeResultText(writer: anytype, result: ProbeResult) !void {
     try writer.print("host_fold_fast_count={d}\n", .{result.host_fold_fast_count});
     try writer.print("host_scan_fast_count={d}\n", .{result.host_scan_fast_count});
     try writer.print("host_fold_scan_miss_unsupported_builtin_count={d}\n", .{result.host_fold_scan_miss_unsupported_builtin_count});
-    try writer.print("host_fold_scan_miss_backend_override_mlx_count={d}\n", .{result.host_fold_scan_miss_backend_override_mlx_count});
+    try writer.print("host_fold_scan_miss_backend_override_count={d}\n", .{result.host_fold_scan_miss_backend_override_count});
     try writer.print("host_fold_scan_miss_non_numeric_or_shape_count={d}\n", .{result.host_fold_scan_miss_non_numeric_or_shape_count});
     try writer.print("host_fold_scan_miss_planner_non_host_count={d}\n", .{result.host_fold_scan_miss_planner_non_host_count});
     try writer.print("host_fold_scan_miss_preserve_generic_semantics_count={d}\n", .{result.host_fold_scan_miss_preserve_generic_semantics_count});
     try writer.print("host_fold_scan_miss_unsupported_input_count={d}\n", .{result.host_fold_scan_miss_unsupported_input_count});
     try writer.print("host_dense_dyad_host_count={d}\n", .{result.host_dense_dyad_host_count});
-    try writer.print("host_dense_dyad_miss_planner_mlx_count={d}\n", .{result.host_dense_dyad_miss_planner_mlx_count});
+    try writer.print("host_dense_dyad_miss_planner_backend_count={d}\n", .{result.host_dense_dyad_miss_planner_backend_count});
     try writer.print("host_dense_dyad_miss_mode_count={d}\n", .{result.host_dense_dyad_miss_mode_count});
     try writer.print("host_dense_dyad_miss_view_count={d}\n", .{result.host_dense_dyad_miss_view_count});
     try writer.print("host_string_view_alloc_count={d}\n", .{result.host_string_view_alloc_count});
@@ -385,29 +385,29 @@ pub fn writeProbeResultText(writer: anytype, result: ProbeResult) !void {
     try writer.print("dense_autodiff_reject_capture_or_global_dependency_count={d}\n", .{result.dense_autodiff_reject_capture_or_global_dependency_count});
     try writer.print("dense_autodiff_reject_non_dense_operand_count={d}\n", .{result.dense_autodiff_reject_non_dense_operand_count});
     try writer.print("planner_numeric_dyad_host_count={d}\n", .{result.planner_numeric_dyad_host_count});
-    try writer.print("planner_numeric_dyad_mlx_count={d}\n", .{result.planner_numeric_dyad_mlx_count});
+    try writer.print("planner_numeric_dyad_backend_count={d}\n", .{result.planner_numeric_dyad_backend_count});
     try writer.print("planner_compare_mask_host_count={d}\n", .{result.planner_compare_mask_host_count});
-    try writer.print("planner_compare_mask_mlx_count={d}\n", .{result.planner_compare_mask_mlx_count});
+    try writer.print("planner_compare_mask_backend_count={d}\n", .{result.planner_compare_mask_backend_count});
     try writer.print("planner_reduce_host_count={d}\n", .{result.planner_reduce_host_count});
-    try writer.print("planner_reduce_mlx_count={d}\n", .{result.planner_reduce_mlx_count});
+    try writer.print("planner_reduce_backend_count={d}\n", .{result.planner_reduce_backend_count});
     try writer.print("exec_numeric_dyad_host_count={d}\n", .{result.exec_numeric_dyad_host_count});
-    try writer.print("exec_numeric_dyad_mlx_count={d}\n", .{result.exec_numeric_dyad_mlx_count});
+    try writer.print("exec_numeric_dyad_backend_count={d}\n", .{result.exec_numeric_dyad_backend_count});
     try writer.print("exec_compare_mask_host_count={d}\n", .{result.exec_compare_mask_host_count});
-    try writer.print("exec_compare_mask_mlx_count={d}\n", .{result.exec_compare_mask_mlx_count});
+    try writer.print("exec_compare_mask_backend_count={d}\n", .{result.exec_compare_mask_backend_count});
     try writer.print("exec_reduce_host_count={d}\n", .{result.exec_reduce_host_count});
-    try writer.print("exec_reduce_mlx_count={d}\n", .{result.exec_reduce_mlx_count});
+    try writer.print("exec_reduce_backend_count={d}\n", .{result.exec_reduce_backend_count});
     try writer.print("exec_scan_host_count={d}\n", .{result.exec_scan_host_count});
-    try writer.print("exec_scan_mlx_count={d}\n", .{result.exec_scan_mlx_count});
+    try writer.print("exec_scan_backend_count={d}\n", .{result.exec_scan_backend_count});
     try writer.print("exec_matmul_host_count={d}\n", .{result.exec_matmul_host_count});
-    try writer.print("exec_matmul_mlx_count={d}\n", .{result.exec_matmul_mlx_count});
+    try writer.print("exec_matmul_backend_count={d}\n", .{result.exec_matmul_backend_count});
     try writer.print("exec_dense_autodiff_host_count={d}\n", .{result.exec_dense_autodiff_host_count});
-    try writer.print("exec_dense_autodiff_mlx_count={d}\n", .{result.exec_dense_autodiff_mlx_count});
+    try writer.print("exec_dense_autodiff_backend_count={d}\n", .{result.exec_dense_autodiff_backend_count});
     try writer.print("planner_scan_host_count={d}\n", .{result.planner_scan_host_count});
-    try writer.print("planner_scan_mlx_count={d}\n", .{result.planner_scan_mlx_count});
+    try writer.print("planner_scan_backend_count={d}\n", .{result.planner_scan_backend_count});
     try writer.print("planner_matmul_host_count={d}\n", .{result.planner_matmul_host_count});
-    try writer.print("planner_matmul_mlx_count={d}\n", .{result.planner_matmul_mlx_count});
+    try writer.print("planner_matmul_backend_count={d}\n", .{result.planner_matmul_backend_count});
     try writer.print("planner_dense_autodiff_host_count={d}\n", .{result.planner_dense_autodiff_host_count});
-    try writer.print("planner_dense_autodiff_mlx_count={d}\n", .{result.planner_dense_autodiff_mlx_count});
+    try writer.print("planner_dense_autodiff_backend_count={d}\n", .{result.planner_dense_autodiff_backend_count});
     try writer.print("last_dense_plan_region={s}\n", .{result.last_dense_plan_region orelse "null"});
     try writer.print("last_dense_plan_backend={s}\n", .{result.last_dense_plan_backend orelse "null"});
     try writer.print("last_dense_exec_backend={s}\n", .{result.last_dense_exec_backend orelse "null"});

@@ -32,12 +32,18 @@ extern fn mlxc_exp(out: *c.mlx_array, value: c.mlx_array, stream: c.mlx_stream) 
 extern fn mlxc_log(out: *c.mlx_array, value: c.mlx_array, stream: c.mlx_stream) c_int;
 extern fn mlxc_tanh(out: *c.mlx_array, value: c.mlx_array, stream: c.mlx_stream) c_int;
 extern fn mlxc_sigmoid(out: *c.mlx_array, value: c.mlx_array, stream: c.mlx_stream) c_int;
+extern fn mlxc_rms_norm(out: *c.mlx_array, value: c.mlx_array, weight: ?*const c.mlx_array, eps: f32, stream: c.mlx_stream) c_int;
 extern fn mlxc_set_default_device_type(device_type: c.mlx_device_type, index: c_int) c_int;
 
 pub const Error = error{
     MlxFailure,
     InvalidDevice,
     UnsupportedType,
+};
+
+pub const NamedArray = struct {
+    name: []u8,
+    array: Array,
 };
 
 pub const DevicePreference = enum {
@@ -234,6 +240,14 @@ pub const Array = struct {
         return fromSliceChecked(data.ptr, dims, c.MLX_FLOAT32);
     }
 
+    pub fn fromBfloat16BitsSliceChecked(data: []const u16, dims: []const i32) Error!Array {
+        return fromSliceChecked(data.ptr, dims, c.MLX_BFLOAT16);
+    }
+
+    pub fn fromBytesChecked(data: []const u8, dims: []const i32, elem_dtype: c.mlx_dtype) Error!Array {
+        return fromSliceChecked(data.ptr, dims, elem_dtype);
+    }
+
     pub fn ndim(self: Array) usize {
         return c.mlx_array_ndim(self.handle);
     }
@@ -299,6 +313,13 @@ pub const Array = struct {
                 try check(c.mlx_array_item_float64(&out, self.handle));
                 break :blk out;
             },
+            c.MLX_FLOAT16, c.MLX_BFLOAT16 => blk: {
+                var casted = try self.castFreshStream(c.MLX_FLOAT32);
+                defer casted.deinit();
+                var out: f32 = 0;
+                try check(c.mlx_array_item_float32(&out, casted.handle));
+                break :blk out;
+            },
             c.MLX_BOOL, c.MLX_INT32, c.MLX_INT64, c.MLX_UINT32 => @floatFromInt(try self.intItem()),
             else => return error.UnsupportedType,
         };
@@ -313,7 +334,15 @@ pub const Array = struct {
     }
 
     pub fn readFloats(self: Array, allocator: std.mem.Allocator) (Error || std.mem.Allocator.Error)![]f32 {
-        return self.readSlice(allocator, f32, c.mlx_array_data_float32);
+        return switch (self.dtype()) {
+            c.MLX_FLOAT32 => self.readSlice(allocator, f32, c.mlx_array_data_float32),
+            c.MLX_FLOAT16, c.MLX_BFLOAT16 => blk: {
+                var casted = try self.castFreshStream(c.MLX_FLOAT32);
+                defer casted.deinit();
+                break :blk casted.readSlice(allocator, f32, c.mlx_array_data_float32);
+            },
+            else => error.UnsupportedType,
+        };
     }
 
     pub fn add(ctx: Context, left: Array, right: Array) Error!Array {
@@ -430,6 +459,13 @@ pub const Array = struct {
         return .{ .handle = out };
     }
 
+    pub fn rmsNorm(ctx: Context, value: Array, weight: ?Array, eps: f32) Error!Array {
+        var out = c.mlx_array_new();
+        const weight_handle = if (weight) |w| &w.handle else null;
+        try check(mlxc_rms_norm(&out, value.handle, weight_handle, eps, ctx.stream));
+        return .{ .handle = out };
+    }
+
     pub fn floor(ctx: Context, value: Array) Error!Array {
         var out = c.mlx_array_new();
         try check(c.mlx_floor(&out, value.handle, ctx.stream));
@@ -439,6 +475,17 @@ pub const Array = struct {
     pub fn cast(ctx: Context, value: Array, target_dtype: c.mlx_dtype) Error!Array {
         var out = c.mlx_array_new();
         try check(c.mlx_astype(&out, value.handle, target_dtype, ctx.stream));
+        return .{ .handle = out };
+    }
+
+    fn castFreshStream(self: Array, target_dtype: c.mlx_dtype) Error!Array {
+        var out = c.mlx_array_new();
+        errdefer _ = c.mlx_array_free(out);
+
+        const stream = c.mlx_stream_new();
+        defer _ = c.mlx_stream_free(stream);
+
+        try check(c.mlx_astype(&out, self.handle, target_dtype, stream));
         return .{ .handle = out };
     }
 
@@ -457,6 +504,12 @@ pub const Array = struct {
     pub fn transpose(ctx: Context, value: Array) Error!Array {
         var out = c.mlx_array_new();
         try check(c.mlx_transpose(&out, value.handle, ctx.stream));
+        return .{ .handle = out };
+    }
+
+    pub fn swapAxes(ctx: Context, value: Array, axis1: i32, axis2: i32) Error!Array {
+        var out = c.mlx_array_new();
+        try check(c.mlx_swapaxes(&out, value.handle, axis1, axis2, ctx.stream));
         return .{ .handle = out };
     }
 
@@ -499,6 +552,12 @@ pub const Array = struct {
     pub fn maxAxis0(ctx: Context, value: Array) Error!Array {
         var out = c.mlx_array_new();
         try check(mlxc_max_axis0(&out, value.handle, ctx.stream));
+        return .{ .handle = out };
+    }
+
+    pub fn argmax(ctx: Context, value: Array) Error!Array {
+        var out = c.mlx_array_new();
+        try check(c.mlx_argmax(&out, value.handle, false, ctx.stream));
         return .{ .handle = out };
     }
 
@@ -559,6 +618,23 @@ pub const Array = struct {
     pub fn slice(ctx: Context, value: Array, start: []const i32, stop: []const i32, strides: []const i32) Error!Array {
         var out = c.mlx_array_new();
         try check(c.mlx_slice(&out, value.handle, start.ptr, start.len, stop.ptr, stop.len, strides.ptr, strides.len, ctx.stream));
+        return .{ .handle = out };
+    }
+
+    pub fn sliceUpdate(ctx: Context, value: Array, update: Array, start: []const i32, stop: []const i32, strides: []const i32) Error!Array {
+        var out = c.mlx_array_new();
+        try check(c.mlx_slice_update(
+            &out,
+            value.handle,
+            update.handle,
+            start.ptr,
+            start.len,
+            stop.ptr,
+            stop.len,
+            strides.ptr,
+            strides.len,
+            ctx.stream,
+        ));
         return .{ .handle = out };
     }
 
@@ -660,3 +736,90 @@ pub const Array = struct {
         };
     }
 };
+
+pub fn loadSafetensors(
+    allocator: std.mem.Allocator,
+    ctx: Context,
+    path: []const u8,
+) (Error || std.mem.Allocator.Error)![]NamedArray {
+    const zpath = try allocator.dupeZ(u8, path);
+    defer allocator.free(zpath);
+
+    var cpu_ctx: ?Context = null;
+    defer {
+        if (cpu_ctx) |*owned| owned.deinit();
+        _ = mlxc_set_default_device_type(switch (ctx.resolved) {
+            .gpu => c.MLX_GPU,
+            else => c.MLX_CPU,
+        }, 0);
+    }
+    const load_stream = if (ctx.resolved == .gpu) blk: {
+        cpu_ctx = try Context.init(.cpu);
+        break :blk cpu_ctx.?.stream;
+    } else ctx.stream;
+
+    var arrays = c.mlx_map_string_to_array_new();
+    errdefer _ = c.mlx_map_string_to_array_free(arrays);
+    var metadata = c.mlx_map_string_to_string_new();
+    errdefer _ = c.mlx_map_string_to_string_free(metadata);
+
+    try check(c.mlx_load_safetensors(&arrays, &metadata, zpath.ptr, load_stream));
+    defer _ = c.mlx_map_string_to_array_free(arrays);
+    defer _ = c.mlx_map_string_to_string_free(metadata);
+
+    const iter = c.mlx_map_string_to_array_iterator_new(arrays);
+    defer _ = c.mlx_map_string_to_array_iterator_free(iter);
+
+    var out = std.ArrayList(NamedArray).empty;
+    errdefer {
+        for (out.items) |*entry| {
+            allocator.free(entry.name);
+            entry.array.deinit();
+        }
+        out.deinit(allocator);
+    }
+
+    while (true) {
+        var key: ?[*:0]const u8 = null;
+        var raw = c.mlx_array_new();
+        const status = c.mlx_map_string_to_array_iterator_next(&key, &raw, iter);
+        if (status == 2) {
+            _ = c.mlx_array_free(raw);
+            break;
+        }
+        try check(status);
+        errdefer _ = c.mlx_array_free(raw);
+
+        const name = try allocator.dupe(u8, std.mem.span(key orelse return error.MlxFailure));
+        errdefer allocator.free(name);
+
+        var array = Array{ .handle = raw };
+        errdefer array.deinit();
+        if (ctx.resolved == .gpu) {
+            const copied = try Array.copy(ctx, array);
+            array.deinit();
+            array = copied;
+        }
+
+        try out.append(allocator, .{
+            .name = name,
+            .array = array,
+        });
+    }
+
+    const owned = try out.toOwnedSlice(allocator);
+    std.sort.block(NamedArray, owned, {}, struct {
+        fn lessThan(_: void, left: NamedArray, right: NamedArray) bool {
+            return std.mem.order(u8, left.name, right.name) == .lt;
+        }
+    }.lessThan);
+    return owned;
+}
+
+pub fn deinitNamedArrays(allocator: std.mem.Allocator, entries: []NamedArray) void {
+    for (entries) |*entry| {
+        allocator.free(entry.name);
+        entry.array.deinit();
+    }
+    allocator.free(entries);
+}

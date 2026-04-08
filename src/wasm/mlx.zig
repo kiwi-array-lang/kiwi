@@ -31,6 +31,11 @@ pub const DevicePreference = enum {
     }
 };
 
+pub const NamedArray = struct {
+    name: []u8,
+    array: Array,
+};
+
 pub const HotGradKind = enum(c_int) {
     square = 1,
     cube = 2,
@@ -444,6 +449,25 @@ pub const Array = struct {
         return initFromHandle(kiwi_bridge_transpose(value.handle), value.dtype());
     }
 
+    pub fn swapAxes(ctx: Context, value: Array, axis1: i32, axis2: i32) Error!Array {
+        if (axis1 == axis2) return value.clone();
+
+        const rank_i32: i32 = @intCast(value.ndim());
+        if (rank_i32 <= 1) return value.clone();
+
+        const norm_axis1 = if (axis1 < 0) axis1 + rank_i32 else axis1;
+        const norm_axis2 = if (axis2 < 0) axis2 + rank_i32 else axis2;
+        if (norm_axis1 < 0 or norm_axis1 >= rank_i32) return error.MlxFailure;
+        if (norm_axis2 < 0 or norm_axis2 >= rank_i32) return error.MlxFailure;
+
+        if (rank_i32 == 2 and ((norm_axis1 == 0 and norm_axis2 == 1) or (norm_axis1 == 1 and norm_axis2 == 0))) {
+            return transpose(ctx, value);
+        }
+
+        // The wasm bridge only exposes a plain 2D transpose today.
+        return error.MlxFailure;
+    }
+
     pub fn copy(ctx: Context, value: Array) Error!Array {
         _ = ctx;
         return value.clone();
@@ -521,6 +545,16 @@ pub const Array = struct {
     pub fn argsort(ctx: Context, value: Array) Error!Array {
         _ = ctx;
         return initFromHandle(kiwi_bridge_argsort(value.handle), c.MLX_INT32);
+    }
+
+    pub fn argmax(ctx: Context, value: Array) Error!Array {
+        if (value.ndim() != 1 or value.size() == 0) return error.MlxFailure;
+        var sorted = try argsort(ctx, value);
+        defer sorted.deinit();
+        const items = sorted.readInts(std.heap.wasm_allocator) catch return error.MlxFailure;
+        defer std.heap.wasm_allocator.free(items);
+        if (items.len == 0) return error.MlxFailure;
+        return fromInt(items[items.len - 1]);
     }
 
     pub fn where(ctx: Context, cond: Array, left: Array, right: Array) Error!Array {
@@ -622,3 +656,23 @@ pub const Array = struct {
         return unsupported();
     }
 };
+
+pub fn loadSafetensors(
+    allocator: std.mem.Allocator,
+    ctx: Context,
+    path: []const u8,
+) (Error || std.mem.Allocator.Error)![]NamedArray {
+    _ = allocator;
+    _ = ctx;
+    _ = path;
+    return error.MlxFailure;
+}
+
+pub fn deinitNamedArrays(allocator: std.mem.Allocator, entries: []NamedArray) void {
+    for (entries) |entry| {
+        allocator.free(entry.name);
+        var array = entry.array;
+        array.deinit();
+    }
+    allocator.free(entries);
+}

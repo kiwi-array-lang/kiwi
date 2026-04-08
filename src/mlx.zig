@@ -18,6 +18,11 @@ const placeholder = struct {
         UnsupportedType,
     };
 
+    pub const NamedArray = struct {
+        name: []u8,
+        array: Self.Array,
+    };
+
     pub const DevicePreference = enum {
         auto,
         cpu,
@@ -396,6 +401,22 @@ const placeholder = struct {
             return unsupportedArray();
         }
     };
+
+    pub fn loadSafetensors(
+        allocator: std.mem.Allocator,
+        ctx: Self.Context,
+        path: []const u8,
+    ) (Self.Error || std.mem.Allocator.Error)![]Self.NamedArray {
+        _ = allocator;
+        _ = ctx;
+        _ = path;
+        return error.MlxFailure;
+    }
+
+    pub fn deinitNamedArrays(allocator: std.mem.Allocator, entries: []Self.NamedArray) void {
+        _ = allocator;
+        _ = entries;
+    }
 };
 
 const runtime = if (zig_builtin.target.cpu.arch == .wasm32)
@@ -409,25 +430,28 @@ pub const Error = runtime.Error;
 pub const DevicePreference = @import("device.zig").DevicePreference;
 pub const Context = runtime.Context;
 pub const Array = runtime.Array;
+pub const NamedArray = runtime.NamedArray;
 pub const check = runtime.check;
+pub const loadSafetensors = runtime.loadSafetensors;
+pub const deinitNamedArrays = runtime.deinitNamedArrays;
 pub const HotGradKind = runtime.HotGradKind;
 pub const LoweredProgramTag = runtime.LoweredProgramTag;
 pub const LoweredProgramInstr = runtime.LoweredProgramInstr;
 
 pub const BackendKind = enum {
-    native,
-    wasm_bridge,
+    mlx,
+    webgpu,
     host_only,
 };
 
 pub const backend_kind: BackendKind = if (@hasDecl(runtime, "backend_kind"))
     switch (runtime.backend_kind) {
-        .wasm_bridge => .wasm_bridge,
+        .wasm_bridge => .webgpu,
         .host_only => .host_only,
-        else => .native,
+        else => .mlx,
     }
 else
-    .native;
+    .mlx;
 pub const supports_full_ops = if (@hasDecl(runtime, "supports_full_ops")) runtime.supports_full_ops else true;
 
 fn runtimeDevicePreference(preference: DevicePreference) runtime.DevicePreference {

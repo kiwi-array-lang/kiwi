@@ -9,6 +9,7 @@ const MlxBackend = enum {
     auto,
     cpu,
     metal,
+    cuda,
 };
 
 const MlxLinkage = enum {
@@ -17,7 +18,25 @@ const MlxLinkage = enum {
     dynamic,
 };
 
-const wasm_export_symbols = &.{
+const wasm_base_export_symbols = &.{
+    "kiwi_alloc_bytes",
+    "kiwi_reset_input_arena",
+    "kiwi_init",
+    "kiwi_deinit",
+    "kiwi_eval",
+    "kiwi_last_error_ptr",
+    "kiwi_last_error_len",
+    "kiwi_last_echo_value",
+    "kiwi_last_kind",
+    "kiwi_last_int",
+    "kiwi_last_float",
+    "kiwi_last_bool",
+    "kiwi_render_last_value",
+    "kiwi_last_rendered_ptr",
+    "kiwi_last_rendered_len",
+};
+
+const wasm_webgpu_export_symbols = &.{
     "kiwi_alloc_bytes",
     "kiwi_reset_input_arena",
     "kiwi_init",
@@ -40,6 +59,20 @@ const wasm_export_symbols = &.{
     "kiwi_last_rendered_len",
     "kiwi_force_backend_surface",
 };
+
+fn addWasmBuildOptions(
+    options: *std.Build.Step.Options,
+    runtime_has_mlx: bool,
+    wasm_exports_accelerator_handles: bool,
+) void {
+    options.addOption(bool, "enable_probe_instrumentation", false);
+    options.addOption(bool, "enable_sampling_profile", false);
+    options.addOption(bool, "enable_string_instrumentation", false);
+    options.addOption([]const u8, "cli_invocation", "kiwi");
+    options.addOption(bool, "enable_bench_cli", false);
+    options.addOption(bool, "runtime_has_mlx", runtime_has_mlx);
+    options.addOption(bool, "wasm_exports_accelerator_handles", wasm_exports_accelerator_handles);
+}
 
 fn addBuildOptions(root_module: *std.Build.Module, options: *std.Build.Step.Options) void {
     root_module.addOptions("build_options", options);
@@ -110,6 +143,7 @@ fn addNativeMlxImports(
     optimize: std.builtin.OptimizeMode,
     mlx_c_include: []const u8,
     mlx_prefix: []const u8,
+    mlxc_mini_bridge: ?[]const u8,
 ) void {
     const legacy_c = b.createModule(.{
         .root_source_file = b.path("src/native/c.zig"),
@@ -132,11 +166,13 @@ fn addNativeMlxImports(
     root_module.addIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{mlx_prefix}) });
     root_module.addLibraryPath(.{ .cwd_relative = mlxRuntimeLibDir(b, mlx_prefix) });
     addRelocatableMlxRPath(root_module, target);
-    root_module.addCSourceFiles(.{
-        .files = &.{"csrc/mlxc_mini.cpp"},
-        .flags = cppFlags(target),
-        .language = .cpp,
-    });
+    if (mlxc_mini_bridge == null) {
+        root_module.addCSourceFiles(.{
+            .files = &.{"csrc/mlxc_mini.cpp"},
+            .flags = cppFlags(target),
+            .language = .cpp,
+        });
+    }
 }
 
 fn addHostOnlyImports(
@@ -161,9 +197,10 @@ fn addRuntimeImports(
     optimize: std.builtin.OptimizeMode,
     mlx_c_include: []const u8,
     mlx_prefix: []const u8,
+    mlxc_mini_bridge: ?[]const u8,
 ) void {
     switch (runtime_backend) {
-        .mlx => addNativeMlxImports(b, root_module, target, optimize, mlx_c_include, mlx_prefix),
+        .mlx => addNativeMlxImports(b, root_module, target, optimize, mlx_c_include, mlx_prefix, mlxc_mini_bridge),
         .host => addHostOnlyImports(b, root_module, target, optimize),
     }
 }
@@ -184,6 +221,7 @@ fn linkMlxDeps(
     target: std.Build.ResolvedTarget,
     mlx_backend: MlxBackend,
     mlx_linkage: MlxLinkage,
+    mlxc_mini_bridge: ?[]const u8,
 ) void {
     if (runtime_backend != .mlx) return;
     const mlx_link_opts: std.Build.Module.LinkSystemLibraryOptions = switch (mlx_linkage) {
@@ -197,6 +235,9 @@ fn linkMlxDeps(
             .search_strategy = .mode_first,
         },
     };
+    if (mlxc_mini_bridge) |bridge_name| {
+        step.root_module.linkSystemLibrary(bridge_name, .{});
+    }
     if (mlx_linkage == .auto)
         step.root_module.linkSystemLibrary("mlx", .{})
     else
@@ -214,7 +255,7 @@ fn linkMlxDeps(
                 step.root_module.linkFramework("Foundation", .{});
                 step.root_module.linkFramework("QuartzCore", .{});
             },
-            .cpu => {},
+            .cpu, .cuda => {},
         }
     }
 }
@@ -239,7 +280,7 @@ pub fn build(b: *std.Build) void {
     const mlx_backend = parseEnumOption(
         MlxBackend,
         "mlx-backend",
-        b.option([]const u8, "mlx-backend", "Native MLX backend shape: auto, cpu, or metal."),
+        b.option([]const u8, "mlx-backend", "Native MLX backend shape: auto, cpu, metal, or cuda."),
         .auto,
     );
     const mlx_linkage = parseEnumOption(
@@ -261,6 +302,10 @@ pub fn build(b: *std.Build) void {
         b.option([]const u8, "mlx-c-include", "Path to the MLX C headers directory. Defaults to .deps/mlx-c."),
         ".deps/mlx-c",
     );
+    const mlxc_mini_bridge = b.option([]const u8, "mlxc-mini-bridge", "Link an external MLX helper bridge library instead of compiling csrc/mlxc_mini.cpp.");
+    const raw_strip_symbols = b.option(bool, "strip", "Strip debug info from compiled artifacts.");
+    const strip_symbols = raw_strip_symbols orelse false;
+    const wasm_strip_symbols = b.option(bool, "wasm-strip", "Strip debug info from wasm artifacts. Defaults to true.") orelse raw_strip_symbols orelse true;
     const strip_instrumentation = b.option(bool, "strip-instrumentation", "Compile out profile/probe/string instrumentation for stripped performance builds.") orelse false;
     const build_options = b.addOptions();
     build_options.addOption(bool, "enable_probe_instrumentation", !strip_instrumentation);
@@ -269,28 +314,27 @@ pub fn build(b: *std.Build) void {
     build_options.addOption([]const u8, "cli_invocation", cli_name);
     build_options.addOption(bool, "enable_bench_cli", !public_cli and has_bench_sources);
     build_options.addOption(bool, "runtime_has_mlx", runtime_backend == .mlx);
-    const wasm_build_options = b.addOptions();
-    wasm_build_options.addOption(bool, "enable_probe_instrumentation", false);
-    wasm_build_options.addOption(bool, "enable_sampling_profile", false);
-    wasm_build_options.addOption(bool, "enable_string_instrumentation", false);
-    wasm_build_options.addOption([]const u8, "cli_invocation", "kiwi");
-    wasm_build_options.addOption(bool, "enable_bench_cli", false);
-    wasm_build_options.addOption(bool, "runtime_has_mlx", true);
+    build_options.addOption(bool, "wasm_exports_accelerator_handles", false);
+    const wasm_webgpu_build_options = b.addOptions();
+    addWasmBuildOptions(wasm_webgpu_build_options, true, true);
+    const wasm_host_min_build_options = b.addOptions();
+    addWasmBuildOptions(wasm_host_min_build_options, false, false);
 
     const module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
+        .strip = strip_symbols,
     });
     addBuildOptions(module, build_options);
-    addRuntimeImports(b, module, runtime_backend, target, optimize, mlx_c_include, mlx_prefix);
+    addRuntimeImports(b, module, runtime_backend, target, optimize, mlx_c_include, mlx_prefix, mlxc_mini_bridge);
 
     const exe = b.addExecutable(.{
         .name = cli_name,
         .root_module = module,
     });
     exe.each_lib_rpath = false;
-    linkMlxDeps(exe, runtime_backend, target, mlx_backend, mlx_linkage);
+    linkMlxDeps(exe, runtime_backend, target, mlx_backend, mlx_linkage, mlxc_mini_bridge);
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
@@ -304,9 +348,10 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/kiwi_bridge.zig"),
             .target = target,
             .optimize = optimize,
+            .strip = strip_symbols,
         });
         addBuildOptions(bridge_module, build_options);
-        addRuntimeImports(b, bridge_module, runtime_backend, target, optimize, mlx_c_include, mlx_prefix);
+        addRuntimeImports(b, bridge_module, runtime_backend, target, optimize, mlx_c_include, mlx_prefix, mlxc_mini_bridge);
 
         const bridge_shared = b.addLibrary(.{
             .linkage = .dynamic,
@@ -314,7 +359,7 @@ pub fn build(b: *std.Build) void {
             .root_module = bridge_module,
         });
         bridge_shared.each_lib_rpath = false;
-        linkMlxDeps(bridge_shared, runtime_backend, target, mlx_backend, mlx_linkage);
+        linkMlxDeps(bridge_shared, runtime_backend, target, mlx_backend, mlx_linkage, mlxc_mini_bridge);
         b.installArtifact(bridge_shared);
         bridge_shared.installHeader(b.path("bridge/include/kiwi_bridge.h"), "kiwi_bridge.h");
         bridge_shared.installHeader(b.path("bridge/include/module.modulemap"), "module.modulemap");
@@ -332,16 +377,17 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/counter_probe.zig"),
             .target = target,
             .optimize = optimize,
+            .strip = strip_symbols,
         });
         addBuildOptions(counter_probe_module, build_options);
-        addRuntimeImports(b, counter_probe_module, runtime_backend, target, optimize, mlx_c_include, mlx_prefix);
+        addRuntimeImports(b, counter_probe_module, runtime_backend, target, optimize, mlx_c_include, mlx_prefix, mlxc_mini_bridge);
 
         const counter_probe = b.addExecutable(.{
             .name = "kiwi-zig-counter-probe",
             .root_module = counter_probe_module,
         });
         counter_probe.each_lib_rpath = false;
-        linkMlxDeps(counter_probe, runtime_backend, target, mlx_backend, mlx_linkage);
+        linkMlxDeps(counter_probe, runtime_backend, target, mlx_backend, mlx_linkage, mlxc_mini_bridge);
         b.installArtifact(counter_probe);
 
         const counter_probe_run = b.addRunArtifact(counter_probe);
@@ -354,16 +400,17 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/string_perf_probe.zig"),
             .target = target,
             .optimize = optimize,
+            .strip = strip_symbols,
         });
         addBuildOptions(string_perf_probe_module, build_options);
-        addRuntimeImports(b, string_perf_probe_module, runtime_backend, target, optimize, mlx_c_include, mlx_prefix);
+        addRuntimeImports(b, string_perf_probe_module, runtime_backend, target, optimize, mlx_c_include, mlx_prefix, mlxc_mini_bridge);
 
         const string_perf_probe = b.addExecutable(.{
             .name = "kiwi-zig-string-perf-probe",
             .root_module = string_perf_probe_module,
         });
         string_perf_probe.each_lib_rpath = false;
-        linkMlxDeps(string_perf_probe, runtime_backend, target, mlx_backend, mlx_linkage);
+        linkMlxDeps(string_perf_probe, runtime_backend, target, mlx_backend, mlx_linkage, mlxc_mini_bridge);
         b.installArtifact(string_perf_probe);
 
         const string_perf_probe_run = b.addRunArtifact(string_perf_probe);
@@ -376,16 +423,17 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/realistic_string_perf_probe.zig"),
             .target = target,
             .optimize = optimize,
+            .strip = strip_symbols,
         });
         addBuildOptions(realistic_string_perf_probe_module, build_options);
-        addRuntimeImports(b, realistic_string_perf_probe_module, runtime_backend, target, optimize, mlx_c_include, mlx_prefix);
+        addRuntimeImports(b, realistic_string_perf_probe_module, runtime_backend, target, optimize, mlx_c_include, mlx_prefix, mlxc_mini_bridge);
 
         const realistic_string_perf_probe = b.addExecutable(.{
             .name = "kiwi-zig-realistic-string-perf-probe",
             .root_module = realistic_string_perf_probe_module,
         });
         realistic_string_perf_probe.each_lib_rpath = false;
-        linkMlxDeps(realistic_string_perf_probe, runtime_backend, target, mlx_backend, mlx_linkage);
+        linkMlxDeps(realistic_string_perf_probe, runtime_backend, target, mlx_backend, mlx_linkage, mlxc_mini_bridge);
         b.installArtifact(realistic_string_perf_probe);
 
         const realistic_string_perf_probe_run = b.addRunArtifact(realistic_string_perf_probe);
@@ -400,15 +448,16 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/tests.zig"),
             .target = target,
             .optimize = optimize,
+            .strip = strip_symbols,
         });
         addBuildOptions(test_module, build_options);
-        addRuntimeImports(b, test_module, runtime_backend, target, optimize, mlx_c_include, mlx_prefix);
+        addRuntimeImports(b, test_module, runtime_backend, target, optimize, mlx_c_include, mlx_prefix, mlxc_mini_bridge);
 
         const tests = b.addTest(.{
             .root_module = test_module,
         });
         tests.each_lib_rpath = false;
-        linkMlxDeps(tests, runtime_backend, target, mlx_backend, mlx_linkage);
+        linkMlxDeps(tests, runtime_backend, target, mlx_backend, mlx_linkage, mlxc_mini_bridge);
         const test_run = b.addRunArtifact(tests);
         configureRunLibraryPath(test_run, runtime_backend, target, mlx_prefix);
         const test_step = b.step("test", "Run kiwi-zig tests");
@@ -423,9 +472,10 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/wasm_api.zig"),
         .target = wasm_target,
         .optimize = .ReleaseSmall,
+        .strip = wasm_strip_symbols,
     });
-    addBuildOptions(wasm_module, wasm_build_options);
-    wasm_module.export_symbol_names = wasm_export_symbols;
+    addBuildOptions(wasm_module, wasm_webgpu_build_options);
+    wasm_module.export_symbol_names = wasm_webgpu_export_symbols;
 
     const wasm_exe = b.addExecutable(.{
         .name = "kiwi_wasm_module",
@@ -437,8 +487,35 @@ pub fn build(b: *std.Build) void {
     const wasm_cmd = b.addSystemCommand(&.{ "bash", "scripts/build_kiwi_wasm_module.sh" });
     wasm_cmd.setCwd(b.path("."));
     wasm_cmd.addFileArg(wasm_exe.getEmittedBin());
-    wasm_cmd.addArg("web/kiwi_wasm_module.js");
+    wasm_cmd.addArg("web/kiwi_wasm_module.wasm");
 
-    const wasm_step = b.step("wasm", "Build the Kiwi wasm module and embedded JS payload");
+    const wasm_webgpu_step = b.step("wasm-webgpu", "Build the Kiwi wasm module for the WebGPU-capable web target");
+    wasm_webgpu_step.dependOn(&wasm_cmd.step);
+
+    const wasm_host_min_module = b.createModule(.{
+        .root_source_file = b.path("src/wasm_api.zig"),
+        .target = wasm_target,
+        .optimize = .ReleaseSmall,
+        .strip = wasm_strip_symbols,
+    });
+    addBuildOptions(wasm_host_min_module, wasm_host_min_build_options);
+    wasm_host_min_module.export_symbol_names = wasm_base_export_symbols;
+
+    const wasm_host_min_exe = b.addExecutable(.{
+        .name = "kiwi_wasm_module_host_min",
+        .root_module = wasm_host_min_module,
+    });
+    wasm_host_min_exe.entry = .disabled;
+    wasm_host_min_exe.rdynamic = true;
+
+    const wasm_host_min_cmd = b.addSystemCommand(&.{ "bash", "scripts/build_kiwi_wasm_module.sh" });
+    wasm_host_min_cmd.setCwd(b.path("."));
+    wasm_host_min_cmd.addFileArg(wasm_host_min_exe.getEmittedBin());
+    wasm_host_min_cmd.addArg("web/kiwi_wasm_module_host_min.wasm");
+
+    const wasm_host_min_step = b.step("wasm-host-min", "Build the minimal host-only Kiwi wasm module");
+    wasm_host_min_step.dependOn(&wasm_host_min_cmd.step);
+
+    const wasm_step = b.step("wasm", "Build the Kiwi wasm module for the web target");
     wasm_step.dependOn(&wasm_cmd.step);
 }

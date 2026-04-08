@@ -15,6 +15,24 @@ pub const c = struct {
         ctx: ?*anyopaque,
     };
 
+    pub const mlx_map_string_to_array = extern struct {
+        ctx: ?*anyopaque,
+    };
+
+    pub const mlx_map_string_to_array_iterator = extern struct {
+        ctx: ?*anyopaque,
+        map_ctx: ?*anyopaque,
+    };
+
+    pub const mlx_map_string_to_string = extern struct {
+        ctx: ?*anyopaque,
+    };
+
+    pub const mlx_map_string_to_string_iterator = extern struct {
+        ctx: ?*anyopaque,
+        map_ctx: ?*anyopaque,
+    };
+
     pub const mlx_dtype = enum(c_int) {
         MLX_BOOL,
         MLX_UINT8,
@@ -105,6 +123,74 @@ pub const c = struct {
     pub extern fn mlx_vector_array_free(vec: mlx_vector_array) c_int;
     pub extern fn mlx_vector_array_append_value(vec: mlx_vector_array, val: mlx_array) c_int;
 
+    pub extern fn mlx_map_string_to_array_new() mlx_map_string_to_array;
+    pub extern fn mlx_map_string_to_array_set(
+        map: *mlx_map_string_to_array,
+        src: mlx_map_string_to_array,
+    ) c_int;
+    pub extern fn mlx_map_string_to_array_free(map: mlx_map_string_to_array) c_int;
+    pub extern fn mlx_map_string_to_array_insert(
+        map: mlx_map_string_to_array,
+        key: [*:0]const u8,
+        value: mlx_array,
+    ) c_int;
+    pub extern fn mlx_map_string_to_array_get(
+        value: *mlx_array,
+        map: mlx_map_string_to_array,
+        key: [*:0]const u8,
+    ) c_int;
+    pub extern fn mlx_map_string_to_array_iterator_new(
+        map: mlx_map_string_to_array,
+    ) mlx_map_string_to_array_iterator;
+    pub extern fn mlx_map_string_to_array_iterator_free(
+        it: mlx_map_string_to_array_iterator,
+    ) c_int;
+    pub extern fn mlx_map_string_to_array_iterator_next(
+        key: *?[*:0]const u8,
+        value: *mlx_array,
+        it: mlx_map_string_to_array_iterator,
+    ) c_int;
+
+    pub extern fn mlx_map_string_to_string_new() mlx_map_string_to_string;
+    pub extern fn mlx_map_string_to_string_set(
+        map: *mlx_map_string_to_string,
+        src: mlx_map_string_to_string,
+    ) c_int;
+    pub extern fn mlx_map_string_to_string_free(map: mlx_map_string_to_string) c_int;
+    pub extern fn mlx_map_string_to_string_insert(
+        map: mlx_map_string_to_string,
+        key: [*:0]const u8,
+        value: [*:0]const u8,
+    ) c_int;
+    pub extern fn mlx_map_string_to_string_get(
+        value: *?[*:0]const u8,
+        map: mlx_map_string_to_string,
+        key: [*:0]const u8,
+    ) c_int;
+    pub extern fn mlx_map_string_to_string_iterator_new(
+        map: mlx_map_string_to_string,
+    ) mlx_map_string_to_string_iterator;
+    pub extern fn mlx_map_string_to_string_iterator_free(
+        it: mlx_map_string_to_string_iterator,
+    ) c_int;
+    pub extern fn mlx_map_string_to_string_iterator_next(
+        key: *?[*:0]const u8,
+        value: *?[*:0]const u8,
+        it: mlx_map_string_to_string_iterator,
+    ) c_int;
+
+    pub extern fn mlx_load_safetensors(
+        res_0: *mlx_map_string_to_array,
+        res_1: *mlx_map_string_to_string,
+        file: [*:0]const u8,
+        s: mlx_stream,
+    ) c_int;
+    pub extern fn mlx_save_safetensors(
+        file: [*:0]const u8,
+        param: mlx_map_string_to_array,
+        metadata: mlx_map_string_to_string,
+    ) c_int;
+
     pub extern fn mlx_add(res: *mlx_array, a: mlx_array, b: mlx_array, stream: mlx_stream) c_int;
     pub extern fn mlx_subtract(res: *mlx_array, a: mlx_array, b: mlx_array, stream: mlx_stream) c_int;
     pub extern fn mlx_multiply(res: *mlx_array, a: mlx_array, b: mlx_array, stream: mlx_stream) c_int;
@@ -129,6 +215,13 @@ pub const c = struct {
         stream: mlx_stream,
     ) c_int;
     pub extern fn mlx_transpose(res: *mlx_array, a: mlx_array, stream: mlx_stream) c_int;
+    pub extern fn mlx_swapaxes(
+        res: *mlx_array,
+        a: mlx_array,
+        axis1: c_int,
+        axis2: c_int,
+        stream: mlx_stream,
+    ) c_int;
     pub extern fn mlx_copy(res: *mlx_array, a: mlx_array, stream: mlx_stream) c_int;
     pub extern fn mlx_matmul(res: *mlx_array, a: mlx_array, b: mlx_array, stream: mlx_stream) c_int;
     pub extern fn mlx_sum(res: *mlx_array, a: mlx_array, keepdims: bool, stream: mlx_stream) c_int;
@@ -140,6 +233,7 @@ pub const c = struct {
         inclusive: bool,
         stream: mlx_stream,
     ) c_int;
+    pub extern fn mlx_argmax(res: *mlx_array, a: mlx_array, keepdims: bool, stream: mlx_stream) c_int;
     pub extern fn mlx_argsort(res: *mlx_array, a: mlx_array, stream: mlx_stream) c_int;
     pub extern fn mlx_reshape(
         res: *mlx_array,
@@ -151,6 +245,18 @@ pub const c = struct {
     pub extern fn mlx_slice(
         res: *mlx_array,
         a: mlx_array,
+        start: [*]const c_int,
+        start_len: usize,
+        stop: [*]const c_int,
+        stop_len: usize,
+        strides: [*]const c_int,
+        strides_len: usize,
+        stream: mlx_stream,
+    ) c_int;
+    pub extern fn mlx_slice_update(
+        res: *mlx_array,
+        a: mlx_array,
+        update: mlx_array,
         start: [*]const c_int,
         start_len: usize,
         stop: [*]const c_int,

@@ -2,6 +2,11 @@ const zig_builtin = @import("builtin");
 const std = @import("std");
 const build_options = @import("build_options");
 const device = @import("device.zig");
+const runtime_backend_wasm = @import("runtime_backend_wasm.zig");
+const runtime_backend_autodiff = @import("runtime_backend_autodiff.zig");
+const runtime_backend_exec = @import("runtime_backend_exec.zig");
+const runtime_backend_materialize = @import("runtime_backend_materialize.zig");
+const runtime_backend_render = @import("runtime_backend_render.zig");
 const c = if (zig_builtin.target.cpu.arch == .wasm32)
     @import("wasm/c.zig").c
 else
@@ -56,6 +61,7 @@ pub const BuiltinId = enum(u8) {
     take,
     floor,
     drop,
+    null_fill_without,
     sort,
     equal,
     reshape,
@@ -70,6 +76,11 @@ pub const BuiltinId = enum(u8) {
     grad,
     valuegrad,
     prng,
+    load,
+    rotcache,
+    rotcacheupdate,
+    rotcacheview,
+    rmsnorm,
 };
 
 const StringPerfCounters = if (enable_string_instrumentation) struct {
@@ -119,6 +130,14 @@ pub const DenseExecBackend = enum(u8) {
     mlx,
 };
 
+fn acceleratorBackendLabel() []const u8 {
+    return switch (mlx.backend_kind) {
+        .mlx => "mlx",
+        .webgpu => "webgpu",
+        .host_only => "accelerator",
+    };
+}
+
 fn rawPtr(raw: u64) usize {
     return @as(usize, @intCast(raw));
 }
@@ -131,15 +150,15 @@ fn stringPerfNow() i128 {
 }
 
 pub const DensePlanReason = enum(u8) {
-    no_mlx_support,
-    already_mlx_resident,
+    no_backend_support,
+    already_backend_resident,
     unmaterialized_range_host,
     packed_mask_host,
     host_fast_kernel,
     small_problem,
     large_problem,
     compare_host_default,
-    matmul_requires_mlx,
+    matmul_requires_backend,
 };
 
 const dense_region_kind_count = std.meta.fields(DenseRegionKind).len;
@@ -376,21 +395,21 @@ fn denseRegionKindLabel(kind: DenseRegionKind) []const u8 {
 fn denseExecBackendLabel(backend: DenseExecBackend) []const u8 {
     return switch (backend) {
         .host => "host",
-        .mlx => "mlx",
+        .mlx => acceleratorBackendLabel(),
     };
 }
 
 fn densePlanReasonLabel(reason: DensePlanReason) []const u8 {
     return switch (reason) {
-        .no_mlx_support => "no_mlx_support",
-        .already_mlx_resident => "already_mlx_resident",
+        .no_backend_support => "no_backend_support",
+        .already_backend_resident => "already_backend_resident",
         .unmaterialized_range_host => "unmaterialized_range_host",
         .packed_mask_host => "packed_mask_host",
         .host_fast_kernel => "host_fast_kernel",
         .small_problem => "small_problem",
         .large_problem => "large_problem",
         .compare_host_default => "compare_host_default",
-        .matmul_requires_mlx => "matmul_requires_mlx",
+        .matmul_requires_backend => "matmul_requires_backend",
     };
 }
 
@@ -424,12 +443,13 @@ pub const Value = struct {
 
     const ArraySubkind = enum(u3) {
         numeric_array,
-        host_array,
+        host_dense_array,
+        host_boxed_array,
         host_string,
         host_symbol,
         host_string_list,
         host_string_view,
-        mlx_array,
+        backend_array,
     };
 
     pub fn int(value: i64) KError!Value {
@@ -522,12 +542,13 @@ pub const Value = struct {
         std.debug.assert(self.tag() == .array);
         return switch (self.arraySubkind()) {
             .numeric_array => .numeric_array,
-            .host_array => .host_array,
+            .host_dense_array => .host_dense_array,
+            .host_boxed_array => .host_boxed_array,
             .host_string => .host_string,
             .host_symbol => .host_symbol,
             .host_string_list => .host_string_list,
             .host_string_view => .host_string_view,
-            .mlx_array => .mlx_array,
+            .backend_array => .backend_array,
         };
     }
 
@@ -535,12 +556,13 @@ pub const Value = struct {
         std.debug.assert(self.tag() == .array);
         return switch (self.arraySubkind()) {
             .numeric_array => self.asNumericArray().activeKind(),
-            .host_array => .host_array,
+            .host_dense_array => .host_dense_array,
+            .host_boxed_array => .host_boxed_array,
             .host_string => .host_string,
             .host_symbol => .host_symbol,
             .host_string_list => .host_string_list,
             .host_string_view => .host_string_view,
-            .mlx_array => .mlx_array,
+            .backend_array => .backend_array,
         };
     }
 
@@ -548,12 +570,13 @@ pub const Value = struct {
         std.debug.assert(self.tag() == .array);
         return switch (self.arraySubkind()) {
             .numeric_array => self.asNumericArray().header.owner,
-            .host_array => self.asHostArray().header.owner,
+            .host_dense_array => self.asHostDenseArray().header.owner,
+            .host_boxed_array => self.asHostBoxedArray().header.owner,
             .host_string => self.asHostString().header.owner,
             .host_symbol => self.asHostSymbol().header.owner,
             .host_string_list => self.asHostStringList().header.owner,
             .host_string_view => self.asHostStringView().header.owner,
-            .mlx_array => self.asMlxArray().header.owner,
+            .backend_array => self.asBackendArray().header.owner,
         };
     }
 
@@ -563,18 +586,22 @@ pub const Value = struct {
         return ptr;
     }
 
-    pub fn asHostArray(self: Value) *const HostArray {
-        return switch (self.arraySubkind()) {
-            .numeric_array => self.asNumericArray().host orelse unreachable,
-            .host_array => @ptrFromInt(rawPtr(self.arrayPtrRaw())),
-            else => unreachable,
-        };
+    pub fn asHostDenseArray(self: Value) *const HostDenseArray {
+        std.debug.assert(self.arraySubkind() == .host_dense_array);
+        const ptr: *const HostDenseArray = @ptrFromInt(rawPtr(self.arrayPtrRaw()));
+        return ptr;
     }
 
-    pub fn asMlxArray(self: Value) *const MlxArray {
+    pub fn asHostBoxedArray(self: Value) *const HostBoxedArray {
+        std.debug.assert(self.arraySubkind() == .host_boxed_array);
+        const ptr: *const HostBoxedArray = @ptrFromInt(rawPtr(self.arrayPtrRaw()));
+        return ptr;
+    }
+
+    pub fn asBackendArray(self: Value) *const BackendArray {
         return switch (self.arraySubkind()) {
-            .numeric_array => self.asNumericArray().mlx orelse unreachable,
-            .mlx_array => @ptrFromInt(rawPtr(self.arrayPtrRaw())),
+            .numeric_array => numericBackendAttachment(self.asNumericArray()) orelse unreachable,
+            .backend_array => @ptrFromInt(rawPtr(self.arrayPtrRaw())),
             else => unreachable,
         };
     }
@@ -635,8 +662,9 @@ pub const Value = struct {
 fn arraySubkindFromPtr(ptr: anytype) Value.ArraySubkind {
     const Child = std.meta.Child(@TypeOf(ptr));
     if (Child == NumericArray) return .numeric_array;
-    if (Child == HostArray) return .host_array;
-    if (Child == MlxArray) return .mlx_array;
+    if (Child == HostDenseArray) return .host_dense_array;
+    if (Child == HostBoxedArray) return .host_boxed_array;
+    if (Child == BackendArray) return .backend_array;
     if (Child == HostText) {
         return switch (ptr.header.kind) {
             .host_string => .host_string,
@@ -666,12 +694,13 @@ const HeapKind = enum(u8) {
     boxed_int,
     closure,
     numeric_array,
-    host_array,
+    host_dense_array,
+    host_boxed_array,
     host_string,
     host_symbol,
     host_string_list,
     host_string_view,
-    mlx_array,
+    backend_array,
 };
 
 const HeapHeader = struct {
@@ -879,7 +908,7 @@ comptime {
     if (@alignOf(HostText) < 8) @compileError("HostText must remain at least 8-byte aligned for tagged Value pointers.");
 }
 
-const HostArrayElem = enum(u8) {
+const HostDenseElem = enum(u8) {
     int,
     float,
 };
@@ -892,31 +921,29 @@ const HostIntStorageKind = enum(u8) {
     int64,
 };
 
-const HostArrayStorageKind = enum(u8) {
+const HostDenseStorageKind = enum(u8) {
     bit,
     int8,
     int16,
     int32,
     int64,
     float64,
-    boxed,
 };
 
-const HostArrayStorage = union(HostArrayStorageKind) {
+const HostDenseStorage = union(HostDenseStorageKind) {
     bit: []u64,
     int8: []i8,
     int16: []i16,
     int32: []i32,
     int64: []i64,
     float64: []f64,
-    boxed: []Value,
 };
 
-const host_array_flag_normalized: u8 = 1 << 0;
-const host_array_flag_asc: u8 = 1 << 1;
-const host_array_flag_dsc: u8 = 1 << 2;
+const host_dense_flag_normalized: u8 = 1 << 0;
+const host_dense_flag_asc: u8 = 1 << 1;
+const host_dense_flag_dsc: u8 = 1 << 2;
 
-const HostArray = struct {
+const HostDenseArray = struct {
     header: HeapHeader align(64),
     logical_handle: ?*NumericArray = null,
     logical_len: usize,
@@ -924,31 +951,72 @@ const HostArray = struct {
     int_range_known: bool = false,
     int_range_min: i64 = 0,
     int_range_max: i64 = 0,
-    storage: HostArrayStorage,
+    storage: HostDenseStorage,
 
-    fn len(self: *const HostArray) usize {
+    fn len(self: *const HostDenseArray) usize {
+        return self.logical_len;
+    }
+};
+
+const HostBoxedArray = struct {
+    header: HeapHeader align(64),
+    logical_len: usize,
+    items: []Value,
+
+    fn len(self: *const HostBoxedArray) usize {
         return self.logical_len;
     }
 };
 
 const host_bit_word_bits = @bitSizeOf(u64);
 
-fn hostArrayNumericMode(array: *const HostArray) ?HostArrayElem {
+fn hostDenseNumericMode(array: *const HostDenseArray) HostDenseElem {
     return switch (array.storage) {
         .bit, .int8, .int16, .int32, .int64 => .int,
         .float64 => .float,
-        .boxed => null,
     };
 }
 
-pub fn debugHostArrayFlags(value: Value) u8 {
-    std.debug.assert(value.tag() == .array and value.activeArrayKind() == .host_array);
-    return value.asHostArray().flags;
+pub fn debugHostDenseFlags(value: Value) u8 {
+    std.debug.assert(value.tag() == .array and value.activeArrayKind() == .host_dense_array);
+    return hostDenseIfPresent(value).?.flags;
 }
 
-pub fn debugHostArrayAddress(value: Value) usize {
-    std.debug.assert(value.tag() == .array and value.activeArrayKind() == .host_array);
-    return @intFromPtr(value.asHostArray());
+pub fn debugHostDenseAddress(value: Value) usize {
+    std.debug.assert(value.tag() == .array and value.activeArrayKind() == .host_dense_array);
+    return @intFromPtr(hostDenseIfPresent(value).?);
+}
+
+pub const DebugHostStorageTag = enum {
+    bit,
+    int8,
+    int16,
+    int32,
+    int64,
+    float64,
+};
+
+pub fn debugActiveHostStorageTag(value: Value) ?DebugHostStorageTag {
+    if (value.tag() != .array or value.activeArrayKind() != .host_dense_array) return null;
+    return @enumFromInt(@intFromEnum(std.meta.activeTag(hostDenseIfPresent(value).?.storage)));
+}
+
+pub fn debugActiveHostLen(value: Value) ?usize {
+    if (value.tag() != .array or value.activeArrayKind() != .host_dense_array) return null;
+    return hostDenseIfPresent(value).?.len();
+}
+
+pub fn debugActiveHostIntAt(value: Value, idx: usize) KError!i64 {
+    if (value.tag() != .array or value.activeArrayKind() != .host_dense_array) return error.Type;
+    return hostDenseIntAt(hostDenseIfPresent(value).?, idx);
+}
+
+pub fn debugActiveHostFloatSlice(value: Value) ?[]const f64 {
+    if (value.tag() != .array or value.activeArrayKind() != .host_dense_array) return null;
+    return switch (hostDenseIfPresent(value).?.storage) {
+        .float64 => |items| items,
+        else => null,
+    };
 }
 
 pub fn debugArraySubkind(value: Value) ?DebugArraySubkind {
@@ -956,9 +1024,9 @@ pub fn debugArraySubkind(value: Value) ?DebugArraySubkind {
     return value.arraySubkind();
 }
 
-pub const DebugHostArrayFlagNormalized = host_array_flag_normalized;
-pub const DebugHostArrayFlagAsc = host_array_flag_asc;
-pub const DebugHostArrayFlagDsc = host_array_flag_dsc;
+pub const DebugHostDenseFlagNormalized = host_dense_flag_normalized;
+pub const DebugHostDenseFlagAsc = host_dense_flag_asc;
+pub const DebugHostDenseFlagDsc = host_dense_flag_dsc;
 
 fn hostIntStorageRank(kind: HostIntStorageKind) u8 {
     return switch (kind) {
@@ -1026,23 +1094,23 @@ const HostAddScanIntAnalysis = struct {
     flags: u8,
 };
 
-fn hostArraySetFlags(array: *HostArray, flags: u8) void {
+fn hostDenseSetFlags(array: *HostDenseArray, flags: u8) void {
     array.flags = flags;
 }
 
-fn hostArraySetCachedIntRange(array: *HostArray, range: HostIntRange) void {
+fn hostDenseSetCachedIntRange(array: *HostDenseArray, range: HostIntRange) void {
     array.int_range_known = true;
     array.int_range_min = range.min;
     array.int_range_max = range.max;
 }
 
-fn hostArrayClearCachedIntRange(array: *HostArray) void {
+fn hostDenseClearCachedIntRange(array: *HostDenseArray) void {
     array.int_range_known = false;
     array.int_range_min = 0;
     array.int_range_max = 0;
 }
 
-fn hostArrayCachedIntRange(array: *const HostArray) ?HostIntRange {
+fn hostDenseCachedIntRange(array: *const HostDenseArray) ?HostIntRange {
     if (!array.int_range_known) return null;
     return .{
         .min = array.int_range_min,
@@ -1050,11 +1118,11 @@ fn hostArrayCachedIntRange(array: *const HostArray) ?HostIntRange {
     };
 }
 
-fn hostArrayHasFlag(array: *const HostArray, flag: u8) bool {
+fn hostDenseHasFlag(array: *const HostDenseArray, flag: u8) bool {
     return (array.flags & flag) != 0;
 }
 
-fn hostArrayReusePriority(array: *const HostArray) u8 {
+fn hostDenseReusePriority(array: *const HostDenseArray) u8 {
     return switch (array.header.owner) {
         .scratch => 2,
         .managed => 1,
@@ -1063,17 +1131,17 @@ fn hostArrayReusePriority(array: *const HostArray) u8 {
 }
 
 fn orderFlagsFromMonotonic(asc: bool, dsc: bool) u8 {
-    return (if (asc) host_array_flag_asc else 0) | (if (dsc) host_array_flag_dsc else 0);
+    return (if (asc) host_dense_flag_asc else 0) | (if (dsc) host_dense_flag_dsc else 0);
 }
 
 fn monotonicFlags(flags: u8) u8 {
-    return flags & (host_array_flag_asc | host_array_flag_dsc);
+    return flags & (host_dense_flag_asc | host_dense_flag_dsc);
 }
 
 fn invertMonotonicFlags(flags: u8) u8 {
     const mono = monotonicFlags(flags);
-    return (if ((mono & host_array_flag_asc) != 0) host_array_flag_dsc else 0) |
-        (if ((mono & host_array_flag_dsc) != 0) host_array_flag_asc else 0);
+    return (if ((mono & host_dense_flag_asc) != 0) host_dense_flag_dsc else 0) |
+        (if ((mono & host_dense_flag_dsc) != 0) host_dense_flag_asc else 0);
 }
 
 fn isRenderableMatrix(items: []const Value) bool {
@@ -1112,7 +1180,7 @@ fn numericArraySetMatrixShape(handle: *NumericArray, rows: usize, cols: usize) v
     for (2..numeric_array_max_rank) |idx| handle.shape[idx] = 0;
 }
 
-fn numericArraySetShapeFromMlx(handle: *NumericArray, array: mlx.Array) void {
+fn numericArraySetShapeFromBackend(handle: *NumericArray, array: mlx.Array) void {
     const rank = @min(array.ndim(), numeric_array_max_rank);
     handle.rank = @intCast(rank);
     for (0..rank) |idx| handle.shape[idx] = @intCast(array.shape()[idx]);
@@ -1137,7 +1205,7 @@ const NumericMatrixView = struct {
     value: Value,
     handle: *const NumericArray,
     shape: NumericMatrixShape,
-    mode: HostArrayElem,
+    mode: HostDenseElem,
 };
 
 fn numericShapeSnapshotFromHandle(handle: *const NumericArray) NumericShapeSnapshot {
@@ -1297,6 +1365,14 @@ fn numericShapeSnapshotMatrix(rows: usize, cols: usize) NumericShapeSnapshot {
     return snapshot;
 }
 
+fn numericShapeSnapshotSwapAxes(snapshot: NumericShapeSnapshot, axis1: usize, axis2: usize) NumericShapeSnapshot {
+    var out = snapshot;
+    std.debug.assert(axis1 < out.rank);
+    std.debug.assert(axis2 < out.rank);
+    std.mem.swap(i32, &out.shape[axis1], &out.shape[axis2]);
+    return out;
+}
+
 fn numericShapeTailSnapshot(handle: *const NumericArray) ?NumericShapeSnapshot {
     if (handle.rank <= 1) return null;
     var snapshot = NumericShapeSnapshot{};
@@ -1350,12 +1426,17 @@ fn numericArrayShapeEqual(left: *const NumericArray, right: *const NumericArray)
     return std.mem.eql(i32, left.shapeSlice(), right.shapeSlice());
 }
 
+const LogicalNumericValue = struct {
+    handle: *NumericArray,
+    value: Value,
+};
+
 fn valueNumericHandle(value: Value) ?*const NumericArray {
     if (value.tag() != .array) return null;
     return switch (value.arraySubkind()) {
         .numeric_array => value.asNumericArray(),
-        .host_array => if (value.asHostArray().logical_handle) |handle| handle else null,
-        .mlx_array => if (value.asMlxArray().logical_handle) |handle| handle else null,
+        .host_dense_array => if (value.asHostDenseArray().logical_handle) |handle| handle else null,
+        .backend_array => if (value.asBackendArray().logical_handle) |handle| handle else null,
         else => null,
     };
 }
@@ -1363,12 +1444,8 @@ fn valueNumericHandle(value: Value) ?*const NumericArray {
 fn logicalHandleForNumericPayloadValue(value: Value) ?*NumericArray {
     if (value.tag() != .array) return null;
     return switch (value.arraySubkind()) {
-        .host_array => blk: {
-            const array = @constCast(value.asHostArray());
-            if (hostArrayNumericMode(array) == null) break :blk null;
-            break :blk array.logical_handle;
-        },
-        .mlx_array => @constCast(value.asMlxArray()).logical_handle,
+        .host_dense_array => @constCast(value.asHostDenseArray()).logical_handle,
+        .backend_array => @constCast(value.asBackendArray()).logical_handle,
         else => null,
     };
 }
@@ -1377,7 +1454,7 @@ fn mutableNumericHandle(value: Value) ?*NumericArray {
     if (value.tag() != .array) return null;
     return switch (value.arraySubkind()) {
         .numeric_array => @constCast(value.asNumericArray()),
-        .host_array, .mlx_array => logicalHandleForNumericPayloadValue(value),
+        .host_dense_array, .backend_array => logicalHandleForNumericPayloadValue(value),
         else => null,
     };
 }
@@ -1386,29 +1463,71 @@ fn numericHandleRequired(value: Value) KError!*NumericArray {
     return mutableNumericHandle(value) orelse error.Type;
 }
 
-fn hostArrayIfPresent(value: Value) ?*const HostArray {
+fn ensureLogicalNumericValue(self: *Session, value: Value) !LogicalNumericValue {
+    if (value.tag() != .array) return error.Type;
+    return switch (value.arraySubkind()) {
+        .numeric_array => .{
+            .handle = @constCast(value.asNumericArray()),
+            .value = value,
+        },
+        .host_dense_array => blk: {
+            const array = @constCast(value.asHostDenseArray());
+            const canonical = try wrapOwnedHostArrayValue(self, array);
+            break :blk .{
+                .handle = @constCast(canonical.asNumericArray()),
+                .value = canonical,
+            };
+        },
+        .backend_array => blk: {
+            const canonical = try wrapOwnedBackendArrayValue(self, @constCast(value.asBackendArray()));
+            break :blk .{
+                .handle = @constCast(canonical.asNumericArray()),
+                .value = canonical,
+            };
+        },
+        else => error.Type,
+    };
+}
+
+fn numericHostAttachment(handle: *const NumericArray) ?*const HostDenseArray {
+    return handle.host;
+}
+
+fn numericBackendAttachment(handle: *const NumericArray) ?*const BackendArray {
+    return handle.mlx;
+}
+
+fn numericHasHostAttachment(handle: *const NumericArray) bool {
+    return numericHostAttachment(handle) != null;
+}
+
+fn numericHasBackendAttachment(handle: *const NumericArray) bool {
+    return numericBackendAttachment(handle) != null;
+}
+
+fn hostDenseIfPresent(value: Value) ?*const HostDenseArray {
     if (value.tag() != .array) return null;
     return switch (value.arraySubkind()) {
-        .host_array => value.asHostArray(),
-        .numeric_array => value.asNumericArray().host,
-        .mlx_array => if (valueNumericHandle(value)) |handle| handle.host else null,
+        .host_dense_array => value.asHostDenseArray(),
+        .numeric_array => numericHostAttachment(value.asNumericArray()),
+        .backend_array => if (valueNumericHandle(value)) |handle| numericHostAttachment(handle) else null,
         else => null,
     };
 }
 
-fn mlxArrayIfPresent(value: Value) ?*const MlxArray {
+fn backendArrayIfPresent(value: Value) ?*const BackendArray {
     if (value.tag() != .array) return null;
     return switch (value.arraySubkind()) {
-        .mlx_array => value.asMlxArray(),
-        .numeric_array => value.asNumericArray().mlx,
-        .host_array => if (value.asHostArray().logical_handle) |handle| handle.mlx else null,
+        .backend_array => value.asBackendArray(),
+        .numeric_array => numericBackendAttachment(value.asNumericArray()),
+        .host_dense_array => if (value.asHostDenseArray().logical_handle) |handle| numericBackendAttachment(handle) else null,
         else => null,
     };
 }
 
-fn ensureNumericHostAttachmentForDenseView(self: *Session, value: Value) KError!?*const HostArray {
+fn ensureNumericHostAttachmentForDenseView(self: *Session, value: Value) KError!?*const HostDenseArray {
     const handle = valueNumericHandle(value) orelse return null;
-    if (handle.host) |array| return array;
+    if (numericHostAttachment(handle)) |array| return array;
     if (numericValueSupportsStructuralFlatItemsWithoutHost(value)) return null;
     return try tryEnsureHostRealizationForHandle(self, @constCast(handle));
 }
@@ -1493,52 +1612,54 @@ pub fn debugNumericStructuralTag(value: Value) ?DebugNumericStructuralTag {
     return handle.structural;
 }
 
-fn debugMlxArrayForValue(value: Value) ?mlx.Array {
+fn debugBackendArrayForValue(value: Value) ?mlx.Array {
     if (value.tag() != .array) return null;
     return switch (value.arraySubkind()) {
-        .mlx_array => value.asMlxArray().array,
-        .host_array => if (value.asHostArray().logical_handle) |handle|
-            if (handle.mlx) |mlx_array| mlx_array.array else null
+        .backend_array => value.asBackendArray().array,
+        .host_dense_array => if (value.asHostDenseArray().logical_handle) |handle|
+            if (numericBackendAttachment(handle)) |backend_array| backend_array.array else null
         else
             null,
         .numeric_array => blk: {
             const handle = value.asNumericArray();
-            if (handle.mlx) |mlx_array| break :blk mlx_array.array;
-            if (numericArrayFlatSliceSource(handle)) |source| break :blk debugMlxArrayForValue(source);
+            if (numericBackendAttachment(handle)) |backend_array| break :blk backend_array.array;
+            if (numericArrayFlatSliceSource(handle)) |source| break :blk debugBackendArrayForValue(source);
             if (numericArrayFlatConcatLeft(handle)) |left| {
-                if (debugMlxArrayForValue(left)) |array| break :blk array;
+                if (debugBackendArrayForValue(left)) |array| break :blk array;
                 const right = numericArrayFlatConcatRight(handle) orelse break :blk null;
-                break :blk debugMlxArrayForValue(right);
+                break :blk debugBackendArrayForValue(right);
             }
             if (numericArrayFlatSegmentsValues(handle)) |segments| {
                 for (segments) |segment| {
-                    if (debugMlxArrayForValue(segment)) |array| break :blk array;
+                    if (debugBackendArrayForValue(segment)) |array| break :blk array;
                 }
             }
-            if (numericArrayFirstAxisSliceSource(handle)) |source| break :blk debugMlxArrayForValue(source);
-            if (numericArrayFirstAxisIndexSource(handle)) |source| break :blk debugMlxArrayForValue(source);
+            if (numericArrayFirstAxisSliceSource(handle)) |source| break :blk debugBackendArrayForValue(source);
+            if (numericArrayFirstAxisIndexSource(handle)) |source| break :blk debugBackendArrayForValue(source);
             if (numericArrayFirstAxisConcatLeft(handle)) |left| {
-                if (debugMlxArrayForValue(left)) |array| break :blk array;
+                if (debugBackendArrayForValue(left)) |array| break :blk array;
                 const right = numericArrayFirstAxisConcatRight(handle) orelse break :blk null;
-                break :blk debugMlxArrayForValue(right);
+                break :blk debugBackendArrayForValue(right);
             }
-            if (numericArrayReshapeSource(handle)) |source| break :blk debugMlxArrayForValue(source);
-            if (numericArrayTransposeSource(handle)) |source| break :blk debugMlxArrayForValue(source);
+            if (numericArrayReshapeSource(handle)) |source| break :blk debugBackendArrayForValue(source);
+            if (numericArrayTransposeSource(handle)) |source| break :blk debugBackendArrayForValue(source);
             break :blk null;
         },
         else => null,
     };
 }
 
-pub fn debugMlxDtypeName(value: Value) ?[]const u8 {
-    const array = debugMlxArrayForValue(value) orelse return null;
+pub fn debugBackendDtypeName(value: Value) ?[]const u8 {
+    const array = debugBackendArrayForValue(value) orelse return null;
     return switch (array.dtype()) {
         c.MLX_BOOL => "bool",
         c.MLX_INT32 => "int32",
         c.MLX_INT64 => "int64",
         c.MLX_UINT32 => "uint32",
+        c.MLX_FLOAT16 => "float16",
         c.MLX_FLOAT32 => "float32",
         c.MLX_FLOAT64 => "float64",
+        c.MLX_BFLOAT16 => "bfloat16",
         else => null,
     };
 }
@@ -1550,7 +1671,7 @@ fn shapedNumericHandle(value: Value) ?*const NumericArray {
 
 fn isUnmaterializedRangeIotaValue(value: Value) bool {
     const handle = valueNumericHandle(value) orelse return false;
-    return numericArrayIsRangeIota(handle) and handle.host == null and handle.mlx == null;
+    return numericArrayIsRangeIota(handle) and !numericHasHostAttachment(handle) and !numericHasBackendAttachment(handle);
 }
 
 fn valueRangeIotaHandle(value: Value) ?*const NumericArray {
@@ -1559,7 +1680,7 @@ fn valueRangeIotaHandle(value: Value) ?*const NumericArray {
 }
 
 fn numericHandleSupportsStructuralFlatItemsWithoutHost(handle: *const NumericArray) bool {
-    if (handle.host != null) return true;
+    if (numericHasHostAttachment(handle)) return true;
     if (numericArrayIsRangeIota(handle)) return true;
     if (numericArrayIsFlatSlice(handle)) {
         const source = numericArrayFlatSliceSource(handle) orelse return false;
@@ -1605,12 +1726,129 @@ fn numericHandleSupportsStructuralFlatItemsWithoutHost(handle: *const NumericArr
     return false;
 }
 
+fn sourceSupportsHostDense(source: Value) bool {
+    return switch (source.tag()) {
+        .int, .bool, .float => true,
+        .array => switch (source.arraySubkind()) {
+            .host_dense_array => true,
+            .numeric_array => true,
+            .backend_array => source.asBackendArray().logical_handle != null,
+            else => false,
+        },
+        else => false,
+    };
+}
+
+fn sourceSupportsCheapHostDense(source: Value) bool {
+    return switch (source.tag()) {
+        .int, .bool, .float => true,
+        .array => switch (source.arraySubkind()) {
+            .host_dense_array => true,
+            .numeric_array => handleSupportsCheapHostDense(source.asNumericArray()),
+            .backend_array => if (source.asBackendArray().logical_handle) |handle|
+                handleSupportsCheapHostDense(handle)
+            else
+                false,
+            else => false,
+        },
+        else => false,
+    };
+}
+
+fn handleSupportsHostDense(handle: *const NumericArray) bool {
+    if (numericHasHostAttachment(handle) or numericArrayIsRangeIota(handle)) return true;
+    if (numericArrayIsFlatSlice(handle)) {
+        const source = numericArrayFlatSliceSource(handle) orelse return false;
+        return sourceSupportsHostDense(source);
+    }
+    if (numericArrayIsFlatConcat(handle)) {
+        const left = numericArrayFlatConcatLeft(handle) orelse return false;
+        const right = numericArrayFlatConcatRight(handle) orelse return false;
+        return sourceSupportsHostDense(left) and sourceSupportsHostDense(right);
+    }
+    if (numericArrayIsFlatSegments(handle)) {
+        const segments = numericArrayFlatSegmentsValues(handle) orelse return false;
+        for (segments) |segment| {
+            if (!sourceSupportsHostDense(segment)) return false;
+        }
+        return true;
+    }
+    if (numericArrayIsFirstAxisSlice(handle)) {
+        const source = numericArrayFirstAxisSliceSource(handle) orelse return false;
+        return sourceSupportsHostDense(source);
+    }
+    if (numericArrayIsFirstAxisIndex(handle)) {
+        const source = numericArrayFirstAxisIndexSource(handle) orelse return false;
+        const row_indices = numericArrayFirstAxisIndexRows(handle) orelse return false;
+        return sourceSupportsHostDense(source) and
+            sourceSupportsHostDense(row_indices);
+    }
+    if (numericArrayIsFirstAxisConcat(handle)) {
+        const left = numericArrayFirstAxisConcatLeft(handle) orelse return false;
+        const right = numericArrayFirstAxisConcatRight(handle) orelse return false;
+        return sourceSupportsHostDense(left) and sourceSupportsHostDense(right);
+    }
+    if (numericArrayIsReshapeView(handle)) {
+        const source = numericArrayReshapeSource(handle) orelse return false;
+        return sourceSupportsHostDense(source);
+    }
+    if (numericArrayIsTransposeView(handle)) {
+        const source = numericArrayTransposeSource(handle) orelse return false;
+        return sourceSupportsHostDense(source);
+    }
+    return false;
+}
+
+fn handleSupportsCheapHostDense(handle: *const NumericArray) bool {
+    if (numericHasHostAttachment(handle) or numericArrayIsRangeIota(handle)) return true;
+    if (numericArrayIsFlatSlice(handle)) {
+        const source = numericArrayFlatSliceSource(handle) orelse return false;
+        return sourceSupportsCheapHostDense(source);
+    }
+    if (numericArrayIsFlatConcat(handle)) {
+        const left = numericArrayFlatConcatLeft(handle) orelse return false;
+        const right = numericArrayFlatConcatRight(handle) orelse return false;
+        return sourceSupportsCheapHostDense(left) and sourceSupportsCheapHostDense(right);
+    }
+    if (numericArrayIsFlatSegments(handle)) {
+        const segments = numericArrayFlatSegmentsValues(handle) orelse return false;
+        for (segments) |segment| {
+            if (!sourceSupportsCheapHostDense(segment)) return false;
+        }
+        return true;
+    }
+    if (numericArrayIsFirstAxisSlice(handle)) {
+        const source = numericArrayFirstAxisSliceSource(handle) orelse return false;
+        return sourceSupportsCheapHostDense(source);
+    }
+    if (numericArrayIsFirstAxisIndex(handle)) {
+        const source = numericArrayFirstAxisIndexSource(handle) orelse return false;
+        const row_indices = numericArrayFirstAxisIndexRows(handle) orelse return false;
+        return sourceSupportsCheapHostDense(source) and
+            sourceSupportsCheapHostDense(row_indices);
+    }
+    if (numericArrayIsFirstAxisConcat(handle)) {
+        const left = numericArrayFirstAxisConcatLeft(handle) orelse return false;
+        const right = numericArrayFirstAxisConcatRight(handle) orelse return false;
+        return sourceSupportsCheapHostDense(left) and sourceSupportsCheapHostDense(right);
+    }
+    if (numericArrayIsReshapeView(handle)) {
+        const source = numericArrayReshapeSource(handle) orelse return false;
+        return sourceSupportsCheapHostDense(source);
+    }
+    if (numericArrayIsTransposeView(handle)) {
+        const source = numericArrayTransposeSource(handle) orelse return false;
+        return sourceSupportsCheapHostDense(source);
+    }
+    return false;
+}
+
 fn numericValueSupportsStructuralFlatItemsWithoutHost(value: Value) bool {
     return switch (value.tag()) {
         .int, .bool, .float => true,
         .array => switch (value.arraySubkind()) {
-            .host_array => hostArrayNumericMode(value.asHostArray()) != null,
-            .mlx_array => if (value.asMlxArray().logical_handle) |handle|
+            .host_dense_array => true,
+            .backend_array => if (value.asBackendArray().logical_handle) |handle|
                 numericHandleSupportsStructuralFlatItemsWithoutHost(handle)
             else
                 false,
@@ -1665,10 +1903,60 @@ fn valueNumericBuilderShape(value: Value) ?NumericShapeSnapshot {
     return snapshot;
 }
 
-fn createManagedStackedNumericArray(self: *Session, values: []const Value, mode: HostArrayElem, item_shape: NumericShapeSnapshot) KError!Value {
+fn tryCreateManagedStackedBackendArray(self: *Session, values: []const Value, shape: NumericShapeSnapshot) KError!?Value {
+    if (comptime !runtime_has_mlx) return null;
+    if (values.len == 0) return null;
+    for (values) |value| {
+        if (!hasBackendRealization(value)) return null;
+    }
+
+    const ctx = try self.backendContext();
+    var arrays = std.ArrayList(mlx.Array).empty;
+    defer {
+        for (arrays.items) |*array| array.deinit();
+        arrays.deinit(self.allocator);
+    }
+    try arrays.ensureTotalCapacity(self.allocator, values.len);
+    for (values) |value| try arrays.append(self.allocator, try self.materializeBackendArray(value));
+
+    var saw_float = false;
+    var saw_non_bool_int = false;
+    for (arrays.items) |array| switch (array.dtype()) {
+        c.MLX_FLOAT16, c.MLX_FLOAT32, c.MLX_FLOAT64, c.MLX_BFLOAT16 => saw_float = true,
+        c.MLX_BOOL => {},
+        else => saw_non_bool_int = true,
+    };
+    const target_dtype: c.mlx_dtype = if (saw_float)
+        c.MLX_FLOAT32
+    else if (saw_non_bool_int)
+        c.MLX_INT32
+    else
+        c.MLX_BOOL;
+
+    for (arrays.items) |*array| {
+        if (array.dtype() == target_dtype) continue;
+        const casted = mlx.Array.cast(ctx.*, array.*, target_dtype) catch |err| return mapMlxError(err);
+        array.deinit();
+        array.* = casted;
+    }
+
+    var concat = mlx.Array.concat(ctx.*, arrays.items) catch |err| return mapMlxError(err);
+    if (shape.rank == 1) return try self.wrapManagedBackendArray(concat);
+
+    const reshaped = mlx.Array.reshape(ctx.*, concat, shape.shape[0..shape.rank]) catch |err| {
+        concat.deinit();
+        return mapMlxError(err);
+    };
+    concat.deinit();
+    return try self.wrapManagedBackendArray(reshaped);
+}
+
+fn createManagedStackedNumericArray(self: *Session, values: []const Value, mode: HostDenseElem, item_shape: NumericShapeSnapshot) KError!Value {
     const item_len = try numericShapeSnapshotElementCount(item_shape);
     const total_len = std.math.mul(usize, values.len, item_len) catch return error.Unsupported;
     const shape = try stackedNumericBuilderShape(values.len, item_shape);
+
+    if (try tryCreateManagedStackedBackendArray(self, values, shape)) |stacked| return stacked;
 
     return switch (mode) {
         .int => blk: {
@@ -2000,6 +2288,15 @@ fn numericValueFirstAxisCellValue(self: *Session, value: Value, handle: *const N
 
     const outer_len: usize = @intCast(handle.shape[0]);
     const outer_idx = try normalizeIndex(raw_index, outer_len);
+    if (handle.preferred == .mlx) {
+        const first_axis_slice = try newFirstAxisSliceValue(self, value, outer_idx, 1);
+        errdefer self.releaseValue(first_axis_slice);
+
+        const reshaped = try newReshapeViewValue(self, first_axis_slice, numericShapeTailSnapshot(handle) orelse return error.Type);
+        self.releaseValue(first_axis_slice);
+        return reshaped;
+    }
+
     const block_len = numericShapeInnerBlockLen(handle);
     if (handle.rank == 2) {
         return try newFlatSliceValue(self, value, outer_idx * block_len, block_len);
@@ -2022,7 +2319,7 @@ fn numericValueScalarIndexValue(self: *Session, value: Value, raw_index: i64) KE
     return try numericValueFirstAxisCellValue(self, value, handle, raw_index);
 }
 
-fn createManagedHostNumericMatrixRowRange(self: *Session, array: *const HostArray, start_row: usize, row_count: usize, cols: usize) KError!Value {
+fn createManagedHostNumericMatrixRowRange(self: *Session, array: *const HostDenseArray, start_row: usize, row_count: usize, cols: usize) KError!Value {
     var row_indices = std.ArrayList(usize).empty;
     defer row_indices.deinit(self.allocator);
     try row_indices.ensureTotalCapacity(self.allocator, row_count);
@@ -2034,6 +2331,7 @@ fn numericValueFirstAxisArithmeticSliceValue(self: *Session, value: Value, slice
     if (NumericStructuralView.init(value)) |structural| {
         if (try numericStructuralArithmeticSliceValue(self, structural, slice)) |result| return result;
     }
+    if (try trySliceFirstAxisConcatNumericMatrix(self, value, slice)) |result| return result;
     const handle = shapedNumericHandle(value) orelse return null;
     const rows: usize = @intCast(handle.shape[0]);
     if (slice.len == 0) return try newFirstAxisSliceValue(self, value, 0, 0);
@@ -2060,7 +2358,7 @@ fn numericValueFirstAxisContiguousSliceValue(self: *Session, value: Value, slice
 }
 
 fn selectorUsesBitMaskEncoding(selector: Value) bool {
-    const host = hostArrayIfPresent(selector) orelse return false;
+    const host = hostDenseIfPresent(selector) orelse return false;
     return std.meta.activeTag(host.storage) == .bit;
 }
 
@@ -2109,14 +2407,14 @@ fn numericValueFirstAxisIndexSelectorValue(self: *Session, value: Value, selecto
     return try newFirstAxisIndexValue(self, value, selected_value);
 }
 
-fn valueMlxBoolMaskLen(value: Value) ?usize {
-    const array = mlxArrayIfPresent(value) orelse return null;
+fn valueBackendBoolMaskLen(value: Value) ?usize {
+    const array = backendArrayIfPresent(value) orelse return null;
     if (array.array.dtype() != c.MLX_BOOL or array.array.ndim() != 1) return null;
     return std.math.cast(usize, array.array.shape()[0]);
 }
 
-fn tryApplyMlxBoolMaskIndex(self: *Session, callee: Value, selector: Value) KError!?Value {
-    const mask_len = valueMlxBoolMaskLen(selector) orelse return null;
+fn tryApplyBackendBoolMaskIndex(self: *Session, callee: Value, selector: Value) KError!?Value {
+    const mask_len = valueBackendBoolMaskLen(selector) orelse return null;
     if (valueNumericMode(callee) == null) return null;
 
     const outer_len: usize = if (shapedNumericHandle(callee)) |handle|
@@ -2125,19 +2423,19 @@ fn tryApplyMlxBoolMaskIndex(self: *Session, callee: Value, selector: Value) KErr
         numericVectorLen(callee) orelse return null;
     if (mask_len != outer_len) return error.Type;
 
-    var mask = try self.materializeMlxArray(selector);
+    var mask = try self.materializeBackendArray(selector);
     defer mask.deinit();
     if (mask.dtype() != c.MLX_BOOL or mask.ndim() != 1) return error.Type;
 
-    var source = try self.materializeMlxArray(callee);
+    var source = try self.materializeBackendArray(callee);
     defer source.deinit();
     if (source.ndim() == 0) return error.Type;
 
-    const ctx = try self.mlxContext();
+    const ctx = try self.backendContext();
     var indices = mlx.Array.boolWhereIndices(ctx.*, mask) catch |err| return mapMlxError(err);
     defer indices.deinit();
     const out = mlx.Array.takeAxis(ctx.*, source, indices, 0) catch |err| return mapMlxError(err);
-    return try self.wrapManagedMlxArray(out);
+    return try self.wrapManagedBackendArray(out);
 }
 
 fn applyNumericShapeSnapshot(handle: *NumericArray, snapshot: NumericShapeSnapshot) void {
@@ -2148,25 +2446,10 @@ fn applyNumericShapeSnapshot(handle: *NumericArray, snapshot: NumericShapeSnapsh
 fn applyNonVectorNumericShapeToValue(self: *Session, value: Value, snapshot: ?NumericShapeSnapshot) !Value {
     const shape = snapshot orelse return value;
     if (shape.rank <= 1) return value;
-    const handle, const canonical = switch (value.tag()) {
-        .array => switch (value.arraySubkind()) {
-            .numeric_array => .{ @constCast(value.asNumericArray()), value },
-            .host_array => blk: {
-                if (hostArrayNumericMode(value.asHostArray()) == null) return error.Type;
-                const wrapped = try wrapOwnedHostArrayValue(self, @constCast(value.asHostArray()));
-                break :blk .{ @constCast(wrapped.asNumericArray()), wrapped };
-            },
-            .mlx_array => blk: {
-                const wrapped = try wrapOwnedMlxArrayValue(self, @constCast(value.asMlxArray()));
-                break :blk .{ @constCast(wrapped.asNumericArray()), wrapped };
-            },
-            else => return error.Type,
-        },
-        else => return error.Type,
-    };
-    applyNumericShapeSnapshot(handle, shape);
-    syncNumericArrayChildren(handle);
-    return canonical;
+    const logical = try ensureLogicalNumericValue(self, value);
+    applyNumericShapeSnapshot(logical.handle, shape);
+    syncNumericArrayChildren(logical.handle);
+    return logical.value;
 }
 
 fn nonVectorNumericShapeForDyad(left: Value, right: Value) KError!?NumericShapeSnapshot {
@@ -2186,18 +2469,17 @@ fn nonVectorNumericShapeForDyad(left: Value, right: Value) KError!?NumericShapeS
     return left_shape orelse right_shape;
 }
 
-fn hostArrayShapeHandle(array: *const HostArray) ?*const NumericArray {
-    if (hostArrayNumericMode(array) == null) return null;
+fn hostDenseShapeHandle(array: *const HostDenseArray) ?*const NumericArray {
     return array.logical_handle;
 }
 
-fn hostArrayNonVectorShape(array: *const HostArray) ?*const NumericArray {
-    const handle = hostArrayShapeHandle(array) orelse return null;
+fn hostDenseNonVectorShape(array: *const HostDenseArray) ?*const NumericArray {
+    const handle = hostDenseShapeHandle(array) orelse return null;
     return if (handle.rank > 1) handle else null;
 }
 
-fn hostNumericMatrixShape(array: *const HostArray) ?NumericMatrixShape {
-    const handle = hostArrayNonVectorShape(array) orelse return null;
+fn hostNumericMatrixShape(array: *const HostDenseArray) ?NumericMatrixShape {
+    const handle = hostDenseNonVectorShape(array) orelse return null;
     if (handle.rank != 2) return null;
     return .{
         .rows = @intCast(handle.shape[0]),
@@ -2205,13 +2487,18 @@ fn hostNumericMatrixShape(array: *const HostArray) ?NumericMatrixShape {
     };
 }
 
-fn hostArrayShapeDims(array: *const HostArray, dims_buf: *[numeric_array_max_rank]i32) []const i32 {
-    if (hostArrayShapeHandle(array)) |handle| {
+fn hostDenseShapeDims(array: *const HostDenseArray, dims_buf: *[numeric_array_max_rank]i32) []const i32 {
+    if (hostDenseShapeHandle(array)) |handle| {
         if (handle.rank != 0) return handle.shapeSlice();
     }
     dims_buf[0] = @intCast(array.len());
     for (1..numeric_array_max_rank) |idx| dims_buf[idx] = 0;
     return dims_buf[0..1];
+}
+
+fn boxedArrayItems(value: Value) ?[]const Value {
+    if (value.tag() != .array or value.arrayKind() != .host_boxed_array) return null;
+    return value.asHostBoxedArray().items;
 }
 
 fn valueNumericMatrixShape(value: Value) ?NumericMatrixShape {
@@ -2267,13 +2554,11 @@ fn rowwiseMatrixVectorDyad(left: Value, right: Value) ?RowwiseMatrixVectorDyad {
 }
 
 fn valueIsRenderableMatrixLike(value: Value) bool {
-    if (valueNumericMatrixShape(value) != null) return true;
-    if (value.tag() != .array or value.arrayKind() != .host_array or std.meta.activeTag(value.asHostArray().storage) != .boxed) return false;
-    return isRenderableMatrix(value.asHostArray().storage.boxed);
+    return valueNumericMatrixShape(value) != null;
 }
 
 fn numericMatrixRowsEqual(self: *Session, view: NumericMatrixView, lhs_row: usize, rhs_row: usize) KError!bool {
-    if (view.handle.mlx != null) {
+    if (numericHasBackendAttachment(view.handle)) {
         _ = try tryEnsureHostRealizationForHandle(self, @constCast(view.handle)) orelse return error.Type;
     }
     const lhs_base = lhs_row * view.shape.cols;
@@ -2295,7 +2580,7 @@ fn numericMatrixRowsEqual(self: *Session, view: NumericMatrixView, lhs_row: usiz
 }
 
 fn numericMatrixRowOrder(self: *Session, view: NumericMatrixView, lhs_row: usize, rhs_row: usize) KError!std.math.Order {
-    if (view.handle.mlx != null) {
+    if (numericHasBackendAttachment(view.handle)) {
         _ = try tryEnsureHostRealizationForHandle(self, @constCast(view.handle)) orelse return error.Type;
     }
     const lhs_base = lhs_row * view.shape.cols;
@@ -2520,6 +2805,47 @@ fn numericValueFirstAxisSegmentSliceValue(self: *Session, value: Value, start: u
     return try newReshapeViewValue(self, value, shape);
 }
 
+fn trySliceFirstAxisConcatNumericMatrix(self: *Session, value: Value, slice: ArithmeticIndexSlice) KError!?Value {
+    if (slice.step != 1) return null;
+    const handle = valueNumericHandle(value) orelse return null;
+    if (!numericArrayIsFirstAxisConcat(handle)) return null;
+    const shape = valueNumericMatrixShape(value) orelse return null;
+
+    var segments = std.ArrayList(FirstAxisMatrixSegment).empty;
+    defer segments.deinit(self.allocator);
+    try collectFirstAxisMatrixSegments(self.allocator, value, shape.cols, &segments);
+    if (segments.items.len == 0) return null;
+
+    const slice_end = slice.start + slice.len;
+    var selected = std.ArrayList(FirstAxisMatrixSegment).empty;
+    defer selected.deinit(self.allocator);
+
+    var row_offset: usize = 0;
+    for (segments.items) |segment| {
+        const seg_start = row_offset;
+        const seg_end = row_offset + segment.rows;
+        row_offset = seg_end;
+
+        if (seg_end <= slice.start or seg_start >= slice_end) continue;
+
+        const overlap_start = @max(seg_start, slice.start);
+        const overlap_end = @min(seg_end, slice_end);
+        const local_start = overlap_start - seg_start;
+        const local_len = overlap_end - overlap_start;
+        if (local_len == 0) continue;
+
+        const piece = try numericValueFirstAxisSegmentSliceValue(self, segment.value, local_start, local_len, shape.cols);
+        try selected.append(self.allocator, .{
+            .value = piece,
+            .rows = local_len,
+            .owned = true,
+        });
+    }
+
+    if (selected.items.len == 0) return null;
+    return try buildFirstAxisMatrixComposition(self, selected.items, shape.cols);
+}
+
 fn tryFuseFirstAxisMatrixSegments(self: *Session, left: FirstAxisMatrixSegment, right: FirstAxisMatrixSegment, cols: usize) KError!?FirstAxisMatrixSegment {
     const shape = NumericMatrixShape{
         .rows = left.rows + right.rows,
@@ -2629,28 +2955,9 @@ fn concatNumericMatrixShape(self: *Session, left: Value, right: Value) KError!?N
 }
 
 fn valueNumericBitSlice(value: Value) ?HostBitSlice {
-    if (value.tag() != .array) return null;
-    return switch (value.arrayKind()) {
-        .host_array => switch (value.asHostArray().storage) {
-            .bit => |words| .{ .words = words, .len = value.asHostArray().logical_len },
-            else => null,
-        },
-        .numeric_array => blk: {
-            const handle = value.asNumericArray();
-            const array = handle.host orelse break :blk null;
-            break :blk switch (array.storage) {
-                .bit => |words| .{ .words = words, .len = array.logical_len },
-                else => null,
-            };
-        },
-        .mlx_array => blk: {
-            const handle = valueNumericHandle(value) orelse break :blk null;
-            const array = handle.host orelse break :blk null;
-            break :blk switch (array.storage) {
-                .bit => |words| .{ .words = words, .len = array.logical_len },
-                else => null,
-            };
-        },
+    const array = hostDenseIfPresent(value) orelse return null;
+    return switch (array.storage) {
+        .bit => |words| .{ .words = words, .len = array.logical_len },
         else => null,
     };
 }
@@ -2713,8 +3020,8 @@ fn concatNumericMatrixValue(self: *Session, left: Value, right: Value, shape: Nu
 fn combineAddMonotonicFlags(left_flags: u8, right_flags: u8) u8 {
     const left_mono = monotonicFlags(left_flags);
     const right_mono = monotonicFlags(right_flags);
-    return (if ((left_mono & host_array_flag_asc) != 0 and (right_mono & host_array_flag_asc) != 0) host_array_flag_asc else 0) |
-        (if ((left_mono & host_array_flag_dsc) != 0 and (right_mono & host_array_flag_dsc) != 0) host_array_flag_dsc else 0);
+    return (if ((left_mono & host_dense_flag_asc) != 0 and (right_mono & host_dense_flag_asc) != 0) host_dense_flag_asc else 0) |
+        (if ((left_mono & host_dense_flag_dsc) != 0 and (right_mono & host_dense_flag_dsc) != 0) host_dense_flag_dsc else 0);
 }
 
 fn combineSubMonotonicFlags(left_flags: u8, right_flags: u8) u8 {
@@ -2722,7 +3029,7 @@ fn combineSubMonotonicFlags(left_flags: u8, right_flags: u8) u8 {
 }
 
 fn scalarMulMonotonicFlags(array_flags: u8, scalar: i64) u8 {
-    if (scalar == 0) return host_array_flag_asc | host_array_flag_dsc;
+    if (scalar == 0) return host_dense_flag_asc | host_dense_flag_dsc;
     if (scalar > 0) return monotonicFlags(array_flags);
     return invertMonotonicFlags(array_flags);
 }
@@ -2735,7 +3042,7 @@ fn intArrayScalarResultFlags(op: BuiltinId, array_flags: u8, scalar: i64, scalar
         .minimum, .maximum, .div => 0,
         else => 0,
     };
-    return host_array_flag_normalized | mono;
+    return host_dense_flag_normalized | mono;
 }
 
 fn intArrayArrayResultFlags(op: BuiltinId, left_flags: u8, right_flags: u8) u8 {
@@ -2745,11 +3052,11 @@ fn intArrayArrayResultFlags(op: BuiltinId, left_flags: u8, right_flags: u8) u8 {
         .minimum, .maximum, .mul, .div => 0,
         else => 0,
     };
-    return host_array_flag_normalized | mono;
+    return host_dense_flag_normalized | mono;
 }
 
 fn intNegResultFlags(input_flags: u8) u8 {
-    return host_array_flag_normalized | invertMonotonicFlags(input_flags);
+    return host_dense_flag_normalized | invertMonotonicFlags(input_flags);
 }
 
 fn analyzeIntSlice(items: []const i64) HostIntAnalysis {
@@ -2757,7 +3064,7 @@ fn analyzeIntSlice(items: []const i64) HostIntAnalysis {
         return .{
             .range = .{ .min = 0, .max = 0 },
             .kind = .int8,
-            .flags = host_array_flag_normalized | host_array_flag_asc | host_array_flag_dsc,
+            .flags = host_dense_flag_normalized | host_dense_flag_asc | host_dense_flag_dsc,
         };
     }
 
@@ -2777,7 +3084,7 @@ fn analyzeIntSlice(items: []const i64) HostIntAnalysis {
     return .{
         .range = .{ .min = min_value, .max = max_value },
         .kind = hostIntStorageKindForRange(min_value, max_value),
-        .flags = host_array_flag_normalized | orderFlagsFromMonotonic(asc, dsc),
+        .flags = host_dense_flag_normalized | orderFlagsFromMonotonic(asc, dsc),
     };
 }
 
@@ -2797,11 +3104,11 @@ const HostFloatSqueezeAnalysis = struct {
 fn analyzeFloatSlice(items: []const f64) HostFloatSqueezeAnalysis {
     if (items.len == 0) {
         return .{
-            .flags = host_array_flag_normalized | host_array_flag_asc | host_array_flag_dsc,
+            .flags = host_dense_flag_normalized | host_dense_flag_asc | host_dense_flag_dsc,
             .int_analysis = .{
                 .range = .{ .min = 0, .max = 0 },
                 .kind = .int8,
-                .flags = host_array_flag_normalized | host_array_flag_asc | host_array_flag_dsc,
+                .flags = host_dense_flag_normalized | host_dense_flag_asc | host_dense_flag_dsc,
             },
         };
     }
@@ -2835,11 +3142,11 @@ fn analyzeFloatSlice(items: []const f64) HostFloatSqueezeAnalysis {
     }
 
     return .{
-        .flags = host_array_flag_normalized | orderFlagsFromMonotonic(asc, dsc),
+        .flags = host_dense_flag_normalized | orderFlagsFromMonotonic(asc, dsc),
         .int_analysis = if (all_int) .{
             .range = .{ .min = min_value, .max = max_value },
             .kind = hostIntStorageKindForRange(min_value, max_value),
-            .flags = host_array_flag_normalized | orderFlagsFromMonotonic(asc, dsc),
+            .flags = host_dense_flag_normalized | orderFlagsFromMonotonic(asc, dsc),
         } else null,
     };
 }
@@ -2920,6 +3227,7 @@ fn hostIntRangeFromWide(min_value: i128, max_value: i128) ?HostIntRange {
 fn hostIntInitialResultKind(op: BuiltinId, left_kind: HostIntStorageKind, right_kind: HostIntStorageKind) HostIntStorageKind {
     return switch (op) {
         .add, .sub, .mul, .minimum, .maximum => maxHostIntStorageKind(left_kind, right_kind),
+        .iota => .int64,
         .div => unreachable,
         else => unreachable,
     };
@@ -2959,6 +3267,7 @@ fn hostIntDyadRange(op: BuiltinId, left: HostIntRange, right: HostIntRange) ?Hos
     return switch (op) {
         .add => hostIntRangeFromWide(@as(i128, left.min) + @as(i128, right.min), @as(i128, left.max) + @as(i128, right.max)),
         .sub => hostIntRangeFromWide(@as(i128, left.min) - @as(i128, right.max), @as(i128, left.max) - @as(i128, right.min)),
+        .iota => null,
         .minimum => .{
             .min = @min(left.min, right.min),
             .max = @min(left.max, right.max),
@@ -2994,9 +3303,9 @@ fn hostIntDyadResultKindForRange(op: BuiltinId, left_kind: HostIntStorageKind, r
     return hostIntStorageKindForRange(range.min, range.max);
 }
 
-fn HostArrayAlloc(comptime T: type) type {
+fn HostDenseAlloc(comptime T: type) type {
     return struct {
-        array: *HostArray,
+        array: *HostDenseArray,
         items: []T,
     };
 }
@@ -3007,15 +3316,30 @@ const HostBitSlice = struct {
 };
 
 const HostBitAlloc = struct {
-    array: *HostArray,
+    array: *HostDenseArray,
     words: []u64,
     len: usize,
 };
 
-const MlxArray = struct {
+const BackendArray = struct {
     header: HeapHeader align(64),
     logical_handle: ?*NumericArray = null,
+    backend_kind: mlx.BackendKind = switch (mlx.backend_kind) {
+        .mlx => .mlx,
+        .webgpu => .webgpu,
+        .host_only => .host_only,
+    },
     array: mlx.Array,
+};
+
+const LoadedSafetensorsLookupEntry = struct {
+    symbol: Value,
+    index: usize,
+};
+
+const LoadedSafetensorsStore = struct {
+    bundle: Value,
+    entries: []LoadedSafetensorsLookupEntry,
 };
 
 const numeric_array_max_rank = 4;
@@ -3050,7 +3374,7 @@ const debug_numeric_structural_tag_count = @typeInfo(DebugNumericStructuralTag).
 
 pub const DebugHostFoldScanMiss = enum {
     unsupported_builtin,
-    backend_override_mlx,
+    backend_override,
     non_numeric_or_shape,
     planner_non_host,
     preserve_generic_semantics,
@@ -3059,11 +3383,22 @@ pub const DebugHostFoldScanMiss = enum {
 const debug_host_fold_scan_miss_count = @typeInfo(DebugHostFoldScanMiss).@"enum".fields.len;
 
 pub const DebugHostDenseDyadMiss = enum {
-    planner_mlx,
+    planner_backend,
     mode,
     view,
 };
 const debug_host_dense_dyad_miss_count = @typeInfo(DebugHostDenseDyadMiss).@"enum".fields.len;
+
+pub const DebugHostDenseDyadOp = enum {
+    add,
+    sub,
+    mul,
+    div,
+    less,
+    more,
+    equal,
+};
+const debug_host_dense_dyad_op_count = @typeInfo(DebugHostDenseDyadOp).@"enum".fields.len;
 
 pub const DebugDenseEachMiss = enum {
     unsupported_base,
@@ -3135,8 +3470,8 @@ const NumericArray = struct {
     first_axis_concat: ?NumericFirstAxisConcat = null,
     reshape_view: ?NumericReshapeView = null,
     transpose_view: ?NumericTransposeView = null,
-    host: ?*HostArray = null,
-    mlx: ?*MlxArray = null,
+    host: ?*HostDenseArray = null,
+    mlx: ?*BackendArray = null,
     registry_prev: ?*NumericArray = null,
     registry_next: ?*NumericArray = null,
     tracked_in_session: bool = false,
@@ -3146,15 +3481,15 @@ const NumericArray = struct {
     fn activeKind(self: *const NumericArray) HeapKind {
         return switch (self.preferred) {
             .host => if (self.host != null)
-                .host_array
+                .host_dense_array
             else if (self.mlx != null)
-                .mlx_array
+                .backend_array
             else
                 .numeric_array,
             .mlx => if (self.mlx != null)
-                .mlx_array
+                .backend_array
             else if (self.host != null)
-                .host_array
+                .host_dense_array
             else
                 .numeric_array,
         };
@@ -3271,10 +3606,12 @@ const Op = enum(u8) {
     inline_call_sqrt1,
     inline_call_sqrt_global,
     inline_call_sqrt_capture,
+    inline_call_argmax1,
     add,
     sub,
     mul,
     div,
+    mod,
     dot,
     minimum,
     maximum,
@@ -3320,6 +3657,8 @@ const Op = enum(u8) {
     take,
     floor,
     drop,
+    null_test,
+    fill_without,
     sort,
     equal,
     reshape,
@@ -3330,6 +3669,7 @@ const Op = enum(u8) {
     join,
     unique,
     find,
+    argmax,
     eval_string,
     call_builtin_derived2,
     enter_inline,
@@ -3770,8 +4110,10 @@ pub const Session = struct {
     mlx_ctx: ?mlx.Context = null,
     global_slots: std.StringHashMap(u16),
     global_names: std.ArrayListUnmanaged([]const u8) = .{},
+    debug_global_call_counts: std.ArrayListUnmanaged(usize) = .{},
     interned_strings: std.StringHashMap(*HostText),
     interned_symbols: std.StringHashMap(*HostText),
+    loaded_safetensors: std.StringHashMap(LoadedSafetensorsStore),
     global_values: std.ArrayListUnmanaged(Value) = .{},
     global_initialized: std.ArrayListUnmanaged(bool) = .{},
     code_cache: std.StringHashMap(*const Code),
@@ -3790,9 +4132,11 @@ pub const Session = struct {
     free_closure_len: usize = 0,
     free_numeric_arrays: [max_pooled_objects]?*NumericArray = [_]?*NumericArray{null} ** max_pooled_objects,
     free_numeric_array_len: usize = 0,
-    free_host_arrays: [max_pooled_objects]?*HostArray = [_]?*HostArray{null} ** max_pooled_objects,
+    free_host_arrays: [max_pooled_objects]?*HostDenseArray = [_]?*HostDenseArray{null} ** max_pooled_objects,
     free_host_array_len: usize = 0,
-    free_mlx_arrays: [max_pooled_objects]?*MlxArray = [_]?*MlxArray{null} ** max_pooled_objects,
+    free_host_boxed_arrays: [max_pooled_objects]?*HostBoxedArray = [_]?*HostBoxedArray{null} ** max_pooled_objects,
+    free_host_boxed_array_len: usize = 0,
+    free_mlx_arrays: [max_pooled_objects]?*BackendArray = [_]?*BackendArray{null} ** max_pooled_objects,
     free_mlx_array_len: usize = 0,
     scratch_code: ScratchCode = .{},
     last_result: ?Value = null,
@@ -3842,11 +4186,18 @@ pub const Session = struct {
     debug_host_scan_fast_count: usize = 0,
     debug_host_fold_scan_miss_counts: [debug_host_fold_scan_miss_count]usize = [_]usize{0} ** debug_host_fold_scan_miss_count,
     debug_host_dense_dyad_host_count: usize = 0,
+    debug_host_dense_dyad_host_op_counts: [debug_host_dense_dyad_op_count]usize = [_]usize{0} ** debug_host_dense_dyad_op_count,
+    debug_host_dense_dyad_host_rowwise_count: usize = 0,
+    debug_host_dense_dyad_host_with_backend_input_count: usize = 0,
     debug_host_dense_dyad_miss_counts: [debug_host_dense_dyad_miss_count]usize = [_]usize{0} ** debug_host_dense_dyad_miss_count,
+    debug_backend_argmax_fast_count: usize = 0,
+    debug_backend_argmax_materialize_ns: u64 = 0,
+    debug_backend_argmax_kernel_ns: u64 = 0,
     debug_host_string_view_alloc_count: usize = 0,
     debug_host_string_view_release_count: usize = 0,
     debug_numeric_structural_alloc_counts: [debug_numeric_structural_tag_count]usize = [_]usize{0} ** debug_numeric_structural_tag_count,
     debug_numeric_structural_release_counts: [debug_numeric_structural_tag_count]usize = [_]usize{0} ** debug_numeric_structural_tag_count,
+    debug_numeric_structural_mlx_realization_counts: [debug_numeric_structural_tag_count]usize = [_]usize{0} ** debug_numeric_structural_tag_count,
     debug_direct_closure1_hit_count: usize = 0,
     debug_direct_closure2_hit_count: usize = 0,
     debug_direct_closure3_hit_count: usize = 0,
@@ -3899,6 +4250,7 @@ pub const Session = struct {
             .global_slots = std.StringHashMap(u16).init(allocator),
             .interned_strings = std.StringHashMap(*HostText).init(allocator),
             .interned_symbols = std.StringHashMap(*HostText).init(allocator),
+            .loaded_safetensors = std.StringHashMap(LoadedSafetensorsStore).init(allocator),
             .code_cache = std.StringHashMap(*const Code).init(allocator),
             .dense_autodiff_cache = std.AutoHashMap(DenseAutodiffCacheKey, DenseAutodiffLowerResult).init(allocator),
         };
@@ -3910,11 +4262,21 @@ pub const Session = struct {
         for (self.global_values.items, self.global_initialized.items) |value, initialized| {
             if (initialized) self.releaseValue(value);
         }
+        // Release cached tensor bundles before forcibly draining the numeric
+        // registry so bundle-owned backend arrays can unregister themselves.
+        var loaded_iter = self.loaded_safetensors.iterator();
+        while (loaded_iter.next()) |entry| {
+            self.releaseValue(entry.value_ptr.bundle);
+            self.allocator.free(entry.value_ptr.entries);
+            self.allocator.free(entry.key_ptr.*);
+        }
+        self.loaded_safetensors.deinit();
         while (self.managed_numeric_registry_head) |handle| self.recycleManagedNumericArray(handle);
         self.global_values.deinit(self.allocator);
         self.global_initialized.deinit(self.allocator);
         self.global_slots.deinit();
         self.global_names.deinit(self.allocator);
+        self.debug_global_call_counts.deinit(self.allocator);
         self.interned_strings.deinit();
         self.interned_symbols.deinit();
         self.code_cache.deinit();
@@ -3939,6 +4301,10 @@ pub const Session = struct {
         while (self.free_host_array_len > 0) {
             self.free_host_array_len -= 1;
             self.allocator.destroy(self.free_host_arrays[self.free_host_array_len].?);
+        }
+        while (self.free_host_boxed_array_len > 0) {
+            self.free_host_boxed_array_len -= 1;
+            self.allocator.destroy(self.free_host_boxed_arrays[self.free_host_boxed_array_len].?);
         }
         while (self.free_mlx_array_len > 0) {
             self.free_mlx_array_len -= 1;
@@ -4113,8 +4479,8 @@ pub const Session = struct {
         _ = self;
         switch (value.tag()) {
             .array => switch (value.arrayKind()) {
-                .mlx_array => {
-                    var owned = value.asMlxArray().array.clone() catch |err| return mapMlxError(err);
+                .backend_array => {
+                    var owned = value.asBackendArray().array.clone() catch |err| return mapMlxError(err);
                     defer owned.deinit();
                     owned.eval() catch |err| return mapMlxError(err);
                 },
@@ -4125,19 +4491,19 @@ pub const Session = struct {
                         owned.eval() catch |err| return mapMlxError(err);
                     }
                 },
-                .host_array, .host_string, .host_symbol, .host_string_list, .host_string_view => {},
+                .host_dense_array, .host_boxed_array, .host_string, .host_symbol, .host_string_list, .host_string_view => {},
                 else => return error.Internal,
             },
             .int, .float, .bool, .builtin, .closure => {},
         }
     }
 
-    pub fn debugScratchHostArrayAllocCount(self: *Session) usize {
+    pub fn debugScratchHostDenseAllocCount(self: *Session) usize {
         if (comptime !enable_probe_instrumentation) return 0;
         return self.debug_scratch_host_array_alloc_count;
     }
 
-    pub fn resetDebugScratchHostArrayAllocCount(self: *Session) void {
+    pub fn resetDebugScratchHostDenseAllocCount(self: *Session) void {
         if (comptime !enable_probe_instrumentation) return;
         self.debug_scratch_host_array_alloc_count = 0;
     }
@@ -4159,8 +4525,8 @@ pub const Session = struct {
             var sample0: i64 = 0;
             var sample1: i64 = 0;
             if (handle.host) |host| {
-                if (hostArrayNumericMode(host) == .int and host.len() > 0) sample0 = hostArrayIntAt(host, 0) catch 0;
-                if (hostArrayNumericMode(host) == .int and host.len() > 1) sample1 = hostArrayIntAt(host, 1) catch 0;
+                if (hostDenseNumericMode(host) == .int and host.len() > 0) sample0 = hostDenseIntAt(host, 0) catch 0;
+                if (hostDenseNumericMode(host) == .int and host.len() > 1) sample1 = hostDenseIntAt(host, 1) catch 0;
             }
             std.debug.print(
                 "handle {*}: structural={s} ref={d} rank={d} host={} mlx={} sample={d},{d} last={}\n",
@@ -4192,12 +4558,12 @@ pub const Session = struct {
         return self.debug_structural_host_realization_count;
     }
 
-    pub fn debugMlxRealizationCount(self: *const Session) usize {
+    pub fn debugBackendRealizationCount(self: *const Session) usize {
         if (comptime !enable_probe_instrumentation) return 0;
         return self.debug_mlx_realization_count;
     }
 
-    pub fn debugStructuralMlxRealizationCount(self: *const Session) usize {
+    pub fn debugStructuralBackendRealizationCount(self: *const Session) usize {
         if (comptime !enable_probe_instrumentation) return 0;
         return self.debug_structural_mlx_realization_count;
     }
@@ -4212,12 +4578,12 @@ pub const Session = struct {
         return self.debug_host_readback_count;
     }
 
-    pub fn debugMlxRealizationReuseCount(self: *const Session) usize {
+    pub fn debugBackendRealizationReuseCount(self: *const Session) usize {
         if (comptime !enable_probe_instrumentation) return 0;
         return self.debug_mlx_realization_reuse_count;
     }
 
-    pub fn debugMlxPromotionCount(self: *const Session) usize {
+    pub fn debugBackendPromotionCount(self: *const Session) usize {
         if (comptime !enable_probe_instrumentation) return 0;
         return self.debug_mlx_promotion_count;
     }
@@ -4227,7 +4593,7 @@ pub const Session = struct {
         return self.debug_host_eviction_count;
     }
 
-    pub fn debugMlxEvictionCount(self: *const Session) usize {
+    pub fn debugBackendEvictionCount(self: *const Session) usize {
         if (comptime !enable_probe_instrumentation) return 0;
         return self.debug_mlx_eviction_count;
     }
@@ -4402,9 +4768,39 @@ pub const Session = struct {
         return self.debug_host_dense_dyad_host_count;
     }
 
+    pub fn debugHostDenseDyadHostOpCount(self: *const Session, op: DebugHostDenseDyadOp) usize {
+        if (comptime !enable_probe_instrumentation) return 0;
+        return self.debug_host_dense_dyad_host_op_counts[@intFromEnum(op)];
+    }
+
+    pub fn debugHostDenseDyadHostRowwiseCount(self: *const Session) usize {
+        if (comptime !enable_probe_instrumentation) return 0;
+        return self.debug_host_dense_dyad_host_rowwise_count;
+    }
+
+    pub fn debugHostDenseDyadHostWithBackendInputCount(self: *const Session) usize {
+        if (comptime !enable_probe_instrumentation) return 0;
+        return self.debug_host_dense_dyad_host_with_backend_input_count;
+    }
+
     pub fn debugHostDenseDyadMissCount(self: *const Session, reason: DebugHostDenseDyadMiss) usize {
         if (comptime !enable_probe_instrumentation) return 0;
         return self.debug_host_dense_dyad_miss_counts[@intFromEnum(reason)];
+    }
+
+    pub fn debugBackendArgmaxFastCount(self: *const Session) usize {
+        if (comptime !enable_probe_instrumentation) return 0;
+        return self.debug_backend_argmax_fast_count;
+    }
+
+    pub fn debugBackendArgmaxMaterializeNs(self: *const Session) u64 {
+        if (comptime !enable_probe_instrumentation) return 0;
+        return self.debug_backend_argmax_materialize_ns;
+    }
+
+    pub fn debugBackendArgmaxKernelNs(self: *const Session) u64 {
+        if (comptime !enable_probe_instrumentation) return 0;
+        return self.debug_backend_argmax_kernel_ns;
     }
 
     pub fn debugHostStringViewAllocCount(self: *const Session) usize {
@@ -4425,6 +4821,11 @@ pub const Session = struct {
     pub fn debugNumericStructuralReleaseCount(self: *const Session, tag: DebugNumericStructuralTag) usize {
         if (comptime !enable_probe_instrumentation) return 0;
         return self.debug_numeric_structural_release_counts[@intFromEnum(tag)];
+    }
+
+    pub fn debugNumericStructuralBackendRealizationCount(self: *const Session, tag: DebugNumericStructuralTag) usize {
+        if (comptime !enable_probe_instrumentation) return 0;
+        return self.debug_numeric_structural_mlx_realization_counts[@intFromEnum(tag)];
     }
 
     pub fn debugDirectClosure1HitCount(self: *const Session) usize {
@@ -4604,11 +5005,18 @@ pub const Session = struct {
         self.debug_host_scan_fast_count = 0;
         self.debug_host_fold_scan_miss_counts = [_]usize{0} ** debug_host_fold_scan_miss_count;
         self.debug_host_dense_dyad_host_count = 0;
+        self.debug_host_dense_dyad_host_op_counts = [_]usize{0} ** debug_host_dense_dyad_op_count;
+        self.debug_host_dense_dyad_host_rowwise_count = 0;
+        self.debug_host_dense_dyad_host_with_backend_input_count = 0;
         self.debug_host_dense_dyad_miss_counts = [_]usize{0} ** debug_host_dense_dyad_miss_count;
+        self.debug_backend_argmax_fast_count = 0;
+        self.debug_backend_argmax_materialize_ns = 0;
+        self.debug_backend_argmax_kernel_ns = 0;
         self.debug_host_string_view_alloc_count = 0;
         self.debug_host_string_view_release_count = 0;
         self.debug_numeric_structural_alloc_counts = [_]usize{0} ** debug_numeric_structural_tag_count;
         self.debug_numeric_structural_release_counts = [_]usize{0} ** debug_numeric_structural_tag_count;
+        self.debug_numeric_structural_mlx_realization_counts = [_]usize{0} ** debug_numeric_structural_tag_count;
         self.debug_direct_closure1_hit_count = 0;
         self.debug_direct_closure2_hit_count = 0;
         self.debug_direct_closure3_hit_count = 0;
@@ -4633,6 +5041,7 @@ pub const Session = struct {
         self.last_dense_plan_reason = null;
         self.last_dense_plan_overridden = false;
         if (comptime enable_probe_instrumentation) self.last_dense_autodiff_exec_backend = null;
+        for (self.debug_global_call_counts.items) |*count| count.* = 0;
     }
 
     pub fn setDebugProbeActive(self: *Session, active: bool) void {
@@ -4696,9 +5105,29 @@ pub const Session = struct {
         self.debug_host_fold_scan_miss_counts[@intFromEnum(reason)] += 1;
     }
 
-    fn noteHostDenseDyadHost(self: *Session) void {
+    fn noteHostDenseDyadOp(self: *Session, op: BuiltinId) void {
+        if (!self.debugDetailedProbeActive()) return;
+        const tag: DebugHostDenseDyadOp = switch (op) {
+            .add => .add,
+            .sub => .sub,
+            .mul => .mul,
+            .div => .div,
+            .less => .less,
+            .more => .more,
+            .equal => .equal,
+            else => return,
+        };
+        self.debug_host_dense_dyad_host_op_counts[@intFromEnum(tag)] += 1;
+    }
+
+    fn noteHostDenseDyadHost(self: *Session, op: BuiltinId, left: Value, right: Value, rowwise: bool) void {
         if (!self.debugDetailedProbeActive()) return;
         self.debug_host_dense_dyad_host_count += 1;
+        self.noteHostDenseDyadOp(op);
+        if (rowwise) self.debug_host_dense_dyad_host_rowwise_count += 1;
+        if (hasBackendRealization(left) or hasBackendRealization(right)) {
+            self.debug_host_dense_dyad_host_with_backend_input_count += 1;
+        }
     }
 
     fn noteHostDenseDyadMiss(self: *Session, reason: DebugHostDenseDyadMiss) void {
@@ -4734,22 +5163,14 @@ pub const Session = struct {
     }
 
     pub fn wasmAcceleratorArrayInfo(self: *Session, value: Value) KError!?WasmArrayInfo {
-        if (comptime mlx.backend_kind != .wasm_bridge) return null;
-        if (value.tag() != .array) return null;
-
-        const payload = switch (value.arraySubkind()) {
-            .mlx_array => @constCast(value.asMlxArray()),
-            .numeric_array, .host_array => try tryEnsureManagedMlxRealization(self, value) orelse return null,
-            else => return null,
-        };
-
-        var info = WasmArrayInfo{
-            .handle = payload.array.handle,
-            .dtype = payload.array.dtype(),
-            .ndim = @intCast(payload.array.ndim()),
-        };
-        for (payload.array.shape(), 0..) |dim, idx| info.shape[idx] = dim;
-        return info;
+        return runtime_backend_wasm.wasmAcceleratorArrayInfo(.{
+            .Session = Session,
+            .Value = Value,
+            .WasmArrayInfo = WasmArrayInfo,
+            .KError = KError,
+            .mlx = mlx,
+            .wasmAcceleratorPayload = wasmAcceleratorPayload,
+        }, self, value);
     }
 
     pub fn renderValue(self: *Session, value: Value) anyerror![]u8 {
@@ -4766,15 +5187,16 @@ pub const Session = struct {
     }
 
     fn renderArray(self: *Session, value: Value) anyerror![]u8 {
-        if (value.arraySubkind() == .numeric_array) return self.renderNumericArray(value.asNumericArray());
+        if (valueNumericHandle(value)) |handle| return self.renderNumericArray(handle);
         const kind = value.arrayKind();
         return switch (kind) {
-            .host_array => self.renderHostArray(value.asHostArray()),
+            .host_dense_array => self.renderHostArray(value.asHostDenseArray()),
+            .host_boxed_array => self.renderHostBoxedArray(value.asHostBoxedArray()),
             .host_string => self.renderHostString(value.asHostString()),
             .host_symbol => self.renderHostSymbol(value.asHostSymbol()),
             .host_string_list => self.renderHostStringList(value.asHostStringList()),
             .host_string_view => self.renderHostStringView(value.asHostStringView()),
-            .mlx_array => self.renderMlxArray(value.asMlxArray()),
+            .backend_array => self.renderBackendArray(value.asBackendArray()),
             else => error.Internal,
         };
     }
@@ -4787,11 +5209,11 @@ pub const Session = struct {
 
     fn renderNumericArray(self: *Session, handle: *const NumericArray) anyerror![]u8 {
         return switch (handle.activeKind()) {
-            .host_array => self.renderHostNumericArray(handle, handle.host orelse return error.Internal),
-            .mlx_array => self.renderMlxArray(handle.mlx orelse return error.Internal),
+            .host_dense_array => self.renderHostNumericArray(handle, numericHostAttachment(handle) orelse return error.Internal),
+            .backend_array => self.renderBackendArray(numericBackendAttachment(handle) orelse return error.Internal),
             .numeric_array => blk: {
                 const value = Value.array(@constCast(handle));
-                if (handle.host == null and hasMlxRealization(value)) {
+                if (!numericHasHostAttachment(handle) and hasBackendRealization(value)) {
                     _ = try tryEnsureHostRealizationForHandle(self, @constCast(handle)) orelse return error.Type;
                     break :blk try self.renderNumericArray(handle);
                 }
@@ -4834,7 +5256,7 @@ pub const Session = struct {
         };
     }
 
-    fn renderHostNumericArray(self: *Session, handle: *const NumericArray, array: *const HostArray) anyerror![]u8 {
+    fn renderHostNumericArray(self: *Session, handle: *const NumericArray, array: *const HostDenseArray) anyerror![]u8 {
         if (handle.rank <= 1) return self.renderHostArray(array);
         if (handle.rank != 2) return error.Unsupported;
 
@@ -4877,7 +5299,6 @@ pub const Session = struct {
                     }
                 }
             },
-            .boxed => return error.Type,
         }
 
         return try out.toOwnedSlice(self.allocator);
@@ -4925,7 +5346,7 @@ pub const Session = struct {
         return try out.toOwnedSlice(self.allocator);
     }
 
-    fn renderHostArray(self: *Session, array: *const HostArray) anyerror![]u8 {
+    fn renderHostArray(self: *Session, array: *const HostDenseArray) anyerror![]u8 {
         var out = std.ArrayList(u8).empty;
         errdefer out.deinit(self.allocator);
 
@@ -4966,140 +5387,43 @@ pub const Session = struct {
                     try out.appendSlice(self.allocator, part);
                 }
             },
-            .boxed => |items| {
-                if (isRenderableMatrix(items)) {
-                    for (items, 0..) |item, idx| {
-                        if (idx != 0) try out.append(self.allocator, '\n');
-                        const part = try self.renderValue(item);
-                        defer self.allocator.free(part);
-                        try out.appendSlice(self.allocator, part);
-                    }
-                } else {
-                    try out.append(self.allocator, '(');
-                    for (items, 0..) |item, idx| {
-                        if (idx != 0) try out.append(self.allocator, ';');
-                        const part = try self.renderValue(item);
-                        defer self.allocator.free(part);
-                        try out.appendSlice(self.allocator, part);
-                    }
-                    try out.append(self.allocator, ')');
-                }
-            },
         }
 
         return try out.toOwnedSlice(self.allocator);
     }
 
-    fn renderMlxArray(self: *Session, array: *const MlxArray) anyerror![]u8 {
-        var owned = try array.array.clone();
-        defer owned.deinit();
-        try owned.eval();
-        if (owned.ndim() == 0) {
-            return switch (owned.dtype()) {
-                c.MLX_BOOL => self.allocator.dupe(u8, if (try owned.boolItem()) "1b" else "0b"),
-                c.MLX_INT32, c.MLX_INT64, c.MLX_UINT32 => std.fmt.allocPrint(self.allocator, "{d}", .{try owned.intItem()}),
-                c.MLX_FLOAT32, c.MLX_FLOAT64 => formatFloat(self.allocator, try owned.floatItem()),
-                else => error.Type,
-            };
+    fn renderHostBoxedArray(self: *Session, array: *const HostBoxedArray) anyerror![]u8 {
+        var out = std.ArrayList(u8).empty;
+        errdefer out.deinit(self.allocator);
+
+        if (isRenderableMatrix(array.items)) {
+            for (array.items, 0..) |item, idx| {
+                if (idx != 0) try out.append(self.allocator, '\n');
+                const part = try self.renderValue(item);
+                defer self.allocator.free(part);
+                try out.appendSlice(self.allocator, part);
+            }
+        } else {
+            try out.append(self.allocator, '(');
+            for (array.items, 0..) |item, idx| {
+                if (idx != 0) try out.append(self.allocator, ';');
+                const part = try self.renderValue(item);
+                defer self.allocator.free(part);
+                try out.appendSlice(self.allocator, part);
+            }
+            try out.append(self.allocator, ')');
         }
 
-        const shape = try self.allocator.alloc(i32, owned.ndim());
-        defer self.allocator.free(shape);
-        for (owned.shape(), 0..) |dim, idx| shape[idx] = @intCast(dim);
+        return try out.toOwnedSlice(self.allocator);
+    }
 
-        if (shape.len == 1) {
-            return switch (owned.dtype()) {
-                c.MLX_INT32, c.MLX_INT64, c.MLX_UINT32 => blk: {
-                    const items = try owned.readInts(self.allocator);
-                    defer self.allocator.free(items);
-                    var out = std.ArrayList(u8).empty;
-                    defer out.deinit(self.allocator);
-                    for (items, 0..) |item, idx| {
-                        if (idx != 0) try out.append(self.allocator, ' ');
-                        try out.writer(self.allocator).print("{d}", .{item});
-                    }
-                    break :blk try out.toOwnedSlice(self.allocator);
-                },
-                c.MLX_FLOAT32, c.MLX_FLOAT64 => blk: {
-                    const items = try owned.readFloats(self.allocator);
-                    defer self.allocator.free(items);
-                    var out = std.ArrayList(u8).empty;
-                    defer out.deinit(self.allocator);
-                    for (items, 0..) |item, idx| {
-                        if (idx != 0) try out.append(self.allocator, ' ');
-                        const part = try formatFloat(self.allocator, item);
-                        defer self.allocator.free(part);
-                        try out.appendSlice(self.allocator, part);
-                    }
-                    break :blk try out.toOwnedSlice(self.allocator);
-                },
-                c.MLX_BOOL => blk: {
-                    const items = try owned.readBools(self.allocator);
-                    defer self.allocator.free(items);
-                    var out = std.ArrayList(u8).empty;
-                    defer out.deinit(self.allocator);
-                    for (items) |item| try out.append(self.allocator, if (item) '1' else '0');
-                    try out.append(self.allocator, 'b');
-                    break :blk try out.toOwnedSlice(self.allocator);
-                },
-                else => error.Type,
-            };
-        }
-
-        if (shape.len == 2) {
-            const rows: usize = @intCast(shape[0]);
-            const cols: usize = @intCast(shape[1]);
-            return switch (owned.dtype()) {
-                c.MLX_BOOL => blk: {
-                    const items = try owned.readBools(self.allocator);
-                    defer self.allocator.free(items);
-                    var out = std.ArrayList(u8).empty;
-                    defer out.deinit(self.allocator);
-                    for (0..rows) |row| {
-                        if (row != 0) try out.append(self.allocator, '\n');
-                        const base = row * cols;
-                        for (0..cols) |col| try out.append(self.allocator, if (items[base + col]) '1' else '0');
-                        try out.append(self.allocator, 'b');
-                    }
-                    break :blk try out.toOwnedSlice(self.allocator);
-                },
-                c.MLX_INT32, c.MLX_INT64, c.MLX_UINT32 => blk: {
-                    const items = try owned.readInts(self.allocator);
-                    defer self.allocator.free(items);
-                    var out = std.ArrayList(u8).empty;
-                    defer out.deinit(self.allocator);
-                    for (0..rows) |row| {
-                        if (row != 0) try out.append(self.allocator, '\n');
-                        const base = row * cols;
-                        for (0..cols) |col| {
-                            if (col != 0) try out.append(self.allocator, ' ');
-                            try out.writer(self.allocator).print("{d}", .{items[base + col]});
-                        }
-                    }
-                    break :blk try out.toOwnedSlice(self.allocator);
-                },
-                c.MLX_FLOAT32, c.MLX_FLOAT64 => blk: {
-                    const items = try owned.readFloats(self.allocator);
-                    defer self.allocator.free(items);
-                    var out = std.ArrayList(u8).empty;
-                    defer out.deinit(self.allocator);
-                    for (0..rows) |row| {
-                        if (row != 0) try out.append(self.allocator, '\n');
-                        const base = row * cols;
-                        for (0..cols) |col| {
-                            if (col != 0) try out.append(self.allocator, ' ');
-                            const part = try formatFloat(self.allocator, items[base + col]);
-                            defer self.allocator.free(part);
-                            try out.appendSlice(self.allocator, part);
-                        }
-                    }
-                    break :blk try out.toOwnedSlice(self.allocator);
-                },
-                else => error.Type,
-            };
-        }
-
-        return std.fmt.allocPrint(self.allocator, "<array {d}d>", .{shape.len});
+    fn renderBackendArray(self: *Session, array: *const BackendArray) anyerror![]u8 {
+        return runtime_backend_render.renderBackendArray(.{
+            .Session = Session,
+            .BackendArray = BackendArray,
+            .c = c,
+            .formatFloat = formatFloat,
+        }, self, array);
     }
 
     fn managedFloat(self: *Session, value: f64) !Value {
@@ -5213,7 +5537,7 @@ pub const Session = struct {
         return closure;
     }
 
-    fn allocHostArrayTyped(self: *Session, comptime T: type, comptime kind: HostArrayStorageKind, owner: HeapOwner, len: usize) !HostArrayAlloc(T) {
+    fn allocHostArrayTyped(self: *Session, comptime T: type, comptime kind: HostDenseStorageKind, owner: HeapOwner, len: usize) !HostDenseAlloc(T) {
         const allocator = switch (owner) {
             .managed => self.allocator,
             .scratch => self.scratch_arena.allocator(),
@@ -5225,13 +5549,13 @@ pub const Session = struct {
         const array = if (owner == .managed and self.free_host_array_len != 0) blk: {
             self.free_host_array_len -= 1;
             break :blk self.free_host_arrays[self.free_host_array_len].?;
-        } else try allocator.create(HostArray);
+        } else try allocator.create(HostDenseArray);
         const items = try allocator.alloc(T, len);
-        array.header = HeapHeader.init(.host_array, owner);
+        array.header = HeapHeader.init(.host_dense_array, owner);
         array.logical_handle = null;
         array.logical_len = len;
         array.flags = 0;
-        hostArrayClearCachedIntRange(array);
+        hostDenseClearCachedIntRange(array);
         array.storage = switch (kind) {
             .bit => unreachable,
             .int8 => .{ .int8 = items },
@@ -5239,7 +5563,6 @@ pub const Session = struct {
             .int32 => .{ .int32 = items },
             .int64 => .{ .int64 = items },
             .float64 => .{ .float64 = items },
-            .boxed => unreachable,
         };
         return .{ .array = array, .items = items };
     }
@@ -5256,14 +5579,14 @@ pub const Session = struct {
         const array = if (owner == .managed and self.free_host_array_len != 0) blk: {
             self.free_host_array_len -= 1;
             break :blk self.free_host_arrays[self.free_host_array_len].?;
-        } else try allocator.create(HostArray);
+        } else try allocator.create(HostDenseArray);
         const words = try allocator.alloc(u64, bitWordCount(len));
         @memset(words, 0);
-        array.header = HeapHeader.init(.host_array, owner);
+        array.header = HeapHeader.init(.host_dense_array, owner);
         array.logical_handle = null;
         array.logical_len = len;
         array.flags = 0;
-        hostArrayClearCachedIntRange(array);
+        hostDenseClearCachedIntRange(array);
         array.storage = .{ .bit = words };
         return .{ .array = array, .words = words, .len = len };
     }
@@ -5376,12 +5699,14 @@ pub const Session = struct {
     }
 
     fn finishHostIntOutput(self: *Session, plan: HostIntOutputPlan, flags: u8) KError!Value {
-        const result = try applyNonVectorNumericShapeToValue(self, try plan.output.value(self), plan.shape);
+        const result_value = try plan.output.value(self);
+        const host = plan.output.arrayPtr();
         if (plan.kind == .bit) {
-            bitClearUnusedTail(result.asHostArray().storage.bit, result.asHostArray().logical_len);
+            bitClearUnusedTail(host.storage.bit, host.logical_len);
         }
-        hostArraySetFlags(@constCast(result.asHostArray()), flags);
-        hostArrayClearCachedIntRange(@constCast(result.asHostArray()));
+        hostDenseSetFlags(host, flags);
+        hostDenseClearCachedIntRange(host);
+        const result = try applyNonVectorNumericShapeToValue(self, result_value, plan.shape);
         return if (plan.reused) self.shareValue(result) else result;
     }
 
@@ -5404,18 +5729,18 @@ pub const Session = struct {
     }
 
     fn finishHostFloatOutput(self: *Session, plan: HostFloatOutputPlan, flags: u8) KError!Value {
-        const result = try applyNonVectorNumericShapeToValue(self, try plan.output.value(self), plan.shape);
-        hostArraySetFlags(@constCast(result.asHostArray()), flags);
+        const result_value = try plan.output.value(self);
+        hostDenseSetFlags(plan.output.array, flags);
+        const result = try applyNonVectorNumericShapeToValue(self, result_value, plan.shape);
         return if (plan.reused) self.shareValue(result) else result;
     }
 
     fn tryReuseHostIntArrayResult(self: *Session, value: Value, kind: HostIntStorageKind) ?HostIntResult {
         _ = self;
-        const array = if (hostArrayIfPresent(value)) |host|
+        const array = if (hostDenseIfPresent(value)) |host|
             @constCast(host)
         else
             return null;
-        if (hostArrayNumericMode(array) == null) return null;
         switch (array.header.owner) {
             .scratch => {},
             .managed => if (array.header.ref_count != 1) return null,
@@ -5447,11 +5772,11 @@ pub const Session = struct {
 
     fn tryReuseHostFloatArrayResult(self: *Session, value: Value) ?HostFloatResult {
         _ = self;
-        const array = if (hostArrayIfPresent(value)) |host|
+        const array = if (hostDenseIfPresent(value)) |host|
             @constCast(host)
         else
             return null;
-        if (hostArrayNumericMode(array) != .float) return null;
+        if (hostDenseNumericMode(array) != .float) return null;
         switch (array.header.owner) {
             .scratch => {},
             .managed => if (array.header.ref_count != 1) return null,
@@ -5468,7 +5793,7 @@ pub const Session = struct {
         const right = self.tryReuseHostIntArrayResult(right_value, kind);
         if (left) |left_out| {
             if (right) |right_out| {
-                return if (hostArrayReusePriority(right_out.arrayPtr()) > hostArrayReusePriority(left_out.arrayPtr())) right_out else left_out;
+                return if (hostDenseReusePriority(right_out.arrayPtr()) > hostDenseReusePriority(left_out.arrayPtr())) right_out else left_out;
             }
             return left_out;
         }
@@ -5480,7 +5805,7 @@ pub const Session = struct {
         const right = self.tryReuseHostFloatArrayResult(right_value);
         if (left) |left_out| {
             if (right) |right_out| {
-                return if (hostArrayReusePriority(right_out.array) > hostArrayReusePriority(left_out.array)) right_out else left_out;
+                return if (hostDenseReusePriority(right_out.array) > hostDenseReusePriority(left_out.array)) right_out else left_out;
             }
             return left_out;
         }
@@ -5603,11 +5928,8 @@ pub const Session = struct {
         if (value.tag() != .array) return value;
         return switch (value.arraySubkind()) {
             .numeric_array => value,
-            .host_array => if (hostArrayNumericMode(value.asHostArray()) != null)
-                Value.array(try ensureNumericArrayHandle(self, value))
-            else
-                value,
-            .mlx_array => Value.array(try ensureNumericArrayHandle(self, value)),
+            .host_dense_array => (try ensureLogicalNumericValue(self, value)).value,
+            .backend_array => (try ensureLogicalNumericValue(self, value)).value,
             else => value,
         };
     }
@@ -5675,18 +5997,18 @@ pub const Session = struct {
         return rooted;
     }
 
-fn finishFrame(self: *Session, frame_index: usize, result: Value) KError!?Value {
-    const frame = self.frames[frame_index];
-    const base = frame.base;
-    const owner = frame.owner;
-    self.frame_len -= 1;
-    const escaped_result = if (self.frame_len == 0) result else try self.retainEscapedValue(result);
-    defer if (self.frame_len != 0) self.releaseValue(result);
-    self.dropStackFrom(base);
-    if (owner) |owned| self.releaseValue(owned);
-    if (self.frame_len == 0) {
-        if (comptime enable_sampling_profile) {
-            self.profile_current_label.store(@intFromEnum(SamplingProfileLabel.idle), .unordered);
+    fn finishFrame(self: *Session, frame_index: usize, result: Value) KError!?Value {
+        const frame = self.frames[frame_index];
+        const base = frame.base;
+        const owner = frame.owner;
+        self.frame_len -= 1;
+        const escaped_result = if (self.frame_len == 0) result else try self.retainEscapedValue(result);
+        defer if (self.frame_len != 0) self.releaseValue(result);
+        self.dropStackFrom(base);
+        if (owner) |owned| self.releaseValue(owned);
+        if (self.frame_len == 0) {
+            if (comptime enable_sampling_profile) {
+                self.profile_current_label.store(@intFromEnum(SamplingProfileLabel.idle), .unordered);
                 self.profile_current_op.store(sampling_profile_no_op, .unordered);
                 self.profile_current_code_id.store(sampling_profile_no_code, .unordered);
                 self.profile_current_callable_slot.store(sampling_profile_no_callable_slot, .unordered);
@@ -5763,21 +6085,22 @@ fn finishFrame(self: *Session, frame_index: usize, result: Value) KError!?Value 
         return stable;
     }
 
-    fn freezeHostArrayConstant(self: *Session, array: *const HostArray) KError!Value {
+    fn freezeHostArrayConstant(self: *Session, array: *const HostDenseArray) KError!Value {
         return switch (array.storage) {
             .bit, .int8, .int16, .int32, .int64 => blk: {
                 const view = hostIntArrayView(array) orelse return error.Type;
                 var out = try self.allocFrozenHostIntResult(hostIntArrayViewKind(view), hostIntArrayViewLen(view));
                 try copyHostIntViewToResult(&out, view);
                 const result = try out.value(self);
-                hostArraySetFlags(@constCast(result.asHostArray()), array.flags);
+                const frozen_host = try mutableNumericHostArrayValue(self, result);
+                hostDenseSetFlags(frozen_host, array.flags);
                 if (array.int_range_known) {
-                    hostArraySetCachedIntRange(@constCast(result.asHostArray()), .{
+                    hostDenseSetCachedIntRange(frozen_host, .{
                         .min = array.int_range_min,
                         .max = array.int_range_max,
                     });
                 } else {
-                    hostArrayClearCachedIntRange(@constCast(result.asHostArray()));
+                    hostDenseClearCachedIntRange(frozen_host);
                 }
                 break :blk result;
             },
@@ -5785,29 +6108,25 @@ fn finishFrame(self: *Session, frame_index: usize, result: Value) KError!?Value 
                 const out = try self.allocFrozenHostFloatResult(items.len);
                 @memcpy(out.items, items);
                 const result = try out.value(self);
-                hostArraySetFlags(@constCast(result.asHostArray()), array.flags);
+                hostDenseSetFlags(try mutableNumericHostArrayValue(self, result), array.flags);
                 break :blk result;
             },
-            .boxed => |items| blk: {
-                const arena_allocator = self.arena.allocator();
-                const frozen_array = try arena_allocator.create(HostArray);
-                const frozen_items = try arena_allocator.alloc(Value, items.len);
-                for (items, 0..) |item, idx| {
-                    frozen_items[idx] = try self.freezeConstantValue(item);
-                }
-                frozen_array.* = .{
-                    .header = HeapHeader.init(.host_array, .frozen),
-                    .logical_handle = null,
-                    .logical_len = items.len,
-                    .flags = array.flags,
-                    .int_range_known = false,
-                    .int_range_min = 0,
-                    .int_range_max = 0,
-                    .storage = .{ .boxed = frozen_items },
-                };
-                break :blk Value.array(frozen_array);
-            },
         };
+    }
+
+    fn freezeHostBoxedArrayConstant(self: *Session, array: *const HostBoxedArray) KError!Value {
+        const arena_allocator = self.arena.allocator();
+        const frozen_array = try arena_allocator.create(HostBoxedArray);
+        const frozen_items = try arena_allocator.alloc(Value, array.items.len);
+        for (array.items, 0..) |item, idx| {
+            frozen_items[idx] = try self.freezeConstantValue(item);
+        }
+        frozen_array.* = .{
+            .header = HeapHeader.init(.host_boxed_array, .frozen),
+            .logical_len = array.items.len,
+            .items = frozen_items,
+        };
+        return Value.array(frozen_array);
     }
 
     fn freezeArrayConstant(self: *Session, value: Value) KError!Value {
@@ -5823,20 +6142,24 @@ fn finishFrame(self: *Session, frame_index: usize, result: Value) KError!?Value 
                 .scratch, .managed => try self.frozenHostSymbol(hostTextBytes(value.asHostSymbol())),
             },
             .host_string_list => error.Unsupported,
-            .host_array => blk: {
-                const frozen = try self.freezeHostArrayConstant(value.asHostArray());
+            .host_dense_array => blk: {
+                const frozen = try self.freezeHostArrayConstant(value.asHostDenseArray());
                 const shaped = try applyNonVectorNumericShapeToValue(self, frozen, valueNonVectorNumericShape(value));
                 break :blk shaped;
             },
-            .mlx_array => blk: {
-                const frozen_host = Value.array(try createHostArrayFromMlxArray(self, .frozen, value.asMlxArray().array));
+            .host_boxed_array => switch (value.asHostBoxedArray().header.owner) {
+                .frozen => value,
+                .scratch, .managed => try self.freezeHostBoxedArrayConstant(value.asHostBoxedArray()),
+            },
+            .backend_array => blk: {
+                const frozen_host = Value.array(try createHostDenseArrayFromBackendArray(self, .frozen, value.asBackendArray().array));
                 const shaped = try applyNonVectorNumericShapeToValue(self, frozen_host, valueNonVectorNumericShape(value));
                 break :blk shaped;
             },
             .numeric_array => blk: {
                 const handle = value.asNumericArray();
                 if (handle.header.owner == .frozen) break :blk value;
-                if (numericArrayIsRangeIota(handle) and handle.host == null and handle.mlx == null) {
+                if (numericArrayIsRangeIota(handle) and !numericHasHostAttachment(handle) and !numericHasBackendAttachment(handle)) {
                     break :blk try newRangeIotaValueWithShape(
                         self,
                         .frozen,
@@ -5899,32 +6222,32 @@ fn finishFrame(self: *Session, frame_index: usize, result: Value) KError!?Value 
         };
     }
 
-    fn planHostArrayNormalization(self: *Session, array: *const HostArray) !HostArrayNormalizationPlan {
+    fn planHostArrayNormalization(self: *Session, array: *const HostDenseArray) !HostArrayNormalizationPlan {
         _ = self;
         return switch (array.storage) {
             .bit, .int8, .int16, .int32, .int64 => blk: {
                 const view = hostIntArrayView(array).?;
-                const normalized = hostArrayHasFlag(array, host_array_flag_normalized);
+                const normalized = hostDenseHasFlag(array, host_dense_flag_normalized);
                 const target_kind = if (normalized)
                     hostIntArrayViewKind(view)
                 else blk2: {
-                    const range = hostArrayCachedIntRange(array) orelse hostIntArrayViewEndpointRange(view, array.flags) orelse hostIntArrayViewRange(view);
+                    const range = hostDenseCachedIntRange(array) orelse hostIntArrayViewEndpointRange(view, array.flags) orelse hostIntArrayViewRange(view);
                     break :blk2 hostIntStorageKindForRange(range.min, range.max);
                 };
                 break :blk .{ .int = .{
                     .view = view,
                     .kind = target_kind,
                     .flags = if (normalized)
-                        (array.flags | host_array_flag_normalized)
+                        (array.flags | host_dense_flag_normalized)
                     else
-                        (host_array_flag_normalized | monotonicFlags(array.flags)),
+                        (host_dense_flag_normalized | monotonicFlags(array.flags)),
                 } };
             },
             .float64 => |items| blk: {
-                if (hostArrayHasFlag(array, host_array_flag_normalized)) {
+                if (hostDenseHasFlag(array, host_dense_flag_normalized)) {
                     break :blk .{ .float = .{
                         .items = items,
-                        .flags = array.flags | host_array_flag_normalized,
+                        .flags = array.flags | host_dense_flag_normalized,
                     } };
                 }
 
@@ -5942,32 +6265,31 @@ fn finishFrame(self: *Session, frame_index: usize, result: Value) KError!?Value 
                     .flags = analysis.flags,
                 } };
             },
-            .boxed => return error.Type,
         };
     }
 
-    fn normalizeHostArrayForPromotion(self: *Session, array: *const HostArray) !Value {
+    fn normalizeHostArrayForPromotion(self: *Session, array: *const HostDenseArray) !Value {
         const plan = try self.planHostArrayNormalization(array);
         return switch (plan) {
             .int => |int_plan| blk: {
                 var out = try self.allocManagedHostIntResult(int_plan.kind, hostIntArrayViewLen(int_plan.view));
                 try copyHostIntViewToResult(&out, int_plan.view);
                 const result = try out.value(self);
-                hostArraySetFlags(@constCast(result.asHostArray()), int_plan.flags);
+                hostDenseSetFlags(try mutableNumericHostArrayValue(self, result), int_plan.flags);
                 break :blk result;
             },
             .float => |float_plan| blk: {
                 const out = try self.allocManagedHostFloatResult(float_plan.items.len);
                 @memcpy(out.items, float_plan.items);
                 const result = try out.value(self);
-                hostArraySetFlags(@constCast(result.asHostArray()), float_plan.flags);
+                hostDenseSetFlags(try mutableNumericHostArrayValue(self, result), float_plan.flags);
                 break :blk result;
             },
             .float_to_int => |int_plan| blk: {
                 var out = try self.allocManagedHostIntResult(int_plan.kind, int_plan.items.len);
                 try copyExactFloatSliceToIntResult(&out, int_plan.items);
                 const result = try out.value(self);
-                hostArraySetFlags(@constCast(result.asHostArray()), int_plan.flags);
+                hostDenseSetFlags(try mutableNumericHostArrayValue(self, result), int_plan.flags);
                 break :blk result;
             },
         };
@@ -5975,12 +6297,12 @@ fn finishFrame(self: *Session, frame_index: usize, result: Value) KError!?Value 
 
     fn promoteScratchArray(self: *Session, value: Value) !Value {
         return switch (value.activeArrayKind()) {
-            .host_array => blk: {
+            .host_dense_array => blk: {
                 const shape = valueNonVectorNumericShape(value);
-                const promoted = try self.normalizeHostArrayForPromotion(value.asHostArray());
+                const promoted = try self.normalizeHostArrayForPromotion(hostDenseIfPresent(value) orelse return error.Type);
                 break :blk try applyNonVectorNumericShapeToValue(self, promoted, shape);
             },
-            .mlx_array => try self.cloneManagedMlxArray(value.asMlxArray().array),
+            .backend_array => try self.cloneManagedBackendArray(value.asBackendArray().array),
             .numeric_array => {
                 const handle = value.asNumericArray();
                 if (numericArrayIsRangeIota(handle)) {
@@ -5993,12 +6315,12 @@ fn finishFrame(self: *Session, frame_index: usize, result: Value) KError!?Value 
                         valueNonVectorNumericShape(value),
                     );
                 }
-                if (handle.host != null) {
+                if (numericHostAttachment(handle)) |host| {
                     const shape = valueNonVectorNumericShape(value);
-                    const promoted = try self.normalizeHostArrayForPromotion(handle.host.?);
+                    const promoted = try self.normalizeHostArrayForPromotion(host);
                     return try applyNonVectorNumericShapeToValue(self, promoted, shape);
                 }
-                if (handle.mlx != null) return try self.cloneManagedMlxArray(handle.mlx.?.array);
+                if (numericBackendAttachment(handle)) |array| return try self.cloneManagedBackendArray(array.array);
                 return error.Internal;
             },
             else => error.Internal,
@@ -6040,7 +6362,7 @@ fn finishFrame(self: *Session, frame_index: usize, result: Value) KError!?Value 
         var saw_scalar = false;
         var saw_non_numeric_item = false;
         var saw_irregular_numeric_array = false;
-        var first_numeric_mode: ?HostArrayElem = null;
+        var first_numeric_mode: ?HostDenseElem = null;
         var first_numeric_shape: ?NumericShapeSnapshot = null;
         for (normalized) |value| {
             switch (value.tag()) {
@@ -6107,9 +6429,9 @@ fn finishFrame(self: *Session, frame_index: usize, result: Value) KError!?Value 
         const handle = valueNumericHandle(value) orelse return null;
         if (handle.rank != 0) return null;
         const host = try tryEnsureHostRealizationForHandle(self, @constCast(handle)) orelse return error.Type;
-        return switch (hostArrayNumericMode(host) orelse return error.Type) {
-            .int => try self.intValue(try hostArrayIntAt(host, 0)),
-            .float => try self.floatValue(try hostArrayFloatAt(host, 0)),
+        return switch (hostDenseNumericMode(host)) {
+            .int => try self.intValue(try hostDenseIntAt(host, 0)),
+            .float => try self.floatValue(try hostDenseFloatAt(host, 0)),
         };
     }
 
@@ -6153,7 +6475,7 @@ fn finishFrame(self: *Session, frame_index: usize, result: Value) KError!?Value 
         };
     }
 
-    fn recycleManagedHostArray(self: *Session, array: *HostArray) void {
+    fn recycleManagedHostArray(self: *Session, array: *HostDenseArray) void {
         array.logical_handle = null;
         switch (array.storage) {
             .bit => |words| self.allocator.free(words),
@@ -6162,10 +6484,6 @@ fn finishFrame(self: *Session, frame_index: usize, result: Value) KError!?Value 
             .int32 => |items| self.allocator.free(items),
             .int64 => |items| self.allocator.free(items),
             .float64 => |items| self.allocator.free(items),
-            .boxed => |items| {
-                for (items) |item| self.releaseValue(item);
-                self.allocator.free(items);
-            },
         }
         if (self.free_host_array_len < self.free_host_arrays.len) {
             self.free_host_arrays[self.free_host_array_len] = array;
@@ -6175,7 +6493,18 @@ fn finishFrame(self: *Session, frame_index: usize, result: Value) KError!?Value 
         }
     }
 
-    fn recycleManagedMlxArray(self: *Session, array: *MlxArray) void {
+    fn recycleManagedHostBoxedArray(self: *Session, array: *HostBoxedArray) void {
+        for (array.items) |item| self.releaseValue(item);
+        self.allocator.free(array.items);
+        if (self.free_host_boxed_array_len < self.free_host_boxed_arrays.len) {
+            self.free_host_boxed_arrays[self.free_host_boxed_array_len] = array;
+            self.free_host_boxed_array_len += 1;
+        } else {
+            self.allocator.destroy(array);
+        }
+    }
+
+    fn recycleManagedBackendArray(self: *Session, array: *BackendArray) void {
         array.logical_handle = null;
         array.array.deinit();
         if (self.free_mlx_array_len < self.free_mlx_arrays.len) {
@@ -6227,7 +6556,7 @@ fn finishFrame(self: *Session, frame_index: usize, result: Value) KError!?Value 
         handle.last_host_touch = self.nextAttachmentTouchTick();
     }
 
-    fn touchMlxAttachment(self: *Session, handle: *NumericArray) void {
+    fn touchBackendAttachment(self: *Session, handle: *NumericArray) void {
         handle.last_mlx_touch = self.nextAttachmentTouchTick();
     }
 
@@ -6262,9 +6591,9 @@ fn finishFrame(self: *Session, frame_index: usize, result: Value) KError!?Value 
         syncNumericArrayChildren(handle);
     }
 
-    fn evictMlxAttachment(self: *Session, handle: *NumericArray) void {
+    fn evictBackendAttachment(self: *Session, handle: *NumericArray) void {
         const array = handle.mlx orelse return;
-        self.recycleManagedMlxArray(array);
+        self.recycleManagedBackendArray(array);
         handle.mlx = null;
         if (comptime enable_probe_instrumentation) self.debug_mlx_eviction_count += 1;
         syncNumericArrayChildren(handle);
@@ -6279,7 +6608,7 @@ fn finishFrame(self: *Session, frame_index: usize, result: Value) KError!?Value 
         if (evict_host) {
             self.evictHostAttachment(handle);
         } else {
-            self.evictMlxAttachment(handle);
+            self.evictBackendAttachment(handle);
         }
     }
 
@@ -6339,7 +6668,7 @@ fn finishFrame(self: *Session, frame_index: usize, result: Value) KError!?Value 
         handle.transpose_view = null;
         if (handle.host) |array| self.recycleManagedHostArray(array);
         handle.host = null;
-        if (handle.mlx) |array| self.recycleManagedMlxArray(array);
+        if (handle.mlx) |array| self.recycleManagedBackendArray(array);
         handle.mlx = null;
         if (self.free_numeric_array_len < self.free_numeric_arrays.len) {
             self.free_numeric_arrays[self.free_numeric_array_len] = handle;
@@ -6432,17 +6761,24 @@ fn finishFrame(self: *Session, frame_index: usize, result: Value) KError!?Value 
                     if (handle.header.owner != .managed) return;
                     self.releaseManagedNumericHandle(handle);
                 },
-                .host_array => {
+                .host_dense_array => {
                     if (logicalHandleForNumericPayloadValue(value)) |handle| {
                         if (handle.header.owner != .managed) return;
                         self.releaseManagedNumericHandle(handle);
                     } else {
-                        const array = @constCast(value.asHostArray());
+                        const array = @constCast(value.asHostDenseArray());
                         if (array.header.owner != .managed) return;
                         std.debug.assert(array.header.ref_count != 0);
                         array.header.ref_count -= 1;
                         if (array.header.ref_count == 0) self.recycleManagedHostArray(array);
                     }
+                },
+                .host_boxed_array => {
+                    const array = @constCast(value.asHostBoxedArray());
+                    if (array.header.owner != .managed) return;
+                    std.debug.assert(array.header.ref_count != 0);
+                    array.header.ref_count -= 1;
+                    if (array.header.ref_count == 0) self.recycleManagedHostBoxedArray(array);
                 },
                 .host_string, .host_symbol => {
                     const text = switch (value.arrayKind()) {
@@ -6485,16 +6821,16 @@ fn finishFrame(self: *Session, frame_index: usize, result: Value) KError!?Value 
                         }
                     }
                 },
-                .mlx_array => {
+                .backend_array => {
                     if (logicalHandleForNumericPayloadValue(value)) |handle| {
                         if (handle.header.owner != .managed) return;
                         self.releaseManagedNumericHandle(handle);
                     } else {
-                        const array = @constCast(value.asMlxArray());
+                        const array = @constCast(value.asBackendArray());
                         if (array.header.owner != .managed) return;
                         std.debug.assert(array.header.ref_count != 0);
                         array.header.ref_count -= 1;
-                        if (array.header.ref_count == 0) self.recycleManagedMlxArray(array);
+                        if (array.header.ref_count == 0) self.recycleManagedBackendArray(array);
                     }
                 },
             },
@@ -6502,7 +6838,7 @@ fn finishFrame(self: *Session, frame_index: usize, result: Value) KError!?Value 
         }
     }
 
-    fn mlxContext(self: *Session) KError!*mlx.Context {
+    fn backendContext(self: *Session) KError!*mlx.Context {
         if (comptime !runtime_has_mlx) return error.Unsupported;
         if (self.mlx_ctx == null) {
             self.mlx_ctx = mlx.initContext(self.device_preference) catch |err| return mapMlxError(err);
@@ -6510,35 +6846,48 @@ fn finishFrame(self: *Session, frame_index: usize, result: Value) KError!?Value 
         return &self.mlx_ctx.?;
     }
 
-    fn cloneManagedMlxArray(self: *Session, array: mlx.Array) KError!Value {
+    fn cloneManagedBackendArray(self: *Session, array: mlx.Array) KError!Value {
         var cloned = array.clone() catch |err| return mapMlxError(err);
         errdefer cloned.deinit();
-        return try self.wrapManagedMlxArray(cloned);
+        return try self.wrapManagedBackendArray(cloned);
     }
 
-    fn allocManagedMlxPayload(self: *Session, array: mlx.Array) KError!*MlxArray {
+    fn allocManagedBackendPayload(self: *Session, array: mlx.Array) KError!*BackendArray {
         const owned = if (self.free_mlx_array_len != 0) blk: {
             self.free_mlx_array_len -= 1;
             break :blk self.free_mlx_arrays[self.free_mlx_array_len].?;
-        } else try self.allocator.create(MlxArray);
+        } else try self.allocator.create(BackendArray);
         owned.* = .{
-            .header = HeapHeader.init(.mlx_array, .managed),
+            .header = HeapHeader.init(.backend_array, .managed),
             .logical_handle = null,
             .array = array,
         };
         return owned;
     }
 
-    fn wrapManagedMlxArray(self: *Session, array: mlx.Array) KError!Value {
-        const owned = try self.allocManagedMlxPayload(array);
-        return try wrapOwnedMlxArrayValue(self, owned);
+    fn wrapManagedBackendArray(self: *Session, array: mlx.Array) KError!Value {
+        const owned = try self.allocManagedBackendPayload(array);
+        return try wrapOwnedBackendArrayValue(self, owned);
+    }
+
+    fn castOwnedBackendArrayToDtype(self: *Session, array: *mlx.Array, target_dtype: c.mlx_dtype) KError!void {
+        if (array.dtype() == target_dtype) return;
+        const ctx = try self.backendContext();
+        const casted = mlx.Array.cast(ctx.*, array.*, target_dtype) catch |err| return mapMlxError(err);
+        array.deinit();
+        array.* = casted;
+    }
+
+    fn bfloat16BitsToFloat32(bit_pattern: u16) f32 {
+        const wide: u32 = @as(u32, bit_pattern) << 16;
+        return @bitCast(wide);
     }
 
     pub fn setGlobalMlxFloatMatrix(self: *Session, name: []const u8, rows: usize, cols: usize, data: []const f32) !void {
         if (comptime !runtime_has_mlx) return error.Unsupported;
         if (rows * cols != data.len) return error.Internal;
         const dims = [_]i32{ @intCast(rows), @intCast(cols) };
-        const value = try self.wrapManagedMlxArray(mlx.Array.fromFloatSlice(data, &dims));
+        const value = try self.wrapManagedBackendArray(mlx.Array.fromFloatSlice(data, &dims));
         defer self.releaseValue(value);
         try self.storeGlobalSlot(try self.internGlobalSlot(name), value);
     }
@@ -6546,7 +6895,46 @@ fn finishFrame(self: *Session, frame_index: usize, result: Value) KError!?Value 
     pub fn setGlobalMlxFloatVector(self: *Session, name: []const u8, data: []const f32) !void {
         if (comptime !runtime_has_mlx) return error.Unsupported;
         const dims = [_]i32{@intCast(data.len)};
-        const value = try self.wrapManagedMlxArray(mlx.Array.fromFloatSlice(data, &dims));
+        const value = try self.wrapManagedBackendArray(mlx.Array.fromFloatSlice(data, &dims));
+        defer self.releaseValue(value);
+        try self.storeGlobalSlot(try self.internGlobalSlot(name), value);
+    }
+
+    pub fn setGlobalMlxFloatArray(self: *Session, name: []const u8, data: []const f32, dims: []const i32) !void {
+        if (comptime !runtime_has_mlx) return error.Unsupported;
+        var elem_count: usize = 1;
+        for (dims) |dim| elem_count *= @intCast(dim);
+        if (elem_count != data.len) return error.Internal;
+        const value = try self.wrapManagedBackendArray(mlx.Array.fromFloatSlice(data, dims));
+        defer self.releaseValue(value);
+        try self.storeGlobalSlot(try self.internGlobalSlot(name), value);
+    }
+
+    pub fn setGlobalMlxBfloat16Matrix(self: *Session, name: []const u8, rows: usize, cols: usize, data: []const u16) !void {
+        if (comptime !runtime_has_mlx) return error.Unsupported;
+        if (rows * cols != data.len) return error.Internal;
+        const dims = [_]i32{ @intCast(rows), @intCast(cols) };
+        const decoded = try self.allocator.alloc(f32, data.len);
+        defer self.allocator.free(decoded);
+        for (data, 0..) |item, idx| decoded[idx] = bfloat16BitsToFloat32(item);
+        var array = mlx.Array.fromFloatSlice(decoded, &dims);
+        errdefer array.deinit();
+        try self.castOwnedBackendArrayToDtype(&array, c.MLX_BFLOAT16);
+        const value = try self.wrapManagedBackendArray(array);
+        defer self.releaseValue(value);
+        try self.storeGlobalSlot(try self.internGlobalSlot(name), value);
+    }
+
+    pub fn setGlobalMlxBfloat16Vector(self: *Session, name: []const u8, data: []const u16) !void {
+        if (comptime !runtime_has_mlx) return error.Unsupported;
+        const dims = [_]i32{@intCast(data.len)};
+        const decoded = try self.allocator.alloc(f32, data.len);
+        defer self.allocator.free(decoded);
+        for (data, 0..) |item, idx| decoded[idx] = bfloat16BitsToFloat32(item);
+        var array = mlx.Array.fromFloatSlice(decoded, &dims);
+        errdefer array.deinit();
+        try self.castOwnedBackendArrayToDtype(&array, c.MLX_BFLOAT16);
+        const value = try self.wrapManagedBackendArray(array);
         defer self.releaseValue(value);
         try self.storeGlobalSlot(try self.internGlobalSlot(name), value);
     }
@@ -7061,10 +7449,12 @@ fn finishFrame(self: *Session, frame_index: usize, result: Value) KError!?Value 
                     const slot = try readByte(frame);
                     try self.execInlineCallUnaryCapture(.sqrt, frame, slot);
                 },
+                .inline_call_argmax1 => try self.execInlineCallArgmax1(),
                 .add => try self.execDyad(.add),
                 .sub => try self.execDyad(.sub),
                 .mul => try self.execDyad(.mul),
                 .div => try self.execDyad(.div),
+                .mod => try self.execDyad(.iota),
                 .dot => try self.execDot(),
                 .minimum => try self.execDyad(.minimum),
                 .maximum => try self.execDyad(.maximum),
@@ -7101,13 +7491,20 @@ fn finishFrame(self: *Session, frame_index: usize, result: Value) KError!?Value 
                 .reverse => try self.execReverseOpcode(),
                 .grade_up => try self.execBuiltinMonad(.grade_up),
                 .grade_down => try self.execBuiltinMonad(.grade_down),
+                .argmax => {
+                    const value = self.pop();
+                    defer self.releaseValue(value);
+                    try self.push(try self.argmaxValue(value));
+                },
                 .not => try self.execBuiltinMonad(.not),
                 .count => try self.execBuiltinMonad(.count),
                 .floor => try self.execBuiltinMonad(.floor),
+                .null_test => try self.execBuiltinMonad(.null_fill_without),
                 .sort => try self.execBuiltinMonad(.sort),
                 .concat => try self.execDyad(.concat),
                 .take => try self.execDyad(.take),
                 .drop => try self.execDyad(.drop),
+                .fill_without => try self.execDyad(.null_fill_without),
                 .equal => try self.execDyad(.equal),
                 .reshape => try self.execDyad(.reshape),
                 .stringify => try self.execBuiltinMonad(.stringify),
@@ -7529,13 +7926,108 @@ fn finishFrame(self: *Session, frame_index: usize, result: Value) KError!?Value 
         return @as(u16, bytes[start]) | (@as(u16, bytes[start + 1]) << 8);
     }
 
+    const ArgmaxBytecodeKind = enum {
+        find_of_max_fold,
+        first_of_grade_down,
+    };
+
+    fn valueIsMaximumFoldCallable(value: Value) bool {
+        return switch (value.tag()) {
+            .closure => blk: {
+                const closure = value.asClosure();
+                if (closureDerivedKind(closure) != .fold) break :blk false;
+                if (closure.captures.len != 1) break :blk false;
+                if (closure.captures[0].tag() != .builtin) break :blk false;
+                break :blk closure.captures[0].asBuiltin() == .maximum;
+            },
+            .builtin => value.asBuiltin() == .maximum,
+            else => false,
+        };
+    }
+
+    fn classifyArgmaxBytecode(bytes: []const u8, constants: []const Value) ?ArgmaxBytecodeKind {
+        if (bytes.len >= 4 and bytes[bytes.len - 1] == @intFromEnum(Op.find) and bytes[bytes.len - 2] == @intFromEnum(Op.call1)) {
+            const fold_lens = [_]usize{ 4, 2 };
+            for (fold_lens) |fold_len| {
+                if (bytes.len < fold_len + 2) continue;
+                const operand_len_x2 = bytes.len - (fold_len + 2);
+                if ((operand_len_x2 & 1) == 0) {
+                    const operand_len = operand_len_x2 / 2;
+                    if (operand_len == 0) continue;
+
+                    const middle = bytes[operand_len .. operand_len + fold_len];
+                    const middle_matches = switch (fold_len) {
+                        4 => middle[0] == @intFromEnum(Op.const_builtin) and
+                            middle[1] == @intFromEnum(BuiltinId.maximum) and
+                            middle[2] == @intFromEnum(Op.make_adverb) and
+                            middle[3] == @intFromEnum(DerivedVerbKind.fold),
+                        2 => blk: {
+                            if (middle[0] != @intFromEnum(Op.const_value)) break :blk false;
+                            const slot = middle[1];
+                            break :blk slot < constants.len and valueIsMaximumFoldCallable(constants[slot]);
+                        },
+                        else => false,
+                    };
+                    if (middle_matches and std.mem.eql(u8, bytes[0..operand_len], bytes[operand_len + fold_len .. bytes.len - 2])) {
+                        return .find_of_max_fold;
+                    }
+                }
+            }
+        }
+
+        if (bytes.len >= 11 and
+            bytes[bytes.len - 11] == @intFromEnum(Op.grade_down) and
+            bytes[bytes.len - 10] == @intFromEnum(Op.const_int) and
+            bytes[bytes.len - 1] == @intFromEnum(Op.call1))
+        {
+            const zero = directReadI64(bytes, bytes.len - 9) orelse return null;
+            if (zero == 0) return .first_of_grade_down;
+        }
+
+        return null;
+    }
+
+    fn argmaxBytecodeOperandLen(bytes: []const u8, constants: []const Value, kind: ArgmaxBytecodeKind) usize {
+        return switch (kind) {
+            .find_of_max_fold => blk: {
+                const fold_lens = [_]usize{ 4, 2 };
+                for (fold_lens) |fold_len| {
+                    if (bytes.len < fold_len + 2) continue;
+                    const operand_len_x2 = bytes.len - (fold_len + 2);
+                    if ((operand_len_x2 & 1) != 0) continue;
+                    const operand_len = operand_len_x2 / 2;
+                    if (operand_len == 0) continue;
+
+                    const middle = bytes[operand_len .. operand_len + fold_len];
+                    const middle_matches = switch (fold_len) {
+                        4 => middle[0] == @intFromEnum(Op.const_builtin) and
+                            middle[1] == @intFromEnum(BuiltinId.maximum) and
+                            middle[2] == @intFromEnum(Op.make_adverb) and
+                            middle[3] == @intFromEnum(DerivedVerbKind.fold),
+                        2 => blk2: {
+                            if (middle[0] != @intFromEnum(Op.const_value)) break :blk2 false;
+                            const slot = middle[1];
+                            break :blk2 slot < constants.len and valueIsMaximumFoldCallable(constants[slot]);
+                        },
+                        else => false,
+                    };
+                    if (middle_matches and std.mem.eql(u8, bytes[0..operand_len], bytes[operand_len + fold_len .. bytes.len - 2])) {
+                        break :blk operand_len;
+                    }
+                }
+                unreachable;
+            },
+            .first_of_grade_down => bytes.len - 11,
+        };
+    }
+
     const DirectConditionalAtom = enum {
         arg0,
         arg1,
         zero,
     };
 
-const DenseElementwiseKind = union(enum) {
+    const DenseElementwiseKind = union(enum) {
         dyad: struct {
             op: BuiltinId,
             swap: bool,
@@ -7553,9 +8045,22 @@ const DenseElementwiseKind = union(enum) {
         transform: DirectUnarySelfTransform,
     };
 
+    const DirectRowReduceKind = enum {
+        sum,
+        product,
+        minimum,
+        maximum,
+        mean,
+    };
+
+    const DirectRowReduceBase = struct {
+        kind: DirectRowReduceKind,
+        has_explicit_each: bool,
+    };
+
     fn classifyDenseBuiltin(op: BuiltinId) ?DenseElementwiseKind {
         return switch (op) {
-            .add, .sub, .mul, .minimum, .maximum, .less, .more => .{ .dyad = .{ .op = op, .swap = false } },
+            .add, .sub, .mul, .div, .minimum, .maximum, .less, .more => .{ .dyad = .{ .op = op, .swap = false } },
             else => null,
         };
     }
@@ -7569,6 +8074,7 @@ const DenseElementwiseKind = union(enum) {
                     .add => try self.addValues(left, right),
                     .sub => try self.subValues(left, right),
                     .mul => try self.mulValues(left, right),
+                    .div => try self.divValues(left, right),
                     .minimum => blk2: {
                         const mask = try self.lessValues(left, right);
                         defer self.releaseValue(mask);
@@ -7756,7 +8262,28 @@ const DenseElementwiseKind = union(enum) {
                     .swap = left_slot == 1,
                 } };
             },
-            .load_local => return classifyDenseConditionalClosure2(bytes),
+            .load_local => {
+                if (bytes.len == 6) {
+                    const right_load: Op = std.meta.intToEnum(Op, bytes[2]) catch return null;
+                    if (right_load != .load_local) return null;
+                    const left_slot = bytes[1];
+                    const right_slot = bytes[3];
+                    if (!((left_slot == 0 and right_slot == 1) or (left_slot == 1 and right_slot == 0))) return null;
+                    const dyad_op: Op = std.meta.intToEnum(Op, bytes[4]) catch return null;
+                    const builtin: BuiltinId = switch (dyad_op) {
+                        .add => .add,
+                        .sub => .sub,
+                        .mul => .mul,
+                        .div => .div,
+                        else => return classifyDenseConditionalClosure2(bytes),
+                    };
+                    return .{ .dyad = .{
+                        .op = builtin,
+                        .swap = left_slot == 1,
+                    } };
+                }
+                return classifyDenseConditionalClosure2(bytes);
+            },
             else => return null,
         }
     }
@@ -7925,6 +8452,86 @@ const DenseElementwiseKind = union(enum) {
         return try self.applyEachRightDerived(kind.base, &[_]Value{ transformed, transformed });
     }
 
+    fn directReadRowReduceBase(self: *Session, closure: *const Closure, bytes: []const u8, idx: *usize) KError!?DirectRowReduceBase {
+        const base_value = (try self.directReadClosureBaseValue(closure, bytes, idx)) orelse return null;
+        if (base_value.tag() == .closure) {
+            const base_closure = base_value.asClosure();
+            if (closureDerivedKind(base_closure) == .each and base_closure.captures.len == 1) {
+                const inner = base_closure.captures[0];
+                if (isDerivedBuiltinClosure(inner, .fold, .add)) return .{ .kind = .sum, .has_explicit_each = false };
+                if (isDerivedBuiltinClosure(inner, .fold, .mul)) return .{ .kind = .product, .has_explicit_each = false };
+                if (isDerivedBuiltinClosure(inner, .fold, .minimum)) return .{ .kind = .minimum, .has_explicit_each = false };
+                if (isDerivedBuiltinClosure(inner, .fold, .maximum)) return .{ .kind = .maximum, .has_explicit_each = false };
+            }
+        }
+        if (isDerivedBuiltinClosure(base_value, .fold, .add)) return .{ .kind = .sum, .has_explicit_each = true };
+        if (isDerivedBuiltinClosure(base_value, .fold, .mul)) return .{ .kind = .product, .has_explicit_each = true };
+        if (isDerivedBuiltinClosure(base_value, .fold, .minimum)) return .{ .kind = .minimum, .has_explicit_each = true };
+        if (isDerivedBuiltinClosure(base_value, .fold, .maximum)) return .{ .kind = .maximum, .has_explicit_each = true };
+        return null;
+    }
+
+    fn classifyDirectRowReduceClosure1(self: *Session, closure: *const Closure) KError!?DirectRowReduceKind {
+        const bytes = closure.code.bytes;
+        if (bytes.len < 5 or bytes[bytes.len - 1] != @intFromEnum(Op.@"return")) return null;
+
+        var idx: usize = 0;
+        const base = (try self.directReadRowReduceBase(closure, bytes, &idx)) orelse return null;
+        if (base.has_explicit_each) {
+            if (idx + 2 > bytes.len or
+                bytes[idx] != @intFromEnum(Op.make_adverb) or
+                bytes[idx + 1] != @intFromEnum(DerivedVerbKind.each)) return null;
+            idx += 2;
+        }
+
+        if (idx + 4 == bytes.len and
+            bytes[idx] == @intFromEnum(Op.load_local) and
+            bytes[idx + 1] == 0)
+        {
+            const call_op: Op = std.meta.intToEnum(Op, bytes[idx + 2]) catch return null;
+            if (call_op == .call1 or call_op == .tail_call1) return base.kind;
+        }
+
+        if (base.kind == .sum and idx + 9 == bytes.len and
+            bytes[idx] == @intFromEnum(Op.load_local) and
+            bytes[idx + 1] == 0)
+        {
+            const call_op: Op = std.meta.intToEnum(Op, bytes[idx + 2]) catch return null;
+            if ((call_op == .call1 or call_op == .tail_call1) and
+                bytes[idx + 3] == @intFromEnum(Op.load_local) and
+                bytes[idx + 4] == 0 and
+                bytes[idx + 5] == @intFromEnum(Op.transpose) and
+                bytes[idx + 6] == @intFromEnum(Op.count) and
+                bytes[idx + 7] == @intFromEnum(Op.div))
+            {
+                return .mean;
+            }
+        }
+
+        return null;
+    }
+
+    fn directRowReduceBuiltin(kind: DirectRowReduceKind) ?BuiltinId {
+        return switch (kind) {
+            .sum => .add,
+            .product => .mul,
+            .minimum => .minimum,
+            .maximum => .maximum,
+            .mean => .add,
+        };
+    }
+
+    fn tryApplyDirectRowReduceKind(self: *Session, kind: DirectRowReduceKind, arg0: Value) KError!?Value {
+        const op = directRowReduceBuiltin(kind) orelse return null;
+        const reduced = (try self.tryFastBackendMatrixRowFoldBuiltin(op, arg0)) orelse return null;
+        if (kind != .mean) return reduced;
+
+        errdefer self.releaseValue(reduced);
+        const shape = valueNumericMatrixShape(arg0) orelse return null;
+        const cols = try self.intValue(std.math.cast(i64, shape.cols) orelse return error.Unsupported);
+        return try self.divValues(reduced, cols);
+    }
+
     fn tryApplyDirectUnaryScaledGlobalCall1(self: *Session, closure: *const Closure, arg0: Value) KError!?Value {
         const bytes = closure.code.bytes;
         if (bytes.len < 9 or bytes[bytes.len - 1] != @intFromEnum(Op.@"return")) return null;
@@ -7969,9 +8576,12 @@ const DenseElementwiseKind = union(enum) {
             .builtin => try self.applyBuiltinCall(callee.asBuiltin(), &[_]Value{arg0}),
             .closure => blk: {
                 const closure = callee.asClosure();
+                if (closure.code.arity == 1) {
+                    if (try self.tryApplyDirectClosure1(closure, arg0)) |result| break :blk result;
+                }
                 if (try self.applyDerivedClosure(closure, &[_]Value{arg0})) |result| break :blk result;
                 if (closure.code.arity != 1) return error.Arity;
-                break :blk try self.tryApplyDirectClosure1(closure, arg0);
+                break :blk null;
             },
             .array => try self.applyArrayCall1(callee, arg0),
             else => error.Type,
@@ -7984,6 +8594,7 @@ const DenseElementwiseKind = union(enum) {
             .builtin => try self.applyBuiltinCall(callee.asBuiltin(), &[_]Value{ arg0, arg1 }),
             .closure => blk: {
                 const closure = callee.asClosure();
+                if (try self.tryApplyDirectDerivedClosure2(closure, arg0, arg1)) |result| break :blk result;
                 if (try self.applyDerivedClosure(closure, &[_]Value{ arg0, arg1 })) |result| break :blk result;
                 if (closure.code.arity != 2) return error.Arity;
                 break :blk try self.tryApplyDirectClosure2(closure, arg0, arg1);
@@ -8009,6 +8620,10 @@ const DenseElementwiseKind = union(enum) {
         }
         const op: Op = std.meta.intToEnum(Op, bytes[0]) catch return null;
         var result: ?Value = switch (op) {
+            .load_local => blk: {
+                if (bytes.len != 4 or bytes[1] != 0 or bytes[2] != @intFromEnum(Op.argmax)) break :blk null;
+                break :blk try self.argmaxValue(arg0);
+            },
             .neg_local => blk: {
                 if (bytes.len != 3 or bytes[1] != 0) break :blk null;
                 break :blk try self.negateValue(arg0);
@@ -8047,6 +8662,11 @@ const DenseElementwiseKind = union(enum) {
             },
             else => null,
         };
+        if (result == null) {
+            if (try self.classifyDirectRowReduceClosure1(closure)) |kind| {
+                result = try self.tryApplyDirectRowReduceKind(kind, arg0);
+            }
+        }
         if (result == null) {
             result = try self.tryApplyDirectUnaryScaledGlobalCall1(closure, arg0);
         }
@@ -8181,8 +8801,8 @@ const DenseElementwiseKind = union(enum) {
         }
         if (numericVectorLen(value)) |len| return len;
         if (value.arraySubkind() == .host_string_list) return value.asHostStringList().len;
-        if (value.arraySubkind() == .host_array and hostArrayNumericMode(value.asHostArray()) == null) {
-            return value.asHostArray().len();
+        if (value.arraySubkind() == .host_boxed_array) {
+            return value.asHostBoxedArray().len();
         }
         return null;
     }
@@ -8203,8 +8823,8 @@ const DenseElementwiseKind = union(enum) {
         if (value.arraySubkind() == .host_string_list) {
             return try self.hostStringListItemValue(value.asHostStringList(), idx);
         }
-        if (value.arraySubkind() == .host_array and hostArrayNumericMode(value.asHostArray()) == null) {
-            return try self.hostArrayIndexScalar(value.asHostArray(), @intCast(idx));
+        if (value.arraySubkind() == .host_boxed_array) {
+            return try self.hostBoxedArrayIndexScalar(value.asHostBoxedArray(), @intCast(idx));
         }
         return error.Type;
     }
@@ -8325,6 +8945,24 @@ const DenseElementwiseKind = union(enum) {
         };
     }
 
+    fn tryApplyDirectDerivedClosure2(self: *Session, closure: *const Closure, arg0: Value, arg1: Value) KError!?Value {
+        if (try self.innerProductInfoFromClosure(closure)) |info| {
+            if (info.reduce != .add or info.map != .mul) return null;
+            if (self.debugDetailedProbeActive()) self.debug_direct_closure2_hit_count += 1;
+            return try self.applyMatmulValues(arg0, arg1);
+        }
+
+        const kind = closureDerivedKind(closure) orelse return null;
+        if (kind != .each_left or closure.captures.len != 1) return null;
+        const base = closure.captures[0];
+        if (base.tag() != .closure) return null;
+        const base_info = (try self.innerProductInfoFromClosure(base.asClosure())) orelse return null;
+        if (base_info.reduce != .add or base_info.map != .mul) return null;
+        if (!valueIsRenderableMatrixLike(arg0)) return null;
+        if (self.debugDetailedProbeActive()) self.debug_direct_closure2_hit_count += 1;
+        return try self.applyMatmulValues(arg0, arg1);
+    }
+
     fn valueAsDotArgs(self: *Session, value: Value) KError![]const Value {
         if (derivedSequenceLen(value)) |len| {
             const args = try self.scratch_arena.allocator().alloc(Value, len);
@@ -8393,19 +9031,14 @@ const DenseElementwiseKind = union(enum) {
             .int, .bool => {
                 try items.append(self.allocator, try self.retainEscapedValue(selector));
             },
-            .array => switch (selector.arrayKind()) {
-                .host_array, .mlx_array, .numeric_array => {
-                    const array = try hostStructuralArrayValue(self, selector);
-                    switch (array.storage) {
-                        .boxed => |boxed| {
-                            for (boxed) |value| try items.append(self.allocator, try self.retainEscapedValue(value));
-                        },
-                        else => {
-                            const len = array.len();
-                            for (0..len) |idx| {
-                                try items.append(self.allocator, try self.hostArrayIndexScalar(array, @intCast(idx)));
-                            }
-                        },
+            .array => if (boxedArrayItems(selector)) |boxed| {
+                for (boxed) |value| try items.append(self.allocator, try self.retainEscapedValue(value));
+            } else switch (selector.arrayKind()) {
+                .host_dense_array, .backend_array, .numeric_array => {
+                    const array = try numericHostArrayValue(self, selector);
+                    const len = array.len();
+                    for (0..len) |idx| {
+                        try items.append(self.allocator, try self.hostDenseIndexScalar(array, @intCast(idx)));
                     }
                 },
                 else => return error.Type,
@@ -8427,10 +9060,185 @@ const DenseElementwiseKind = union(enum) {
         return try self.applyShallowAmend(base, selectors[0], .assign, amended, Value.fromBool(false));
     }
 
+    const DenseAssignRhs = union(enum) {
+        int_scalar: i64,
+        float_scalar: f64,
+        int_vector: HostIntArrayView,
+        float_vector: []const f64,
+    };
+
+    fn amendCloneOwner(base: Value) HeapOwner {
+        std.debug.assert(base.tag() == .array);
+        return switch (base.arrayOwner()) {
+            .scratch => .scratch,
+            .managed, .frozen => .managed,
+        };
+    }
+
+    fn hostIntKindCanRepresent(kind: HostIntStorageKind, value: i64) bool {
+        return switch (kind) {
+            .bit => value == 0 or value == 1,
+            .int8 => std.math.cast(i8, value) != null,
+            .int16 => std.math.cast(i16, value) != null,
+            .int32 => std.math.cast(i32, value) != null,
+            .int64 => true,
+        };
+    }
+
+    fn denseAssignRhs(self: *Session, rhs_source: Value, selectors_len: usize) KError!?DenseAssignRhs {
+        if (scalarIntLikeValue(rhs_source)) |value| return .{ .int_scalar = value };
+        if (rhs_source.tag() == .float) return .{ .float_scalar = rhs_source.asFloat() };
+        if (rhs_source.tag() != .array) return null;
+        if (valueNonVectorNumericShape(rhs_source) != null) return null;
+        const rhs_array = try numericHostArrayValue(self, rhs_source);
+        if (rhs_array.len() != selectors_len) return null;
+        return switch (hostDenseNumericMode(rhs_array)) {
+            .int => .{ .int_vector = hostIntArrayView(rhs_array) orelse return null },
+            .float => .{ .float_vector = rhs_array.storage.float64 },
+        };
+    }
+
+    fn denseAssignRhsFitsIntKind(kind: HostIntStorageKind, selectors_len: usize, rhs: DenseAssignRhs) bool {
+        return switch (rhs) {
+            .int_scalar => |value| hostIntKindCanRepresent(kind, value),
+            .float_scalar => |value| blk: {
+                const int_value = exactIntFromFloat(value) orelse break :blk false;
+                break :blk hostIntKindCanRepresent(kind, int_value);
+            },
+            .int_vector => |view| blk: {
+                std.debug.assert(hostIntArrayViewLen(view) == selectors_len);
+                for (0..selectors_len) |idx| {
+                    if (!hostIntKindCanRepresent(kind, hostIntViewItem(view, idx))) break :blk false;
+                }
+                break :blk true;
+            },
+            .float_vector => |items| blk: {
+                std.debug.assert(items.len == selectors_len);
+                for (items) |item| {
+                    const int_value = exactIntFromFloat(item) orelse break :blk false;
+                    if (!hostIntKindCanRepresent(kind, int_value)) break :blk false;
+                }
+                break :blk true;
+            },
+        };
+    }
+
+    fn applyDenseAssignIntRhs(out: *HostIntResult, selectors: []const usize, rhs: DenseAssignRhs) KError!void {
+        switch (rhs) {
+            .int_scalar => |value| {
+                for (selectors) |target_idx| try out.set(target_idx, value);
+            },
+            .float_scalar => |value| {
+                const int_value = exactIntFromFloat(value) orelse return error.Unsupported;
+                for (selectors) |target_idx| try out.set(target_idx, int_value);
+            },
+            .int_vector => |view| {
+                std.debug.assert(hostIntArrayViewLen(view) == selectors.len);
+                for (selectors, 0..) |target_idx, idx| try out.set(target_idx, hostIntViewItem(view, idx));
+            },
+            .float_vector => |items| {
+                std.debug.assert(items.len == selectors.len);
+                for (selectors, 0..) |target_idx, idx| {
+                    const int_value = exactIntFromFloat(items[idx]) orelse return error.Unsupported;
+                    try out.set(target_idx, int_value);
+                }
+            },
+        }
+    }
+
+    fn applyDenseAssignFloatRhs(out: []f64, selectors: []const usize, rhs: DenseAssignRhs) void {
+        switch (rhs) {
+            .int_scalar => |value| {
+                const float_value = @as(f64, @floatFromInt(value));
+                for (selectors) |target_idx| out[target_idx] = float_value;
+            },
+            .float_scalar => |value| {
+                for (selectors) |target_idx| out[target_idx] = value;
+            },
+            .int_vector => |view| {
+                std.debug.assert(hostIntArrayViewLen(view) == selectors.len);
+                for (selectors, 0..) |target_idx, idx| out[target_idx] = @as(f64, @floatFromInt(hostIntViewItem(view, idx)));
+            },
+            .float_vector => |items| {
+                std.debug.assert(items.len == selectors.len);
+                for (selectors, 0..) |target_idx, idx| out[target_idx] = items[idx];
+            },
+        }
+    }
+
+    fn prepareReusableHostDenseForMutation(self: *Session, source: Value) bool {
+        const handle = valueNumericHandle(source) orelse return true;
+        const mutable_handle = @constCast(handle);
+        if (numericBackendAttachment(handle) != null) {
+            if (mutable_handle.header.owner != .managed) return false;
+            self.evictBackendAttachment(mutable_handle);
+        }
+        mutable_handle.preferred = .host;
+        syncNumericArrayChildren(mutable_handle);
+        return true;
+    }
+
+    fn tryFastDenseAssignAmend(self: *Session, base: Value, selectors: []const usize, rhs_source: Value) KError!?Value {
+        if (selectors.len == 0) return null;
+        if (valueNonVectorNumericShape(base) != null) return null;
+
+        const rhs = (try self.denseAssignRhs(rhs_source, selectors.len)) orelse return null;
+        const base_array = try numericHostArrayValue(self, base);
+
+        return switch (hostDenseNumericMode(base_array)) {
+            .int => blk: {
+                const view = hostIntArrayView(base_array) orelse return null;
+                const kind = hostIntArrayViewKind(view);
+                if (!denseAssignRhsFitsIntKind(kind, selectors.len, rhs)) return null;
+
+                var reused = false;
+                var out = if (self.tryReuseHostIntArrayResult(base, kind)) |existing| blk_out: {
+                    if (!self.prepareReusableHostDenseForMutation(base)) return null;
+                    reused = true;
+                    break :blk_out existing;
+                } else blk_out: {
+                    var allocated = try self.allocOwnedHostIntResult(amendCloneOwner(base), kind, base_array.len());
+                    errdefer self.releaseValue(Value.array(allocated.arrayPtr()));
+                    try copyHostIntViewToResult(&allocated, view);
+                    break :blk_out allocated;
+                };
+                try applyDenseAssignIntRhs(&out, selectors, rhs);
+                const host = out.arrayPtr();
+                hostDenseSetFlags(host, host_dense_flag_normalized);
+                hostDenseClearCachedIntRange(host);
+                const value = try out.value(self);
+                break :blk if (reused) self.shareValue(value) else value;
+            },
+            .float => blk: {
+                const base_items = base_array.storage.float64;
+                var reused = false;
+                var out = if (self.tryReuseHostFloatArrayResult(base)) |existing| blk_out: {
+                    if (!self.prepareReusableHostDenseForMutation(base)) return null;
+                    reused = true;
+                    break :blk_out existing;
+                } else blk_out: {
+                    const allocated = try self.allocOwnedHostFloatResult(amendCloneOwner(base), base_array.len());
+                    errdefer self.releaseValue(Value.array(allocated.array));
+                    @memcpy(allocated.items, base_items);
+                    break :blk_out allocated;
+                };
+                applyDenseAssignFloatRhs(out.items, selectors, rhs);
+                hostDenseSetFlags(out.array, host_dense_flag_normalized);
+                hostDenseClearCachedIntRange(out.array);
+                const value = try out.value(self);
+                break :blk if (reused) self.shareValue(value) else value;
+            },
+        };
+    }
+
     fn applyShallowAmend(self: *Session, base: Value, selector: Value, mode: ShallowAmendMode, func_or_value: Value, arg: Value) KError!Value {
         if (base.tag() != .array) return error.Type;
         const selectors = try self.collectSelectorIndices(base, selector);
         defer self.allocator.free(selectors);
+
+        if (mode == .assign) {
+            if (try self.tryFastDenseAssignAmend(base, selectors, func_or_value)) |fast| return fast;
+        }
 
         const items = try self.materializeTopLevelItems(base);
         defer {
@@ -8491,7 +9299,7 @@ const DenseElementwiseKind = union(enum) {
                 try indices.append(self.allocator, try normalizeIndex(scalarIntLikeValue(selector).?, top_len));
             },
             .array => {
-                const array = try hostStructuralArrayValue(self, selector);
+                const array = try numericHostArrayValue(self, selector);
                 if (hostIntArrayView(array)) |view| switch (view) {
                     .bit => |bits| {
                         if (bits.len != top_len) return error.Type;
@@ -8516,8 +9324,8 @@ const DenseElementwiseKind = union(enum) {
     }
 
     fn topLevelLen(self: *Session, value: Value) KError!usize {
-        const array = try hostStructuralArrayValue(self, value);
-        if (hostArrayNonVectorShape(array)) |shape| {
+        const array = try numericHostArrayValue(self, value);
+        if (hostDenseNonVectorShape(array)) |shape| {
             if (shape.rank != 2) return error.Unsupported;
             return @intCast(shape.shape[0]);
         }
@@ -8525,7 +9333,7 @@ const DenseElementwiseKind = union(enum) {
     }
 
     fn materializeTopLevelItems(self: *Session, value: Value) KError![]Value {
-        const array = try hostStructuralArrayValue(self, value);
+        const array = try numericHostArrayValue(self, value);
         const len = try self.topLevelLen(value);
         const items = try self.allocator.alloc(Value, len);
         errdefer self.allocator.free(items);
@@ -8534,7 +9342,7 @@ const DenseElementwiseKind = union(enum) {
             for (items[0..initialized]) |item| self.releaseValue(item);
         }
         for (0..len) |idx| {
-            items[idx] = try self.hostArrayIndexScalar(array, @intCast(idx));
+            items[idx] = try self.hostDenseIndexScalar(array, @intCast(idx));
             initialized += 1;
         }
         return items;
@@ -8635,12 +9443,15 @@ const DenseElementwiseKind = union(enum) {
             .not,
             .count,
             .floor,
+            .null_fill_without,
             .sort,
             .stringify,
             .unique,
             .eval_string,
+            .load,
+            .rotcacheview,
             => true,
-            .minimum, .concat, .take, .drop, .equal, .reshape, .cast, .contains, .split, .join, .find, .grad, .valuegrad, .prng => false,
+            .minimum, .concat, .take, .drop, .equal, .reshape, .cast, .contains, .split, .join, .find, .grad, .valuegrad, .prng, .rotcache, .rotcacheupdate, .rmsnorm => false,
         };
     }
 
@@ -8657,6 +9468,7 @@ const DenseElementwiseKind = union(enum) {
             .concat,
             .count,
             .floor,
+            .null_fill_without,
             .sort,
             .equal,
             .stringify,
@@ -8664,8 +9476,11 @@ const DenseElementwiseKind = union(enum) {
             .split,
             .join,
             .unique,
+            .load,
+            .rotcache,
+            .rotcacheupdate,
             => true,
-            .exp, .log, .tanh, .sigmoid, .iota, .reverse, .grade_up, .grade_down, .not, .take, .drop, .reshape, .cast, .find, .eval_string, .grad, .valuegrad, .prng => false,
+            .exp, .log, .tanh, .sigmoid, .iota, .reverse, .grade_up, .grade_down, .not, .take, .drop, .reshape, .cast, .find, .eval_string, .grad, .valuegrad, .prng, .rotcacheview, .rmsnorm => false,
         };
     }
 
@@ -8793,12 +9608,12 @@ const DenseElementwiseKind = union(enum) {
             return true;
         }
 
-        const left_array = try hostStructuralArrayValue(self, left);
-        const right_array = try hostStructuralArrayValue(self, right);
+        const left_array = try numericHostArrayValue(self, left);
+        const right_array = try numericHostArrayValue(self, right);
         if (left_array.len() != right_array.len()) return false;
         for (0..left_array.len()) |idx| {
-            const lhs = try self.hostArrayIndexScalar(left_array, @intCast(idx));
-            const rhs = try self.hostArrayIndexScalar(right_array, @intCast(idx));
+            const lhs = try self.hostDenseIndexScalar(left_array, @intCast(idx));
+            const rhs = try self.hostDenseIndexScalar(right_array, @intCast(idx));
             defer self.releaseValue(lhs);
             defer self.releaseValue(rhs);
             if (!(try self.valuesExactlyEqual(lhs, rhs))) return false;
@@ -8836,8 +9651,10 @@ const DenseElementwiseKind = union(enum) {
     fn applyEachDerived(self: *Session, base: Value, args: []const Value) KError!Value {
         var profile_scope = self.beginSamplingProfileScope(.apply_each);
         defer profile_scope.end();
+        if (try self.tryFastTransposeEachDerived(base, args)) |value| return value;
+        if (try self.tryFastBatchedMatmulEachDerived(base, args)) |value| return value;
         if (try self.tryFastUnaryLiftedEachDerived(base, args)) |value| return value;
-        if (try self.tryFastMlxMatrixRowFoldEachDerived(base, args)) |value| return value;
+        if (try self.tryFastBackendMatrixRowFoldEachDerived(base, args)) |value| return value;
         if (try self.tryFastDenseEachDerived(base, args)) |value| return value;
         var len: ?usize = null;
         var saw_array = false;
@@ -8877,58 +9694,108 @@ const DenseElementwiseKind = union(enum) {
         return try self.createManagedArrayLikeFromValues(results.items);
     }
 
-    fn tryFastMlxMatrixRowFoldEachDerived(self: *Session, base: Value, args: []const Value) KError!?Value {
-        if (comptime !runtime_has_mlx) return null;
-        if (args.len != 1) return null;
+    fn tryFastTransposeEachDerived(self: *Session, base: Value, args: []const Value) KError!?Value {
+        if (args.len != 1 or base.tag() != .builtin or base.asBuiltin() != .add) return null;
+        const handle = shapedNumericHandle(args[0]) orelse return null;
+        if (handle.rank < 3 or valueNumericMode(args[0]) == null) return null;
+        return try self.transposeDenseNumericValueSwapAxes(args[0], handle, 1, 2);
+    }
 
-        const op: BuiltinId = if (isDerivedBuiltinClosure(base, .fold, .add))
-            .add
-        else if (isDerivedBuiltinClosure(base, .fold, .mul))
-            .mul
-        else if (isDerivedBuiltinClosure(base, .fold, .minimum))
-            .minimum
-        else if (isDerivedBuiltinClosure(base, .fold, .maximum))
-            .maximum
-        else
-            return null;
+    fn tryFastBatchedMatmulEachDerived(self: *Session, base: Value, args: []const Value) KError!?Value {
+        if (args.len != 2 or base.tag() != .closure) return null;
+        const closure = base.asClosure();
+        if (try self.innerProductInfoFromClosure(closure)) |info| {
+            if (info.reduce == .add and info.map == .mul) {
+                return try self.applyBatchedMatmulValues(args[0], args[1]);
+            }
+        }
+        if (closureDerivedKind(closure) != .each_left or closure.captures.len != 1) return null;
+        const inner = closure.captures[0];
+        if (inner.tag() != .closure) return null;
+        const info = (try self.innerProductInfoFromClosure(inner.asClosure())) orelse return null;
+        if (info.reduce != .add or info.map != .mul) return null;
+        return try self.applyBatchedMatmulValues(args[0], args[1]);
+    }
 
-        const matrix = args[0];
-        const shape = valueNumericMatrixShape(matrix) orelse return null;
-        if (shape.rows == 0 or shape.cols == 0) return null;
+    fn tryFastBackendMatrixRowFoldEachDerived(self: *Session, base: Value, args: []const Value) KError!?Value {
+        return runtime_backend_exec.tryFastBackendMatrixRowFoldEachDerived(.{
+            .Session = Session,
+            .Value = Value,
+            .NumericArray = NumericArray,
+            .BuiltinId = BuiltinId,
+            .DenseExecBackend = DenseExecBackend,
+            .KError = KError,
+            .c = c,
+            .mlx = mlx,
+            .runtime_has_mlx = runtime_has_mlx,
+            .isDerivedBuiltinClosure = isDerivedBuiltinClosure,
+            .valueNumericMatrixShape = valueNumericMatrixShape,
+            .valueNumericHandle = valueNumericHandle,
+            .numericIntAt = numericIntAt,
+            .numericArrayIsFirstAxisSlice = numericArrayIsFirstAxisSlice,
+            .numericArrayFirstAxisSliceSource = numericArrayFirstAxisSliceSource,
+            .numericArrayFirstAxisSliceRowStart = numericArrayFirstAxisSliceRowStart,
+            .numericArrayFirstAxisSliceRowStep = numericArrayFirstAxisSliceRowStep,
+            .numericArrayIsFirstAxisIndex = numericArrayIsFirstAxisIndex,
+            .numericArrayFirstAxisIndexSource = numericArrayFirstAxisIndexSource,
+            .numericArrayFirstAxisIndexRows = numericArrayFirstAxisIndexRows,
+            .numericArrayIsFirstAxisConcat = numericArrayIsFirstAxisConcat,
+            .numericArrayFirstAxisConcatLeft = numericArrayFirstAxisConcatLeft,
+            .numericArrayFirstAxisConcatRight = numericArrayFirstAxisConcatRight,
+            .numericArrayIsReshapeView = numericArrayIsReshapeView,
+            .numericArrayReshapeSource = numericArrayReshapeSource,
+            .numericArrayIsTransposeView = numericArrayIsTransposeView,
+            .numericArrayTransposeSource = numericArrayTransposeSource,
+            .isBackendArrayValue = isBackendArrayValue,
+            .hasBackendRealization = hasBackendRealization,
+            .actualDenseBackend = actualDenseBackend,
+            .materializeBackendArray = Session.materializeBackendArray,
+            .backendContext = Session.backendContext,
+            .mapMlxError = mapMlxError,
+            .noteDensePlanDecision = noteDensePlanDecision,
+            .wrapManagedBackendArray = Session.wrapManagedBackendArray,
+            .numeric_array_max_rank = numeric_array_max_rank,
+        }, self, base, args);
+    }
 
-        const has_mlx_residency = isMlxBackedArray(matrix) or hasMlxRealization(matrix);
-        const planned_backend: DenseExecBackend = switch (self.dense_backend_override) {
-            .host => return null,
-            .mlx => .mlx,
-            .auto => if (has_mlx_residency) .mlx else return null,
-        };
-        const actual_backend = actualDenseBackend(self, true, planned_backend);
-        if (actual_backend != .mlx) return null;
-
-        var arr = try self.materializeMlxArray(matrix);
-        defer arr.deinit();
-        if (arr.ndim() != 2) return null;
-        try castMlxBoolArrayTo(self, &arr, c.MLX_INT32);
-
-        const ctx = try self.mlxContext();
-        var transposed = mlx.Array.transpose(ctx.*, arr) catch |err| return mapMlxError(err);
-        defer transposed.deinit();
-
-        const out = switch (op) {
-            .add => mlx.Array.sumAxis0(ctx.*, transposed) catch |err| return mapMlxError(err),
-            .mul => mlx.Array.prodAxis0(ctx.*, transposed) catch |err| return mapMlxError(err),
-            .minimum => mlx.Array.minAxis0(ctx.*, transposed) catch |err| return mapMlxError(err),
-            .maximum => mlx.Array.maxAxis0(ctx.*, transposed) catch |err| return mapMlxError(err),
-            else => return null,
-        };
-        noteDensePlanDecision(
-            self,
-            .reduce,
-            planned_backend,
-            actual_backend,
-            if (has_mlx_residency) .already_mlx_resident else .large_problem,
-        );
-        return try self.wrapManagedMlxArray(out);
+    fn tryFastBackendMatrixRowFoldBuiltin(self: *Session, op: BuiltinId, matrix: Value) KError!?Value {
+        return runtime_backend_exec.tryFastBackendMatrixRowFoldBuiltin(.{
+            .Session = Session,
+            .Value = Value,
+            .NumericArray = NumericArray,
+            .BuiltinId = BuiltinId,
+            .DenseExecBackend = DenseExecBackend,
+            .KError = KError,
+            .c = c,
+            .mlx = mlx,
+            .runtime_has_mlx = runtime_has_mlx,
+            .valueNumericMatrixShape = valueNumericMatrixShape,
+            .valueNumericHandle = valueNumericHandle,
+            .numericIntAt = numericIntAt,
+            .numericArrayIsFirstAxisSlice = numericArrayIsFirstAxisSlice,
+            .numericArrayFirstAxisSliceSource = numericArrayFirstAxisSliceSource,
+            .numericArrayFirstAxisSliceRowStart = numericArrayFirstAxisSliceRowStart,
+            .numericArrayFirstAxisSliceRowStep = numericArrayFirstAxisSliceRowStep,
+            .numericArrayIsFirstAxisIndex = numericArrayIsFirstAxisIndex,
+            .numericArrayFirstAxisIndexSource = numericArrayFirstAxisIndexSource,
+            .numericArrayFirstAxisIndexRows = numericArrayFirstAxisIndexRows,
+            .numericArrayIsFirstAxisConcat = numericArrayIsFirstAxisConcat,
+            .numericArrayFirstAxisConcatLeft = numericArrayFirstAxisConcatLeft,
+            .numericArrayFirstAxisConcatRight = numericArrayFirstAxisConcatRight,
+            .numericArrayIsReshapeView = numericArrayIsReshapeView,
+            .numericArrayReshapeSource = numericArrayReshapeSource,
+            .numericArrayIsTransposeView = numericArrayIsTransposeView,
+            .numericArrayTransposeSource = numericArrayTransposeSource,
+            .isBackendArrayValue = isBackendArrayValue,
+            .hasBackendRealization = hasBackendRealization,
+            .actualDenseBackend = actualDenseBackend,
+            .materializeBackendArray = Session.materializeBackendArray,
+            .backendContext = Session.backendContext,
+            .mapMlxError = mapMlxError,
+            .noteDensePlanDecision = noteDensePlanDecision,
+            .wrapManagedBackendArray = Session.wrapManagedBackendArray,
+            .numeric_array_max_rank = numeric_array_max_rank,
+        }, self, op, matrix);
     }
 
     fn tryFastUnaryLiftedEachDerived(self: *Session, base: Value, args: []const Value) KError!?Value {
@@ -8976,6 +9843,7 @@ const DenseElementwiseKind = union(enum) {
     fn wholeArrayEachDyadSafe(left: Value, right: Value) bool {
         if (left.tag() != .array or right.tag() != .array) return true;
         if (valueNumericMode(left) == null or valueNumericMode(right) == null) return false;
+        if (rowwiseMatrixVectorDyad(left, right) != null) return true;
         const left_shape = valueNonVectorNumericShape(left);
         const right_shape = valueNonVectorNumericShape(right);
         if (left_shape == null and right_shape == null) return true;
@@ -8999,111 +9867,38 @@ const DenseElementwiseKind = union(enum) {
         };
     }
 
-    fn tryFastMlxFoldDerived(self: *Session, base: Value, args: []const Value, collect: bool) KError!?Value {
-        if (base.tag() != .builtin) return null;
-        return switch (base.asBuiltin()) {
-            .add => try self.tryFastMlxAddFoldScan(args, collect),
-            .sub => if (!collect) try self.tryFastMlxSubFold(args) else null,
-            .mul, .minimum, .maximum => if (!collect) try self.tryFastMlxReduceUnary(base.asBuiltin(), args) else null,
-            else => null,
-        };
-    }
-
-    fn tryFastMlxReduceUnary(self: *Session, op: BuiltinId, args: []const Value) KError!?Value {
-        if (args.len != 1) return null;
-        const vector = args[0];
-        if (planDenseReduceScanBackend(self, false, vector) != .mlx) return null;
-
-        var arr = try self.materializeMlxArray(vector);
-        defer arr.deinit();
-        if (arr.ndim() == 0) return null;
-        if (@as(usize, @intCast(arr.shape()[0])) == 0) return error.Type;
-        try castMlxBoolArrayTo(self, &arr, c.MLX_INT32);
-
-        const ctx = try self.mlxContext();
-        const out = switch (op) {
-            .add => mlx.Array.sumAxis0(ctx.*, arr) catch |err| return mapMlxError(err),
-            .mul => mlx.Array.prodAxis0(ctx.*, arr) catch |err| return mapMlxError(err),
-            .minimum => mlx.Array.minAxis0(ctx.*, arr) catch |err| return mapMlxError(err),
-            .maximum => mlx.Array.maxAxis0(ctx.*, arr) catch |err| return mapMlxError(err),
-            else => return null,
-        };
-        return try self.wrapManagedMlxArray(out);
-    }
-
-    fn tryFastMlxAddFoldScan(self: *Session, args: []const Value, collect: bool) KError!?Value {
-        if (args.len != 1) return null;
-        const vector = args[0];
-        if (planDenseReduceScanBackend(self, collect, vector) != .mlx) return null;
-
-        var arr = try self.materializeMlxArray(vector);
-        defer arr.deinit();
-        if (arr.ndim() == 0) return null;
-        if (@as(usize, @intCast(arr.shape()[0])) == 0) return error.Type;
-        try castMlxBoolArrayTo(self, &arr, c.MLX_INT32);
-
-        const ctx = try self.mlxContext();
-        const out = if (collect)
-            mlx.Array.cumsum0Inclusive(ctx.*, arr) catch |err| return mapMlxError(err)
-        else
-            mlx.Array.sumAxis0(ctx.*, arr) catch |err| return mapMlxError(err);
-        return try self.wrapManagedMlxArray(out);
-    }
-
-    fn sliceMlxAxis0Range(self: *Session, value: mlx.Array, start: usize, count: usize) KError!mlx.Array {
-        const ndim = value.ndim();
-        if (ndim == 0) return error.Type;
-        var start_buf: [numeric_array_max_rank]i32 = [_]i32{0} ** numeric_array_max_rank;
-        var stop_buf: [numeric_array_max_rank]i32 = [_]i32{0} ** numeric_array_max_rank;
-        var stride_buf: [numeric_array_max_rank]i32 = [_]i32{1} ** numeric_array_max_rank;
-        const shape = value.shape();
-        for (0..ndim) |idx| stop_buf[idx] = shape[idx];
-        start_buf[0] = std.math.cast(i32, start) orelse return error.Unsupported;
-        stop_buf[0] = std.math.cast(i32, start + count) orelse return error.Unsupported;
-        return mlx.Array.slice(
-            (try self.mlxContext()).*,
-            value,
-            start_buf[0..ndim],
-            stop_buf[0..ndim],
-            stride_buf[0..ndim],
-        ) catch |err| return mapMlxError(err);
-    }
-
-    fn tryFastMlxSubFold(self: *Session, args: []const Value) KError!?Value {
-        if (args.len == 0 or args.len > 2) return null;
-        const vector = args[args.len - 1];
-        if (planDenseReduceScanBackend(self, false, vector) != .mlx) return null;
-
-        var arr = try self.materializeMlxArray(vector);
-        defer arr.deinit();
-        if (arr.ndim() == 0) return null;
-        const outer_len: usize = @intCast(arr.shape()[0]);
-        if (args.len == 1 and outer_len == 0) return error.Type;
-
-        if (outer_len <= 1) return null;
-
-        try castMlxBoolArrayTo(self, &arr, c.MLX_INT32);
-
-        const ctx = try self.mlxContext();
-        const reduced = if (args.len == 2) blk: {
-            var total = mlx.Array.sumAxis0(ctx.*, arr) catch |err| return mapMlxError(err);
-            errdefer total.deinit();
-            var seed = try self.materializeMlxArray(args[0]);
-            defer seed.deinit();
-            try castMlxBoolArrayTo(self, &seed, c.MLX_INT32);
-            break :blk mlx.Array.sub(ctx.*, seed, total) catch |err| return mapMlxError(err);
-        } else blk: {
-            var head = try self.sliceMlxAxis0Range(arr, 0, 1);
-            defer head.deinit();
-            var tail = try self.sliceMlxAxis0Range(arr, 1, outer_len - 1);
-            defer tail.deinit();
-            var first = mlx.Array.sumAxis0(ctx.*, head) catch |err| return mapMlxError(err);
-            errdefer first.deinit();
-            var rest = mlx.Array.sumAxis0(ctx.*, tail) catch |err| return mapMlxError(err);
-            errdefer rest.deinit();
-            break :blk mlx.Array.sub(ctx.*, first, rest) catch |err| return mapMlxError(err);
-        };
-        return try self.wrapManagedMlxArray(reduced);
+    fn tryFastBackendFoldDerived(self: *Session, base: Value, args: []const Value, collect: bool) KError!?Value {
+        return runtime_backend_exec.tryFastBackendFoldDerived(.{
+            .Session = Session,
+            .Value = Value,
+            .NumericArray = NumericArray,
+            .BuiltinId = BuiltinId,
+            .KError = KError,
+            .c = c,
+            .mlx = mlx,
+            .backendContext = Session.backendContext,
+            .mapMlxError = mapMlxError,
+            .planDenseReduceScanBackend = planDenseReduceScanBackend,
+            .valueNumericHandle = valueNumericHandle,
+            .numericIntAt = numericIntAt,
+            .numericArrayIsFirstAxisSlice = numericArrayIsFirstAxisSlice,
+            .numericArrayFirstAxisSliceSource = numericArrayFirstAxisSliceSource,
+            .numericArrayFirstAxisSliceRowStart = numericArrayFirstAxisSliceRowStart,
+            .numericArrayFirstAxisSliceRowStep = numericArrayFirstAxisSliceRowStep,
+            .numericArrayIsFirstAxisIndex = numericArrayIsFirstAxisIndex,
+            .numericArrayFirstAxisIndexSource = numericArrayFirstAxisIndexSource,
+            .numericArrayFirstAxisIndexRows = numericArrayFirstAxisIndexRows,
+            .numericArrayIsFirstAxisConcat = numericArrayIsFirstAxisConcat,
+            .numericArrayFirstAxisConcatLeft = numericArrayFirstAxisConcatLeft,
+            .numericArrayFirstAxisConcatRight = numericArrayFirstAxisConcatRight,
+            .numericArrayIsReshapeView = numericArrayIsReshapeView,
+            .numericArrayReshapeSource = numericArrayReshapeSource,
+            .numericArrayIsTransposeView = numericArrayIsTransposeView,
+            .numericArrayTransposeSource = numericArrayTransposeSource,
+            .materializeBackendArray = Session.materializeBackendArray,
+            .wrapManagedBackendArray = Session.wrapManagedBackendArray,
+            .numeric_array_max_rank = numeric_array_max_rank,
+        }, self, base, args, collect);
     }
 
     fn fastRangeIotaAddFoldScan(self: *Session, handle: *const NumericArray, seed: ?i64, collect: bool) KError!Value {
@@ -9172,8 +9967,7 @@ const DenseElementwiseKind = union(enum) {
                 return try self.fastRangeIotaAddFoldScan(handle, null, collect);
             }
         }
-        const array = hostArrayIfPresent(vector) orelse return null;
-        if (hostArrayNumericMode(array) == null) return null;
+        const array = hostDenseIfPresent(vector) orelse return null;
         const len = array.len();
 
         if (args.len == 1 and len == 0) return error.Type;
@@ -9316,8 +10110,7 @@ const DenseElementwiseKind = union(enum) {
             }
         }
 
-        const array = hostArrayIfPresent(vector) orelse return null;
-        if (hostArrayNumericMode(array) == null) return null;
+        const array = hostDenseIfPresent(vector) orelse return null;
         const len = array.len();
         if (args.len == 1 and len == 0) return error.Type;
         if (len <= 1) return null;
@@ -9357,8 +10150,7 @@ const DenseElementwiseKind = union(enum) {
 
         const vector = args[args.len - 1];
         if (valueNonVectorNumericShape(vector) != null) return null;
-        const array = hostArrayIfPresent(vector) orelse return null;
-        if (hostArrayNumericMode(array) == null) return null;
+        const array = hostDenseIfPresent(vector) orelse return null;
         if (array.storage != .bit) return null;
 
         const len = array.len();
@@ -9572,13 +10364,13 @@ const DenseElementwiseKind = union(enum) {
         return try self.finishHostReducedFloatResult(handle, out);
     }
 
-    fn fastHostAddFoldIntUnseeded(self: *Session, array: *const HostArray, view: HostIntArrayView) KError!Value {
-        const range = hostArrayCachedIntRange(array) orelse hostIntArrayViewEndpointRange(view, array.flags);
+    fn fastHostAddFoldIntUnseeded(self: *Session, array: *const HostDenseArray, view: HostIntArrayView) KError!Value {
+        const range = hostDenseCachedIntRange(array) orelse hostIntArrayViewEndpointRange(view, array.flags);
         return try self.intValue(try foldAddIntViewMaybeUnchecked(view, range, null));
     }
 
-    fn fastHostAddFoldInt(self: *Session, array: *const HostArray, view: HostIntArrayView, seed: i64) KError!Value {
-        const range = hostArrayCachedIntRange(array) orelse hostIntArrayViewEndpointRange(view, array.flags);
+    fn fastHostAddFoldInt(self: *Session, array: *const HostDenseArray, view: HostIntArrayView, seed: i64) KError!Value {
+        const range = hostDenseCachedIntRange(array) orelse hostIntArrayViewEndpointRange(view, array.flags);
         return try self.intValue(try foldAddIntViewMaybeUnchecked(view, range, seed));
     }
 
@@ -9655,7 +10447,7 @@ const DenseElementwiseKind = union(enum) {
         var profile_scope = self.beginSamplingProfileScope(if (collect) .apply_scan else .apply_fold);
         defer profile_scope.end();
         if (args.len == 0) return error.Arity;
-        if (try self.tryFastMlxFoldDerived(base, args, collect)) |value| return value;
+        if (try self.tryFastBackendFoldDerived(base, args, collect)) |value| return value;
         if (try self.tryFastHostFoldDerived(base, args, collect)) |value| {
             self.noteHostFoldScanFast(collect);
             return value;
@@ -9673,7 +10465,10 @@ const DenseElementwiseKind = union(enum) {
 
         if (args.len == 1) {
             const vector = args[0];
-            const len = derivedSequenceLen(vector) orelse return error.Type;
+            const len = derivedSequenceLen(vector) orelse {
+                if (!collect) return self.shareValue(vector);
+                return error.Type;
+            };
             if (len == 0) return error.Type;
 
             var acc = try self.derivedSequenceItemValue(vector, 0);
@@ -9713,12 +10508,20 @@ const DenseElementwiseKind = union(enum) {
 
         var len: ?usize = null;
         for (args[1..]) |arg| {
-            const arg_len = derivedSequenceLen(arg) orelse return error.Type;
+            const arg_len = derivedSequenceLen(arg) orelse {
+                if (!collect and len == null) continue;
+                return error.Type;
+            };
             if (len) |existing| {
                 if (existing != arg_len) return error.Type;
             } else {
                 len = arg_len;
             }
+        }
+
+        if (len == null) {
+            if (!collect) return try self.applyDerivedBase(base, args);
+            return error.Type;
         }
 
         var acc = self.shareValue(args[0]);
@@ -9840,13 +10643,7 @@ const DenseElementwiseKind = union(enum) {
         }
         return switch (right.arrayKind()) {
             .host_string_list => try self.fastHostStringListContainsEachRight(needle, right.asHostStringList()),
-            .host_array => switch (right.asHostArray().storage) {
-                .boxed => |items| try self.fastHostBoxedStringContainsEachRight(needle, items),
-                else => blk: {
-                    if (self.debugDetailedProbeActive()) self.debug_each_right_fast_string_contains_miss_non_string_right_count += 1;
-                    break :blk null;
-                },
-            },
+            .host_boxed_array => try self.fastHostBoxedStringContainsEachRight(needle, right.asHostBoxedArray().items),
             else => blk: {
                 if (self.debugDetailedProbeActive()) self.debug_each_right_fast_string_contains_miss_non_string_right_count += 1;
                 break :blk null;
@@ -10022,7 +10819,7 @@ const DenseElementwiseKind = union(enum) {
             .add, .sub, .mul, .minimum, .maximum => {},
             else => return .unsupported_builtin,
         }
-        if (self.dense_backend_override == .mlx) return .backend_override_mlx;
+        if (self.dense_backend_override == .mlx) return .backend_override;
 
         const value = args[args.len - 1];
         if (!collect) {
@@ -10047,8 +10844,7 @@ const DenseElementwiseKind = union(enum) {
             }
         }
 
-        const array = hostArrayIfPresent(value) orelse return .unsupported_input;
-        if (hostArrayNumericMode(array) == null) return .non_numeric_or_shape;
+        const array = hostDenseIfPresent(value) orelse return .unsupported_input;
         if (array.len() <= 1) return .preserve_generic_semantics;
         return .unsupported_input;
     }
@@ -10097,6 +10893,9 @@ const DenseElementwiseKind = union(enum) {
             },
             .closure => {
                 const closure = callee.asClosure();
+                if (try self.tryApplyDirectDerivedClosure2(closure, arg0, arg1)) |result| {
+                    return try self.finishFrame(frame_index, result);
+                }
                 if (try self.applyDerivedClosure(closure, &[_]Value{ arg0, arg1 })) |result| {
                     return try self.finishFrame(frame_index, result);
                 }
@@ -10174,6 +10973,11 @@ const DenseElementwiseKind = union(enum) {
             },
             .closure => {
                 const closure = callee.asClosure();
+                if (try self.tryApplyDirectDerivedClosure2(closure, arg0, arg1)) |result| {
+                    self.dropStackFrom(callee_index);
+                    try self.push(result);
+                    return;
+                }
                 if (try self.applyDerivedClosure(closure, &[_]Value{ arg0, arg1 })) |result| {
                     self.dropStackFrom(callee_index);
                     try self.push(result);
@@ -10228,6 +11032,7 @@ const DenseElementwiseKind = union(enum) {
     fn execGlobalCall1(self: *Session, slot: u16) KError!void {
         if (self.stack_len < 1) return error.Internal;
 
+        self.noteGlobalCall(slot);
         const callee = try self.loadGlobalSlot(slot);
         const arg0_index = self.stack_len - 1;
         const arg0 = self.stack[arg0_index];
@@ -10272,6 +11077,7 @@ const DenseElementwiseKind = union(enum) {
     fn execTailGlobalCall1(self: *Session, frame_index: usize, slot: u16) KError!?Value {
         if (self.stack_len < 1) return error.Internal;
 
+        self.noteGlobalCall(slot);
         const callee = try self.loadGlobalSlot(slot);
         const arg0 = self.stack[self.stack_len - 1];
 
@@ -10300,6 +11106,7 @@ const DenseElementwiseKind = union(enum) {
     fn execGlobalCall2(self: *Session, slot: u16) KError!void {
         if (self.stack_len < 2) return error.Internal;
 
+        self.noteGlobalCall(slot);
         const callee = try self.loadGlobalSlot(slot);
         const arg0_index = self.stack_len - 2;
         const arg0 = self.stack[arg0_index];
@@ -10313,6 +11120,11 @@ const DenseElementwiseKind = union(enum) {
             },
             .closure => {
                 const closure = callee.asClosure();
+                if (try self.tryApplyDirectDerivedClosure2(closure, arg0, arg1)) |result| {
+                    self.dropStackFrom(arg0_index);
+                    try self.push(result);
+                    return;
+                }
                 if (try self.applyDerivedClosure(closure, &[_]Value{ arg0, arg1 })) |result| {
                     self.dropStackFrom(arg0_index);
                     try self.push(result);
@@ -10345,6 +11157,7 @@ const DenseElementwiseKind = union(enum) {
     fn execTailGlobalCall2(self: *Session, frame_index: usize, slot: u16) KError!?Value {
         if (self.stack_len < 2) return error.Internal;
 
+        self.noteGlobalCall(slot);
         const callee = try self.loadGlobalSlot(slot);
         const arg0_index = self.stack_len - 2;
         const arg0 = self.stack[arg0_index];
@@ -10357,6 +11170,9 @@ const DenseElementwiseKind = union(enum) {
             },
             .closure => {
                 const closure = callee.asClosure();
+                if (try self.tryApplyDirectDerivedClosure2(closure, arg0, arg1)) |result| {
+                    return try self.finishFrame(frame_index, result);
+                }
                 if (try self.applyDerivedClosure(closure, &[_]Value{ arg0, arg1 })) |result| {
                     return try self.finishFrame(frame_index, result);
                 }
@@ -10376,6 +11192,7 @@ const DenseElementwiseKind = union(enum) {
         const total = @as(usize, argc);
         if (self.stack_len < total) return error.Internal;
 
+        self.noteGlobalCall(slot);
         const callee = try self.loadGlobalSlot(slot);
         const arg_start = self.stack_len - total;
         const args = self.stack[arg_start..self.stack_len];
@@ -10476,7 +11293,7 @@ const DenseElementwiseKind = union(enum) {
         const right = self.pop();
         const left = self.pop();
         const direct = stringBytes(left) != null and right.tag() == .array and switch (right.arrayKind()) {
-            .host_string_list, .host_array => true,
+            .host_string_list, .host_dense_array => true,
             else => false,
         };
         const value = if (direct)
@@ -10516,19 +11333,19 @@ const DenseElementwiseKind = union(enum) {
     fn execArrayDyad(self: *Session, op: BuiltinId) KError!void {
         const right = self.pop();
         const left = self.pop();
-        const value = try self.applyDenseDyad(op, left, right);
+        const value = try self.applyNumericDyad(op, left, right);
         self.releaseValue(left);
         self.releaseValue(right);
         try self.push(value);
     }
 
-    fn execTypedArrayDyad(self: *Session, op: BuiltinId, left_mode: HostArrayElem, right_mode: HostArrayElem) KError!void {
+    fn execTypedArrayDyad(self: *Session, op: BuiltinId, left_mode: HostDenseElem, right_mode: HostDenseElem) KError!void {
         const right = self.pop();
         const left = self.pop();
         const planned_backend: ?DenseExecBackend = if (valueNumericMode(left) == left_mode and
             valueNumericMode(right) == right_mode and
-            !isMlxBackedArray(left) and
-            !isMlxBackedArray(right))
+            !isBackendArrayValue(left) and
+            !isBackendArrayValue(right))
             planDenseNumericDyadBackend(self, op, left, right)
         else
             null;
@@ -10542,16 +11359,15 @@ const DenseElementwiseKind = union(enum) {
                 self.noteHostDenseDyadMiss(.view);
                 return err;
             };
-            self.noteHostDenseDyadHost();
+            self.noteHostDenseDyadHost(op, left, right, false);
             break :blk switch (denseResultMode(op, left_mode, right_mode)) {
                 .int => try self.applyHostArrayDyadInt(op, left, right, left_view, right_view, len),
                 .float => try self.applyHostArrayDyadFloat(op, left, right, left_view, right_view, len),
             };
         } else if (planned_backend == .mlx) blk: {
-            self.noteHostDenseDyadMiss(.planner_mlx);
-            break :blk try self.applyMlxArrayDyad(op, left, right);
-        } else
-            try self.applyDenseDyad(op, left, right);
+            self.noteHostDenseDyadMiss(.planner_backend);
+            break :blk try self.applyBackendArrayDyad(op, left, right);
+        } else try self.applyNumericDyad(op, left, right);
         self.releaseValue(left);
         self.releaseValue(right);
         try self.push(value);
@@ -10559,19 +11375,19 @@ const DenseElementwiseKind = union(enum) {
 
     fn execArrayMonad(self: *Session, op: BuiltinId) KError!void {
         const value = self.pop();
-        const result = try self.applyDenseMonad(op, value);
+        const result = try self.applyNumericMonad(op, value);
         self.releaseValue(value);
         try self.push(result);
     }
 
-    fn execTypedArrayMonad(self: *Session, op: BuiltinId, elem_mode: HostArrayElem) KError!void {
+    fn execTypedArrayMonad(self: *Session, op: BuiltinId, elem_mode: HostDenseElem) KError!void {
         const value = self.pop();
         const result = if (value.tag() == .array and
-            value.arrayKind() == .host_array and
+            value.arrayKind() == .host_dense_array and
             valueNumericMode(value) == elem_mode)
-            try self.applyHostArrayMonad(op, value.asHostArray())
+            try self.applyHostArrayMonad(op, value.asHostDenseArray())
         else
-            try self.applyDenseMonad(op, value);
+            try self.applyNumericMonad(op, value);
         self.releaseValue(value);
         try self.push(result);
     }
@@ -10831,11 +11647,18 @@ const DenseElementwiseKind = union(enum) {
         try self.execInlineCallUnaryCapture(.sqrt, frame, slot);
     }
 
+    fn execInlineCallArgmax1(self: *Session) KError!void {
+        const arg = self.pop();
+        defer self.releaseValue(arg);
+        try self.push(try self.argmaxValue(arg));
+    }
+
     fn applyBuiltinCall(self: *Session, op: BuiltinId, args: []const Value) KError!Value {
         var profile_scope = self.beginSamplingProfileScope(.apply_builtin);
         defer profile_scope.end();
         if (op == .prng) return try self.applyPrngBuiltin(args);
         if (op == .grad or op == .valuegrad) return try self.applyAutogradBuiltin(op, args);
+        if (op == .rmsnorm) return try self.applyRmsNormBuiltin(args);
         return switch (args.len) {
             0 => error.Arity,
             1 => self.applyMonad(op, args[0]),
@@ -10861,12 +11684,13 @@ const DenseElementwiseKind = union(enum) {
         }
         if (selector.tag() == .array) {
             if (try numericValueFirstAxisIndexSelectorValue(self, callee, selector)) |result| return result;
-            if (try tryApplyMlxBoolMaskIndex(self, callee, selector)) |result| return result;
+            if (try tryApplyBackendBoolMaskIndex(self, callee, selector)) |result| return result;
         }
         if (valueRangeIotaHandle(callee)) |handle| return try self.applyRangeIotaIndex(handle, selector);
         if (valueNumericHandle(callee)) |handle| return try self.applyHostArrayIndex(try hostStructuralArrayForHandle(self, @constCast(handle)), selector);
         return switch (callee.arrayKind()) {
-            .host_array, .mlx_array => try self.applyHostArrayIndex(try hostStructuralArrayValue(self, callee), selector),
+            .host_dense_array, .backend_array => try self.applyHostArrayIndex(try numericHostArrayValue(self, callee), selector),
+            .host_boxed_array => try self.applyHostBoxedArrayIndex(callee.asHostBoxedArray(), selector),
             .host_string_list => switch (selector.tag()) {
                 .int, .bool => try self.hostStringListItemValue(callee.asHostStringList(), @intCast(try normalizeIndex(scalarIntLikeValue(selector).?, callee.asHostStringList().len))),
                 else => error.Type,
@@ -11071,7 +11895,7 @@ const DenseElementwiseKind = union(enum) {
                 const items = try self.allocator.alloc(f32, grad.len);
                 defer self.allocator.free(items);
                 for (grad, 0..) |item, idx| items[idx] = @floatCast(item);
-                break :blk try self.wrapManagedMlxArray(mlx.Array.fromFloatSlice(items, target.shape));
+                break :blk try self.wrapManagedBackendArray(mlx.Array.fromFloatSlice(items, target.shape));
             },
         };
 
@@ -11094,7 +11918,7 @@ const DenseElementwiseKind = union(enum) {
         self.last_dense_autodiff_exec_backend = null;
 
         if (!target.is_scalar and self.chooseDenseAutodiffExecBackend(&program, args[0]) == .mlx) {
-            if (try self.tryFastDenseAutogradMlx(kind, &program, args[0])) |value| return value;
+            if (try self.tryFastDenseAutogradBackend(kind, &program, args[0])) |value| return value;
         }
 
         const grad = try scratch.alloc(f64, target.values.len);
@@ -11112,33 +11936,32 @@ const DenseElementwiseKind = union(enum) {
         return try self.createManagedHostBoxedArray(&pair);
     }
 
-    fn tryFastDenseAutogradMlx(self: *Session, kind: DerivedVerbKind, program: *const DenseAutodiffProgram, value: Value) KError!?Value {
-        var input = try materializeMlxAutogradInput(self, value);
-        defer input.deinit();
-        if (input.ndim() != 1) return null;
-
-        const result = try executeDenseAutodiffProgramMlx(self, program, input);
-        input = mlx.Array.empty();
-        var original_value = result.value;
-        defer original_value.deinit();
-        var grad_value = result.grad;
-        errdefer grad_value.deinit();
-
-        const wrapped_grad = try self.wrapManagedMlxArray(grad_value);
-        if (comptime enable_probe_instrumentation) self.last_dense_autodiff_exec_backend = .mlx;
-        if (kind == .grad) return wrapped_grad;
-
-        const original_scalar = try scalarNumericMlxArrayResultOwned(&original_value);
-        const original_host = try self.numericScalarValueFromF64(original_scalar);
-        defer self.releaseValue(original_host);
-        defer self.releaseValue(wrapped_grad);
-        const pair = [_]Value{ original_host, wrapped_grad };
-        return try self.createManagedHostBoxedArray(&pair);
+    fn tryFastDenseAutogradBackend(self: *Session, kind: DerivedVerbKind, program: *const DenseAutodiffProgram, value: Value) KError!?Value {
+        return runtime_backend_autodiff.tryFastDenseAutogradBackend(.{
+            .Session = Session,
+            .Value = Value,
+            .BuiltinId = BuiltinId,
+            .DerivedVerbKind = DerivedVerbKind,
+            .DenseAutodiffProgram = DenseAutodiffProgram,
+            .DenseAutodiffNodeKind = DenseAutodiffNodeKind,
+            .KError = KError,
+            .c = c,
+            .mlx = mlx,
+            .dense_autodiff_max_nodes = dense_autodiff_max_nodes,
+            .enable_probe_instrumentation = enable_probe_instrumentation,
+            .mapMlxError = mapMlxError,
+            .backendContext = Session.backendContext,
+            .materializeBackendArray = Session.materializeBackendArray,
+            .wrapManagedBackendArray = Session.wrapManagedBackendArray,
+            .numericScalarValueFromF64 = Session.numericScalarValueFromF64,
+            .createManagedHostBoxedArray = Session.createManagedHostBoxedArray,
+            .releaseValue = Session.releaseValue,
+        }, self, kind, program, value);
     }
 
     fn chooseDenseAutodiffExecBackend(self: *Session, program: *const DenseAutodiffProgram, value: Value) DenseAutodiffExecBackend {
         _ = program;
-        if (comptime !runtime_has_mlx or mlx.backend_kind == .wasm_bridge) return .host;
+        if (comptime !runtime_has_mlx or !mlx.supports_full_ops) return .host;
         return switch (planDenseAutodiffBackend(self, value)) {
             .host => .host,
             .mlx => .mlx,
@@ -11153,7 +11976,7 @@ const DenseElementwiseKind = union(enum) {
                 const items = try self.allocator.alloc(f32, grad.len);
                 defer self.allocator.free(items);
                 for (grad, 0..) |item, idx| items[idx] = @floatCast(item);
-                break :blk try self.wrapManagedMlxArray(mlx.Array.fromFloatSlice(items, target.shape));
+                break :blk try self.wrapManagedBackendArray(mlx.Array.fromFloatSlice(items, target.shape));
             },
         };
     }
@@ -11251,7 +12074,7 @@ const DenseElementwiseKind = union(enum) {
                 const converted = try self.allocator.alloc(f32, items.len);
                 defer self.allocator.free(converted);
                 for (items, 0..) |item, idx| converted[idx] = @floatCast(item);
-                break :blk try self.wrapManagedMlxArray(mlx.Array.fromFloatSlice(converted, target.shape));
+                break :blk try self.wrapManagedBackendArray(mlx.Array.fromFloatSlice(converted, target.shape));
             },
         };
     }
@@ -11261,15 +12084,15 @@ const DenseElementwiseKind = union(enum) {
         return switch (value.tag()) {
             .int, .bool, .float => try scalarNumericValue(value),
             .array => switch (value.activeArrayKind()) {
-                .mlx_array => blk: {
-                    var owned = value.asMlxArray().array.clone() catch |err| return mapMlxError(err);
+                .backend_array => blk: {
+                    var owned = value.asBackendArray().array.clone() catch |err| return mapMlxError(err);
                     defer owned.deinit();
                     owned.eval() catch |err| return mapMlxError(err);
                     if (owned.ndim() != 0) return error.Type;
                     break :blk switch (owned.dtype()) {
                         c.MLX_BOOL => @floatFromInt(@intFromBool(owned.boolItem() catch |err| return mapMlxError(err))),
                         c.MLX_INT32, c.MLX_INT64, c.MLX_UINT32 => @floatFromInt(owned.intItem() catch |err| return mapMlxError(err)),
-                        c.MLX_FLOAT32, c.MLX_FLOAT64 => owned.floatItem() catch |err| return mapMlxError(err),
+                        c.MLX_FLOAT16, c.MLX_FLOAT32, c.MLX_FLOAT64, c.MLX_BFLOAT16 => owned.floatItem() catch |err| return mapMlxError(err),
                         else => return error.Type,
                     };
                 },
@@ -11634,28 +12457,13 @@ const DenseElementwiseKind = union(enum) {
     }
 
     fn setNumericMatrixShapeOnValue(self: *Session, value: Value, rows: usize, cols: usize) !Value {
-        const handle, const canonical = switch (value.tag()) {
-            .array => switch (value.arraySubkind()) {
-                .numeric_array => .{ @constCast(value.asNumericArray()), value },
-                .host_array => blk: {
-                    if (hostArrayNumericMode(value.asHostArray()) == null) return error.Type;
-                    const wrapped = try wrapOwnedHostArrayValue(self, @constCast(value.asHostArray()));
-                    break :blk .{ @constCast(wrapped.asNumericArray()), wrapped };
-                },
-                .mlx_array => blk: {
-                    const wrapped = try wrapOwnedMlxArrayValue(self, @constCast(value.asMlxArray()));
-                    break :blk .{ @constCast(wrapped.asNumericArray()), wrapped };
-                },
-                else => return error.Type,
-            },
-            else => return error.Type,
-        };
-        numericArraySetMatrixShape(handle, rows, cols);
-        syncNumericArrayChildren(handle);
-        return canonical;
+        const logical = try ensureLogicalNumericValue(self, value);
+        numericArraySetMatrixShape(logical.handle, rows, cols);
+        syncNumericArrayChildren(logical.handle);
+        return logical.value;
     }
 
-    fn hostNumericMatrixRow(self: *Session, array: *const HostArray, row_idx: usize, cols: usize) KError!Value {
+    fn hostNumericMatrixRow(self: *Session, array: *const HostDenseArray, row_idx: usize, cols: usize) KError!Value {
         if (comptime enable_probe_instrumentation) self.debug_host_matrix_row_copy_count += 1;
         const start = row_idx * cols;
         return switch (array.storage) {
@@ -11667,7 +12475,6 @@ const DenseElementwiseKind = union(enum) {
                 break :blk try self.createManagedHostBitArray(out.items);
             },
             .float64 => |items| try self.createManagedHostFloatArray(items[start .. start + cols]),
-            .boxed => error.Type,
             else => blk: {
                 const view = hostIntArrayView(array) orelse return error.Type;
                 var out = std.ArrayList(i64).empty;
@@ -11679,7 +12486,7 @@ const DenseElementwiseKind = union(enum) {
         };
     }
 
-    fn createManagedHostNumericMatrixRows(self: *Session, array: *const HostArray, row_indices: []const usize, cols: usize) KError!Value {
+    fn createManagedHostNumericMatrixRows(self: *Session, array: *const HostDenseArray, row_indices: []const usize, cols: usize) KError!Value {
         const shape = numericShapeSnapshotMatrix(row_indices.len, cols);
         switch (array.storage) {
             .bit => {
@@ -11704,7 +12511,6 @@ const DenseElementwiseKind = union(enum) {
                 const value = try self.createManagedHostFloatArray(out.items);
                 return try applyNonVectorNumericShapeToValue(self, value, shape);
             },
-            .boxed => return error.Type,
             else => {
                 const view = hostIntArrayView(array) orelse return error.Type;
                 var out = std.ArrayList(i64).empty;
@@ -11720,7 +12526,7 @@ const DenseElementwiseKind = union(enum) {
         }
     }
 
-    fn hostNumericMatrixIndexByIntVector(self: *Session, array: *const HostArray, selector: HostIntArrayView, rows: usize, cols: usize) KError!Value {
+    fn hostNumericMatrixIndexByIntVector(self: *Session, array: *const HostDenseArray, selector: HostIntArrayView, rows: usize, cols: usize) KError!Value {
         if (comptime enable_probe_instrumentation) self.debug_host_matrix_index_copy_count += 1;
         var row_indices = std.ArrayList(usize).empty;
         defer row_indices.deinit(self.allocator);
@@ -11731,7 +12537,7 @@ const DenseElementwiseKind = union(enum) {
         return try self.createManagedHostNumericMatrixRows(array, row_indices.items, cols);
     }
 
-    fn hostNumericMatrixIndexByIntDenseView(self: *Session, array: *const HostArray, selector: HostIntDenseView, rows: usize, cols: usize) KError!Value {
+    fn hostNumericMatrixIndexByIntDenseView(self: *Session, array: *const HostDenseArray, selector: HostIntDenseView, rows: usize, cols: usize) KError!Value {
         if (selector == .dense) return try self.hostNumericMatrixIndexByIntVector(array, selector.dense, rows, cols);
         if (comptime enable_probe_instrumentation) self.debug_host_matrix_index_copy_count += 1;
         var row_indices = std.ArrayList(usize).empty;
@@ -11743,7 +12549,7 @@ const DenseElementwiseKind = union(enum) {
         return try self.createManagedHostNumericMatrixRows(array, row_indices.items, cols);
     }
 
-    fn hostNumericMatrixIndexMask(self: *Session, array: *const HostArray, mask: HostBitSlice, rows: usize, cols: usize) KError!Value {
+    fn hostNumericMatrixIndexMask(self: *Session, array: *const HostDenseArray, mask: HostBitSlice, rows: usize, cols: usize) KError!Value {
         if (mask.len != rows) return error.Type;
         if (comptime enable_probe_instrumentation) self.debug_host_matrix_mask_copy_count += 1;
         var row_indices = std.ArrayList(usize).empty;
@@ -11755,12 +12561,12 @@ const DenseElementwiseKind = union(enum) {
         return try self.createManagedHostNumericMatrixRows(array, row_indices.items, cols);
     }
 
-    fn applyHostArrayIndex(self: *Session, array: *const HostArray, selector: Value) KError!Value {
+    fn applyHostArrayIndex(self: *Session, array: *const HostDenseArray, selector: Value) KError!Value {
         return switch (selector.tag()) {
-            .int, .bool => try self.hostArrayIndexScalar(array, scalarIntLikeValue(selector).?),
+            .int, .bool => try self.hostDenseIndexScalar(array, scalarIntLikeValue(selector).?),
             .array => switch (selector.arrayKind()) {
-                .host_array, .mlx_array, .numeric_array => if (valueHostIntStructuralView(selector)) |view|
-                    try self.hostArrayIndexDenseSelector(array, view)
+                .host_dense_array, .backend_array, .numeric_array => if (valueHostIntStructuralView(selector)) |view|
+                    try self.hostDenseIndexDenseSelector(array, view)
                 else
                     error.Type,
                 else => error.Internal,
@@ -11769,8 +12575,22 @@ const DenseElementwiseKind = union(enum) {
         };
     }
 
-    fn hostArrayIndexScalar(self: *Session, array: *const HostArray, raw_index: i64) KError!Value {
-        if (hostArrayShapeHandle(array)) |handle| {
+    fn applyHostBoxedArrayIndex(self: *Session, array: *const HostBoxedArray, selector: Value) KError!Value {
+        return switch (selector.tag()) {
+            .int, .bool => try self.hostBoxedArrayIndexScalar(array, scalarIntLikeValue(selector).?),
+            .array => switch (selector.arrayKind()) {
+                .host_dense_array, .backend_array, .numeric_array => if (valueHostIntStructuralView(selector)) |view|
+                    try self.hostBoxedArrayIndexDenseSelector(array, view)
+                else
+                    error.Type,
+                else => error.Internal,
+            },
+            else => error.Type,
+        };
+    }
+
+    fn hostDenseIndexScalar(self: *Session, array: *const HostDenseArray, raw_index: i64) KError!Value {
+        if (hostDenseShapeHandle(array)) |handle| {
             if (handle.rank > 1) return try numericValueScalarIndexValue(self, Value.array(@constCast(handle)), raw_index) orelse error.Type;
         }
         const idx = try normalizeIndex(raw_index, array.len());
@@ -11778,32 +12598,56 @@ const DenseElementwiseKind = union(enum) {
             .bit => |words| Value.fromBool(bitGet(words, idx)),
             .int8, .int16, .int32, .int64 => try self.intValue(hostIntViewItem(hostIntArrayView(array).?, idx)),
             .float64 => |items| try self.floatValue(items[idx]),
-            .boxed => |items| self.shareValue(items[idx]),
         };
     }
 
-    fn hostArrayIndexVector(self: *Session, array: *const HostArray, selector: *const HostArray) KError!Value {
+    fn hostBoxedArrayIndexScalar(self: *Session, array: *const HostBoxedArray, raw_index: i64) KError!Value {
+        const idx = try normalizeIndex(raw_index, array.len());
+        return self.shareValue(array.items[idx]);
+    }
+
+    fn hostDenseIndexVector(self: *Session, array: *const HostDenseArray, selector: *const HostDenseArray) KError!Value {
         if (hostIntArrayView(selector)) |selector_view| {
             return switch (selector_view) {
-                .bit => |bits| try self.hostArrayIndexMask(array, bits),
-                else => try self.hostArrayIndexByIntVector(array, selector_view),
+                .bit => |bits| try self.hostDenseIndexMask(array, bits),
+                else => try self.hostDenseIndexByIntVector(array, selector_view),
             };
         }
         return error.Type;
     }
 
-    fn hostArrayIndexDenseSelector(self: *Session, array: *const HostArray, selector: HostIntDenseView) KError!Value {
+    fn hostBoxedArrayIndexVector(self: *Session, array: *const HostBoxedArray, selector: *const HostDenseArray) KError!Value {
+        if (hostIntArrayView(selector)) |selector_view| {
+            return switch (selector_view) {
+                .bit => |bits| try self.hostBoxedArrayIndexMask(array, bits),
+                else => try self.hostBoxedArrayIndexByIntVector(array, selector_view),
+            };
+        }
+        return error.Type;
+    }
+
+    fn hostDenseIndexDenseSelector(self: *Session, array: *const HostDenseArray, selector: HostIntDenseView) KError!Value {
         return switch (selector) {
             .dense => |view| switch (view) {
-                .bit => |bits| try self.hostArrayIndexMask(array, bits),
-                else => try self.hostArrayIndexByIntVector(array, view),
+                .bit => |bits| try self.hostDenseIndexMask(array, bits),
+                else => try self.hostDenseIndexByIntVector(array, view),
             },
-            .range_iota, .flat_slice, .flat_stride, .flat_concat, .flat_segments, .first_axis_slice, .first_axis_index, .first_axis_concat, .transpose => try self.hostArrayIndexByIntDenseView(array, selector),
+            .range_iota, .flat_slice, .flat_stride, .flat_concat, .flat_segments, .first_axis_slice, .first_axis_index, .first_axis_concat, .transpose => try self.hostDenseIndexByIntDenseView(array, selector),
         };
     }
 
-    fn hostArrayIndexMask(self: *Session, array: *const HostArray, mask: HostBitSlice) KError!Value {
-        if (hostArrayNonVectorShape(array)) |shape| {
+    fn hostBoxedArrayIndexDenseSelector(self: *Session, array: *const HostBoxedArray, selector: HostIntDenseView) KError!Value {
+        return switch (selector) {
+            .dense => |view| switch (view) {
+                .bit => |bits| try self.hostBoxedArrayIndexMask(array, bits),
+                else => try self.hostBoxedArrayIndexByIntVector(array, view),
+            },
+            .range_iota, .flat_slice, .flat_stride, .flat_concat, .flat_segments, .first_axis_slice, .first_axis_index, .first_axis_concat, .transpose => try self.hostBoxedArrayIndexByIntDenseView(array, selector),
+        };
+    }
+
+    fn hostDenseIndexMask(self: *Session, array: *const HostDenseArray, mask: HostBitSlice) KError!Value {
+        if (hostDenseNonVectorShape(array)) |shape| {
             if (shape.rank != 2) return error.Unsupported;
             return try self.hostNumericMatrixIndexMask(array, mask, @intCast(shape.shape[0]), @intCast(shape.shape[1]));
         }
@@ -11828,15 +12672,6 @@ const DenseElementwiseKind = union(enum) {
                 }
                 return try self.createManagedHostFloatArray(out.items);
             },
-            .boxed => |items| {
-                var out = std.ArrayList(Value).empty;
-                defer out.deinit(self.allocator);
-                for (0..mask.len) |idx| {
-                    if (!bitGet(mask.words, idx)) continue;
-                    try out.append(self.allocator, items[idx]);
-                }
-                return try self.createManagedHostBoxedArray(out.items);
-            },
             else => {
                 var out = std.ArrayList(i64).empty;
                 defer out.deinit(self.allocator);
@@ -11850,8 +12685,19 @@ const DenseElementwiseKind = union(enum) {
         }
     }
 
-    fn hostArrayIndexByIntVector(self: *Session, array: *const HostArray, selector: HostIntArrayView) KError!Value {
-        if (hostArrayNonVectorShape(array)) |shape| {
+    fn hostBoxedArrayIndexMask(self: *Session, array: *const HostBoxedArray, mask: HostBitSlice) KError!Value {
+        if (mask.len != array.len()) return error.Type;
+        var out = std.ArrayList(Value).empty;
+        defer out.deinit(self.allocator);
+        for (0..mask.len) |idx| {
+            if (!bitGet(mask.words, idx)) continue;
+            try out.append(self.allocator, array.items[idx]);
+        }
+        return try self.createManagedHostBoxedArray(out.items);
+    }
+
+    fn hostDenseIndexByIntVector(self: *Session, array: *const HostDenseArray, selector: HostIntArrayView) KError!Value {
+        if (hostDenseNonVectorShape(array)) |shape| {
             if (shape.rank != 2) return error.Unsupported;
             return try self.hostNumericMatrixIndexByIntVector(array, selector, @intCast(shape.shape[0]), @intCast(shape.shape[1]));
         }
@@ -11876,15 +12722,6 @@ const DenseElementwiseKind = union(enum) {
                 }
                 return try self.createManagedHostFloatArray(out.items);
             },
-            .boxed => |items| {
-                var out = std.ArrayList(Value).empty;
-                defer out.deinit(self.allocator);
-                for (0..len) |sel_idx| {
-                    const idx = try normalizeIndex(hostIntViewItem(selector, sel_idx), array.len());
-                    try out.append(self.allocator, items[idx]);
-                }
-                return try self.createManagedHostBoxedArray(out.items);
-            },
             else => {
                 var out = std.ArrayList(i64).empty;
                 defer out.deinit(self.allocator);
@@ -11898,9 +12735,20 @@ const DenseElementwiseKind = union(enum) {
         }
     }
 
-    fn hostArrayIndexByIntDenseView(self: *Session, array: *const HostArray, selector: HostIntDenseView) KError!Value {
-        if (selector == .dense) return try self.hostArrayIndexByIntVector(array, selector.dense);
-        if (hostArrayNonVectorShape(array)) |shape| {
+    fn hostBoxedArrayIndexByIntVector(self: *Session, array: *const HostBoxedArray, selector: HostIntArrayView) KError!Value {
+        const len = hostIntArrayViewLen(selector);
+        var out = std.ArrayList(Value).empty;
+        defer out.deinit(self.allocator);
+        for (0..len) |sel_idx| {
+            const idx = try normalizeIndex(hostIntViewItem(selector, sel_idx), array.len());
+            try out.append(self.allocator, array.items[idx]);
+        }
+        return try self.createManagedHostBoxedArray(out.items);
+    }
+
+    fn hostDenseIndexByIntDenseView(self: *Session, array: *const HostDenseArray, selector: HostIntDenseView) KError!Value {
+        if (selector == .dense) return try self.hostDenseIndexByIntVector(array, selector.dense);
+        if (hostDenseNonVectorShape(array)) |shape| {
             if (shape.rank != 2) return error.Unsupported;
             return try self.hostNumericMatrixIndexByIntDenseView(array, selector, @intCast(shape.shape[0]), @intCast(shape.shape[1]));
         }
@@ -11927,16 +12775,6 @@ const DenseElementwiseKind = union(enum) {
                 }
                 return try self.createManagedHostFloatArray(out.items);
             },
-            .boxed => |items| {
-                var out = std.ArrayList(Value).empty;
-                defer out.deinit(self.allocator);
-                try out.ensureTotalCapacity(self.allocator, len);
-                for (0..len) |idx| {
-                    const source_idx = try normalizeIndex(try hostIntDenseViewItem(selector, idx), items.len);
-                    try out.append(self.allocator, items[source_idx]);
-                }
-                return try self.createManagedHostBoxedArray(out.items);
-            },
             else => {
                 const view = hostIntArrayView(array).?;
                 var out = std.ArrayList(i64).empty;
@@ -11951,6 +12789,19 @@ const DenseElementwiseKind = union(enum) {
         }
     }
 
+    fn hostBoxedArrayIndexByIntDenseView(self: *Session, array: *const HostBoxedArray, selector: HostIntDenseView) KError!Value {
+        if (selector == .dense) return try self.hostBoxedArrayIndexByIntVector(array, selector.dense);
+        const len = hostIntDenseViewLen(selector);
+        var out = std.ArrayList(Value).empty;
+        defer out.deinit(self.allocator);
+        try out.ensureTotalCapacity(self.allocator, len);
+        for (0..len) |idx| {
+            const source_idx = try normalizeIndex(try hostIntDenseViewItem(selector, idx), array.len());
+            try out.append(self.allocator, array.items[source_idx]);
+        }
+        return try self.createManagedHostBoxedArray(out.items);
+    }
+
     fn applyRangeIotaIndex(self: *Session, handle: *const NumericArray, selector: Value) KError!Value {
         const structural = NumericStructuralView{ .handle = handle };
         return switch (selector.tag()) {
@@ -11961,7 +12812,7 @@ const DenseElementwiseKind = union(enum) {
                     if (try hostIntDenseViewArithmeticSlice(view, outer_len)) |slice| {
                         break :blk (try numericStructuralArithmeticSliceValue(self, structural, slice)).?;
                     }
-                    break :blk try self.applyHostArrayIndex(try hostStructuralArrayValue(self, Value.array(handle)), selector);
+                    break :blk try self.applyHostArrayIndex(try hostStructuralArrayForHandle(self, @constCast(handle)), selector);
                 } else switch (view) {
                     .dense => |dense| switch (dense) {
                         .bit => |bits| blk: {
@@ -12009,7 +12860,7 @@ const DenseElementwiseKind = union(enum) {
                 if (try self.tryScalarIntBoolMonad(.sub, value)) |result| break :blk result;
                 break :blk switch (value.tag()) {
                     .float => try self.floatValue(-value.asFloat()),
-                    .array => try self.applyDenseMonad(.sub, value),
+                    .array => try self.applyNumericMonad(.sub, value),
                     else => error.Type,
                 };
             },
@@ -12017,7 +12868,7 @@ const DenseElementwiseKind = union(enum) {
                 if (try self.tryScalarIntBoolMonad(.div, value)) |result| break :blk result;
                 break :blk switch (value.tag()) {
                     .float => try self.floatValue(std.math.sqrt(value.asFloat())),
-                    .array => try self.applyDenseMonad(.div, value),
+                    .array => try self.applyNumericMonad(.div, value),
                     else => error.Type,
                 };
             },
@@ -12029,7 +12880,7 @@ const DenseElementwiseKind = union(enum) {
                 if (scalarIntLikeValue(value)) |int_value| break :blk try self.floatValue(applyFloatMonadOp(op, @floatFromInt(int_value)));
                 break :blk switch (value.tag()) {
                     .float => try self.floatValue(applyFloatMonadOp(op, value.asFloat())),
-                    .array => try self.applyDenseMonad(op, value),
+                    .array => try self.applyNumericMonad(op, value),
                     else => error.Type,
                 };
             },
@@ -12047,6 +12898,7 @@ const DenseElementwiseKind = union(enum) {
             .take => error.Arity,
             .floor => try self.floorValue(value),
             .drop => error.Arity,
+            .null_fill_without => try self.nullValue(value),
             .sort => try self.sortValue(value),
             .equal => error.Arity,
             .reshape => error.Arity,
@@ -12061,9 +12913,25 @@ const DenseElementwiseKind = union(enum) {
                 try self.uniqueValue(value),
             .find => error.Arity,
             .eval_string => try self.evalStringValue(value),
+            .load => try self.loadValue(value),
+            .rotcacheview => try self.rotcacheViewValue(value),
             .grad, .valuegrad => error.Type,
-            .prng => error.Arity,
+            .prng, .rotcache, .rotcacheupdate, .rmsnorm => error.Arity,
         };
+    }
+
+    fn bangValues(self: *Session, left: Value, right: Value) KError!Value {
+        if (try self.promoteRenderableNumericDyadOperands(left, right)) |operands| {
+            return try self.bangValues(operands.left, operands.right);
+        }
+        if (try self.tryScalarIntBoolDyad(.iota, left, right)) |result| return result;
+        if (hasArrayOperand(left, right) and
+            valueNumericMode(left) != null and valueNumericMode(left) != .float and
+            valueNumericMode(right) != null and valueNumericMode(right) != .float)
+        {
+            return try self.applyHostArrayDyad(.iota, left, right);
+        }
+        return error.Type;
     }
 
     fn flipValue(self: *Session, value: Value) KError!Value {
@@ -12092,8 +12960,7 @@ const DenseElementwiseKind = union(enum) {
                 break :blk try newReshapeViewValue(self, singleton, numericShapeSnapshotMatrix(1, 1));
             },
             .array => switch (value.arrayKind()) {
-                .host_array => blk: {
-                    if (std.meta.activeTag(value.asHostArray().storage) != .boxed) break :blk error.Type;
+                .host_boxed_array => blk: {
                     break :blk try self.createManagedHostBoxedArray(&[_]Value{value});
                 },
                 .host_string, .host_string_view => try self.createManagedHostBoxedArray(&[_]Value{value}),
@@ -12114,7 +12981,7 @@ const DenseElementwiseKind = union(enum) {
         if (try self.tryScalarIntBoolMonad(.sub, value)) |result| return result;
         return switch (value.tag()) {
             .float => try self.floatValue(-value.asFloat()),
-            .array => try self.applyDenseMonad(.sub, value),
+            .array => try self.applyNumericMonad(.sub, value),
             else => error.Type,
         };
     }
@@ -12123,34 +12990,59 @@ const DenseElementwiseKind = union(enum) {
         if (try self.tryScalarIntBoolMonad(.div, value)) |result| return result;
         return switch (value.tag()) {
             .float => try self.floatValue(std.math.sqrt(value.asFloat())),
-            .array => try self.applyDenseMonad(.div, value),
+            .array => try self.applyNumericMonad(.div, value),
             else => error.Type,
         };
     }
 
-    fn scalarIntLikeValue(value: Value) ?i64 {
-        return switch (value.raw & Value.tag_mask) {
-            Value.int_tag => @as(i64, @bitCast(value.raw)) >> Value.tag_bits,
-            Value.boxed_int_tag => value.asBoxedInt().value,
-            Value.bool_tag => @intFromBool(value.asBool()),
-            else => null,
+fn scalarIntLikeValue(value: Value) ?i64 {
+    return switch (value.raw & Value.tag_mask) {
+        Value.int_tag => @as(i64, @bitCast(value.raw)) >> Value.tag_bits,
+        Value.boxed_int_tag => value.asBoxedInt().value,
+        Value.bool_tag => @intFromBool(value.asBool()),
+        else => null,
+    };
+}
+
+fn tryScalarIntBoolDyad(self: *Session, op: BuiltinId, left: Value, right: Value) KError!?Value {
+    const left_value = scalarIntLikeValue(left) orelse return null;
+    const right_value = scalarIntLikeValue(right) orelse return null;
+    return switch (op) {
+        .add => try self.addIntValue(left_value, right_value),
+        .sub => try self.subIntValue(left_value, right_value),
+        .mul => try self.mulIntValue(left_value, right_value),
+        .div => try self.floatValue(@as(f64, @floatFromInt(left_value)) / @as(f64, @floatFromInt(right_value))),
+        .iota => try self.intValue(bangIntOp(left_value, right_value)),
+        .minimum => try self.intValue(@min(left_value, right_value)),
+        .maximum => try self.intValue(@max(left_value, right_value)),
+        .less => Value.fromBool(left_value < right_value),
+        .more => Value.fromBool(left_value > right_value),
+        else => return error.Unsupported,
         };
     }
 
-    fn tryScalarIntBoolDyad(self: *Session, op: BuiltinId, left: Value, right: Value) KError!?Value {
-        const left_value = scalarIntLikeValue(left) orelse return null;
-        const right_value = scalarIntLikeValue(right) orelse return null;
-        return switch (op) {
-            .add => try self.addIntValue(left_value, right_value),
-            .sub => try self.subIntValue(left_value, right_value),
-            .mul => try self.mulIntValue(left_value, right_value),
-            .div => try self.floatValue(@as(f64, @floatFromInt(left_value)) / @as(f64, @floatFromInt(right_value))),
-            .minimum => try self.intValue(@min(left_value, right_value)),
-            .maximum => try self.intValue(@max(left_value, right_value)),
-            .less => Value.fromBool(left_value < right_value),
-            .more => Value.fromBool(left_value > right_value),
-            else => return error.Unsupported,
-        };
+    fn numericStructuralAffineOffsetValue(self: *Session, value: Value, offset: i64) KError!?Value {
+        const handle = valueNumericHandle(value) orelse return null;
+        if (!numericArrayIsRangeIota(handle)) return null;
+        const start = try checkedIntOp(.add, handle.range_iota.start, offset);
+        return try newRangeIotaValueWithShape(
+            self,
+            .managed,
+            numericArrayRangeLen(handle),
+            start,
+            handle.range_iota.step,
+            numericShapeSnapshotFromHandle(handle),
+        );
+    }
+
+    fn tryAffineRangeAddValues(self: *Session, left: Value, right: Value) KError!?Value {
+        if (scalarIntLikeValue(left)) |offset| {
+            if (try self.numericStructuralAffineOffsetValue(right, offset)) |result| return result;
+        }
+        if (scalarIntLikeValue(right)) |offset| {
+            if (try self.numericStructuralAffineOffsetValue(left, offset)) |result| return result;
+        }
+        return null;
     }
 
     fn tryScalarIntBoolMonad(self: *Session, op: BuiltinId, value: Value) KError!?Value {
@@ -12162,6 +13054,105 @@ const DenseElementwiseKind = union(enum) {
             .div => try self.floatValue(std.math.sqrt(@as(f64, @floatFromInt(int_value)))),
             else => return error.Unsupported,
         };
+    }
+
+    fn loadPathBytes(value: Value) ?[]const u8 {
+        return stringBytes(value);
+    }
+
+    fn loadTensorNameBytes(value: Value) ?[]const u8 {
+        return symbolBytes(value) orelse stringBytes(value);
+    }
+
+    fn loadedSafetensorsTensorValue(self: *Session, store: *const LoadedSafetensorsStore, index: usize) KError!Value {
+        const bundle = store.bundle.asHostBoxedArray();
+        if (bundle.len() != 2) return error.Internal;
+        const values = bundle.items[1];
+        if (values.tag() != .array or values.arrayKind() != .host_boxed_array) return error.Internal;
+        const items = values.asHostBoxedArray();
+        if (index >= items.len()) return error.Internal;
+        return self.shareValue(items.items[index]);
+    }
+
+    fn ensureLoadedSafetensors(self: *Session, path: []const u8) KError!*LoadedSafetensorsStore {
+        if (comptime !runtime_has_mlx) return error.Unsupported;
+        if (!std.mem.endsWith(u8, path, ".safetensors")) return error.Unsupported;
+        if (self.loaded_safetensors.getPtr(path)) |store| return store;
+
+        const ctx = try self.backendContext();
+        const named = mlx.loadSafetensors(self.allocator, ctx.*, path) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return mapMlxError(err),
+        };
+        defer mlx.deinitNamedArrays(self.allocator, named);
+
+        const names = try self.allocator.alloc(Value, named.len);
+        defer self.allocator.free(names);
+        const tensors = try self.allocator.alloc(Value, named.len);
+        defer self.allocator.free(tensors);
+
+        var initialized_tensor_count: usize = 0;
+        errdefer {
+            for (tensors[0..initialized_tensor_count]) |value| self.releaseValue(value);
+        }
+
+        for (named, 0..) |*entry, idx| {
+            names[idx] = try self.frozenHostSymbol(entry.name);
+            tensors[idx] = try self.wrapManagedBackendArray(entry.array);
+            entry.array = mlx.Array.empty();
+            initialized_tensor_count += 1;
+        }
+
+        const names_box = try self.createManagedHostBoxedArray(names);
+        errdefer self.releaseValue(names_box);
+        const tensors_box = try self.createManagedHostBoxedArray(tensors);
+        errdefer self.releaseValue(tensors_box);
+        for (tensors[0..initialized_tensor_count]) |value| self.releaseValue(value);
+        initialized_tensor_count = 0;
+
+        const bundle = try self.createManagedHostBoxedArray(&[_]Value{ names_box, tensors_box });
+        errdefer self.releaseValue(bundle);
+        self.releaseValue(names_box);
+        self.releaseValue(tensors_box);
+
+        const entries = try self.allocator.alloc(LoadedSafetensorsLookupEntry, names.len);
+        errdefer self.allocator.free(entries);
+        for (entries, 0..) |*entry, idx| {
+            entry.* = .{
+                .symbol = names[idx],
+                .index = idx,
+            };
+        }
+
+        const owned_path = try self.allocator.dupe(u8, path);
+        errdefer self.allocator.free(owned_path);
+        errdefer {
+            self.releaseValue(bundle);
+            self.allocator.free(entries);
+        }
+
+        try self.loaded_safetensors.put(owned_path, .{
+            .bundle = bundle,
+            .entries = entries,
+        });
+        return self.loaded_safetensors.getPtr(owned_path).?;
+    }
+
+    fn loadValue(self: *Session, value: Value) KError!Value {
+        const path = loadPathBytes(value) orelse return error.Type;
+        const store = try self.ensureLoadedSafetensors(path);
+        return self.shareValue(store.bundle);
+    }
+
+    fn loadTensorValue(self: *Session, path_value: Value, name_value: Value) KError!Value {
+        const path = loadPathBytes(path_value) orelse return error.Type;
+        const name = loadTensorNameBytes(name_value) orelse return error.Type;
+        const store = try self.ensureLoadedSafetensors(path);
+        for (store.entries) |entry| {
+            const symbol = symbolBytes(entry.symbol) orelse return error.Internal;
+            if (std.mem.eql(u8, symbol, name)) return try self.loadedSafetensorsTensorValue(store, entry.index);
+        }
+        return error.Name;
     }
 
     fn scalarRandomCountValue(value: Value) ?i64 {
@@ -12263,20 +13254,18 @@ const DenseElementwiseKind = union(enum) {
                 }
                 return result;
             },
-            .host_array => switch (right.asHostArray().storage) {
-                .boxed => |boxed| {
-                    var bytes_len: usize = 0;
-                    for (boxed) |item| {
-                        const piece = stringBytes(item) orelse return error.Type;
-                        bytes_len = std.math.add(usize, bytes_len, piece.len) catch return error.Unsupported;
-                    }
-                    const result = try self.joinBoxedStringValues(boxed, sep, bytes_len);
-                    if (comptime enable_string_instrumentation) {
-                        self.string_perf.join_helper_ns += @intCast(stringPerfNow() - helper_start);
-                    }
-                    return result;
-                },
-                else => return error.Type,
+            .host_boxed_array => {
+                const boxed = right.asHostBoxedArray().items;
+                var bytes_len: usize = 0;
+                for (boxed) |item| {
+                    const piece = stringBytes(item) orelse return error.Type;
+                    bytes_len = std.math.add(usize, bytes_len, piece.len) catch return error.Unsupported;
+                }
+                const result = try self.joinBoxedStringValues(boxed, sep, bytes_len);
+                if (comptime enable_string_instrumentation) {
+                    self.string_perf.join_helper_ns += @intCast(stringPerfNow() - helper_start);
+                }
+                return result;
             },
             else => return error.Type,
         }
@@ -12286,14 +13275,11 @@ const DenseElementwiseKind = union(enum) {
         if (value.tag() != .array) return false;
         return switch (value.arrayKind()) {
             .host_string_list => true,
-            .host_array => switch (value.asHostArray().storage) {
-                .boxed => |boxed| blk: {
-                    for (boxed) |item| {
-                        if (stringBytes(item) == null) break :blk false;
-                    }
-                    break :blk true;
-                },
-                else => false,
+            .host_boxed_array => blk: {
+                for (value.asHostBoxedArray().items) |item| {
+                    if (stringBytes(item) == null) break :blk false;
+                }
+                break :blk true;
             },
             else => false,
         };
@@ -12592,11 +13578,13 @@ const DenseElementwiseKind = union(enum) {
             .sub => self.subValues(left, right),
             .mul => self.mulValues(left, right),
             .div => self.divValues(left, right),
+            .iota => self.bangValues(left, right),
             .minimum => self.minimumValues(left, right),
             .maximum => self.maximumValues(left, right),
             .concat => self.concatValues(left, right),
             .take => self.takeValues(left, right),
             .drop => self.dropValues(left, right),
+            .null_fill_without => self.fillWithoutValues(left, right),
             .less => self.lessValues(left, right),
             .more => self.moreValues(left, right),
             .equal => self.equalValues(left, right),
@@ -12605,11 +13593,15 @@ const DenseElementwiseKind = union(enum) {
             .contains => self.containsValues(left, right),
             .split => self.splitValues(left, right),
             .join => self.joinValues(left, right),
+            .load => self.loadTensorValue(left, right),
+            .rotcache => self.rotcacheInitValue(left, right),
+            .rotcacheupdate => self.rotcacheUpdateValue(left, right),
             .find => if (scalarRandomCountValue(left)) |count|
                 self.randomDyadValue(count, right)
             else
                 self.findValues(left, right),
             .prng => error.Arity,
+            .rmsnorm => error.Arity,
             else => error.Arity,
         };
     }
@@ -12630,6 +13622,28 @@ const DenseElementwiseKind = union(enum) {
             .float => value.asFloat(),
             else => null,
         };
+    }
+
+    fn applyRmsNormBuiltin(self: *Session, args: []const Value) KError!Value {
+        if (args.len != 3) return error.Arity;
+        if (comptime !runtime_has_mlx) return error.Unsupported;
+
+        const eps = scalarNumericFloatValue(args[2]) orelse return error.Type;
+        _ = valueNumericMode(args[0]) orelse return error.Type;
+        _ = valueNumericMode(args[1]) orelse return error.Type;
+
+        var x = try self.materializeBackendArray(args[0]);
+        defer x.deinit();
+        var w = try self.materializeBackendArray(args[1]);
+        defer w.deinit();
+
+        if (x.ndim() == 0) return error.Type;
+        if (w.ndim() != 1) return error.Type;
+        if (w.shape()[0] != x.shape()[x.ndim() - 1]) return error.Type;
+
+        const ctx = try self.backendContext();
+        const out = mlx.Array.rmsNorm(ctx.*, x, w, @floatCast(eps)) catch |err| return mapMlxError(err);
+        return try self.wrapManagedBackendArray(out);
     }
 
     fn stringBytes(value: Value) ?[]const u8 {
@@ -12677,42 +13691,39 @@ const DenseElementwiseKind = union(enum) {
                 else
                     false,
                 .host_symbol => right.arrayKind() == .host_symbol and std.mem.eql(u8, hostTextBytes(left.asHostSymbol()), hostTextBytes(right.asHostSymbol())),
-                .host_array, .mlx_array, .numeric_array => blk: {
+                .host_boxed_array => blk: {
+                    if (right.arrayKind() != .host_boxed_array) break :blk false;
+                    const left_items = left.asHostBoxedArray().items;
+                    const right_items = right.asHostBoxedArray().items;
+                    if (left_items.len != right_items.len) break :blk false;
+                    for (left_items, right_items) |left_item, right_item| {
+                        if (!try self.valueStructuralEqual(left_item, right_item)) break :blk false;
+                    }
+                    break :blk true;
+                },
+                .host_dense_array, .backend_array, .numeric_array => blk: {
                     switch (right.arrayKind()) {
-                        .host_array, .mlx_array, .numeric_array => {},
+                        .host_dense_array, .backend_array, .numeric_array => {},
                         else => break :blk false,
                     }
-                    const lhs = try hostStructuralArrayValue(self, left);
-                    const rhs = try hostStructuralArrayValue(self, right);
+                    const lhs = try numericHostArrayValue(self, left);
+                    const rhs = try numericHostArrayValue(self, right);
                     if (lhs.len() != rhs.len()) break :blk false;
-                    if (hostArrayNumericMode(lhs) != null and hostArrayNumericMode(rhs) != null) {
+                    if (left.arraySubkind() != .host_boxed_array and right.arraySubkind() != .host_boxed_array) {
                         var lhs_dims_buf: [numeric_array_max_rank]i32 = [_]i32{0} ** numeric_array_max_rank;
                         var rhs_dims_buf: [numeric_array_max_rank]i32 = [_]i32{0} ** numeric_array_max_rank;
-                        if (!std.mem.eql(i32, hostArrayShapeDims(lhs, &lhs_dims_buf), hostArrayShapeDims(rhs, &rhs_dims_buf))) break :blk false;
+                        if (!std.mem.eql(i32, hostDenseShapeDims(lhs, &lhs_dims_buf), hostDenseShapeDims(rhs, &rhs_dims_buf))) break :blk false;
                         for (0..lhs.len()) |idx| {
                             if (try numericFloatAt(left, idx) != try numericFloatAt(right, idx)) break :blk false;
                         }
                         break :blk true;
                     }
-                    switch (lhs.storage) {
-                        .boxed => |left_items| {
-                            if (std.meta.activeTag(rhs.storage) != .boxed) break :blk false;
-                            const right_items = rhs.storage.boxed;
-                            for (left_items, right_items) |left_item, right_item| {
-                                if (!try self.valueStructuralEqual(left_item, right_item)) break :blk false;
-                            }
-                            break :blk true;
-                        },
-                        else => {
-                            if (std.meta.activeTag(rhs.storage) == .boxed) break :blk false;
-                            for (0..lhs.len()) |idx| {
-                                const left_item = try self.hostArrayIndexScalar(lhs, @intCast(idx));
-                                const right_item = try self.hostArrayIndexScalar(rhs, @intCast(idx));
-                                if (!try self.valueStructuralEqual(left_item, right_item)) break :blk false;
-                            }
-                            break :blk true;
-                        },
+                    for (0..lhs.len()) |idx| {
+                        const left_item = try self.hostDenseIndexScalar(lhs, @intCast(idx));
+                        const right_item = try self.hostDenseIndexScalar(rhs, @intCast(idx));
+                        if (!try self.valueStructuralEqual(left_item, right_item)) break :blk false;
                     }
+                    break :blk true;
                 },
                 else => false,
             },
@@ -12728,12 +13739,94 @@ const DenseElementwiseKind = union(enum) {
         return try self.managedHostString(rendered);
     }
 
+    fn castTagBytes(value: Value) ?[]const u8 {
+        return symbolBytes(value) orelse stringBytes(value);
+    }
+
+    fn castTagBackendDtype(tag: []const u8) ?c.mlx_dtype {
+        if (std.mem.eql(u8, tag, "f16") or std.mem.eql(u8, tag, "float16")) return c.MLX_FLOAT16;
+        if (std.mem.eql(u8, tag, "f32") or std.mem.eql(u8, tag, "float32")) return c.MLX_FLOAT32;
+        if (std.mem.eql(u8, tag, "f64") or std.mem.eql(u8, tag, "float64")) return c.MLX_FLOAT64;
+        if (std.mem.eql(u8, tag, "bf16") or std.mem.eql(u8, tag, "bfloat16")) return c.MLX_BFLOAT16;
+        return null;
+    }
+
+    fn truncFloatToInt64(value: f64) KError!i64 {
+        if (!std.math.isFinite(value)) return error.Type;
+        const truncated = @trunc(value);
+        const min_i64_f64 = @as(f64, @floatFromInt(std.math.minInt(i64)));
+        const max_i64_f64 = @as(f64, @floatFromInt(std.math.maxInt(i64)));
+        if (truncated < min_i64_f64 or truncated > max_i64_f64) return error.Unsupported;
+        return @intFromFloat(truncated);
+    }
+
+    fn castValueToInt(self: *Session, value: Value) KError!Value {
+        if (stringBytes(value)) |text| {
+            const parsed_int = std.fmt.parseInt(i64, text, 10) catch |parse_int_err| switch (parse_int_err) {
+                error.InvalidCharacter => blk: {
+                    const parsed_float = std.fmt.parseFloat(f64, text) catch return error.Type;
+                    break :blk try truncFloatToInt64(parsed_float);
+                },
+                else => return error.Type,
+            };
+            return try self.intValue(parsed_int);
+        }
+
+        if (scalarIntLikeValue(value)) |int_value| return try self.intValue(int_value);
+        if (value.tag() == .float) return try self.intValue(try truncFloatToInt64(value.asFloat()));
+
+        const mode = valueNumericMode(value) orelse return error.Type;
+        const len = numericFlatLen(value) orelse return error.Type;
+        var out = std.ArrayList(i64).empty;
+        defer out.deinit(self.allocator);
+        try out.ensureTotalCapacity(self.allocator, len);
+        switch (mode) {
+            .int => for (0..len) |idx| try out.append(self.allocator, try numericIntAt(value, idx)),
+            .float => for (0..len) |idx| try out.append(self.allocator, try truncFloatToInt64(try numericFloatAt(value, idx))),
+        }
+        const casted = try self.createManagedHostIntArray(out.items);
+        return try applyNonVectorNumericShapeToValue(self, casted, valueNonVectorNumericShape(value));
+    }
+
+    fn castValueToFloat(self: *Session, value: Value) KError!Value {
+        if (stringBytes(value)) |text| {
+            const parsed = std.fmt.parseFloat(f64, text) catch return error.Type;
+            return try self.floatValue(parsed);
+        }
+
+        if (scalarNumericFloatValue(value)) |float_value| return try self.floatValue(float_value);
+
+        const mode = valueNumericMode(value) orelse return error.Type;
+        const len = numericFlatLen(value) orelse return error.Type;
+        var out = std.ArrayList(f64).empty;
+        defer out.deinit(self.allocator);
+        try out.ensureTotalCapacity(self.allocator, len);
+        switch (mode) {
+            .int => for (0..len) |idx| try out.append(self.allocator, @floatFromInt(try numericIntAt(value, idx))),
+            .float => for (0..len) |idx| try out.append(self.allocator, try numericFloatAt(value, idx)),
+        }
+        const casted = try self.createManagedHostFloatArray(out.items);
+        return try applyNonVectorNumericShapeToValue(self, casted, valueNonVectorNumericShape(value));
+    }
+
+    fn castValueToBackendDtype(self: *Session, value: Value, target_dtype: c.mlx_dtype) KError!Value {
+        if (valueNumericMode(value) == null) return error.Type;
+        var array = try self.materializeBackendArray(value);
+        errdefer array.deinit();
+        try self.castOwnedBackendArrayToDtype(&array, target_dtype);
+        return try self.wrapManagedBackendArray(array);
+    }
+
     fn castValues(self: *Session, left: Value, right: Value) KError!Value {
-        const kind = symbolBytes(left) orelse return error.Type;
-        const text = stringBytes(right) orelse return error.Type;
-        if (std.mem.eql(u8, kind, "i")) {
-            const parsed = std.fmt.parseInt(i64, text, 10) catch return error.Type;
-            return try self.intValue(parsed);
+        const kind = castTagBytes(left) orelse return error.Type;
+        if (std.mem.eql(u8, kind, "i") or std.mem.eql(u8, kind, "int") or std.mem.eql(u8, kind, "int32")) {
+            return try self.castValueToInt(right);
+        }
+        if (std.mem.eql(u8, kind, "n") or std.mem.eql(u8, kind, "f") or std.mem.eql(u8, kind, "float")) {
+            return try self.castValueToFloat(right);
+        }
+        if (castTagBackendDtype(kind)) |target_dtype| {
+            return try self.castValueToBackendDtype(right, target_dtype);
         }
         return error.Unsupported;
     }
@@ -12809,8 +13902,7 @@ const DenseElementwiseKind = union(enum) {
             }
             return try self.createManagedHostIntArray(out.items);
         }
-        if (value.tag() != .array or value.arrayKind() != .host_array or std.meta.activeTag(value.asHostArray().storage) != .boxed) return error.Type;
-        const items = value.asHostArray().storage.boxed;
+        const items = boxedArrayItems(value) orelse return error.Type;
         var out = std.ArrayList(Value).empty;
         defer out.deinit(self.allocator);
         for (items) |item| {
@@ -12874,6 +13966,299 @@ const DenseElementwiseKind = union(enum) {
         }
     }
 
+    const rotcache_state_len = 3;
+    const rotcache_payload_index = 0;
+    const rotcache_max_index = 1;
+    const rotcache_offset_index = 2;
+
+    const RotCacheState = struct {
+        array: *HostBoxedArray,
+        payload: Value,
+        max_size: usize,
+        offset: usize,
+    };
+
+    fn rotcachePayloadRows(value: Value) KError!usize {
+        const handle = shapedNumericHandle(value) orelse return error.Type;
+        if (handle.rank == 0) return error.Type;
+        return @intCast(handle.shape[0]);
+    }
+
+    fn rotcachePayloadMatches(left: Value, right: Value) KError!void {
+        const left_handle = shapedNumericHandle(left) orelse return error.Type;
+        const right_handle = shapedNumericHandle(right) orelse return error.Type;
+        if (left_handle.rank == 0 or right_handle.rank == 0) return error.Type;
+        if (left_handle.rank != right_handle.rank) return error.Type;
+        if (valueNumericMode(left) == null or valueNumericMode(right) == null) return error.Type;
+        if (!std.mem.eql(i32, left_handle.shape[1..left_handle.rank], right_handle.shape[1..right_handle.rank])) return error.Type;
+    }
+
+    fn parseRotcacheState(value: Value) KError!RotCacheState {
+        if (value.tag() != .array or value.arrayKind() != .host_boxed_array) return error.Type;
+        const array = @constCast(value.asHostBoxedArray());
+        if (array.header.owner != .managed or array.items.len != rotcache_state_len) return error.Type;
+        const payload = array.items[rotcache_payload_index];
+        _ = try rotcachePayloadRows(payload);
+        const max_i64 = scalarIntLikeValue(array.items[rotcache_max_index]) orelse return error.Type;
+        const offset_i64 = scalarIntLikeValue(array.items[rotcache_offset_index]) orelse return error.Type;
+        if (max_i64 <= 0 or offset_i64 < 0) return error.Type;
+        const max_size: usize = @intCast(max_i64);
+        if ((try rotcachePayloadRows(payload)) > max_size) return error.Type;
+        return .{
+            .array = array,
+            .payload = payload,
+            .max_size = max_size,
+            .offset = @intCast(offset_i64),
+        };
+    }
+
+    fn replaceManagedHostBoxedArrayItem(self: *Session, array: *HostBoxedArray, idx: usize, value: Value) KError!void {
+        if (array.header.owner != .managed or idx >= array.items.len) return error.Type;
+        const retained = try self.retainEscapedValue(value);
+        const old = array.items[idx];
+        array.items[idx] = retained;
+        self.releaseValue(old);
+    }
+
+    fn rotcacheWantsBackend(value: Value) bool {
+        if (!runtime_has_mlx) return false;
+        if (isBackendArrayValue(value) or hasBackendRealization(value)) return true;
+        const handle = valueNumericHandle(value) orelse return false;
+        return handle.preferred == .mlx;
+    }
+
+    fn rotcacheHasFixedBackendBuffer(state: RotCacheState) bool {
+        if (!runtime_has_mlx) return false;
+        if (!rotcacheWantsBackend(state.payload)) return false;
+        const rows = rotcachePayloadRows(state.payload) catch return false;
+        return rows == state.max_size;
+    }
+
+    fn sliceBackendAxis0Value(self: *Session, value: Value, start: usize, count: usize) KError!Value {
+        const handle = shapedNumericHandle(value) orelse return error.Type;
+        if (handle.rank == 0) return error.Type;
+
+        var source_array = try self.materializeBackendArray(value);
+        defer source_array.deinit();
+
+        var start_buf: [numeric_array_max_rank]i32 = [_]i32{0} ** numeric_array_max_rank;
+        var stop_buf: [numeric_array_max_rank]i32 = [_]i32{0} ** numeric_array_max_rank;
+        var stride_buf: [numeric_array_max_rank]i32 = [_]i32{1} ** numeric_array_max_rank;
+        for (0..handle.rank) |idx| stop_buf[idx] = handle.shape[idx];
+        start_buf[0] = std.math.cast(i32, start) orelse return error.Unsupported;
+        stop_buf[0] = std.math.cast(i32, start + count) orelse return error.Unsupported;
+
+        const ctx = try self.backendContext();
+        const out = mlx.Array.slice(
+            ctx.*,
+            source_array,
+            start_buf[0..handle.rank],
+            stop_buf[0..handle.rank],
+            stride_buf[0..handle.rank],
+        ) catch |err| return mapMlxError(err);
+        return try self.wrapManagedBackendArray(out);
+    }
+
+    fn zeroBackendAxis0LikeValue(self: *Session, value: Value, rows: usize) KError!Value {
+        const handle = shapedNumericHandle(value) orelse return error.Type;
+        if (handle.rank == 0) return error.Type;
+
+        var source_array = try self.materializeBackendArray(value);
+        defer source_array.deinit();
+
+        var dims_buf: [numeric_array_max_rank]i32 = handle.shape;
+        dims_buf[0] = std.math.cast(i32, rows) orelse return error.Unsupported;
+
+        const out = mlx.Array.zeros((try self.backendContext()).*, dims_buf[0..handle.rank], source_array.dtype()) catch |err| return mapMlxError(err);
+        return try self.wrapManagedBackendArray(out);
+    }
+
+    fn sliceUpdateBackendAxis0Value(self: *Session, value: Value, start: usize, update: Value) KError!Value {
+        const value_handle = shapedNumericHandle(value) orelse return error.Type;
+        if (value_handle.rank == 0) return error.Type;
+        try rotcachePayloadMatches(value, update);
+        const update_rows = try rotcachePayloadRows(update);
+        if (update_rows == 0) return self.shareValue(value);
+        if (start + update_rows > @as(usize, @intCast(value_handle.shape[0]))) return error.Type;
+
+        var source_array = try self.materializeBackendArray(value);
+        defer source_array.deinit();
+        var update_array = try self.materializeBackendArray(update);
+        defer update_array.deinit();
+
+        var start_buf: [numeric_array_max_rank]i32 = [_]i32{0} ** numeric_array_max_rank;
+        var stop_buf: [numeric_array_max_rank]i32 = [_]i32{0} ** numeric_array_max_rank;
+        var stride_buf: [numeric_array_max_rank]i32 = [_]i32{1} ** numeric_array_max_rank;
+        for (0..value_handle.rank) |idx| stop_buf[idx] = value_handle.shape[idx];
+        start_buf[0] = std.math.cast(i32, start) orelse return error.Unsupported;
+        stop_buf[0] = std.math.cast(i32, start + update_rows) orelse return error.Unsupported;
+
+        const out = mlx.Array.sliceUpdate(
+            (try self.backendContext()).*,
+            source_array,
+            update_array,
+            start_buf[0..value_handle.rank],
+            stop_buf[0..value_handle.rank],
+            stride_buf[0..value_handle.rank],
+        ) catch |err| return mapMlxError(err);
+        return try self.wrapManagedBackendArray(out);
+    }
+
+    fn concatBackendAxis0Values(self: *Session, left: Value, right: Value) KError!Value {
+        var arrays = [_]mlx.Array{
+            try self.materializeBackendArray(left),
+            try self.materializeBackendArray(right),
+        };
+        defer arrays[0].deinit();
+        defer arrays[1].deinit();
+        const out = try mlxConcatAxis0((try self.backendContext()).*, arrays[0..]);
+        return try self.wrapManagedBackendArray(out);
+    }
+
+    fn rotcacheTailValue(self: *Session, value: Value, max_size: usize) KError!Value {
+        const rows = try rotcachePayloadRows(value);
+        if (rows <= max_size) return self.shareValue(value);
+        const start = rows - max_size;
+        if (rotcacheWantsBackend(value)) return try self.sliceBackendAxis0Value(value, start, max_size);
+        return (try numericValueFirstAxisContiguousSliceValue(self, value, .{ .start = start, .len = max_size })) orelse error.Type;
+    }
+
+    fn rotcacheConcatAndTailValue(self: *Session, left: Value, right: Value, max_size: usize) KError!Value {
+        const left_rows = try rotcachePayloadRows(left);
+        const right_rows = try rotcachePayloadRows(right);
+        if (right_rows == 0) return self.shareValue(left);
+
+        const combined_rows = std.math.add(usize, left_rows, right_rows) catch return error.Unsupported;
+        if (rotcacheWantsBackend(left) or rotcacheWantsBackend(right)) {
+            const combined = try self.concatBackendAxis0Values(left, right);
+            errdefer self.releaseValue(combined);
+            if (combined_rows <= max_size) return combined;
+            const trimmed = try self.sliceBackendAxis0Value(combined, combined_rows - max_size, max_size);
+            self.releaseValue(combined);
+            return trimmed;
+        }
+
+        const combined = try self.concatValues(left, right);
+        errdefer self.releaseValue(combined);
+        if (combined_rows <= max_size) return combined;
+        const trimmed = (try numericValueFirstAxisContiguousSliceValue(
+            self,
+            combined,
+            .{ .start = combined_rows - max_size, .len = max_size },
+        )) orelse return error.Type;
+        self.releaseValue(combined);
+        return trimmed;
+    }
+
+    fn rotcacheInitBackendValue(self: *Session, left: Value, max_size: usize, max_i64: i64) KError!Value {
+        const payload = try self.rotcacheTailValue(left, max_size);
+        defer self.releaseValue(payload);
+        const payload_rows = try rotcachePayloadRows(payload);
+
+        const buffer = if (payload_rows == max_size)
+            self.shareValue(payload)
+        else blk: {
+            const zeros = try self.zeroBackendAxis0LikeValue(payload, max_size);
+            errdefer self.releaseValue(zeros);
+            if (payload_rows == 0) break :blk zeros;
+            const filled = try self.sliceUpdateBackendAxis0Value(zeros, 0, payload);
+            self.releaseValue(zeros);
+            break :blk filled;
+        };
+        defer self.releaseValue(buffer);
+
+        return try self.createManagedHostBoxedArray(&[_]Value{
+            buffer,
+            try self.intValue(max_i64),
+            try self.intValue(@intCast(payload_rows)),
+        });
+    }
+
+    fn rotcacheViewBackendValue(self: *Session, payload: Value, max_size: usize, offset: usize) KError!Value {
+        const used = @min(offset, max_size);
+        if (used == 0) return try self.sliceBackendAxis0Value(payload, 0, 0);
+        if (offset < max_size) return try self.sliceBackendAxis0Value(payload, 0, used);
+
+        const write_pos = offset % max_size;
+        if (write_pos == 0) return self.shareValue(payload);
+
+        const head = try self.sliceBackendAxis0Value(payload, write_pos, max_size - write_pos);
+        defer self.releaseValue(head);
+        const tail = try self.sliceBackendAxis0Value(payload, 0, write_pos);
+        defer self.releaseValue(tail);
+        return try self.concatBackendAxis0Values(head, tail);
+    }
+
+    fn rotcacheUpdateBackendValue(self: *Session, state: RotCacheState, right: Value) KError!Value {
+        const right_rows = try rotcachePayloadRows(right);
+        if (right_rows == 0) return try self.rotcacheViewBackendValue(state.payload, state.max_size, state.offset);
+
+        if (right_rows >= state.max_size) {
+            const tail = try self.rotcacheTailValue(right, state.max_size);
+            try self.replaceManagedHostBoxedArrayItem(state.array, rotcache_payload_index, tail);
+            try self.replaceManagedHostBoxedArrayItem(state.array, rotcache_offset_index, try self.intValue(@intCast(state.max_size)));
+            return tail;
+        }
+
+        const write_pos = if (state.offset < state.max_size) state.offset else state.offset % state.max_size;
+        const updated = if (write_pos + right_rows <= state.max_size)
+            try self.sliceUpdateBackendAxis0Value(state.payload, write_pos, right)
+        else blk: {
+            const first_len = state.max_size - write_pos;
+            const second_len = right_rows - first_len;
+
+            const head = try self.sliceBackendAxis0Value(right, 0, first_len);
+            defer self.releaseValue(head);
+            const head_written = try self.sliceUpdateBackendAxis0Value(state.payload, write_pos, head);
+            errdefer self.releaseValue(head_written);
+
+            const tail = try self.sliceBackendAxis0Value(right, first_len, second_len);
+            defer self.releaseValue(tail);
+            const wrapped = try self.sliceUpdateBackendAxis0Value(head_written, 0, tail);
+            self.releaseValue(head_written);
+            break :blk wrapped;
+        };
+        errdefer self.releaseValue(updated);
+
+        const new_offset = std.math.add(usize, state.offset, right_rows) catch return error.Unsupported;
+        try self.replaceManagedHostBoxedArrayItem(state.array, rotcache_payload_index, updated);
+        try self.replaceManagedHostBoxedArrayItem(state.array, rotcache_offset_index, try self.intValue(@intCast(new_offset)));
+
+        const view = try self.rotcacheViewBackendValue(updated, state.max_size, new_offset);
+        return view;
+    }
+
+    fn rotcacheInitValue(self: *Session, left: Value, right: Value) KError!Value {
+        const max_i64 = scalarIntLikeValue(right) orelse return error.Type;
+        if (max_i64 <= 0) return error.Type;
+        const max_size: usize = @intCast(max_i64);
+        if (rotcacheWantsBackend(left)) return try self.rotcacheInitBackendValue(left, max_size, max_i64);
+        const payload = try self.rotcacheTailValue(left, max_size);
+        defer self.releaseValue(payload);
+        return try self.createManagedHostBoxedArray(&[_]Value{
+            payload,
+            try self.intValue(max_i64),
+            try self.intValue(@intCast(try rotcachePayloadRows(payload))),
+        });
+    }
+
+    fn rotcacheUpdateValue(self: *Session, left: Value, right: Value) KError!Value {
+        const state = try parseRotcacheState(left);
+        try rotcachePayloadMatches(state.payload, right);
+        if (rotcacheHasFixedBackendBuffer(state)) return try self.rotcacheUpdateBackendValue(state, right);
+        const new_payload = try self.rotcacheConcatAndTailValue(state.payload, right, state.max_size);
+        const new_offset = std.math.add(usize, state.offset, try rotcachePayloadRows(right)) catch return error.Unsupported;
+        try self.replaceManagedHostBoxedArrayItem(state.array, rotcache_payload_index, new_payload);
+        try self.replaceManagedHostBoxedArrayItem(state.array, rotcache_offset_index, try self.intValue(@intCast(new_offset)));
+        return new_payload;
+    }
+
+    fn rotcacheViewValue(self: *Session, value: Value) KError!Value {
+        const state = try parseRotcacheState(value);
+        if (rotcacheHasFixedBackendBuffer(state)) return try self.rotcacheViewBackendValue(state.payload, state.max_size, state.offset);
+        return self.shareValue(state.payload);
+    }
+
     fn randomUniformValue(self: *Session, count_value: i64) KError!Value {
         if (count_value < 0) return error.Type;
         const count: usize = @intCast(count_value);
@@ -12928,8 +14313,8 @@ const DenseElementwiseKind = union(enum) {
             if (handle.rank != 0) return @intCast(handle.shape[0]);
         }
         return switch (value.arrayKind()) {
-            .host_array => value.asHostArray().len(),
-            .mlx_array => @intCast(value.asMlxArray().array.shape()[0]),
+            .host_dense_array => value.asHostDenseArray().len(),
+            .backend_array => @intCast(value.asBackendArray().array.shape()[0]),
             .numeric_array => null,
             else => null,
         };
@@ -12988,17 +14373,19 @@ const DenseElementwiseKind = union(enum) {
             .float => try self.randomScaleFloatValue(count_value, right.asFloat()),
             .array => if (stringBytes(right)) |text|
                 try self.randomSelectStringValue(count_value, text)
-            else
-                switch (right.arrayKind()) {
-                    .host_array, .mlx_array, .numeric_array => try self.randomSelectValue(count_value, right),
-                    else => error.Type,
-                },
+            else switch (right.arrayKind()) {
+                .host_dense_array, .backend_array, .numeric_array => try self.randomSelectValue(count_value, right),
+                else => error.Type,
+            },
             .bool, .builtin, .closure => error.Type,
         };
     }
 
     fn numericRowQueryLen(value: Value) ?usize {
         if (valueNumericMode(value) == null) return null;
+        if (valueNumericHandle(value)) |handle| {
+            if (handle.rank == 0) return 1;
+        }
         if (value.tag() != .array) return 1;
         if (valueNonVectorNumericShape(value)) |shape| {
             if (shape.rank == 2 and shape.shape[0] == 1) return @intCast(shape.shape[1]);
@@ -13033,11 +14420,128 @@ const DenseElementwiseKind = union(enum) {
         return try self.intValue(@intCast(shape.rows));
     }
 
+    fn tryFastBackendNumericVectorFindValue(self: *Session, left: Value, right: Value) KError!?Value {
+        return runtime_backend_exec.tryFastBackendNumericVectorFindValue(.{
+            .Session = Session,
+            .Value = Value,
+            .NumericArray = NumericArray,
+            .KError = KError,
+            .c = c,
+            .mlx = mlx,
+            .runtime_has_mlx = runtime_has_mlx,
+            .valueNumericMode = valueNumericMode,
+            .valueNumericMatrixShape = valueNumericMatrixShape,
+            .valueNumericHandle = valueNumericHandle,
+            .numericFlatLen = numericFlatLen,
+            .numericIntAt = numericIntAt,
+            .numericRowQueryLen = numericRowQueryLen,
+            .numericArrayIsFirstAxisSlice = numericArrayIsFirstAxisSlice,
+            .numericArrayFirstAxisSliceSource = numericArrayFirstAxisSliceSource,
+            .numericArrayFirstAxisSliceRowStart = numericArrayFirstAxisSliceRowStart,
+            .numericArrayFirstAxisSliceRowStep = numericArrayFirstAxisSliceRowStep,
+            .numericArrayIsFirstAxisIndex = numericArrayIsFirstAxisIndex,
+            .numericArrayFirstAxisIndexSource = numericArrayFirstAxisIndexSource,
+            .numericArrayFirstAxisIndexRows = numericArrayFirstAxisIndexRows,
+            .numericArrayIsFirstAxisConcat = numericArrayIsFirstAxisConcat,
+            .numericArrayFirstAxisConcatLeft = numericArrayFirstAxisConcatLeft,
+            .numericArrayFirstAxisConcatRight = numericArrayFirstAxisConcatRight,
+            .numericArrayIsReshapeView = numericArrayIsReshapeView,
+            .numericArrayReshapeSource = numericArrayReshapeSource,
+            .numericArrayIsTransposeView = numericArrayIsTransposeView,
+            .numericArrayTransposeSource = numericArrayTransposeSource,
+            .isBackendArrayValue = isBackendArrayValue,
+            .hasBackendRealization = hasBackendRealization,
+            .materializeBackendArray = Session.materializeBackendArray,
+            .backendContext = Session.backendContext,
+            .mapMlxError = mapMlxError,
+            .intValue = Session.intValue,
+            .numeric_array_max_rank = numeric_array_max_rank,
+        }, self, left, right);
+    }
+
+    fn tryFastBackendArgmaxValue(self: *Session, value: Value) KError!?Value {
+        return runtime_backend_exec.tryFastBackendArgmaxValue(.{
+            .Session = Session,
+            .Value = Value,
+            .NumericArray = NumericArray,
+            .KError = KError,
+            .c = c,
+            .mlx = mlx,
+            .enable_probe_instrumentation = enable_probe_instrumentation,
+            .runtime_has_mlx = runtime_has_mlx,
+            .valueNumericMode = valueNumericMode,
+            .valueNumericMatrixShape = valueNumericMatrixShape,
+            .numericFlatLen = numericFlatLen,
+            .valueNumericHandle = valueNumericHandle,
+            .numericIntAt = numericIntAt,
+            .numericArrayIsFirstAxisSlice = numericArrayIsFirstAxisSlice,
+            .numericArrayFirstAxisSliceSource = numericArrayFirstAxisSliceSource,
+            .numericArrayFirstAxisSliceRowStart = numericArrayFirstAxisSliceRowStart,
+            .numericArrayFirstAxisSliceRowStep = numericArrayFirstAxisSliceRowStep,
+            .numericArrayIsFirstAxisIndex = numericArrayIsFirstAxisIndex,
+            .numericArrayFirstAxisIndexSource = numericArrayFirstAxisIndexSource,
+            .numericArrayFirstAxisIndexRows = numericArrayFirstAxisIndexRows,
+            .numericArrayIsFirstAxisConcat = numericArrayIsFirstAxisConcat,
+            .numericArrayFirstAxisConcatLeft = numericArrayFirstAxisConcatLeft,
+            .numericArrayFirstAxisConcatRight = numericArrayFirstAxisConcatRight,
+            .numericArrayIsReshapeView = numericArrayIsReshapeView,
+            .numericArrayReshapeSource = numericArrayReshapeSource,
+            .numericArrayIsTransposeView = numericArrayIsTransposeView,
+            .numericArrayTransposeSource = numericArrayTransposeSource,
+            .isBackendArrayValue = isBackendArrayValue,
+            .hasBackendRealization = hasBackendRealization,
+            .materializeBackendArray = Session.materializeBackendArray,
+            .backendContext = Session.backendContext,
+            .mapMlxError = mapMlxError,
+            .intValue = Session.intValue,
+            .numeric_array_max_rank = numeric_array_max_rank,
+        }, self, value);
+    }
+
+    fn argmaxValue(self: *Session, value: Value) KError!Value {
+        if (valueNumericMode(value) == null or valueNumericMatrixShape(value) != null) return error.Type;
+        const len = numericFlatLen(value) orelse return error.Type;
+        if (len == 0) return error.Type;
+        if (len == 1) return try self.intValue(0);
+        if (try self.tryFastBackendArgmaxValue(value)) |result| return result;
+
+        if (valueNumericHandle(value)) |handle| _ = try tryEnsureHostRealizationForHandle(self, @constCast(handle));
+        switch (valueNumericMode(value).?) {
+            .int => {
+                var best_idx: usize = 0;
+                var best_value = try numericIntAt(value, 0);
+                for (1..len) |idx| {
+                    const current = try numericIntAt(value, idx);
+                    if (current > best_value) {
+                        best_value = current;
+                        best_idx = idx;
+                    }
+                }
+                return try self.intValue(@intCast(best_idx));
+            },
+            .float => {
+                var best_idx: usize = 0;
+                var best_value = try numericFloatAt(value, 0);
+                for (1..len) |idx| {
+                    const current = try numericFloatAt(value, idx);
+                    if (current > best_value) {
+                        best_value = current;
+                        best_idx = idx;
+                    }
+                }
+                return try self.intValue(@intCast(best_idx));
+            },
+        }
+    }
+
     fn findNumericVectorValue(self: *Session, left: Value, right: Value) KError!?Value {
         if (valueNumericMode(left) == null or valueNumericMatrixShape(left) != null) return null;
         const left_len = numericFlatLen(left) orelse return null;
         const query_len = numericRowQueryLen(right) orelse return null;
         if (query_len != 1) return error.Type;
+        if (try self.tryFastBackendNumericVectorFindValue(left, right)) |result| return result;
+        if (valueNumericHandle(left)) |handle| _ = try tryEnsureHostRealizationForHandle(self, @constCast(handle));
+        if (valueNumericHandle(right)) |handle| _ = try tryEnsureHostRealizationForHandle(self, @constCast(handle));
         for (0..left_len) |idx| {
             if (try numericValuesEqualAt(left, idx, right, 0)) return try self.intValue(@intCast(idx));
         }
@@ -13049,12 +14553,13 @@ const DenseElementwiseKind = union(enum) {
             if (try self.findNumericMatrixRowValue(left, right, shape)) |result| return result;
         }
         if (try self.findNumericVectorValue(left, right)) |result| return result;
-        if (left.tag() == .array and left.arrayKind() == .host_array and std.meta.activeTag(left.asHostArray().storage) == .boxed and symbolBytes(right) != null) {
-            const items = left.asHostArray().storage.boxed;
-            for (items, 0..) |item, idx| {
-                if (try self.valueStructuralEqual(item, right)) return try self.intValue(@intCast(idx));
+        if (boxedArrayItems(left)) |items| {
+            if (symbolBytes(right) != null) {
+                for (items, 0..) |item, idx| {
+                    if (try self.valueStructuralEqual(item, right)) return try self.intValue(@intCast(idx));
+                }
+                return try self.intValue(@intCast(items.len));
             }
-            return try self.intValue(@intCast(items.len));
         }
         return error.Type;
     }
@@ -13067,8 +14572,9 @@ const DenseElementwiseKind = union(enum) {
                     if (handle.rank != 0) break :blk try self.intValue(@intCast(handle.shape[0]));
                 }
                 break :blk switch (value.arrayKind()) {
-                    .host_array => try self.intValue(@intCast(value.asHostArray().len())),
-                    .mlx_array => try self.intValue(@intCast(value.asMlxArray().array.shape()[0])),
+                    .host_dense_array => try self.intValue(@intCast(value.asHostDenseArray().len())),
+                    .host_boxed_array => try self.intValue(@intCast(value.asHostBoxedArray().len())),
+                    .backend_array => try self.intValue(@intCast(value.asBackendArray().array.shape()[0])),
                     else => error.Internal,
                 };
             },
@@ -13085,9 +14591,9 @@ const DenseElementwiseKind = union(enum) {
                 break :blk try self.intValue(int_value);
             },
             .array => switch (value.arrayKind()) {
-                .host_array, .mlx_array, .numeric_array => if (valueHostIntStructuralView(value) != null)
+                .host_dense_array => if (valueHostIntStructuralView(value) != null)
                     self.shareValue(value)
-                else switch ((try hostStructuralArrayValue(self, value)).storage) {
+                else switch (value.asHostDenseArray().storage) {
                     .float64 => |items| blk: {
                         var out = std.ArrayList(i64).empty;
                         defer out.deinit(self.allocator);
@@ -13095,9 +14601,22 @@ const DenseElementwiseKind = union(enum) {
                         for (items) |item| try out.append(self.allocator, std.math.lossyCast(i64, @floor(item)));
                         break :blk try self.createManagedHostIntArray(out.items);
                     },
-                    .boxed => |items| {
-                        if (items.len == 0) return error.Type;
-                        return self.shareValue(items[0]);
+                    else => self.shareValue(value),
+                },
+                .host_boxed_array => blk: {
+                    const items = value.asHostBoxedArray().items;
+                    if (items.len == 0) return error.Type;
+                    break :blk self.shareValue(items[0]);
+                },
+                .backend_array, .numeric_array => if (valueHostIntStructuralView(value) != null)
+                    self.shareValue(value)
+                else switch ((try numericHostArrayValue(self, value)).storage) {
+                    .float64 => |items| blk: {
+                        var out = std.ArrayList(i64).empty;
+                        defer out.deinit(self.allocator);
+                        try out.ensureTotalCapacity(self.allocator, items.len);
+                        for (items) |item| try out.append(self.allocator, std.math.lossyCast(i64, @floor(item)));
+                        break :blk try self.createManagedHostIntArray(out.items);
                     },
                     else => self.shareValue(value),
                 },
@@ -13149,7 +14668,18 @@ const DenseElementwiseKind = union(enum) {
                 .step = -1,
             })) |result| return result;
         }
-        const array = try hostStructuralArrayValue(self, value);
+        if (boxedArrayItems(value)) |items| {
+            var out = std.ArrayList(Value).empty;
+            defer out.deinit(self.allocator);
+            try out.ensureTotalCapacity(self.allocator, items.len);
+            var idx = items.len;
+            while (idx > 0) {
+                idx -= 1;
+                try out.append(self.allocator, items[idx]);
+            }
+            return try self.createManagedHostBoxedArray(out.items);
+        }
+        const array = try numericHostArrayValue(self, value);
         if (hostNumericMatrixShape(array)) |shape| {
             var row_indices = std.ArrayList(usize).empty;
             defer row_indices.deinit(self.allocator);
@@ -13183,17 +14713,6 @@ const DenseElementwiseKind = union(enum) {
                     try out.append(self.allocator, items[idx]);
                 }
                 break :blk try self.createManagedHostFloatArray(out.items);
-            },
-            .boxed => |items| blk: {
-                var out = std.ArrayList(Value).empty;
-                defer out.deinit(self.allocator);
-                try out.ensureTotalCapacity(self.allocator, items.len);
-                var idx = items.len;
-                while (idx > 0) {
-                    idx -= 1;
-                    try out.append(self.allocator, items[idx]);
-                }
-                break :blk try self.createManagedHostBoxedArray(out.items);
             },
             else => blk: {
                 const view = hostIntArrayView(array).?;
@@ -13281,13 +14800,13 @@ const DenseElementwiseKind = union(enum) {
             for (0..hostIntDenseViewLen(view)) |idx| try out.append(self.allocator, try hostIntDenseViewItem(view, idx) == 0);
             return try self.createManagedHostBitArray(out.items);
         }
-        const array = try hostStructuralArrayValue(self, value);
+        const array = try numericHostArrayValue(self, value);
         switch (array.storage) {
             .bit => |words| {
-                const plan = try self.planHostIntUnaryOutput(hostArraySourceValue(array), .bit, .bit, array.len(), true, true);
+                const plan = try self.planHostIntUnaryOutput(hostDenseSourceValue(array), .bit, .bit, array.len(), true, true);
                 fillBitNotWords(plan.output.bit.words, .{ .words = words, .len = array.len() });
-                const result = try self.finishHostIntOutput(plan, host_array_flag_normalized | invertMonotonicFlags(array.flags));
-                hostArraySetCachedIntRange(@constCast(result.asHostArray()), .{ .min = 0, .max = 1 });
+                const result = try self.finishHostIntOutput(plan, host_dense_flag_normalized | invertMonotonicFlags(array.flags));
+                hostDenseSetCachedIntRange(try mutableNumericHostArrayValue(self, result), .{ .min = 0, .max = 1 });
                 return result;
             },
             .float64 => |items| {
@@ -13308,7 +14827,223 @@ const DenseElementwiseKind = union(enum) {
         }
     }
 
-    fn hostNumericMatrixRowOrder(array: *const HostArray, lhs_row: usize, rhs_row: usize, cols: usize) std.math.Order {
+    fn scalarNullLikeValue(value: Value) bool {
+        return switch (value.tag()) {
+            .int, .float, .bool, .builtin, .closure => false,
+            .array => switch (value.arrayKind()) {
+                .host_symbol => hostTextBytes(value.asHostSymbol()).len == 0,
+                else => false,
+            },
+        };
+    }
+
+    fn valueIsAtomicForFillWithout(value: Value) bool {
+        return switch (value.tag()) {
+            .array => value.arrayKind() == .host_symbol,
+            else => true,
+        };
+    }
+
+    fn numericFalseMaskValue(self: *Session, value: Value) KError!Value {
+        const total = numericFlatLen(value) orelse if (value.tag() == .array)
+            (try numericHostArrayValue(self, value)).len()
+        else
+            return Value.fromBool(false);
+        const bits = try self.allocator.alloc(bool, total);
+        defer self.allocator.free(bits);
+        @memset(bits, false);
+        const mask = try self.createManagedHostBitArray(bits);
+        if (valueNonVectorNumericShape(value)) |shape| return try applyNonVectorNumericShapeToValue(self, mask, shape);
+        return mask;
+    }
+
+    fn nullValue(self: *Session, value: Value) KError!Value {
+        if (scalarNullLikeValue(value)) return Value.fromBool(true);
+        if (value.tag() != .array) return Value.fromBool(false);
+
+        if (stringBytes(value)) |text| {
+            const bits = try self.allocator.alloc(bool, text.len);
+            defer self.allocator.free(bits);
+            @memset(bits, false);
+            return try self.createManagedHostBitArray(bits);
+        }
+        if (valueNumericMode(value) != null) return try self.numericFalseMaskValue(value);
+        if (boxedArrayItems(value)) |items| {
+            var out = std.ArrayList(Value).empty;
+            defer out.deinit(self.allocator);
+            try out.ensureTotalCapacity(self.allocator, items.len);
+            for (items) |item| try out.append(self.allocator, try self.nullValue(item));
+            return try self.makeArrayFromValues(out.items);
+        }
+        return switch (value.arrayKind()) {
+            .host_string_list => blk: {
+                const bits = try self.allocator.alloc(bool, value.asHostStringList().len);
+                defer self.allocator.free(bits);
+                @memset(bits, false);
+                break :blk try self.createManagedHostBitArray(bits);
+            },
+            .host_symbol => Value.fromBool(false),
+            else => error.Type,
+        };
+    }
+
+    fn fillValues(self: *Session, left: Value, right: Value) KError!Value {
+        if (scalarNullLikeValue(right)) return self.shareValue(left);
+        if (right.tag() != .array) return self.shareValue(right);
+        if (boxedArrayItems(right)) |items| {
+            var out = std.ArrayList(Value).empty;
+            defer out.deinit(self.allocator);
+            try out.ensureTotalCapacity(self.allocator, items.len);
+            for (items) |item| try out.append(self.allocator, try self.fillValues(left, item));
+            return try self.makeArrayFromValues(out.items);
+        }
+        return self.shareValue(right);
+    }
+
+    fn numericScalarItemValue(self: *Session, value: Value, idx: usize) KError!Value {
+        const array = try numericHostArrayValue(self, value);
+        return try self.hostDenseIndexScalar(array, @intCast(idx));
+    }
+
+    fn sequenceContainsValue(self: *Session, haystack: Value, needle: Value) KError!bool {
+        if (valueNumericMatrixShape(haystack)) |shape| {
+            for (0..shape.rows) |row_idx| {
+                const item = try numericValueFirstAxisCellValue(self, haystack, shapedNumericHandle(haystack).?, @intCast(row_idx));
+                defer self.releaseValue(item);
+                if (try self.valueStructuralEqual(item, needle)) return true;
+            }
+            return false;
+        }
+        if (valueNumericMode(haystack) != null) {
+            const len = numericFlatLen(haystack) orelse (try numericHostArrayValue(self, haystack)).len();
+            for (0..len) |idx| {
+                const item = try self.numericScalarItemValue(haystack, idx);
+                defer self.releaseValue(item);
+                if (try self.valueStructuralEqual(item, needle)) return true;
+            }
+            return false;
+        }
+        if (boxedArrayItems(haystack)) |items| {
+            for (items) |item| {
+                if (try self.valueStructuralEqual(item, needle)) return true;
+            }
+            return false;
+        }
+        return try self.valueStructuralEqual(haystack, needle);
+    }
+
+    fn withoutStringValues(self: *Session, left: []const u8, right: Value) KError!Value {
+        const removed = stringBytes(right) orelse return error.Type;
+        var lookup = [_]bool{false} ** 256;
+        for (removed) |ch| lookup[ch] = true;
+        var out = std.ArrayList(u8).empty;
+        defer out.deinit(self.allocator);
+        for (left) |ch| {
+            if (!lookup[ch]) try out.append(self.allocator, ch);
+        }
+        return try self.managedHostString(out.items);
+    }
+
+    fn withoutNumericVectorValues(self: *Session, left: Value, right: Value) KError!Value {
+        const source = try numericHostArrayValue(self, left);
+        const len = source.len();
+        var removed_any = false;
+
+        switch (source.storage) {
+            .bit => {
+                var out = std.ArrayList(bool).empty;
+                defer out.deinit(self.allocator);
+                for (0..len) |idx| {
+                    const item = Value.fromBool(bitGet(source.storage.bit, idx));
+                    if (try self.sequenceContainsValue(right, item)) {
+                        removed_any = true;
+                        continue;
+                    }
+                    try out.append(self.allocator, item.asBool());
+                }
+                if (!removed_any) return self.shareValue(left);
+                return try self.createManagedHostBitArray(out.items);
+            },
+            .float64 => |items| {
+                var out = std.ArrayList(f64).empty;
+                defer out.deinit(self.allocator);
+                for (items) |item| {
+                    const value = try self.floatValue(item);
+                    if (try self.sequenceContainsValue(right, value)) {
+                        removed_any = true;
+                        continue;
+                    }
+                    try out.append(self.allocator, item);
+                }
+                if (!removed_any) return self.shareValue(left);
+                return try self.createManagedHostFloatArray(out.items);
+            },
+            else => {
+                const view = hostIntArrayView(source).?;
+                var out = std.ArrayList(i64).empty;
+                defer out.deinit(self.allocator);
+                for (0..hostIntArrayViewLen(view)) |idx| {
+                    const item_value = try self.intValue(hostIntViewItem(view, idx));
+                    if (try self.sequenceContainsValue(right, item_value)) {
+                        removed_any = true;
+                        continue;
+                    }
+                    try out.append(self.allocator, item_value.asInt());
+                }
+                if (!removed_any) return self.shareValue(left);
+                return try self.createManagedHostIntArray(out.items);
+            },
+        }
+    }
+
+    fn withoutNumericMatrixValues(self: *Session, left: Value, right: Value, shape: NumericMatrixShape) KError!Value {
+        var row_indices = std.ArrayList(usize).empty;
+        defer row_indices.deinit(self.allocator);
+        try row_indices.ensureTotalCapacity(self.allocator, shape.rows);
+        var removed_any = false;
+        for (0..shape.rows) |row_idx| {
+            const row = try numericValueFirstAxisCellValue(self, left, shapedNumericHandle(left).?, @intCast(row_idx));
+            defer self.releaseValue(row);
+            if (try self.sequenceContainsValue(right, row)) {
+                removed_any = true;
+                continue;
+            }
+            try row_indices.append(self.allocator, row_idx);
+        }
+        if (!removed_any) return self.shareValue(left);
+        return try numericValueMatrixSelectRows(self, left, row_indices.items);
+    }
+
+    fn withoutBoxedValues(self: *Session, left: Value, right: Value, items: []const Value) KError!Value {
+        var out = std.ArrayList(Value).empty;
+        defer out.deinit(self.allocator);
+        try out.ensureTotalCapacity(self.allocator, items.len);
+        var removed_any = false;
+        for (items) |item| {
+            if (try self.sequenceContainsValue(right, item)) {
+                removed_any = true;
+                continue;
+            }
+            try out.append(self.allocator, item);
+        }
+        if (!removed_any) return self.shareValue(left);
+        return try self.makeArrayFromValues(out.items);
+    }
+
+    fn withoutValues(self: *Session, left: Value, right: Value) KError!Value {
+        if (stringBytes(left)) |text| return try self.withoutStringValues(text, right);
+        if (valueNumericMatrixShape(left)) |shape| return try self.withoutNumericMatrixValues(left, right, shape);
+        if (valueNumericMode(left) != null) return try self.withoutNumericVectorValues(left, right);
+        if (boxedArrayItems(left)) |items| return try self.withoutBoxedValues(left, right, items);
+        return error.Type;
+    }
+
+    fn fillWithoutValues(self: *Session, left: Value, right: Value) KError!Value {
+        if (valueIsAtomicForFillWithout(left)) return try self.fillValues(left, right);
+        return try self.withoutValues(left, right);
+    }
+
+    fn hostNumericMatrixRowOrder(array: *const HostDenseArray, lhs_row: usize, rhs_row: usize, cols: usize) std.math.Order {
         const left_base = lhs_row * cols;
         const right_base = rhs_row * cols;
         return switch (array.storage) {
@@ -13329,7 +15064,6 @@ const DenseElementwiseKind = union(enum) {
                 }
                 return .eq;
             },
-            .boxed => unreachable,
             else => {
                 const view = hostIntArrayView(array).?;
                 for (0..cols) |col| {
@@ -13341,7 +15075,7 @@ const DenseElementwiseKind = union(enum) {
         };
     }
 
-    fn hostItemOrder(array: *const HostArray, lhs: usize, rhs: usize) std.math.Order {
+    fn hostItemOrder(array: *const HostDenseArray, lhs: usize, rhs: usize) std.math.Order {
         if (hostNumericMatrixShape(array)) |shape| return hostNumericMatrixRowOrder(array, lhs, rhs, shape.cols);
         return switch (array.storage) {
             .bit => std.math.order(@intFromBool(bitGet(array.storage.bit, lhs)), @intFromBool(bitGet(array.storage.bit, rhs))),
@@ -13354,7 +15088,7 @@ const DenseElementwiseKind = union(enum) {
         return if (ascending) order == .lt else order == .gt;
     }
 
-    fn hostIndexedOrder(_: *Session, array: *const HostArray, lhs: usize, rhs: usize) KError!std.math.Order {
+    fn hostIndexedOrder(_: *Session, array: *const HostDenseArray, lhs: usize, rhs: usize) KError!std.math.Order {
         return hostItemOrder(array, lhs, rhs);
     }
 
@@ -13437,7 +15171,7 @@ const DenseElementwiseKind = union(enum) {
         }
         if (valueNumericMode(value) != null) {
             if (numericVectorLen(value)) |len| {
-                if (hostArrayIfPresent(value) != null or numericValueSupportsStructuralFlatItemsWithoutHost(value)) {
+                if (hostDenseIfPresent(value) != null or numericValueSupportsStructuralFlatItemsWithoutHost(value)) {
                     const idxs = try self.allocator.alloc(usize, len);
                     defer self.allocator.free(idxs);
                     for (idxs, 0..) |*slot, idx| slot.* = idx;
@@ -13455,7 +15189,7 @@ const DenseElementwiseKind = union(enum) {
             if (self.debugDetailedProbeActive()) self.debug_grade_structural_numeric_fast_count += 1;
             return try self.managedHostIndexArrayValue(idxs);
         }
-        const array = try hostStructuralArrayValue(self, value);
+        const array = try numericHostArrayValue(self, value);
         const len = if (hostNumericMatrixShape(array)) |shape| shape.rows else array.len();
         const idxs = try self.allocator.alloc(usize, len);
         defer self.allocator.free(idxs);
@@ -13487,7 +15221,7 @@ const DenseElementwiseKind = union(enum) {
             try self.stableMergeSortIndices(idxs, true, matrix, numericMatrixIndexedOrder);
             return try numericValueMatrixSelectRows(self, value, idxs);
         }
-        const array = try hostStructuralArrayValue(self, value);
+        const array = try numericHostArrayValue(self, value);
         if (hostNumericMatrixShape(array)) |shape| {
             const idxs = try self.allocator.alloc(usize, shape.rows);
             defer self.allocator.free(idxs);
@@ -13572,7 +15306,7 @@ const DenseElementwiseKind = union(enum) {
             for (0..hostIntDenseViewLen(view)) |idx| try values.append(self.allocator, try self.intValue(try hostIntDenseViewItem(view, idx)));
             return;
         }
-        const array = try hostStructuralArrayValue(self, value);
+        const array = try numericHostArrayValue(self, value);
         switch (array.storage) {
             .bit => |words| for (0..array.len()) |idx| try values.append(self.allocator, Value.fromBool(bitGet(words, idx))),
             .float64 => |items| for (items) |item| try values.append(self.allocator, try self.floatValue(item)),
@@ -13584,6 +15318,9 @@ const DenseElementwiseKind = union(enum) {
     }
 
     fn takeValues(self: *Session, left: Value, right: Value) KError!Value {
+        if (try shapeVectorSnapshotValue(left)) |shape| {
+            return try self.reshapeToSnapshotValue(shape, right);
+        }
         const raw_count = scalarIntLikeValue(left) orelse return error.Type;
         if (right.tag() != .array) {
             if (right.tag() != .int and right.tag() != .bool and right.tag() != .float) return error.Type;
@@ -13631,7 +15368,85 @@ const DenseElementwiseKind = union(enum) {
                 }
             }
         }
-        return try self.takeHostArray(raw_count, try hostStructuralArrayValue(self, right));
+        return try self.takeHostArray(raw_count, try numericHostArrayValue(self, right));
+    }
+
+    fn shapeVectorSnapshotValue(value: Value) KError!?NumericShapeSnapshot {
+        const len = numericVectorLen(value) orelse return null;
+        if (valueNumericMode(value) != .int) return null;
+        if (len == 0) return error.Type;
+        if (len > numeric_array_max_rank) return error.Unsupported;
+
+        var dims_buf: [numeric_array_max_rank]i32 = [_]i32{0} ** numeric_array_max_rank;
+        for (0..len) |idx| {
+            const dim_i64 = try numericIntAt(value, idx);
+            dims_buf[idx] = std.math.cast(i32, dim_i64) orelse return error.Unsupported;
+        }
+        return try numericShapeSnapshotFromDims(dims_buf[0..len]);
+    }
+
+    fn reshapeToSnapshotValue(self: *Session, shape: NumericShapeSnapshot, right: Value) KError!Value {
+        const total = try numericShapeSnapshotElementCount(shape);
+
+        if (right.tag() != .array) {
+            return switch (right.tag()) {
+                .int, .bool, .float => blk: {
+                    const flat = try self.takeScalarValue(@intCast(total), right);
+                    break :blk try applyNonVectorNumericShapeToValue(self, flat, shape);
+                },
+                else => error.Type,
+            };
+        }
+
+        if (valueRangeIotaHandle(right)) |handle| {
+            const source_total = numericArrayRangeLen(handle);
+            if (source_total == 0 and total != 0) return error.Type;
+            if (source_total == total) {
+                return try newRangeIotaValueWithShape(
+                    self,
+                    .managed,
+                    total,
+                    handle.range_iota.start,
+                    handle.range_iota.step,
+                    shape,
+                );
+            }
+        }
+
+        if (valueNumericMode(right)) |mode| {
+            const source_total = numericFlatLen(right) orelse if (right.tag() == .array)
+                (try numericHostArrayValue(self, right)).len()
+            else
+                return error.Type;
+            if (source_total == 0 and total != 0) return error.Type;
+            if (source_total == total) {
+                return try newReshapeViewValue(self, right, shape);
+            }
+            return switch (mode) {
+                .float => blk: {
+                    var out = std.ArrayList(f64).empty;
+                    defer out.deinit(self.allocator);
+                    try out.ensureTotalCapacity(self.allocator, total);
+                    for (0..total) |idx| {
+                        try out.append(self.allocator, try numericFloatAt(right, @intCast(idx % source_total)));
+                    }
+                    const reshaped = try self.createManagedHostFloatArray(out.items);
+                    break :blk try applyNonVectorNumericShapeToValue(self, reshaped, shape);
+                },
+                .int => blk: {
+                    var out = std.ArrayList(i64).empty;
+                    defer out.deinit(self.allocator);
+                    try out.ensureTotalCapacity(self.allocator, total);
+                    for (0..total) |idx| {
+                        try out.append(self.allocator, try numericIntAt(right, @intCast(idx % source_total)));
+                    }
+                    const reshaped = try self.createManagedHostIntArray(out.items);
+                    break :blk try applyNonVectorNumericShapeToValue(self, reshaped, shape);
+                },
+            };
+        }
+
+        return error.Type;
     }
 
     fn takeScalarValue(self: *Session, raw_count: i64, value: Value) KError!Value {
@@ -13663,7 +15478,7 @@ const DenseElementwiseKind = union(enum) {
         }
     }
 
-    fn takeHostArray(self: *Session, raw_count: i64, array: *const HostArray) KError!Value {
+    fn takeHostArray(self: *Session, raw_count: i64, array: *const HostDenseArray) KError!Value {
         if (hostNumericMatrixShape(array)) |shape| {
             const count: usize = @intCast(@abs(raw_count));
             if (count == 0) {
@@ -13799,7 +15614,7 @@ const DenseElementwiseKind = union(enum) {
                 return try newFlatSliceValue(self, right, start, end - start);
             }
         }
-        const array = try hostStructuralArrayValue(self, right);
+        const array = try numericHostArrayValue(self, right);
         if (hostNumericMatrixShape(array)) |shape| {
             const drop_count: usize = if (raw_count >= 0)
                 @min(@as(usize, @intCast(raw_count)), shape.rows)
@@ -13846,7 +15661,7 @@ const DenseElementwiseKind = union(enum) {
 
         const row_len: usize = @intCast(row_len_value);
         const total = numericFlatLen(right) orelse if (right.tag() == .array)
-            (try hostStructuralArrayValue(self, right)).len()
+            (try numericHostArrayValue(self, right)).len()
         else
             return error.Type;
         if (total == 0 or total % row_len != 0) return error.Unsupported;
@@ -13866,8 +15681,8 @@ const DenseElementwiseKind = union(enum) {
             return try newReshapeViewValue(self, right, numericShapeSnapshotMatrix(rows, row_len));
         }
 
-        const source = try hostStructuralArrayValue(self, right);
-        if (hostArrayNumericMode(source) != null) {
+        const source = try numericHostArrayValue(self, right);
+        if (right.arraySubkind() != .host_boxed_array) {
             const value = switch (source.storage) {
                 .bit => blk: {
                     var out = std.ArrayList(bool).empty;
@@ -13877,7 +15692,6 @@ const DenseElementwiseKind = union(enum) {
                     break :blk try self.createManagedHostBitArray(out.items);
                 },
                 .float64 => |items| try self.createManagedHostFloatArray(items),
-                .boxed => return error.Type,
                 else => blk: {
                     const view = hostIntArrayView(source) orelse return error.Type;
                     var out = std.ArrayList(i64).empty;
@@ -13903,18 +15717,18 @@ const DenseElementwiseKind = union(enum) {
             try inner.ensureTotalCapacity(self.allocator, row_len);
             const start = row_idx * row_len;
             for (0..row_len) |col_idx| {
-                try inner.append(self.allocator, try self.hostArrayIndexScalar(source, @intCast(start + col_idx)));
+                try inner.append(self.allocator, try self.hostDenseIndexScalar(source, @intCast(start + col_idx)));
             }
             try outer.append(self.allocator, try self.createManagedArrayLikeFromValues(inner.items));
         }
         return try self.createManagedArrayLikeFromValues(outer.items);
     }
 
-fn equalValues(self: *Session, left: Value, right: Value) KError!Value {
-    if (try self.promoteRenderableNumericDyadOperands(left, right)) |operands| {
-        return try self.equalValues(operands.left, operands.right);
-    }
-    if (left.tag() != .array and right.tag() != .array) {
+    fn equalValues(self: *Session, left: Value, right: Value) KError!Value {
+        if (try self.promoteRenderableNumericDyadOperands(left, right)) |operands| {
+            return try self.equalValues(operands.left, operands.right);
+        }
+        if (left.tag() != .array and right.tag() != .array) {
             if (left.tag() == .float or right.tag() == .float) {
                 const lhs = switch (left.tag()) {
                     .float => left.asFloat(),
@@ -13967,26 +15781,26 @@ fn equalValues(self: *Session, left: Value, right: Value) KError!Value {
         });
     }
 
-fn compareNumericArrayValues(self: *Session, op: BuiltinId, left: Value, right: Value) KError!Value {
-    if (planCompareMaskBackend(self, op, left, right) == .mlx) return try self.applyMlxArrayDyad(op, left, right);
-    const len = try arrayResultLen(left, right);
-    const shape = try nonVectorNumericShapeForDyad(left, right);
-    const rowwise = rowwiseMatrixVectorDyad(left, right);
-    var out = std.ArrayList(bool).empty;
-    defer out.deinit(self.allocator);
-    try out.ensureTotalCapacity(self.allocator, len);
-    for (0..len) |idx| {
-        const lhs = if (left.tag() == .array)
-            try numericFloatAt(left, if (rowwise) |info| info.operandIndex(true, idx) else idx)
-        else
-            scalarNumericFloatValue(left).?;
-        const rhs = if (right.tag() == .array)
-            try numericFloatAt(right, if (rowwise) |info| info.operandIndex(false, idx) else idx)
-        else
-            scalarNumericFloatValue(right).?;
-        try out.append(self.allocator, switch (op) {
-            .less => lhs < rhs,
-            .more => lhs > rhs,
+    fn compareNumericArrayValues(self: *Session, op: BuiltinId, left: Value, right: Value) KError!Value {
+        if (planCompareMaskBackend(self, op, left, right) == .mlx) return try self.applyBackendArrayDyad(op, left, right);
+        const len = try arrayResultLen(left, right);
+        const shape = try nonVectorNumericShapeForDyad(left, right);
+        const rowwise = rowwiseMatrixVectorDyad(left, right);
+        var out = std.ArrayList(bool).empty;
+        defer out.deinit(self.allocator);
+        try out.ensureTotalCapacity(self.allocator, len);
+        for (0..len) |idx| {
+            const lhs = if (left.tag() == .array)
+                try numericFloatAt(left, if (rowwise) |info| info.operandIndex(true, idx) else idx)
+            else
+                scalarNumericFloatValue(left).?;
+            const rhs = if (right.tag() == .array)
+                try numericFloatAt(right, if (rowwise) |info| info.operandIndex(false, idx) else idx)
+            else
+                scalarNumericFloatValue(right).?;
+            try out.append(self.allocator, switch (op) {
+                .less => lhs < rhs,
+                .more => lhs > rhs,
                 else => return error.Internal,
             });
         }
@@ -14021,27 +15835,170 @@ fn compareNumericArrayValues(self: *Session, op: BuiltinId, left: Value, right: 
                     }
                 }
                 const transposed = try out.value(self);
-                hostArraySetFlags(@constCast(transposed.asHostArray()), if (range.min >= 0 and range.max <= 1) host_array_flag_normalized else 0);
-                hostArraySetCachedIntRange(@constCast(transposed.asHostArray()), range);
+                const transposed_host = try mutableNumericHostArrayValue(self, transposed);
+                hostDenseSetFlags(transposed_host, if (range.min >= 0 and range.max <= 1) host_dense_flag_normalized else 0);
+                hostDenseSetCachedIntRange(transposed_host, range);
                 break :blk try applyNonVectorNumericShapeToValue(self, transposed, out_shape);
             },
             else => null,
         };
     }
 
-    fn transposeMlxMatrixValue(self: *Session, value: Value) KError!Value {
-        var input = try self.materializeMlxArray(value);
-        defer input.deinit();
-        const ctx = try self.mlxContext();
-        const out = mlx.Array.transpose(ctx.*, input) catch |err| return mapMlxError(err);
-        return try self.wrapManagedMlxArray(out);
+    fn transposeBackendMatrixValue(self: *Session, value: Value) KError!Value {
+        if (comptime runtime_has_mlx) {
+            return runtime_backend_exec.transposeBackendMatrixValue(.{
+                .Session = Session,
+                .Value = Value,
+                .NumericArray = NumericArray,
+                .KError = KError,
+                .mlx = mlx,
+                .mapMlxError = mapMlxError,
+                .backendContext = Session.backendContext,
+                .valueNumericHandle = valueNumericHandle,
+                .numericIntAt = numericIntAt,
+                .numericArrayIsFirstAxisSlice = numericArrayIsFirstAxisSlice,
+                .numericArrayFirstAxisSliceSource = numericArrayFirstAxisSliceSource,
+                .numericArrayFirstAxisSliceRowStart = numericArrayFirstAxisSliceRowStart,
+                .numericArrayFirstAxisSliceRowStep = numericArrayFirstAxisSliceRowStep,
+                .numericArrayIsFirstAxisIndex = numericArrayIsFirstAxisIndex,
+                .numericArrayFirstAxisIndexSource = numericArrayFirstAxisIndexSource,
+                .numericArrayFirstAxisIndexRows = numericArrayFirstAxisIndexRows,
+                .numericArrayIsFirstAxisConcat = numericArrayIsFirstAxisConcat,
+                .numericArrayFirstAxisConcatLeft = numericArrayFirstAxisConcatLeft,
+                .numericArrayFirstAxisConcatRight = numericArrayFirstAxisConcatRight,
+                .numericArrayIsReshapeView = numericArrayIsReshapeView,
+                .numericArrayReshapeSource = numericArrayReshapeSource,
+                .numericArrayIsTransposeView = numericArrayIsTransposeView,
+                .numericArrayTransposeSource = numericArrayTransposeSource,
+                .materializeBackendArray = Session.materializeBackendArray,
+                .wrapManagedBackendArray = Session.wrapManagedBackendArray,
+                .numeric_array_max_rank = numeric_array_max_rank,
+            }, self, value);
+        }
+        return error.Unsupported;
+    }
+
+    fn transposeBackendSwapAxesValue(self: *Session, value: Value, axis1: usize, axis2: usize) KError!Value {
+        if (comptime runtime_has_mlx) {
+            return runtime_backend_exec.transposeBackendSwapAxesValue(.{
+                .Session = Session,
+                .Value = Value,
+                .NumericArray = NumericArray,
+                .KError = KError,
+                .mlx = mlx,
+                .mapMlxError = mapMlxError,
+                .backendContext = Session.backendContext,
+                .valueNumericHandle = valueNumericHandle,
+                .numericIntAt = numericIntAt,
+                .numericArrayIsFirstAxisSlice = numericArrayIsFirstAxisSlice,
+                .numericArrayFirstAxisSliceSource = numericArrayFirstAxisSliceSource,
+                .numericArrayFirstAxisSliceRowStart = numericArrayFirstAxisSliceRowStart,
+                .numericArrayFirstAxisSliceRowStep = numericArrayFirstAxisSliceRowStep,
+                .numericArrayIsFirstAxisIndex = numericArrayIsFirstAxisIndex,
+                .numericArrayFirstAxisIndexSource = numericArrayFirstAxisIndexSource,
+                .numericArrayFirstAxisIndexRows = numericArrayFirstAxisIndexRows,
+                .numericArrayIsFirstAxisConcat = numericArrayIsFirstAxisConcat,
+                .numericArrayFirstAxisConcatLeft = numericArrayFirstAxisConcatLeft,
+                .numericArrayFirstAxisConcatRight = numericArrayFirstAxisConcatRight,
+                .numericArrayIsReshapeView = numericArrayIsReshapeView,
+                .numericArrayReshapeSource = numericArrayReshapeSource,
+                .numericArrayIsTransposeView = numericArrayIsTransposeView,
+                .numericArrayTransposeSource = numericArrayTransposeSource,
+                .materializeBackendArray = Session.materializeBackendArray,
+                .wrapManagedBackendArray = Session.wrapManagedBackendArray,
+                .numeric_array_max_rank = numeric_array_max_rank,
+            }, self, value, @intCast(axis1), @intCast(axis2));
+        }
+        return error.Unsupported;
+    }
+
+    fn transposeAxesSourceIndex(source_shape: []const i32, axis1: usize, axis2: usize, out_idx: usize) usize {
+        var source_coords: [numeric_array_max_rank]usize = [_]usize{0} ** numeric_array_max_rank;
+        var remaining = out_idx;
+        var axis = source_shape.len;
+        while (axis > 0) {
+            axis -= 1;
+            const source_axis = if (axis == axis1)
+                axis2
+            else if (axis == axis2)
+                axis1
+            else
+                axis;
+            const dim: usize = @intCast(source_shape[source_axis]);
+            source_coords[source_axis] = if (dim == 0) 0 else remaining % dim;
+            if (dim != 0) remaining /= dim;
+        }
+
+        var source_idx: usize = 0;
+        for (source_shape, 0..) |dim_i32, source_axis| {
+            const dim: usize = @intCast(dim_i32);
+            source_idx = source_idx * dim + source_coords[source_axis];
+        }
+        return source_idx;
+    }
+
+    fn transposeHostDenseValueSwapAxes(
+        self: *Session,
+        value: Value,
+        handle: *const NumericArray,
+        axis1: usize,
+        axis2: usize,
+    ) KError!Value {
+        const elem_count = numericArrayElementCount(handle);
+        const out_shape = numericShapeSnapshotSwapAxes(numericShapeSnapshotFromHandle(handle), axis1, axis2);
+        return switch (valueNumericMode(value) orelse return error.Type) {
+            .float => blk: {
+                var out = std.ArrayList(f64).empty;
+                defer out.deinit(self.allocator);
+                try out.ensureTotalCapacity(self.allocator, elem_count);
+                for (0..elem_count) |out_idx| {
+                    try out.append(self.allocator, try numericFloatAt(value, transposeAxesSourceIndex(handle.shapeSlice(), axis1, axis2, out_idx)));
+                }
+                const transposed = try self.createManagedHostFloatArray(out.items);
+                break :blk try applyNonVectorNumericShapeToValue(self, transposed, out_shape);
+            },
+            .int => blk: {
+                var out = std.ArrayList(i64).empty;
+                defer out.deinit(self.allocator);
+                try out.ensureTotalCapacity(self.allocator, elem_count);
+                for (0..elem_count) |out_idx| {
+                    try out.append(self.allocator, try numericIntAt(value, transposeAxesSourceIndex(handle.shapeSlice(), axis1, axis2, out_idx)));
+                }
+                const transposed = try self.createManagedHostIntArray(out.items);
+                break :blk try applyNonVectorNumericShapeToValue(self, transposed, out_shape);
+            },
+        };
+    }
+
+    fn transposeDenseNumericValueSwapAxes(
+        self: *Session,
+        value: Value,
+        handle: *const NumericArray,
+        axis1: usize,
+        axis2: usize,
+    ) KError!Value {
+        if (handle.rank < 2 or axis1 >= handle.rank or axis2 >= handle.rank or axis1 == axis2) return error.Type;
+        const elem_count = numericArrayElementCount(handle);
+        if (comptime runtime_has_mlx) {
+            if (planTransposeBackend(self, value, elem_count) == .mlx) {
+                noteTransposeMaterializationDecision(self, value, elem_count, .mlx);
+                return try self.transposeBackendSwapAxesValue(value, axis1, axis2);
+            }
+        }
+        noteTransposeMaterializationDecision(self, value, elem_count, .host);
+        return try self.transposeHostDenseValueSwapAxes(value, handle, axis1, axis2);
     }
 
     fn transposeValue(self: *Session, value: Value) KError!Value {
+        if (valueNumericHandle(value)) |handle| {
+            if (handle.rank > 2 and valueNumericMode(value) != null) {
+                return try self.transposeDenseNumericValueSwapAxes(value, handle, 0, 1);
+            }
+        }
         if (valueNumericMatrixView(value)) |matrix| {
             const elem_count = matrix.shape.rows * matrix.shape.cols;
             if (planTransposeBackend(self, value, elem_count) == .mlx) {
-                return try self.transposeMlxMatrixValue(value);
+                return try self.transposeBackendMatrixValue(value);
             }
             if (try self.transposeHostDenseMatrixValue(value, matrix.shape)) |result| return result;
 
@@ -14073,48 +16030,17 @@ fn compareNumericArrayValues(self: *Session, op: BuiltinId, left: Value, right: 
                 },
             }
         }
-        if (value.tag() != .array or value.arrayKind() != .host_array or std.meta.activeTag(value.asHostArray().storage) != .boxed) return error.Type;
-        const items = value.asHostArray().storage.boxed;
-        if (!isRenderableMatrix(items)) return error.Type;
-        const rows = items.len;
-        const cols = numericVectorLen(items[0]) orelse return error.Type;
-        const out_shape = numericShapeSnapshotMatrix(cols, rows);
-        var saw_float = false;
-        for (items) |row| {
-            if ((valueNumericMode(row) orelse return error.Type) == .float) saw_float = true;
-        }
-        if (saw_float) {
-            var out = std.ArrayList(f64).empty;
-            defer out.deinit(self.allocator);
-            try out.ensureTotalCapacity(self.allocator, rows * cols);
-            for (0..cols) |col_idx| {
-                for (items) |row| {
-                    try out.append(self.allocator, try numericFloatAt(row, col_idx));
-                }
-            }
-            const transposed = try self.createManagedHostFloatArray(out.items);
-            return try applyNonVectorNumericShapeToValue(self, transposed, out_shape);
-        }
-        var out = std.ArrayList(i64).empty;
-        defer out.deinit(self.allocator);
-        try out.ensureTotalCapacity(self.allocator, rows * cols);
-        for (0..cols) |col_idx| {
-            for (items) |row| {
-                try out.append(self.allocator, try numericIntAt(row, col_idx));
-            }
-        }
-        const transposed = try self.createManagedHostIntArray(out.items);
-        return try applyNonVectorNumericShapeToValue(self, transposed, out_shape);
+        return error.Type;
     }
 
-fn minimumValues(self: *Session, left: Value, right: Value) KError!Value {
-    if (try self.promoteRenderableNumericDyadOperands(left, right)) |operands| {
-        return try self.minimumValues(operands.left, operands.right);
-    }
-    if (left.tag() == .bool and right.tag() == .bool) return Value.fromBool(left.asBool() and right.asBool());
+    fn minimumValues(self: *Session, left: Value, right: Value) KError!Value {
+        if (try self.promoteRenderableNumericDyadOperands(left, right)) |operands| {
+            return try self.minimumValues(operands.left, operands.right);
+        }
+        if (left.tag() == .bool and right.tag() == .bool) return Value.fromBool(left.asBool() and right.asBool());
         if (try self.tryScalarIntBoolDyad(.minimum, left, right)) |result| return result;
         if (valueNumericMode(left) != null and valueNumericMode(right) != null and (left.tag() == .array or right.tag() == .array)) {
-            return try self.applyDenseDyad(.minimum, left, right);
+            return try self.applyNumericDyad(.minimum, left, right);
         }
         if (shouldUseGenericArrayDyad(left, right)) return try self.applyGenericArrayDyad(.minimum, left, right);
         if (left.tag() == .float or right.tag() == .float) {
@@ -14127,14 +16053,14 @@ fn minimumValues(self: *Session, left: Value, right: Value) KError!Value {
         return try self.intValue(@min(lhs, rhs));
     }
 
-fn maximumValues(self: *Session, left: Value, right: Value) KError!Value {
-    if (try self.promoteRenderableNumericDyadOperands(left, right)) |operands| {
-        return try self.maximumValues(operands.left, operands.right);
-    }
-    if (left.tag() == .bool and right.tag() == .bool) return Value.fromBool(left.asBool() or right.asBool());
+    fn maximumValues(self: *Session, left: Value, right: Value) KError!Value {
+        if (try self.promoteRenderableNumericDyadOperands(left, right)) |operands| {
+            return try self.maximumValues(operands.left, operands.right);
+        }
+        if (left.tag() == .bool and right.tag() == .bool) return Value.fromBool(left.asBool() or right.asBool());
         if (try self.tryScalarIntBoolDyad(.maximum, left, right)) |result| return result;
         if (valueNumericMode(left) != null and valueNumericMode(right) != null and (left.tag() == .array or right.tag() == .array)) {
-            return try self.applyDenseDyad(.maximum, left, right);
+            return try self.applyNumericDyad(.maximum, left, right);
         }
         if (shouldUseGenericArrayDyad(left, right)) return try self.applyGenericArrayDyad(.maximum, left, right);
         if (left.tag() == .float or right.tag() == .float) {
@@ -14147,11 +16073,11 @@ fn maximumValues(self: *Session, left: Value, right: Value) KError!Value {
         return try self.intValue(@max(lhs, rhs));
     }
 
-fn lessValues(self: *Session, left: Value, right: Value) KError!Value {
-    if (try self.promoteRenderableNumericDyadOperands(left, right)) |operands| {
-        return try self.lessValues(operands.left, operands.right);
-    }
-    if (try self.tryScalarIntBoolDyad(.less, left, right)) |result| return result;
+    fn lessValues(self: *Session, left: Value, right: Value) KError!Value {
+        if (try self.promoteRenderableNumericDyadOperands(left, right)) |operands| {
+            return try self.lessValues(operands.left, operands.right);
+        }
+        if (try self.tryScalarIntBoolDyad(.less, left, right)) |result| return result;
         if (shouldUseGenericArrayDyad(left, right)) return try self.applyGenericArrayDyad(.less, left, right);
         if (valueNumericMode(left) != null and valueNumericMode(right) != null and (left.tag() == .array or right.tag() == .array)) {
             return try self.compareNumericArrayValues(.less, left, right);
@@ -14159,11 +16085,11 @@ fn lessValues(self: *Session, left: Value, right: Value) KError!Value {
         return try self.compareScalars(.less, left, right);
     }
 
-fn moreValues(self: *Session, left: Value, right: Value) KError!Value {
-    if (try self.promoteRenderableNumericDyadOperands(left, right)) |operands| {
-        return try self.moreValues(operands.left, operands.right);
-    }
-    if (try self.tryScalarIntBoolDyad(.more, left, right)) |result| return result;
+    fn moreValues(self: *Session, left: Value, right: Value) KError!Value {
+        if (try self.promoteRenderableNumericDyadOperands(left, right)) |operands| {
+            return try self.moreValues(operands.left, operands.right);
+        }
+        if (try self.tryScalarIntBoolDyad(.more, left, right)) |result| return result;
         if (shouldUseGenericArrayDyad(left, right)) return try self.applyGenericArrayDyad(.more, left, right);
         if (valueNumericMode(left) != null and valueNumericMode(right) != null and (left.tag() == .array or right.tag() == .array)) {
             return try self.compareNumericArrayValues(.more, left, right);
@@ -14171,31 +16097,31 @@ fn moreValues(self: *Session, left: Value, right: Value) KError!Value {
         return try self.compareScalars(.more, left, right);
     }
 
-fn equalArrayValues(self: *Session, left: Value, right: Value) KError!Value {
-    if (valueNumericMode(left) != null and valueNumericMode(right) != null) {
-        if (planCompareMaskBackend(self, .equal, left, right) == .mlx) return try self.applyMlxArrayDyad(.equal, left, right);
-        const len = try arrayResultLen(left, right);
-        const shape = try nonVectorNumericShapeForDyad(left, right);
-        const rowwise = rowwiseMatrixVectorDyad(left, right);
-        var out = std.ArrayList(bool).empty;
-        defer out.deinit(self.allocator);
-        try out.ensureTotalCapacity(self.allocator, len);
-        for (0..len) |idx| {
-            const lhs = if (left.tag() == .array)
-                try numericFloatAt(left, if (rowwise) |info| info.operandIndex(true, idx) else idx)
-            else
-                scalarNumericFloatValue(left).?;
-            const rhs = if (right.tag() == .array)
-                try numericFloatAt(right, if (rowwise) |info| info.operandIndex(false, idx) else idx)
-            else
-                scalarNumericFloatValue(right).?;
-            try out.append(self.allocator, lhs == rhs);
-        }
-        const result = try self.createManagedHostBitArray(out.items);
+    fn equalArrayValues(self: *Session, left: Value, right: Value) KError!Value {
+        if (valueNumericMode(left) != null and valueNumericMode(right) != null) {
+            if (planCompareMaskBackend(self, .equal, left, right) == .mlx) return try self.applyBackendArrayDyad(.equal, left, right);
+            const len = try arrayResultLen(left, right);
+            const shape = try nonVectorNumericShapeForDyad(left, right);
+            const rowwise = rowwiseMatrixVectorDyad(left, right);
+            var out = std.ArrayList(bool).empty;
+            defer out.deinit(self.allocator);
+            try out.ensureTotalCapacity(self.allocator, len);
+            for (0..len) |idx| {
+                const lhs = if (left.tag() == .array)
+                    try numericFloatAt(left, if (rowwise) |info| info.operandIndex(true, idx) else idx)
+                else
+                    scalarNumericFloatValue(left).?;
+                const rhs = if (right.tag() == .array)
+                    try numericFloatAt(right, if (rowwise) |info| info.operandIndex(false, idx) else idx)
+                else
+                    scalarNumericFloatValue(right).?;
+                try out.append(self.allocator, lhs == rhs);
+            }
+            const result = try self.createManagedHostBitArray(out.items);
             return try applyNonVectorNumericShapeToValue(self, result, shape);
         }
-        const left_array = if (left.tag() == .array) try hostStructuralArrayValue(self, left) else null;
-        const right_array = if (right.tag() == .array) try hostStructuralArrayValue(self, right) else null;
+        const left_array = if (left.tag() == .array) try numericHostArrayValue(self, left) else null;
+        const right_array = if (right.tag() == .array) try numericHostArrayValue(self, right) else null;
         const len = if (left_array != null and right_array != null) blk: {
             if (left_array.?.len() != right_array.?.len()) return error.Type;
             break :blk left_array.?.len();
@@ -14205,8 +16131,8 @@ fn equalArrayValues(self: *Session, left: Value, right: Value) KError!Value {
         defer out.deinit(self.allocator);
         try out.ensureTotalCapacity(self.allocator, len);
         for (0..len) |idx| {
-            const lhs = if (left_array) |array| try self.hostArrayIndexScalar(array, @intCast(idx)) else left;
-            const rhs = if (right_array) |array| try self.hostArrayIndexScalar(array, @intCast(idx)) else right;
+            const lhs = if (left_array) |array| try self.hostDenseIndexScalar(array, @intCast(idx)) else left;
+            const rhs = if (right_array) |array| try self.hostDenseIndexScalar(array, @intCast(idx)) else right;
             defer if (left_array != null) self.releaseValue(lhs);
             defer if (right_array != null) self.releaseValue(rhs);
             const eq = try self.equalValues(lhs, rhs);
@@ -14216,13 +16142,14 @@ fn equalArrayValues(self: *Session, left: Value, right: Value) KError!Value {
         return try self.createManagedHostBitArray(out.items);
     }
 
-fn addValues(self: *Session, left: Value, right: Value) KError!Value {
-    if (try self.promoteRenderableNumericDyadOperands(left, right)) |operands| {
-        return try self.addValues(operands.left, operands.right);
-    }
-    if (try self.tryScalarIntBoolDyad(.add, left, right)) |result| return result;
+    fn addValues(self: *Session, left: Value, right: Value) KError!Value {
+        if (try self.promoteRenderableNumericDyadOperands(left, right)) |operands| {
+            return try self.addValues(operands.left, operands.right);
+        }
+        if (try self.tryScalarIntBoolDyad(.add, left, right)) |result| return result;
+        if (try self.tryAffineRangeAddValues(left, right)) |result| return result;
         if (shouldUseGenericArrayDyad(left, right)) return try self.applyGenericArrayDyad(.add, left, right);
-        if (left.tag() == .array or right.tag() == .array) return try self.applyDenseDyad(.add, left, right);
+        if (hasArrayOperand(left, right) and canApplyNumericDyad(left, right)) return try self.applyNumericDyad(.add, left, right);
         return switch (left.tag()) {
             .int => switch (right.tag()) {
                 .float => try self.floatValue(@as(f64, @floatFromInt(left.asInt())) + right.asFloat()),
@@ -14241,13 +16168,13 @@ fn addValues(self: *Session, left: Value, right: Value) KError!Value {
         };
     }
 
-fn subValues(self: *Session, left: Value, right: Value) KError!Value {
-    if (try self.promoteRenderableNumericDyadOperands(left, right)) |operands| {
-        return try self.subValues(operands.left, operands.right);
-    }
-    if (try self.tryScalarIntBoolDyad(.sub, left, right)) |result| return result;
+    fn subValues(self: *Session, left: Value, right: Value) KError!Value {
+        if (try self.promoteRenderableNumericDyadOperands(left, right)) |operands| {
+            return try self.subValues(operands.left, operands.right);
+        }
+        if (try self.tryScalarIntBoolDyad(.sub, left, right)) |result| return result;
         if (shouldUseGenericArrayDyad(left, right)) return try self.applyGenericArrayDyad(.sub, left, right);
-        if (left.tag() == .array or right.tag() == .array) return try self.applyDenseDyad(.sub, left, right);
+        if (hasArrayOperand(left, right) and canApplyNumericDyad(left, right)) return try self.applyNumericDyad(.sub, left, right);
         return switch (left.tag()) {
             .int => switch (right.tag()) {
                 .float => try self.floatValue(@as(f64, @floatFromInt(left.asInt())) - right.asFloat()),
@@ -14266,13 +16193,13 @@ fn subValues(self: *Session, left: Value, right: Value) KError!Value {
         };
     }
 
-fn mulValues(self: *Session, left: Value, right: Value) KError!Value {
-    if (try self.promoteRenderableNumericDyadOperands(left, right)) |operands| {
-        return try self.mulValues(operands.left, operands.right);
-    }
-    if (try self.tryScalarIntBoolDyad(.mul, left, right)) |result| return result;
+    fn mulValues(self: *Session, left: Value, right: Value) KError!Value {
+        if (try self.promoteRenderableNumericDyadOperands(left, right)) |operands| {
+            return try self.mulValues(operands.left, operands.right);
+        }
+        if (try self.tryScalarIntBoolDyad(.mul, left, right)) |result| return result;
         if (shouldUseGenericArrayDyad(left, right)) return try self.applyGenericArrayDyad(.mul, left, right);
-        if (left.tag() == .array or right.tag() == .array) return try self.applyDenseDyad(.mul, left, right);
+        if (hasArrayOperand(left, right) and canApplyNumericDyad(left, right)) return try self.applyNumericDyad(.mul, left, right);
         return switch (left.tag()) {
             .int => switch (right.tag()) {
                 .float => try self.floatValue(@as(f64, @floatFromInt(left.asInt())) * right.asFloat()),
@@ -14291,13 +16218,13 @@ fn mulValues(self: *Session, left: Value, right: Value) KError!Value {
         };
     }
 
-fn divValues(self: *Session, left: Value, right: Value) KError!Value {
-    if (try self.promoteRenderableNumericDyadOperands(left, right)) |operands| {
-        return try self.divValues(operands.left, operands.right);
-    }
-    if (try self.tryScalarIntBoolDyad(.div, left, right)) |result| return result;
+    fn divValues(self: *Session, left: Value, right: Value) KError!Value {
+        if (try self.promoteRenderableNumericDyadOperands(left, right)) |operands| {
+            return try self.divValues(operands.left, operands.right);
+        }
+        if (try self.tryScalarIntBoolDyad(.div, left, right)) |result| return result;
         if (shouldUseGenericArrayDyad(left, right)) return try self.applyGenericArrayDyad(.div, left, right);
-        if (left.tag() == .array or right.tag() == .array) return try self.applyDenseDyad(.div, left, right);
+        if (hasArrayOperand(left, right) and canApplyNumericDyad(left, right)) return try self.applyNumericDyad(.div, left, right);
         const left_float = switch (left.tag()) {
             .int => @as(f64, @floatFromInt(left.asInt())),
             .bool => @as(f64, @floatFromInt(@intFromBool(left.asBool()))),
@@ -14324,7 +16251,7 @@ fn divValues(self: *Session, left: Value, right: Value) KError!Value {
         result_rows: usize,
         result_cols: usize,
         result_len: usize,
-        result_mode: HostArrayElem,
+        result_mode: HostDenseElem,
     };
 
     fn matmulShapeForValues(left: Value, right: Value) KError!?MatmulShape {
@@ -14386,7 +16313,7 @@ fn divValues(self: *Session, left: Value, right: Value) KError!Value {
         if (shape.result_rank == 0) return try self.floatValue(out.items[0]);
         const value = try out.value(self);
         const analysis = analyzeFloatSlice(out.items);
-        hostArraySetFlags(@constCast(value.asHostArray()), analysis.flags);
+        hostDenseSetFlags(try mutableNumericHostArrayValue(self, value), analysis.flags);
         if (shape.result_rank == 2) return try newReshapeViewValue(self, value, numericShapeSnapshotMatrix(shape.result_rows, shape.result_cols));
         return value;
     }
@@ -14515,82 +16442,71 @@ fn divValues(self: *Session, left: Value, right: Value) KError!Value {
         return try self.finishHostMatmulIntResult(shape, out_items);
     }
 
-fn promoteRenderableMatrixValue(self: *Session, value: Value) KError!?Value {
-    if (valueNumericMatrixShape(value) != null) return value;
-    if (value.tag() != .array or value.arrayKind() != .host_array or std.meta.activeTag(value.asHostArray().storage) != .boxed) return null;
+    fn promoteRenderableMatrixValue(self: *Session, value: Value) KError!?Value {
+        if (valueNumericMatrixShape(value) != null) return value;
+        _ = self;
+        return null;
+    }
 
-        const items = value.asHostArray().storage.boxed;
-        if (!isRenderableMatrix(items)) return null;
+    const NumericDyadOperands = struct {
+        left: Value,
+        right: Value,
+    };
 
-        const rows = items.len;
-        const cols = numericVectorLen(items[0]) orelse return error.Type;
-        const out_shape = numericShapeSnapshotMatrix(rows, cols);
+    fn promoteRenderableNumericDyadOperands(self: *Session, left: Value, right: Value) KError!?NumericDyadOperands {
+        var promoted_left = left;
+        var promoted_right = right;
+        var changed = false;
 
-        var saw_float = false;
-        for (items) |row| {
-            if ((valueNumericMode(row) orelse return error.Type) == .float) saw_float = true;
-        }
-
-        if (saw_float) {
-            var out = std.ArrayList(f64).empty;
-            defer out.deinit(self.allocator);
-            try out.ensureTotalCapacity(self.allocator, rows * cols);
-            for (items) |row| {
-                for (0..cols) |col_idx| {
-                    try out.append(self.allocator, try numericFloatAt(row, col_idx));
-                }
-            }
-            const promoted = try self.createManagedHostFloatArray(out.items);
-            return try applyNonVectorNumericShapeToValue(self, promoted, out_shape);
-        }
-
-        var out = std.ArrayList(i64).empty;
-        defer out.deinit(self.allocator);
-        try out.ensureTotalCapacity(self.allocator, rows * cols);
-        for (items) |row| {
-            for (0..cols) |col_idx| {
-                try out.append(self.allocator, try numericIntAt(row, col_idx));
+        if (try self.promoteRenderableMatrixValue(left)) |value| {
+            if (value.raw != left.raw) {
+                promoted_left = value;
+                changed = true;
             }
         }
-    const promoted = try self.createManagedHostIntArray(out.items);
-    return try applyNonVectorNumericShapeToValue(self, promoted, out_shape);
-}
-
-const NumericDyadOperands = struct {
-    left: Value,
-    right: Value,
-};
-
-fn promoteRenderableNumericDyadOperands(self: *Session, left: Value, right: Value) KError!?NumericDyadOperands {
-    var promoted_left = left;
-    var promoted_right = right;
-    var changed = false;
-
-    if (try self.promoteRenderableMatrixValue(left)) |value| {
-        if (value.raw != left.raw) {
-            promoted_left = value;
-            changed = true;
+        if (try self.promoteRenderableMatrixValue(right)) |value| {
+            if (value.raw != right.raw) {
+                promoted_right = value;
+                changed = true;
+            }
         }
+        if (!changed) return null;
+        return .{ .left = promoted_left, .right = promoted_right };
     }
-    if (try self.promoteRenderableMatrixValue(right)) |value| {
-        if (value.raw != right.raw) {
-            promoted_right = value;
-            changed = true;
+
+    fn applyBackendMatmulValues(self: *Session, left: Value, right: Value) KError!Value {
+        if (comptime runtime_has_mlx) {
+            return runtime_backend_exec.applyBackendMatmulValues(.{
+                .Session = Session,
+                .Value = Value,
+                .NumericArray = NumericArray,
+                .KError = KError,
+                .c = c,
+                .mlx = mlx,
+                .mapMlxError = mapMlxError,
+                .backendContext = Session.backendContext,
+                .valueNumericHandle = valueNumericHandle,
+                .numericIntAt = numericIntAt,
+                .numericArrayIsFirstAxisSlice = numericArrayIsFirstAxisSlice,
+                .numericArrayFirstAxisSliceSource = numericArrayFirstAxisSliceSource,
+                .numericArrayFirstAxisSliceRowStart = numericArrayFirstAxisSliceRowStart,
+                .numericArrayFirstAxisSliceRowStep = numericArrayFirstAxisSliceRowStep,
+                .numericArrayIsFirstAxisIndex = numericArrayIsFirstAxisIndex,
+                .numericArrayFirstAxisIndexSource = numericArrayFirstAxisIndexSource,
+                .numericArrayFirstAxisIndexRows = numericArrayFirstAxisIndexRows,
+                .numericArrayIsFirstAxisConcat = numericArrayIsFirstAxisConcat,
+                .numericArrayFirstAxisConcatLeft = numericArrayFirstAxisConcatLeft,
+                .numericArrayFirstAxisConcatRight = numericArrayFirstAxisConcatRight,
+                .numericArrayIsReshapeView = numericArrayIsReshapeView,
+                .numericArrayReshapeSource = numericArrayReshapeSource,
+                .numericArrayIsTransposeView = numericArrayIsTransposeView,
+                .numericArrayTransposeSource = numericArrayTransposeSource,
+                .numeric_array_max_rank = numeric_array_max_rank,
+                .materializeBackendArray = Session.materializeBackendArray,
+                .wrapManagedBackendArray = Session.wrapManagedBackendArray,
+            }, self, left, right);
         }
-    }
-    if (!changed) return null;
-    return .{ .left = promoted_left, .right = promoted_right };
-}
-
-    fn applyMlxMatmulValues(self: *Session, left: Value, right: Value) KError!Value {
-        var left_arr = try self.dotTensor(left);
-        defer left_arr.deinit();
-        var right_arr = try self.dotTensor(right);
-        defer right_arr.deinit();
-
-        const ctx = try self.mlxContext();
-        const out = mlx.Array.matmul(ctx.*, left_arr, right_arr) catch |err| return mapMlxError(err);
-        return try self.wrapManagedMlxArray(out);
+        return error.Unsupported;
     }
 
     fn applyMatmulValues(self: *Session, left: Value, right: Value) KError!Value {
@@ -14599,7 +16515,7 @@ fn promoteRenderableNumericDyadOperands(self: *Session, left: Value, right: Valu
         const shape = (try matmulShapeForValues(promoted_left, promoted_right)) orelse return error.Type;
         return switch (planMatmulBackend(self, promoted_left, promoted_right)) {
             .host => try self.applyHostMatmulGeneric(promoted_left, promoted_right, shape),
-            .mlx => try self.applyMlxMatmulValues(promoted_left, promoted_right),
+            .mlx => try self.applyBackendMatmulValues(promoted_left, promoted_right),
         };
     }
 
@@ -14609,31 +16525,104 @@ fn promoteRenderableNumericDyadOperands(self: *Session, left: Value, right: Valu
         return error.Unsupported;
     }
 
+    const BatchedMatmulShape = struct {
+        batch_len: usize,
+        left_rows: usize,
+        inner_len: usize,
+        right_cols: usize,
+    };
+
+    fn batchedMatmulShapeForValues(left: Value, right: Value) KError!?BatchedMatmulShape {
+        _ = valueNumericMode(left) orelse return null;
+        _ = valueNumericMode(right) orelse return null;
+
+        const left_handle = shapedNumericHandle(left) orelse return null;
+        const right_handle = shapedNumericHandle(right) orelse return null;
+        if (left_handle.rank != 3 or right_handle.rank != 3) return null;
+
+        const batch_len: usize = @intCast(left_handle.shape[0]);
+        if (batch_len == 0) return null;
+        if (batch_len != @as(usize, @intCast(right_handle.shape[0]))) return error.Type;
+
+        const left_rows: usize = @intCast(left_handle.shape[1]);
+        const inner_len: usize = @intCast(left_handle.shape[2]);
+        if (inner_len != @as(usize, @intCast(right_handle.shape[1]))) return error.Type;
+
+        return .{
+            .batch_len = batch_len,
+            .left_rows = left_rows,
+            .inner_len = inner_len,
+            .right_cols = @intCast(right_handle.shape[2]),
+        };
+    }
+
+    fn planBatchedMatmulBackend(self: *Session, left: Value, right: Value, shape: BatchedMatmulShape) DenseExecBackend {
+        const left_facts = denseValuePlanFacts(left);
+        const right_facts = denseValuePlanFacts(right);
+        return chooseDenseRegionBackend(self, .matmul, .{
+            .elem_count = shape.batch_len * shape.left_rows * shape.inner_len * shape.right_cols,
+            .matrix_rows = shape.batch_len * shape.left_rows,
+            .matrix_cols = shape.right_cols,
+            .has_backend_residency = left_facts.has_backend_residency or right_facts.has_backend_residency,
+        });
+    }
+
+    fn applyHostBatchedMatmulValues(self: *Session, left: Value, right: Value, shape: BatchedMatmulShape) KError!Value {
+        const left_handle = shapedNumericHandle(left) orelse return error.Type;
+        const right_handle = shapedNumericHandle(right) orelse return error.Type;
+
+        var results = std.ArrayList(Value).empty;
+        defer {
+            for (results.items) |value| self.releaseValue(value);
+            results.deinit(self.allocator);
+        }
+        try results.ensureTotalCapacity(self.allocator, shape.batch_len);
+
+        for (0..shape.batch_len) |idx| {
+            const left_item = try numericValueFirstAxisCellValue(self, left, left_handle, @intCast(idx));
+            defer self.releaseValue(left_item);
+            const right_item = try numericValueFirstAxisCellValue(self, right, right_handle, @intCast(idx));
+            defer self.releaseValue(right_item);
+
+            const item_shape = (try matmulShapeForValues(left_item, right_item)) orelse return error.Type;
+            if (item_shape.result_rank != 2) return error.Type;
+            const result = try self.applyHostMatmulGeneric(left_item, right_item, item_shape);
+            try results.append(self.allocator, result);
+        }
+        return try self.createManagedArrayLikeFromValues(results.items);
+    }
+
+    fn applyBatchedMatmulValues(self: *Session, left: Value, right: Value) KError!?Value {
+        const shape = (try batchedMatmulShapeForValues(left, right)) orelse return null;
+        return switch (self.planBatchedMatmulBackend(left, right, shape)) {
+            .host => try self.applyHostBatchedMatmulValues(left, right, shape),
+            .mlx => try self.applyBackendMatmulValues(left, right),
+        };
+    }
+
     fn dotValues(self: *Session, left: Value, right: Value) KError!Value {
         return try self.applyDot(left, right);
     }
 
-    fn applyDenseMonad(self: *Session, op: BuiltinId, value: Value) KError!Value {
+    fn applyNumericMonad(self: *Session, op: BuiltinId, value: Value) KError!Value {
         if (NumericStructuralView.init(value)) |structural| {
             if (try numericStructuralDenseMonadValue(self, value, structural, op)) |result| return result;
         }
-        if (value.tag() == .array and value.arraySubkind() == .numeric_array) {
-            const handle = value.asNumericArray();
-            if (supportsMlxMonad(op) and handle.host == null and hasMlxRealization(value)) {
-                return try self.applyMlxArrayMonad(op, value);
+        if (valueNumericHandle(value)) |const_handle| {
+            const handle = @constCast(const_handle);
+            if (supportsBackendMonad(op) and !numericHasHostAttachment(handle) and hasBackendRealization(value)) {
+                return try self.applyBackendArrayMonad(op, value);
             }
-            if (handle.host == null and handle.structural != .materialized) {
+            if (!numericHasHostAttachment(handle) and handle.structural != .materialized) {
                 const view = try hostDenseView(self, value);
                 return try self.applyHostDenseViewMonad(op, value, view);
             }
+            return self.applyHostArrayMonad(op, try hostStructuralArrayForHandle(self, handle));
         }
-        return switch (value.tag()) {
-            .array => switch (value.arrayKind()) {
-                .host_array => self.applyHostArrayMonad(op, value.asHostArray()),
-                .mlx_array => self.applyMlxArrayMonad(op, value),
-                .numeric_array => self.applyHostArrayMonad(op, try hostStructuralArrayForHandle(self, @constCast(value.asNumericArray()))),
-                else => error.Internal,
-            },
+        if (value.tag() != .array) return error.Type;
+        return switch (value.arrayKind()) {
+            .host_dense_array => self.applyHostArrayMonad(op, value.asHostDenseArray()),
+            .backend_array => self.applyBackendArrayMonad(op, value),
             else => error.Type,
         };
     }
@@ -14708,20 +16697,30 @@ fn promoteRenderableNumericDyadOperands(self: *Session, left: Value, right: Valu
         };
     }
 
-fn applyDenseDyad(self: *Session, op: BuiltinId, left: Value, right: Value) KError!Value {
-    const promoted_left = if (try self.promoteRenderableMatrixValue(left)) |value| value else left;
-    const promoted_right = if (try self.promoteRenderableMatrixValue(right)) |value| value else right;
-    if (planDenseNumericDyadBackend(self, op, promoted_left, promoted_right) == .mlx) {
-        self.noteHostDenseDyadMiss(.planner_mlx);
-        return self.applyMlxArrayDyad(op, promoted_left, promoted_right);
+    fn applyNumericDyad(self: *Session, op: BuiltinId, left: Value, right: Value) KError!Value {
+        const promoted_left = if (try self.promoteRenderableMatrixValue(left)) |value| value else left;
+        const promoted_right = if (try self.promoteRenderableMatrixValue(right)) |value| value else right;
+        if (planDenseNumericDyadBackend(self, op, promoted_left, promoted_right) == .mlx) {
+            self.noteHostDenseDyadMiss(.planner_backend);
+            return self.applyBackendArrayDyad(op, promoted_left, promoted_right);
+        }
+        return self.applyHostArrayDyad(op, promoted_left, promoted_right);
     }
-    return self.applyHostArrayDyad(op, promoted_left, promoted_right);
-}
+
+    fn hasArrayOperand(left: Value, right: Value) bool {
+        return left.tag() == .array or right.tag() == .array;
+    }
+
+    fn canApplyNumericDyad(left: Value, right: Value) bool {
+        return valueNumericMode(left) != null and valueNumericMode(right) != null;
+    }
 
     fn applyGenericArrayDyad(self: *Session, op: BuiltinId, left: Value, right: Value) KError!Value {
         const len = try arrayResultLen(left, right);
-        const left_array = if (left.tag() == .array) try hostStructuralArrayValue(self, left) else null;
-        const right_array = if (right.tag() == .array) try hostStructuralArrayValue(self, right) else null;
+        const left_dense = if (left.tag() == .array and left.arraySubkind() != .host_boxed_array) try numericHostArrayValue(self, left) else null;
+        const right_dense = if (right.tag() == .array and right.arraySubkind() != .host_boxed_array) try numericHostArrayValue(self, right) else null;
+        const left_boxed = if (left.tag() == .array and left.arraySubkind() == .host_boxed_array) left.asHostBoxedArray() else null;
+        const right_boxed = if (right.tag() == .array and right.arraySubkind() == .host_boxed_array) right.asHostBoxedArray() else null;
         var out = std.ArrayList(Value).empty;
         defer {
             for (out.items) |value| self.releaseValue(value);
@@ -14729,10 +16728,20 @@ fn applyDenseDyad(self: *Session, op: BuiltinId, left: Value, right: Value) KErr
         }
         try out.ensureTotalCapacity(self.allocator, len);
         for (0..len) |idx| {
-            const lhs = if (left_array) |array| try self.hostArrayIndexScalar(array, @intCast(idx)) else left;
-            defer if (left_array != null) self.releaseValue(lhs);
-            const rhs = if (right_array) |array| try self.hostArrayIndexScalar(array, @intCast(idx)) else right;
-            defer if (right_array != null) self.releaseValue(rhs);
+            const lhs = if (left_dense) |array|
+                try self.hostDenseIndexScalar(array, @intCast(idx))
+            else if (left_boxed) |array|
+                try self.hostBoxedArrayIndexScalar(array, @intCast(idx))
+            else
+                left;
+            defer if (left_dense != null or left_boxed != null) self.releaseValue(lhs);
+            const rhs = if (right_dense) |array|
+                try self.hostDenseIndexScalar(array, @intCast(idx))
+            else if (right_boxed) |array|
+                try self.hostBoxedArrayIndexScalar(array, @intCast(idx))
+            else
+                right;
+            defer if (right_dense != null or right_boxed != null) self.releaseValue(rhs);
             try out.append(self.allocator, switch (op) {
                 .add => try self.addValues(lhs, rhs),
                 .sub => try self.subValues(lhs, rhs),
@@ -14749,24 +16758,24 @@ fn applyDenseDyad(self: *Session, op: BuiltinId, left: Value, right: Value) KErr
         return try self.makeArrayFromValues(out.items);
     }
 
-    fn applyHostArrayMonad(self: *Session, op: BuiltinId, array: *const HostArray) KError!Value {
+    fn applyHostArrayMonad(self: *Session, op: BuiltinId, array: *const HostDenseArray) KError!Value {
         return switch (op) {
-            .add => self.shareValue(hostArraySourceValue(array)),
+            .add => self.shareValue(hostDenseSourceValue(array)),
             .sub => switch (array.storage) {
                 .bit, .int8, .int16, .int32, .int64 => blk: {
                     const items = hostIntArrayView(array).?;
                     const input_kind = hostIntArrayViewKind(items);
                     const len = hostIntArrayViewLen(items);
-                    if (hostIntNegRange(hostArrayCachedIntRange(array) orelse hostIntArrayViewEndpointRange(items, array.flags) orelse hostIntArrayViewRange(items))) |result_range| {
+                    if (hostIntNegRange(hostDenseCachedIntRange(array) orelse hostIntArrayViewEndpointRange(items, array.flags) orelse hostIntArrayViewRange(items))) |result_range| {
                         const result_kind = hostIntStorageKindForRange(result_range.min, result_range.max);
-                        var plan = try self.planHostIntUnaryOutput(hostArraySourceValue(array), input_kind, result_kind, len, true, true);
+                        var plan = try self.planHostIntUnaryOutput(hostDenseSourceValue(array), input_kind, result_kind, len, true, true);
                         try fillIntNegArrayResult(&plan.output, items, plan.unchecked_safe);
                         break :blk try self.finishHostIntOutput(plan, intNegResultFlags(array.flags));
                     }
                     var attempt_kind = hostNegInitialResultKind(input_kind);
                     while (true) {
                         var plan = try self.planHostIntUnaryOutput(
-                            hostArraySourceValue(array),
+                            hostDenseSourceValue(array),
                             input_kind,
                             attempt_kind,
                             len,
@@ -14784,124 +16793,122 @@ fn applyDenseDyad(self: *Session, op: BuiltinId, left: Value, right: Value) KErr
                     }
                 },
                 .float64 => |items| blk: {
-                    var plan = try self.planHostFloatUnaryOutput(hostArraySourceValue(array), items.len, true);
+                    var plan = try self.planHostFloatUnaryOutput(hostDenseSourceValue(array), items.len, true);
                     for (items, 0..) |item, idx| plan.output.items[idx] = -item;
                     break :blk try self.finishHostFloatOutput(plan, 0);
                 },
-                .boxed => error.Type,
             },
-            .mul => self.shareValue(hostArraySourceValue(array)),
+            .mul => self.shareValue(hostDenseSourceValue(array)),
             .div, .exp, .log, .tanh, .sigmoid => switch (array.storage) {
                 .bit => |words| blk: {
-                    const plan = try self.planHostFloatUnaryOutput(hostArraySourceValue(array), array.logical_len, false);
+                    const plan = try self.planHostFloatUnaryOutput(hostDenseSourceValue(array), array.logical_len, false);
                     fillFloatUnaryBitArray(plan.output.items, op, .{ .words = words, .len = array.logical_len });
                     break :blk try self.finishHostFloatOutput(plan, 0);
                 },
                 .int8 => |items| blk: {
-                    const plan = try self.planHostFloatUnaryOutput(hostArraySourceValue(array), items.len, false);
+                    const plan = try self.planHostFloatUnaryOutput(hostDenseSourceValue(array), items.len, false);
                     fillFloatUnaryArray(i8, plan.output.items, op, items);
                     break :blk try self.finishHostFloatOutput(plan, 0);
                 },
                 .int16 => |items| blk: {
-                    const plan = try self.planHostFloatUnaryOutput(hostArraySourceValue(array), items.len, false);
+                    const plan = try self.planHostFloatUnaryOutput(hostDenseSourceValue(array), items.len, false);
                     fillFloatUnaryArray(i16, plan.output.items, op, items);
                     break :blk try self.finishHostFloatOutput(plan, 0);
                 },
                 .int32 => |items| blk: {
-                    const plan = try self.planHostFloatUnaryOutput(hostArraySourceValue(array), items.len, false);
+                    const plan = try self.planHostFloatUnaryOutput(hostDenseSourceValue(array), items.len, false);
                     fillFloatUnaryArray(i32, plan.output.items, op, items);
                     break :blk try self.finishHostFloatOutput(plan, 0);
                 },
                 .int64 => |items| blk: {
-                    const plan = try self.planHostFloatUnaryOutput(hostArraySourceValue(array), items.len, false);
+                    const plan = try self.planHostFloatUnaryOutput(hostDenseSourceValue(array), items.len, false);
                     fillFloatUnaryArray(i64, plan.output.items, op, items);
                     break :blk try self.finishHostFloatOutput(plan, 0);
                 },
                 .float64 => |items| blk: {
-                    const plan = try self.planHostFloatUnaryOutput(hostArraySourceValue(array), items.len, true);
+                    const plan = try self.planHostFloatUnaryOutput(hostDenseSourceValue(array), items.len, true);
                     fillFloatUnaryArray(f64, plan.output.items, op, items);
                     break :blk try self.finishHostFloatOutput(plan, 0);
                 },
-                .boxed => error.Type,
             },
             else => error.Type,
         };
     }
 
-fn applyHostArrayDyad(self: *Session, op: BuiltinId, left: Value, right: Value) KError!Value {
-    const mode = arrayResultMode(op, left, right) orelse {
-        self.noteHostDenseDyadMiss(.mode);
-        return error.Type;
-    };
-    const len = try arrayResultLen(left, right);
-    if (rowwiseMatrixVectorDyad(left, right)) |rowwise| {
-        self.noteHostDenseDyadHost();
-        return switch (mode) {
-            .int => try self.applyHostArrayDyadRowwiseInt(op, left, right, rowwise, len),
-            .float => try self.applyHostArrayDyadRowwiseFloat(op, left, right, rowwise, len),
+    fn applyHostArrayDyad(self: *Session, op: BuiltinId, left: Value, right: Value) KError!Value {
+        const mode = arrayResultMode(op, left, right) orelse {
+            self.noteHostDenseDyadMiss(.mode);
+            return error.Type;
         };
-    }
-    const left_view = hostDenseView(self, left) catch |err| {
-        self.noteHostDenseDyadMiss(.view);
-        return err;
+        const len = try arrayResultLen(left, right);
+        if (rowwiseMatrixVectorDyad(left, right)) |rowwise| {
+            self.noteHostDenseDyadHost(op, left, right, true);
+            return switch (mode) {
+                .int => try self.applyHostArrayDyadRowwiseInt(op, left, right, rowwise, len),
+                .float => try self.applyHostArrayDyadRowwiseFloat(op, left, right, rowwise, len),
+            };
+        }
+        const left_view = hostDenseView(self, left) catch |err| {
+            self.noteHostDenseDyadMiss(.view);
+            return err;
         };
         const right_view = hostDenseView(self, right) catch |err| {
             self.noteHostDenseDyadMiss(.view);
             return err;
         };
-    self.noteHostDenseDyadHost();
-    return switch (mode) {
-        .int => try self.applyHostArrayDyadInt(op, left, right, left_view, right_view, len),
-        .float => try self.applyHostArrayDyadFloat(op, left, right, left_view, right_view, len),
-    };
-}
-
-fn applyHostArrayDyadRowwiseInt(self: *Session, op: BuiltinId, left: Value, right: Value, rowwise: RowwiseMatrixVectorDyad, len: usize) KError!Value {
-    var profile_scope = self.beginSamplingProfileScope(.dense_host);
-    defer profile_scope.end();
-
-    var out = std.ArrayList(i64).empty;
-    defer out.deinit(self.allocator);
-    try out.ensureTotalCapacity(self.allocator, len);
-    for (0..len) |idx| {
-        const lhs = try numericIntAt(left, rowwise.operandIndex(true, idx));
-        const rhs = try numericIntAt(right, rowwise.operandIndex(false, idx));
-        try out.append(self.allocator, switch (op) {
-            .add => try checkedIntOp(.add, lhs, rhs),
-            .sub => try checkedIntOp(.sub, lhs, rhs),
-            .mul => try checkedIntOp(.mul, lhs, rhs),
-            .minimum => @min(lhs, rhs),
-            .maximum => @max(lhs, rhs),
-            else => return error.Type,
-        });
+        self.noteHostDenseDyadHost(op, left, right, false);
+        return switch (mode) {
+            .int => try self.applyHostArrayDyadInt(op, left, right, left_view, right_view, len),
+            .float => try self.applyHostArrayDyadFloat(op, left, right, left_view, right_view, len),
+        };
     }
-    const result = try self.createManagedHostIntArray(out.items);
-    return try applyNonVectorNumericShapeToValue(self, result, numericShapeSnapshotMatrix(rowwise.rows, rowwise.cols));
-}
 
-fn applyHostArrayDyadRowwiseFloat(self: *Session, op: BuiltinId, left: Value, right: Value, rowwise: RowwiseMatrixVectorDyad, len: usize) KError!Value {
-    var profile_scope = self.beginSamplingProfileScope(.dense_host);
-    defer profile_scope.end();
+    fn applyHostArrayDyadRowwiseInt(self: *Session, op: BuiltinId, left: Value, right: Value, rowwise: RowwiseMatrixVectorDyad, len: usize) KError!Value {
+        var profile_scope = self.beginSamplingProfileScope(.dense_host);
+        defer profile_scope.end();
 
-    var out = std.ArrayList(f64).empty;
-    defer out.deinit(self.allocator);
-    try out.ensureTotalCapacity(self.allocator, len);
-    for (0..len) |idx| {
-        const lhs = try numericFloatAt(left, rowwise.operandIndex(true, idx));
-        const rhs = try numericFloatAt(right, rowwise.operandIndex(false, idx));
-        try out.append(self.allocator, switch (op) {
-            .add => lhs + rhs,
-            .sub => lhs - rhs,
-            .mul => lhs * rhs,
-            .div => lhs / rhs,
-            .minimum => @min(lhs, rhs),
-            .maximum => @max(lhs, rhs),
-            else => return error.Type,
-        });
+        var out = std.ArrayList(i64).empty;
+        defer out.deinit(self.allocator);
+        try out.ensureTotalCapacity(self.allocator, len);
+        for (0..len) |idx| {
+            const lhs = try numericIntAt(left, rowwise.operandIndex(true, idx));
+            const rhs = try numericIntAt(right, rowwise.operandIndex(false, idx));
+            try out.append(self.allocator, switch (op) {
+                .add => try checkedIntOp(.add, lhs, rhs),
+                .sub => try checkedIntOp(.sub, lhs, rhs),
+                .mul => try checkedIntOp(.mul, lhs, rhs),
+                .minimum => @min(lhs, rhs),
+                .maximum => @max(lhs, rhs),
+                else => return error.Type,
+            });
+        }
+        const result = try self.createManagedHostIntArray(out.items);
+        return try applyNonVectorNumericShapeToValue(self, result, numericShapeSnapshotMatrix(rowwise.rows, rowwise.cols));
     }
-    const result = try self.createManagedHostFloatArray(out.items);
-    return try applyNonVectorNumericShapeToValue(self, result, numericShapeSnapshotMatrix(rowwise.rows, rowwise.cols));
-}
+
+    fn applyHostArrayDyadRowwiseFloat(self: *Session, op: BuiltinId, left: Value, right: Value, rowwise: RowwiseMatrixVectorDyad, len: usize) KError!Value {
+        var profile_scope = self.beginSamplingProfileScope(.dense_host);
+        defer profile_scope.end();
+
+        var out = std.ArrayList(f64).empty;
+        defer out.deinit(self.allocator);
+        try out.ensureTotalCapacity(self.allocator, len);
+        for (0..len) |idx| {
+            const lhs = try numericFloatAt(left, rowwise.operandIndex(true, idx));
+            const rhs = try numericFloatAt(right, rowwise.operandIndex(false, idx));
+            try out.append(self.allocator, switch (op) {
+                .add => lhs + rhs,
+                .sub => lhs - rhs,
+                .mul => lhs * rhs,
+                .div => lhs / rhs,
+                .minimum => @min(lhs, rhs),
+                .maximum => @max(lhs, rhs),
+                else => return error.Type,
+            });
+        }
+        const result = try self.createManagedHostFloatArray(out.items);
+        return try applyNonVectorNumericShapeToValue(self, result, numericShapeSnapshotMatrix(rowwise.rows, rowwise.cols));
+    }
 
     fn applyHostArrayDyadInt(self: *Session, op: BuiltinId, left_value: Value, right_value: Value, left: HostDenseView, right: HostDenseView, len: usize) KError!Value {
         var profile_scope = self.beginSamplingProfileScope(.dense_host);
@@ -15115,137 +17122,117 @@ fn applyHostArrayDyadRowwiseFloat(self: *Session, op: BuiltinId, left: Value, ri
         };
     }
 
-    fn applyMlxArrayMonad(self: *Session, op: BuiltinId, value: Value) KError!Value {
-        var input = try self.materializeMlxArray(value);
-        errdefer input.deinit();
-        if (op == .add) return try self.wrapManagedMlxArray(input);
-        defer input.deinit();
-        const out = switch (op) {
-            .add => unreachable,
-            .sub => blk: {
-                try castMlxBoolArrayTo(self, &input, c.MLX_INT32);
-                const ctx = try self.mlxContext();
-                break :blk mlx.Array.negate(ctx.*, input) catch |err| return mapMlxError(err);
-            },
-            .div => blk: {
-                try castMlxBoolArrayTo(self, &input, c.MLX_FLOAT32);
-                const ctx = try self.mlxContext();
-                break :blk mlx.Array.sqrt(ctx.*, input) catch |err| return mapMlxError(err);
-            },
-            .mul => return error.Unsupported,
-            .exp => blk: {
-                try castMlxBoolArrayTo(self, &input, c.MLX_FLOAT32);
-                const ctx = try self.mlxContext();
-                break :blk mlx.Array.exp(ctx.*, input) catch |err| return mapMlxError(err);
-            },
-            .log => blk: {
-                try castMlxBoolArrayTo(self, &input, c.MLX_FLOAT32);
-                const ctx = try self.mlxContext();
-                break :blk mlx.Array.log(ctx.*, input) catch |err| return mapMlxError(err);
-            },
-            .tanh => blk: {
-                try castMlxBoolArrayTo(self, &input, c.MLX_FLOAT32);
-                const ctx = try self.mlxContext();
-                break :blk mlx.Array.tanh(ctx.*, input) catch |err| return mapMlxError(err);
-            },
-            .sigmoid => blk: {
-                try castMlxBoolArrayTo(self, &input, c.MLX_FLOAT32);
-                const ctx = try self.mlxContext();
-                break :blk mlx.Array.sigmoid(ctx.*, input) catch |err| return mapMlxError(err);
-            },
-            else => return error.Unsupported,
-        };
-        return try self.wrapManagedMlxArray(out);
-    }
-
-fn applyMlxArrayDyad(self: *Session, op: BuiltinId, left: Value, right: Value) KError!Value {
-    var profile_scope = self.beginSamplingProfileScope(.dense_mlx);
-    defer profile_scope.end();
-    var left_arr = try self.materializeMlxArray(left);
-        defer left_arr.deinit();
-        var right_arr = try self.materializeMlxArray(right);
-        defer right_arr.deinit();
-
-    const use_float = op == .div or mlxDtypeIsFloat(left_arr.dtype()) or mlxDtypeIsFloat(right_arr.dtype());
-    try castMlxBoolArrayTo(self, &left_arr, if (use_float) c.MLX_FLOAT32 else c.MLX_INT32);
-    try castMlxBoolArrayTo(self, &right_arr, if (use_float) c.MLX_FLOAT32 else c.MLX_INT32);
-
-    const ctx = try self.mlxContext();
-    if (rowwiseMatrixVectorDyad(left, right)) |rowwise| {
-        if (rowwise.matrix_on_left) {
-            const reshaped = mlx.Array.reshape(ctx.*, right_arr, &[_]i32{ @intCast(rowwise.rows), 1 }) catch |err| return mapMlxError(err);
-            right_arr.deinit();
-            right_arr = reshaped;
-        } else {
-            const reshaped = mlx.Array.reshape(ctx.*, left_arr, &[_]i32{ @intCast(rowwise.rows), 1 }) catch |err| return mapMlxError(err);
-            left_arr.deinit();
-            left_arr = reshaped;
+    fn applyBackendArrayMonad(self: *Session, op: BuiltinId, value: Value) KError!Value {
+        if (comptime runtime_has_mlx) {
+            return runtime_backend_exec.applyBackendArrayMonad(.{
+                .Session = Session,
+                .Value = Value,
+                .NumericArray = NumericArray,
+                .BuiltinId = BuiltinId,
+                .KError = KError,
+                .c = c,
+                .mlx = mlx,
+                .mapMlxError = mapMlxError,
+                .backendContext = Session.backendContext,
+                .valueNumericHandle = valueNumericHandle,
+                .numericIntAt = numericIntAt,
+                .numericArrayIsFirstAxisSlice = numericArrayIsFirstAxisSlice,
+                .numericArrayFirstAxisSliceSource = numericArrayFirstAxisSliceSource,
+                .numericArrayFirstAxisSliceRowStart = numericArrayFirstAxisSliceRowStart,
+                .numericArrayFirstAxisSliceRowStep = numericArrayFirstAxisSliceRowStep,
+                .numericArrayIsFirstAxisIndex = numericArrayIsFirstAxisIndex,
+                .numericArrayFirstAxisIndexSource = numericArrayFirstAxisIndexSource,
+                .numericArrayFirstAxisIndexRows = numericArrayFirstAxisIndexRows,
+                .numericArrayIsFirstAxisConcat = numericArrayIsFirstAxisConcat,
+                .numericArrayFirstAxisConcatLeft = numericArrayFirstAxisConcatLeft,
+                .numericArrayFirstAxisConcatRight = numericArrayFirstAxisConcatRight,
+                .numericArrayIsReshapeView = numericArrayIsReshapeView,
+                .numericArrayReshapeSource = numericArrayReshapeSource,
+                .numericArrayIsTransposeView = numericArrayIsTransposeView,
+                .numericArrayTransposeSource = numericArrayTransposeSource,
+                .materializeBackendArray = Session.materializeBackendArray,
+                .wrapManagedBackendArray = Session.wrapManagedBackendArray,
+                .numeric_array_max_rank = numeric_array_max_rank,
+            }, self, op, value);
         }
-    }
-    const out = switch (op) {
-        .add => mlx.Array.add(ctx.*, left_arr, right_arr) catch |err| return mapMlxError(err),
-        .sub => mlx.Array.sub(ctx.*, left_arr, right_arr) catch |err| return mapMlxError(err),
-            .mul => mlx.Array.mul(ctx.*, left_arr, right_arr) catch |err| return mapMlxError(err),
-            .div => mlx.Array.div(ctx.*, left_arr, right_arr) catch |err| return mapMlxError(err),
-            .less => mlx.Array.less(ctx.*, left_arr, right_arr) catch |err| return mapMlxError(err),
-            .more => mlx.Array.greater(ctx.*, left_arr, right_arr) catch |err| return mapMlxError(err),
-            .equal => mlx.Array.equal(ctx.*, left_arr, right_arr) catch |err| return mapMlxError(err),
-            else => return error.Unsupported,
-        };
-        return try self.wrapManagedMlxArray(out);
+        return error.Unsupported;
     }
 
-    fn materializeMlxArrayFromHandle(self: *Session, handle: *NumericArray) KError!mlx.Array {
-        var profile_scope = self.beginSamplingProfileScope(.mlx_realization);
-        defer profile_scope.end();
-        if (try tryEnsureManagedMlxRealizationForHandle(self, handle)) |owned| {
-            return owned.array.clone() catch |err| return mapMlxError(err);
+    fn applyBackendArrayDyad(self: *Session, op: BuiltinId, left: Value, right: Value) KError!Value {
+        if (comptime runtime_has_mlx) {
+            var profile_scope = self.beginSamplingProfileScope(.dense_mlx);
+            defer profile_scope.end();
+            return runtime_backend_exec.applyBackendArrayDyad(.{
+                .Session = Session,
+                .Value = Value,
+                .NumericArray = NumericArray,
+                .BuiltinId = BuiltinId,
+                .KError = KError,
+                .c = c,
+                .mlx = mlx,
+                .mapMlxError = mapMlxError,
+                .backendContext = Session.backendContext,
+                .valueNumericHandle = valueNumericHandle,
+                .numericIntAt = numericIntAt,
+                .numericArrayIsFirstAxisSlice = numericArrayIsFirstAxisSlice,
+                .numericArrayFirstAxisSliceSource = numericArrayFirstAxisSliceSource,
+                .numericArrayFirstAxisSliceRowStart = numericArrayFirstAxisSliceRowStart,
+                .numericArrayFirstAxisSliceRowStep = numericArrayFirstAxisSliceRowStep,
+                .numericArrayIsFirstAxisIndex = numericArrayIsFirstAxisIndex,
+                .numericArrayFirstAxisIndexSource = numericArrayFirstAxisIndexSource,
+                .numericArrayFirstAxisIndexRows = numericArrayFirstAxisIndexRows,
+                .numericArrayIsFirstAxisConcat = numericArrayIsFirstAxisConcat,
+                .numericArrayFirstAxisConcatLeft = numericArrayFirstAxisConcatLeft,
+                .numericArrayFirstAxisConcatRight = numericArrayFirstAxisConcatRight,
+                .numericArrayIsReshapeView = numericArrayIsReshapeView,
+                .numericArrayReshapeSource = numericArrayReshapeSource,
+                .numericArrayIsTransposeView = numericArrayIsTransposeView,
+                .numericArrayTransposeSource = numericArrayTransposeSource,
+                .materializeBackendArray = Session.materializeBackendArray,
+                .wrapManagedBackendArray = Session.wrapManagedBackendArray,
+                .rowwiseMatrixVectorDyad = rowwiseMatrixVectorDyad,
+                .numeric_array_max_rank = numeric_array_max_rank,
+            }, self, op, left, right);
         }
-        if (numericArrayIsRangeIota(handle)) return try createMlxArrayFromRangeIota(self, handle);
-        if (numericArrayIsFlatSlice(handle)) return try createMlxArrayFromFlatSlice(self, handle);
-        if (numericArrayIsFlatConcat(handle)) return try createMlxArrayFromFlatConcat(self, handle);
-        if (numericArrayIsFlatSegments(handle)) return try createMlxArrayFromFlatSegments(self, handle);
-        if (numericArrayIsFirstAxisSlice(handle)) return try createMlxArrayFromFirstAxisSlice(self, handle);
-        if (numericArrayIsFirstAxisIndex(handle)) return try createMlxArrayFromFirstAxisIndex(self, handle);
-        if (numericArrayIsFirstAxisConcat(handle)) return try createMlxArrayFromFirstAxisConcat(self, handle);
-        if (numericArrayIsReshapeView(handle)) return try createMlxArrayFromReshapeView(self, handle);
-        if (numericArrayIsTransposeView(handle)) return try createMlxArrayFromTransposeView(self, handle);
-        return try createMlxArrayFromHostArray(self, try hostStructuralArrayForHandle(self, handle));
+        return error.Unsupported;
     }
 
-    fn materializeMlxArray(self: *Session, value: Value) KError!mlx.Array {
+    fn materializeBackendArrayFromHandle(self: *Session, handle: *NumericArray) KError!mlx.Array {
+        if (comptime runtime_has_mlx) {
+            var profile_scope = self.beginSamplingProfileScope(.mlx_realization);
+            defer profile_scope.end();
+            if (try tryEnsureManagedBackendRealizationForHandle(self, handle)) |owned| {
+                return owned.array.clone() catch |err| return mapMlxError(err);
+            }
+            if (numericArrayIsRangeIota(handle)) return try createBackendArrayFromRangeIota(self, handle);
+            if (numericArrayIsFlatSlice(handle)) return try createBackendArrayFromFlatSlice(self, handle);
+            if (numericArrayIsFlatConcat(handle)) return try createBackendArrayFromFlatConcat(self, handle);
+            if (numericArrayIsFlatSegments(handle)) return try createBackendArrayFromFlatSegments(self, handle);
+            if (numericArrayIsFirstAxisSlice(handle)) return try createBackendArrayFromFirstAxisSlice(self, handle);
+            if (numericArrayIsFirstAxisIndex(handle)) return try createBackendArrayFromFirstAxisIndex(self, handle);
+            if (numericArrayIsFirstAxisConcat(handle)) return try createBackendArrayFromFirstAxisConcat(self, handle);
+            if (numericArrayIsReshapeView(handle)) return try createBackendArrayFromReshapeView(self, handle);
+            if (numericArrayIsTransposeView(handle)) return try createBackendArrayFromTransposeView(self, handle);
+            return try createBackendArrayFromHostArray(self, try hostStructuralArrayForHandle(self, handle));
+        }
+        return error.Unsupported;
+    }
+
+    fn materializeBackendArray(self: *Session, value: Value) KError!mlx.Array {
         return switch (value.tag()) {
             .int => mlx.Array.fromInt(@intCast(value.asInt())),
             .float => mlx.Array.fromFloat(@floatCast(value.asFloat())),
             .bool => mlx.Array.fromInt(@intFromBool(value.asBool())),
             .array => blk: {
-                if (mutableNumericHandle(value)) |handle| {
-                    if (try tryEnsureManagedMlxRealizationForHandle(self, handle)) |owned| {
-                        break :blk owned.array.clone() catch |err| return mapMlxError(err);
-                    }
-                }
+                if (valueNumericHandle(value)) |handle| break :blk try self.materializeBackendArrayFromHandle(@constCast(handle));
                 break :blk switch (value.arraySubkind()) {
-                    .host_array => try createMlxArrayFromHostArray(self, value.asHostArray()),
-                    .mlx_array => value.asMlxArray().array.clone() catch |err| return mapMlxError(err),
-                    .numeric_array => try self.materializeMlxArrayFromHandle(@constCast(value.asNumericArray())),
+                    .host_dense_array => try createBackendArrayFromHostArray(self, value.asHostDenseArray()),
+                    .backend_array => value.asBackendArray().array.clone() catch |err| return mapMlxError(err),
                     else => error.Internal,
                 };
             },
             else => error.Type,
         };
-    }
-
-    fn dotTensor(self: *Session, value: Value) KError!mlx.Array {
-        var arr = try self.materializeMlxArray(value);
-        errdefer arr.deinit();
-        if (arr.ndim() == 0) return error.Type;
-        if (arr.dtype() != c.MLX_FLOAT32 and arr.dtype() != c.MLX_FLOAT64) {
-            const ctx = try self.mlxContext();
-            const casted = mlx.Array.cast(ctx.*, arr, c.MLX_FLOAT32) catch |err| return mapMlxError(err);
-            arr.deinit();
-            arr = casted;
-        }
-        return arr;
     }
 
     fn negateIntValue(self: *Session, value: i64) KError!Value {
@@ -15280,6 +17267,7 @@ fn applyMlxArrayDyad(self: *Session, op: BuiltinId, left: Value, right: Value) K
         try self.global_values.append(self.allocator, Value.fromBool(false));
         try self.global_initialized.append(self.allocator, false);
         try self.global_names.append(self.allocator, owned_name);
+        try self.debug_global_call_counts.append(self.allocator, 0);
         try self.global_slots.put(owned_name, slot);
         return slot;
     }
@@ -15304,11 +17292,24 @@ fn applyMlxArrayDyad(self: *Session, op: BuiltinId, left: Value, right: Value) K
         return try self.loadGlobalSlot(slot);
     }
 
-    pub fn debugEnsureNumericHandleValue(self: *Session, value: Value) !Value {
-        return Value.array(try ensureNumericArrayHandle(self, value));
+    pub fn debugGlobalSlotCount(self: *const Session) usize {
+        if (comptime !enable_probe_instrumentation) return 0;
+        return self.global_names.items.len;
     }
 
-    pub fn debugMakeBareManagedHostIntVector(self: *Session, data: []const i64) !Value {
+    pub fn debugGlobalNameAt(self: *const Session, slot: usize) ?[]const u8 {
+        if (comptime !enable_probe_instrumentation) return null;
+        if (slot >= self.global_names.items.len) return null;
+        return self.global_names.items[slot];
+    }
+
+    pub fn debugGlobalCallCountAt(self: *const Session, slot: usize) usize {
+        if (comptime !enable_probe_instrumentation) return 0;
+        if (slot >= self.debug_global_call_counts.items.len) return 0;
+        return self.debug_global_call_counts.items[slot];
+    }
+
+    pub fn debugMakeManagedHostIntVector(self: *Session, data: []const i64) !Value {
         var min_value: i64 = 0;
         var max_value: i64 = 0;
         if (data.len != 0) {
@@ -15321,11 +17322,11 @@ fn applyMlxArrayDyad(self: *Session, op: BuiltinId, left: Value, right: Value) K
         }
         var out = try self.allocManagedHostIntResult(hostIntStorageKindForRange(min_value, max_value), data.len);
         for (data, 0..) |item, idx| try out.set(idx, item);
-        return Value.array(out.arrayPtr());
+        return try out.value(self);
     }
 
-    pub fn debugMaterializeMlxArrayValue(self: *Session, value: Value) !void {
-        var array = try self.materializeMlxArray(value);
+    pub fn debugMaterializeBackendArrayValue(self: *Session, value: Value) !void {
+        var array = try self.materializeBackendArray(value);
         array.deinit();
     }
 
@@ -15337,6 +17338,13 @@ fn applyMlxArrayDyad(self: *Session, op: BuiltinId, left: Value, right: Value) K
         if (slot >= self.global_values.items.len or slot >= self.global_initialized.items.len) return error.Internal;
         if (!self.global_initialized.items[slot]) return error.Name;
         return self.global_values.items[slot];
+    }
+
+    fn noteGlobalCall(self: *Session, slot: u16) void {
+        if (!self.debugDetailedProbeActive()) return;
+        const idx: usize = slot;
+        if (idx >= self.debug_global_call_counts.items.len) return;
+        self.debug_global_call_counts.items[idx] += 1;
     }
 
     inline fn pop(self: *Session) Value {
@@ -15365,8 +17373,9 @@ fn applyMlxArrayDyad(self: *Session, op: BuiltinId, left: Value, right: Value) K
         var out = try self.allocManagedHostIntResult(analysis.kind, items.len);
         for (items, 0..) |item, idx| try out.set(idx, item);
         const value = try out.value(self);
-        hostArraySetFlags(@constCast(value.asHostArray()), analysis.flags);
-        hostArraySetCachedIntRange(@constCast(value.asHostArray()), analysis.range);
+        const host = try mutableNumericHostArrayValue(self, value);
+        hostDenseSetFlags(host, analysis.flags);
+        hostDenseSetCachedIntRange(host, analysis.range);
         return value;
     }
 
@@ -15389,8 +17398,9 @@ fn applyMlxArrayDyad(self: *Session, op: BuiltinId, left: Value, right: Value) K
         var out = try self.allocManagedHostIntResult(.bit, items.len);
         for (items, 0..) |item, idx| try out.set(idx, @intFromBool(item));
         const value = try out.value(self);
-        hostArraySetFlags(@constCast(value.asHostArray()), host_array_flag_normalized | orderFlagsFromMonotonic(asc, dsc));
-        hostArraySetCachedIntRange(@constCast(value.asHostArray()), .{
+        const host = try mutableNumericHostArrayValue(self, value);
+        hostDenseSetFlags(host, host_dense_flag_normalized | orderFlagsFromMonotonic(asc, dsc));
+        hostDenseSetCachedIntRange(host, .{
             .min = if (saw_zero) 0 else 1,
             .max = if (saw_one) 1 else 0,
         });
@@ -15402,7 +17412,7 @@ fn applyMlxArrayDyad(self: *Session, op: BuiltinId, left: Value, right: Value) K
         const out = try self.allocManagedHostFloatResult(items.len);
         @memcpy(out.items, items);
         const value = try out.value(self);
-        hostArraySetFlags(@constCast(value.asHostArray()), analysis.flags);
+        hostDenseSetFlags(try mutableNumericHostArrayValue(self, value), analysis.flags);
         return value;
     }
 
@@ -15410,8 +17420,9 @@ fn applyMlxArrayDyad(self: *Session, op: BuiltinId, left: Value, right: Value) K
         if (values.len == 0) {
             var out = try self.allocManagedHostIntResult(.bit, 0);
             const value = try out.value(self);
-            hostArraySetFlags(@constCast(value.asHostArray()), host_array_flag_normalized | host_array_flag_asc | host_array_flag_dsc);
-            hostArraySetCachedIntRange(@constCast(value.asHostArray()), .{ .min = 0, .max = 0 });
+            const host = try mutableNumericHostArrayValue(self, value);
+            hostDenseSetFlags(host, host_dense_flag_normalized | host_dense_flag_asc | host_dense_flag_dsc);
+            hostDenseSetCachedIntRange(host, .{ .min = 0, .max = 0 });
             return value;
         }
         var all_bool = true;
@@ -15457,8 +17468,9 @@ fn applyMlxArrayDyad(self: *Session, op: BuiltinId, left: Value, right: Value) K
             });
         }
         const result = try out.value(self);
-        hostArraySetFlags(@constCast(result.asHostArray()), host_array_flag_normalized | orderFlagsFromMonotonic(asc, dsc));
-        hostArraySetCachedIntRange(@constCast(result.asHostArray()), .{ .min = min_value, .max = max_value });
+        const result_host = try mutableNumericHostArrayValue(self, result);
+        hostDenseSetFlags(result_host, host_dense_flag_normalized | orderFlagsFromMonotonic(asc, dsc));
+        hostDenseSetCachedIntRange(result_host, .{ .min = min_value, .max = max_value });
         return result;
     }
 
@@ -15466,7 +17478,7 @@ fn applyMlxArrayDyad(self: *Session, op: BuiltinId, left: Value, right: Value) K
         if (values.len == 0) {
             const out = try self.allocManagedHostFloatResult(0);
             const value = try out.value(self);
-            hostArraySetFlags(@constCast(value.asHostArray()), host_array_flag_normalized | host_array_flag_asc | host_array_flag_dsc);
+            hostDenseSetFlags(try mutableNumericHostArrayValue(self, value), host_dense_flag_normalized | host_dense_flag_asc | host_dense_flag_dsc);
             return value;
         }
 
@@ -15524,8 +17536,9 @@ fn applyMlxArrayDyad(self: *Session, op: BuiltinId, left: Value, right: Value) K
                 });
             }
             const result = try out.value(self);
-            hostArraySetFlags(@constCast(result.asHostArray()), host_array_flag_normalized | orderFlagsFromMonotonic(asc, dsc));
-            hostArraySetCachedIntRange(@constCast(result.asHostArray()), .{ .min = min_value, .max = max_value });
+            const result_host = try mutableNumericHostArrayValue(self, result);
+            hostDenseSetFlags(result_host, host_dense_flag_normalized | orderFlagsFromMonotonic(asc, dsc));
+            hostDenseSetCachedIntRange(result_host, .{ .min = min_value, .max = max_value });
             return result;
         }
 
@@ -15539,12 +17552,15 @@ fn applyMlxArrayDyad(self: *Session, op: BuiltinId, left: Value, right: Value) K
             };
         }
         const result = try out.value(self);
-        hostArraySetFlags(@constCast(result.asHostArray()), host_array_flag_normalized | orderFlagsFromMonotonic(asc, dsc));
+        hostDenseSetFlags(try mutableNumericHostArrayValue(self, result), host_dense_flag_normalized | orderFlagsFromMonotonic(asc, dsc));
         return result;
     }
 
     fn createManagedHostBoxedArray(self: *Session, values: []const Value) !Value {
-        const array = try self.allocator.create(HostArray);
+        const array = if (self.free_host_boxed_array_len != 0) blk: {
+            self.free_host_boxed_array_len -= 1;
+            break :blk self.free_host_boxed_arrays[self.free_host_boxed_array_len].?;
+        } else try self.allocator.create(HostBoxedArray);
         errdefer self.allocator.destroy(array);
         const items = try self.allocator.alloc(Value, values.len);
         errdefer self.allocator.free(items);
@@ -15552,11 +17568,9 @@ fn applyMlxArrayDyad(self: *Session, op: BuiltinId, left: Value, right: Value) K
             items[idx] = try self.retainEscapedValue(value);
         }
         array.* = .{
-            .header = HeapHeader.init(.host_array, .managed),
-            .logical_handle = null,
+            .header = HeapHeader.init(.host_boxed_array, .managed),
             .logical_len = values.len,
-            .flags = 0,
-            .storage = .{ .boxed = items },
+            .items = items,
         };
         return Value.array(array);
     }
@@ -15723,10 +17737,10 @@ const HostIntArrayView = union(HostIntStorageKind) {
 
 const HostIntResult = union(HostIntStorageKind) {
     bit: HostBitAlloc,
-    int8: HostArrayAlloc(i8),
-    int16: HostArrayAlloc(i16),
-    int32: HostArrayAlloc(i32),
-    int64: HostArrayAlloc(i64),
+    int8: HostDenseAlloc(i8),
+    int16: HostDenseAlloc(i16),
+    int32: HostDenseAlloc(i32),
+    int64: HostDenseAlloc(i64),
 
     fn set(self: *HostIntResult, idx: usize, item_value: i64) KError!void {
         switch (self.*) {
@@ -15746,7 +17760,7 @@ const HostIntResult = union(HostIntStorageKind) {
         return try wrapOwnedHostArrayValue(session, self.arrayPtr());
     }
 
-    fn arrayPtr(self: *const HostIntResult) *HostArray {
+    fn arrayPtr(self: *const HostIntResult) *HostDenseArray {
         return switch (self.*) {
             .bit => |out| out.array,
             .int8 => |out| out.array,
@@ -15758,13 +17772,31 @@ const HostIntResult = union(HostIntStorageKind) {
 };
 
 const HostFloatResult = struct {
-    array: *HostArray,
+    array: *HostDenseArray,
     items: []f64,
 
     fn value(self: HostFloatResult, session: *Session) !Value {
         return try wrapOwnedHostArrayValue(session, self.array);
     }
 };
+
+fn hostIntResultSet(result: *HostIntResult, idx: usize, item_value: i64) KError!void {
+    return result.set(idx, item_value);
+}
+
+fn hostIntResultArrayPtr(result: *const HostIntResult) *HostDenseArray {
+    return result.arrayPtr();
+}
+
+fn wasmAcceleratorPayload(self: *Session, value: Value) KError!?*BackendArray {
+    if (value.tag() != .array) return null;
+
+    return switch (value.arraySubkind()) {
+        .backend_array => @constCast(value.asBackendArray()),
+        .numeric_array, .host_dense_array => try tryEnsureManagedBackendRealization(self, value) orelse return null,
+        else => null,
+    };
+}
 
 const HostIntOutputPlan = struct {
     output: HostIntResult,
@@ -15811,7 +17843,7 @@ fn copyExactFloatSliceToIntResult(out: *HostIntResult, items: []const f64) KErro
     for (items, 0..) |item, idx| try out.set(idx, exactIntFromFloat(item).?);
 }
 
-fn hostIntArrayView(array: *const HostArray) ?HostIntArrayView {
+fn hostIntArrayView(array: *const HostDenseArray) ?HostIntArrayView {
     return switch (array.storage) {
         .bit => |words| .{ .bit = .{ .words = words, .len = array.logical_len } },
         .int8 => |items| .{ .int8 = items },
@@ -15819,7 +17851,6 @@ fn hostIntArrayView(array: *const HostArray) ?HostIntArrayView {
         .int32 => |items| .{ .int32 = items },
         .int64 => |items| .{ .int64 = items },
         .float64 => null,
-        .boxed => null,
     };
 }
 
@@ -15906,8 +17937,8 @@ fn hostIntArrayViewEndpointRange(view: HostIntArrayView, flags: u8) ?HostIntRang
     if (hostIntArrayViewLen(view) == 0) return .{ .min = 0, .max = 0 };
     const first = hostIntViewItem(view, 0);
     const last = hostIntViewItem(view, hostIntArrayViewLen(view) - 1);
-    if ((mono & host_array_flag_asc) != 0) return .{ .min = first, .max = last };
-    if ((mono & host_array_flag_dsc) != 0) return .{ .min = last, .max = first };
+    if ((mono & host_dense_flag_asc) != 0) return .{ .min = first, .max = last };
+    if ((mono & host_dense_flag_dsc) != 0) return .{ .min = last, .max = first };
     return null;
 }
 
@@ -15932,10 +17963,10 @@ fn hostRangeIotaViewBounds(view: HostRangeIotaView) HostIntRange {
 fn hostRangeIotaViewFlags(view: HostRangeIotaView) u8 {
     const len = hostRangeIotaViewLen(view);
     const mono = if (len <= 1)
-        host_array_flag_asc | host_array_flag_dsc
+        host_dense_flag_asc | host_dense_flag_dsc
     else
         orderFlagsFromMonotonic(view.handle.range_iota.step >= 0, view.handle.range_iota.step <= 0);
-    return host_array_flag_normalized | mono;
+    return host_dense_flag_normalized | mono;
 }
 
 fn hostRangeIotaViewItem(view: HostRangeIotaView, idx: usize) KError!i64 {
@@ -16109,13 +18140,13 @@ fn hostFirstAxisSliceFlatIndex(view: HostFirstAxisSliceView, idx: usize) KError!
 
 fn hostFirstAxisSliceIntItem(view: HostFirstAxisSliceView, idx: usize) KError!i64 {
     const flat_idx = try hostFirstAxisSliceFlatIndex(view, idx);
-    if (view.source_host) |array| return try hostArrayIntAt(array, flat_idx);
+    if (view.source_host) |array| return try hostDenseIntAt(array, flat_idx);
     return try numericIntAt(view.source_value, flat_idx);
 }
 
 fn hostFirstAxisSliceFloatItem(view: HostFirstAxisSliceView, idx: usize) KError!f64 {
     const flat_idx = try hostFirstAxisSliceFlatIndex(view, idx);
-    if (view.source_host) |array| return try hostArrayFloatAt(array, flat_idx);
+    if (view.source_host) |array| return try hostDenseFloatAt(array, flat_idx);
     return try numericFloatAt(view.source_value, flat_idx);
 }
 
@@ -16128,12 +18159,12 @@ fn hostFirstAxisIndexSourceRow(view: HostFirstAxisIndexView, row_pos: usize) KEr
 }
 
 fn hostFirstAxisIndexSourceIntAt(view: HostFirstAxisIndexView, flat_idx: usize) KError!i64 {
-    if (view.source_host) |array| return try hostArrayIntAt(array, flat_idx);
+    if (view.source_host) |array| return try hostDenseIntAt(array, flat_idx);
     return try numericIntAt(view.source_value, flat_idx);
 }
 
 fn hostFirstAxisIndexSourceFloatAt(view: HostFirstAxisIndexView, flat_idx: usize) KError!f64 {
-    if (view.source_host) |array| return try hostArrayFloatAt(array, flat_idx);
+    if (view.source_host) |array| return try hostDenseFloatAt(array, flat_idx);
     return try numericFloatAt(view.source_value, flat_idx);
 }
 
@@ -16148,63 +18179,63 @@ fn hostFirstAxisIndexFlatIndex(view: HostFirstAxisIndexView, idx: usize) KError!
 
 fn hostFirstAxisIndexIntItem(view: HostFirstAxisIndexView, idx: usize) KError!i64 {
     const flat_idx = try hostFirstAxisIndexFlatIndex(view, idx);
-    if (view.source_host) |array| return try hostArrayIntAt(array, flat_idx);
+    if (view.source_host) |array| return try hostDenseIntAt(array, flat_idx);
     return try numericIntAt(view.source_value, flat_idx);
 }
 
 fn hostFirstAxisIndexFloatItem(view: HostFirstAxisIndexView, idx: usize) KError!f64 {
     const flat_idx = try hostFirstAxisIndexFlatIndex(view, idx);
-    if (view.source_host) |array| return try hostArrayFloatAt(array, flat_idx);
+    if (view.source_host) |array| return try hostDenseFloatAt(array, flat_idx);
     return try numericFloatAt(view.source_value, flat_idx);
 }
 
 fn hostFirstAxisConcatIntItem(view: HostFirstAxisConcatView, idx: usize) KError!i64 {
     if (idx >= view.len) return error.Internal;
     if (idx < view.left_len) {
-        if (view.left_host) |array| return try hostArrayIntAt(array, idx);
+        if (view.left_host) |array| return try hostDenseIntAt(array, idx);
         return try numericIntAt(view.left_value, idx);
     }
     const right_idx = idx - view.left_len;
-    if (view.right_host) |array| return try hostArrayIntAt(array, right_idx);
+    if (view.right_host) |array| return try hostDenseIntAt(array, right_idx);
     return try numericIntAt(view.right_value, right_idx);
 }
 
 fn hostFirstAxisConcatFloatItem(view: HostFirstAxisConcatView, idx: usize) KError!f64 {
     if (idx >= view.len) return error.Internal;
     if (idx < view.left_len) {
-        if (view.left_host) |array| return try hostArrayFloatAt(array, idx);
+        if (view.left_host) |array| return try hostDenseFloatAt(array, idx);
         return try numericFloatAt(view.left_value, idx);
     }
     const right_idx = idx - view.left_len;
-    if (view.right_host) |array| return try hostArrayFloatAt(array, right_idx);
+    if (view.right_host) |array| return try hostDenseFloatAt(array, right_idx);
     return try numericFloatAt(view.right_value, right_idx);
 }
 
 fn hostFlatSliceIntItem(view: HostFlatSliceView, idx: usize) KError!i64 {
     if (idx >= view.len) return error.Internal;
     const flat_idx = view.start + idx;
-    if (view.source_host) |array| return try hostArrayIntAt(array, flat_idx);
+    if (view.source_host) |array| return try hostDenseIntAt(array, flat_idx);
     return try numericIntAt(view.source_value, flat_idx);
 }
 
 fn hostFlatSliceFloatItem(view: HostFlatSliceView, idx: usize) KError!f64 {
     if (idx >= view.len) return error.Internal;
     const flat_idx = view.start + idx;
-    if (view.source_host) |array| return try hostArrayFloatAt(array, flat_idx);
+    if (view.source_host) |array| return try hostDenseFloatAt(array, flat_idx);
     return try numericFloatAt(view.source_value, flat_idx);
 }
 
 fn hostFlatStrideIntItem(view: HostFlatStrideView, idx: usize) KError!i64 {
     if (idx >= view.len) return error.Internal;
     const flat_idx = view.start + idx * view.step;
-    if (view.source_host) |array| return try hostArrayIntAt(array, flat_idx);
+    if (view.source_host) |array| return try hostDenseIntAt(array, flat_idx);
     return try numericIntAt(view.source_value, flat_idx);
 }
 
 fn hostFlatStrideFloatItem(view: HostFlatStrideView, idx: usize) KError!f64 {
     if (idx >= view.len) return error.Internal;
     const flat_idx = view.start + idx * view.step;
-    if (view.source_host) |array| return try hostArrayFloatAt(array, flat_idx);
+    if (view.source_host) |array| return try hostDenseFloatAt(array, flat_idx);
     return try numericFloatAt(view.source_value, flat_idx);
 }
 
@@ -16222,18 +18253,18 @@ fn hostTransposeSourceIndex(view: HostTransposeView, idx: usize) KError!usize {
 
 fn hostTransposeIntItem(view: HostTransposeView, idx: usize) KError!i64 {
     const source_idx = try hostTransposeSourceIndex(view, idx);
-    if (view.source_host) |array| return try hostArrayIntAt(array, source_idx);
+    if (view.source_host) |array| return try hostDenseIntAt(array, source_idx);
     return try numericIntAt(view.source_value, source_idx);
 }
 
 fn hostTransposeFloatItem(view: HostTransposeView, idx: usize) KError!f64 {
     const source_idx = try hostTransposeSourceIndex(view, idx);
-    if (view.source_host) |array| return try hostArrayFloatAt(array, source_idx);
+    if (view.source_host) |array| return try hostDenseFloatAt(array, source_idx);
     return try numericFloatAt(view.source_value, source_idx);
 }
 
 fn hostFlatSliceIntFlags(view: HostFlatSliceView) u8 {
-    if (view.len <= 1) return host_array_flag_normalized | host_array_flag_asc | host_array_flag_dsc;
+    if (view.len <= 1) return host_dense_flag_normalized | host_dense_flag_asc | host_dense_flag_dsc;
     var prev = hostFlatSliceIntItem(view, 0) catch unreachable;
     var asc = true;
     var dsc = true;
@@ -16243,11 +18274,11 @@ fn hostFlatSliceIntFlags(view: HostFlatSliceView) u8 {
         if (prev < item) dsc = false;
         prev = item;
     }
-    return host_array_flag_normalized | orderFlagsFromMonotonic(asc, dsc);
+    return host_dense_flag_normalized | orderFlagsFromMonotonic(asc, dsc);
 }
 
 fn hostFlatStrideIntFlags(view: HostFlatStrideView) u8 {
-    if (view.len <= 1) return host_array_flag_normalized | host_array_flag_asc | host_array_flag_dsc;
+    if (view.len <= 1) return host_dense_flag_normalized | host_dense_flag_asc | host_dense_flag_dsc;
     var prev = hostFlatStrideIntItem(view, 0) catch unreachable;
     var asc = true;
     var dsc = true;
@@ -16257,7 +18288,7 @@ fn hostFlatStrideIntFlags(view: HostFlatStrideView) u8 {
         if (prev < item) dsc = false;
         prev = item;
     }
-    return host_array_flag_normalized | orderFlagsFromMonotonic(asc, dsc);
+    return host_dense_flag_normalized | orderFlagsFromMonotonic(asc, dsc);
 }
 
 fn hostFlatSegmentsIntItem(view: HostFlatSegmentsView, idx: usize) KError!i64 {
@@ -16283,7 +18314,7 @@ fn hostFlatSegmentsFloatItem(view: HostFlatSegmentsView, idx: usize) KError!f64 
 }
 
 fn hostFlatSegmentsIntFlags(view: HostFlatSegmentsView) u8 {
-    if (view.len <= 1) return host_array_flag_normalized | host_array_flag_asc | host_array_flag_dsc;
+    if (view.len <= 1) return host_dense_flag_normalized | host_dense_flag_asc | host_dense_flag_dsc;
     var prev = hostFlatSegmentsIntItem(view, 0) catch unreachable;
     var asc = true;
     var dsc = true;
@@ -16293,11 +18324,11 @@ fn hostFlatSegmentsIntFlags(view: HostFlatSegmentsView) u8 {
         if (prev < item) dsc = false;
         prev = item;
     }
-    return host_array_flag_normalized | orderFlagsFromMonotonic(asc, dsc);
+    return host_dense_flag_normalized | orderFlagsFromMonotonic(asc, dsc);
 }
 
 fn hostFirstAxisSliceIntFlags(view: HostFirstAxisSliceView) u8 {
-    if (view.len <= 1) return host_array_flag_normalized | host_array_flag_asc | host_array_flag_dsc;
+    if (view.len <= 1) return host_dense_flag_normalized | host_dense_flag_asc | host_dense_flag_dsc;
     var prev = hostFirstAxisSliceIntItem(view, 0) catch unreachable;
     var asc = true;
     var dsc = true;
@@ -16307,11 +18338,11 @@ fn hostFirstAxisSliceIntFlags(view: HostFirstAxisSliceView) u8 {
         if (prev < item) dsc = false;
         prev = item;
     }
-    return host_array_flag_normalized | orderFlagsFromMonotonic(asc, dsc);
+    return host_dense_flag_normalized | orderFlagsFromMonotonic(asc, dsc);
 }
 
 fn hostFirstAxisIndexIntFlags(view: HostFirstAxisIndexView) u8 {
-    if (view.len <= 1) return host_array_flag_normalized | host_array_flag_asc | host_array_flag_dsc;
+    if (view.len <= 1) return host_dense_flag_normalized | host_dense_flag_asc | host_dense_flag_dsc;
     var prev = hostFirstAxisIndexIntItem(view, 0) catch unreachable;
     var asc = true;
     var dsc = true;
@@ -16321,11 +18352,11 @@ fn hostFirstAxisIndexIntFlags(view: HostFirstAxisIndexView) u8 {
         if (prev < item) dsc = false;
         prev = item;
     }
-    return host_array_flag_normalized | orderFlagsFromMonotonic(asc, dsc);
+    return host_dense_flag_normalized | orderFlagsFromMonotonic(asc, dsc);
 }
 
 fn hostFirstAxisConcatIntFlags(view: HostFirstAxisConcatView) u8 {
-    if (view.len <= 1) return host_array_flag_normalized | host_array_flag_asc | host_array_flag_dsc;
+    if (view.len <= 1) return host_dense_flag_normalized | host_dense_flag_asc | host_dense_flag_dsc;
     var prev = hostFirstAxisConcatIntItem(view, 0) catch unreachable;
     var asc = true;
     var dsc = true;
@@ -16335,12 +18366,12 @@ fn hostFirstAxisConcatIntFlags(view: HostFirstAxisConcatView) u8 {
         if (prev < item) dsc = false;
         prev = item;
     }
-    return host_array_flag_normalized | orderFlagsFromMonotonic(asc, dsc);
+    return host_dense_flag_normalized | orderFlagsFromMonotonic(asc, dsc);
 }
 
 fn hostTransposeIntFlags(view: HostTransposeView) u8 {
     const len = hostTransposeViewLen(view);
-    if (len <= 1) return host_array_flag_normalized | host_array_flag_asc | host_array_flag_dsc;
+    if (len <= 1) return host_dense_flag_normalized | host_dense_flag_asc | host_dense_flag_dsc;
     var prev = hostTransposeIntItem(view, 0) catch unreachable;
     var asc = true;
     var dsc = true;
@@ -16350,7 +18381,7 @@ fn hostTransposeIntFlags(view: HostTransposeView) u8 {
         if (prev < item) dsc = false;
         prev = item;
     }
-    return host_array_flag_normalized | orderFlagsFromMonotonic(asc, dsc);
+    return host_dense_flag_normalized | orderFlagsFromMonotonic(asc, dsc);
 }
 
 fn hostIntDenseViewItem(view: HostIntDenseView, idx: usize) KError!i64 {
@@ -16371,16 +18402,16 @@ fn hostIntDenseViewItem(view: HostIntDenseView, idx: usize) KError!i64 {
 fn hostIntDenseValueFlags(value: Value, view: HostIntDenseView) u8 {
     return switch (view) {
         .dense => switch (value.arrayKind()) {
-            .host_array => value.asHostArray().flags,
+            .host_dense_array => value.asHostDenseArray().flags,
             .numeric_array => blk: {
                 const handle = value.asNumericArray();
-                if (handle.host) |array| break :blk array.flags;
+                if (numericHostAttachment(handle)) |array| break :blk array.flags;
                 if (numericArrayIsRangeIota(handle)) break :blk hostRangeIotaViewFlags(.{ .handle = handle });
                 break :blk 0;
             },
-            .mlx_array => blk: {
+            .backend_array => blk: {
                 const handle = valueNumericHandle(value) orelse break :blk 0;
-                if (handle.host) |array| break :blk array.flags;
+                if (numericHostAttachment(handle)) |array| break :blk array.flags;
                 break :blk 0;
             },
             else => 0,
@@ -16400,23 +18431,23 @@ fn hostIntDenseValueFlags(value: Value, view: HostIntDenseView) u8 {
 fn hostIntDenseValueRange(value: Value, view: HostIntDenseView) HostIntRange {
     return switch (view) {
         .dense => |items| switch (value.arrayKind()) {
-            .host_array => hostArrayCachedIntRange(value.asHostArray()) orelse
-                hostIntArrayViewEndpointRange(items, value.asHostArray().flags) orelse
+            .host_dense_array => hostDenseCachedIntRange(value.asHostDenseArray()) orelse
+                hostIntArrayViewEndpointRange(items, value.asHostDenseArray().flags) orelse
                 hostIntArrayViewRange(items),
             .numeric_array => blk: {
                 const handle = value.asNumericArray();
-                if (handle.host) |array| {
-                    break :blk hostArrayCachedIntRange(array) orelse
+                if (numericHostAttachment(handle)) |array| {
+                    break :blk hostDenseCachedIntRange(array) orelse
                         hostIntArrayViewEndpointRange(items, array.flags) orelse
                         hostIntArrayViewRange(items);
                 }
                 if (numericArrayIsRangeIota(handle)) break :blk numericArrayRangeIotaBounds(handle);
                 break :blk hostIntArrayViewRange(items);
             },
-            .mlx_array => blk: {
+            .backend_array => blk: {
                 const handle = valueNumericHandle(value) orelse break :blk hostIntArrayViewRange(items);
-                if (handle.host) |array| {
-                    break :blk hostArrayCachedIntRange(array) orelse
+                if (numericHostAttachment(handle)) |array| {
+                    break :blk hostDenseCachedIntRange(array) orelse
                         hostIntArrayViewEndpointRange(items, array.flags) orelse
                         hostIntArrayViewRange(items);
                 }
@@ -16456,6 +18487,28 @@ fn hostBitSliceContiguousTrueRun(mask: HostBitSlice) ?ContiguousIndexSlice {
     };
 }
 
+fn hostRangeIotaViewArithmeticSlice(view: HostRangeIotaView, len: usize) ?ArithmeticIndexSlice {
+    const slice_len = hostRangeIotaViewLen(view);
+    if (slice_len == 0) return .{ .start = 0, .len = 0, .step = 1 };
+
+    const start_raw = view.handle.range_iota.start;
+    const step = std.math.cast(i32, view.handle.range_iota.step) orelse return null;
+    if (step == 0) return null;
+
+    const len_i64 = std.math.cast(i64, len) orelse return null;
+    if (start_raw < 0 or start_raw >= len_i64) return null;
+
+    const span_i64 = std.math.mul(i64, @as(i64, @intCast(slice_len - 1)), @as(i64, step)) catch return null;
+    const last_raw = std.math.add(i64, start_raw, span_i64) catch return null;
+    if (last_raw < 0 or last_raw >= len_i64) return null;
+
+    return .{
+        .start = @as(usize, @intCast(start_raw)),
+        .len = slice_len,
+        .step = step,
+    };
+}
+
 fn hostIntDenseViewArithmeticSlice(view: HostIntDenseView, len: usize) KError!?ArithmeticIndexSlice {
     return switch (view) {
         .dense => |items| switch (items) {
@@ -16481,7 +18534,24 @@ fn hostIntDenseViewArithmeticSlice(view: HostIntDenseView, len: usize) KError!?A
                 break :blk .{ .start = start, .len = slice_len, .step = step };
             },
         },
-        .range_iota, .flat_slice, .flat_stride, .flat_concat, .flat_segments, .first_axis_slice, .first_axis_index, .first_axis_concat, .transpose => blk: {
+        .range_iota => |items| blk: {
+            if (hostRangeIotaViewArithmeticSlice(items, len)) |slice| break :blk slice;
+            const slice_len = hostIntDenseViewLen(view);
+            if (slice_len == 0) break :blk .{ .start = 0, .len = 0, .step = 1 };
+            const start = try normalizeIndex(try hostIntDenseViewItem(view, 0), len);
+            if (slice_len == 1) break :blk .{ .start = start, .len = 1, .step = 1 };
+            const second = try normalizeIndex(try hostIntDenseViewItem(view, 1), len);
+            const step_i64 = @as(i64, @intCast(second)) - @as(i64, @intCast(start));
+            if (step_i64 == 0) break :blk null;
+            const step = std.math.cast(i32, step_i64) orelse break :blk null;
+            for (1..slice_len) |idx| {
+                const expected_i64 = @as(i64, @intCast(start)) + @as(i64, @intCast(idx)) * @as(i64, step);
+                if (expected_i64 < 0 or expected_i64 >= len) break :blk null;
+                if (try normalizeIndex(try hostIntDenseViewItem(view, idx), len) != @as(usize, @intCast(expected_i64))) break :blk null;
+            }
+            break :blk .{ .start = start, .len = slice_len, .step = step };
+        },
+        .flat_slice, .flat_stride, .flat_concat, .flat_segments, .first_axis_slice, .first_axis_index, .first_axis_concat, .transpose => blk: {
             const slice_len = hostIntDenseViewLen(view);
             if (slice_len == 0) break :blk .{ .start = 0, .len = 0, .step = 1 };
             const start = try normalizeIndex(try hostIntDenseViewItem(view, 0), len);
@@ -16510,7 +18580,7 @@ fn hostIntDenseViewContiguousSlice(view: HostIntDenseView, len: usize) KError!?C
 fn valueHostIntStructuralView(value: Value) ?HostIntDenseView {
     if (value.tag() != .array) return null;
     return switch (value.arraySubkind()) {
-        .host_array => if (hostIntArrayView(value.asHostArray())) |view|
+        .host_dense_array => if (hostIntArrayView(value.asHostDenseArray())) |view|
             .{ .dense = view }
         else
             null,
@@ -16519,7 +18589,7 @@ fn valueHostIntStructuralView(value: Value) ?HostIntDenseView {
             if (numericArrayIsRangeIota(handle)) break :blk .{ .range_iota = .{ .handle = handle } };
             if (numericArrayIsFlatSlice(handle)) {
                 const source = numericArrayFlatSliceSource(handle) orelse break :blk null;
-                const source_host = if (hostArrayIfPresent(source)) |array|
+                const source_host = if (hostDenseIfPresent(source)) |array|
                     if (hostIntArrayView(array) != null) array else break :blk null
                 else if (numericValueSupportsStructuralFlatItemsWithoutHost(source))
                     null
@@ -16536,13 +18606,13 @@ fn valueHostIntStructuralView(value: Value) ?HostIntDenseView {
             if (numericArrayIsFlatConcat(handle)) {
                 const left = numericArrayFlatConcatLeft(handle) orelse break :blk null;
                 const right = numericArrayFlatConcatRight(handle) orelse break :blk null;
-                const left_host = if (hostArrayIfPresent(left)) |array|
+                const left_host = if (hostDenseIfPresent(left)) |array|
                     if (hostIntArrayView(array) != null) array else break :blk null
                 else if (numericValueSupportsStructuralFlatItemsWithoutHost(left))
                     null
                 else
                     break :blk null;
-                const right_host = if (hostArrayIfPresent(right)) |array|
+                const right_host = if (hostDenseIfPresent(right)) |array|
                     if (hostIntArrayView(array) != null) array else break :blk null
                 else if (numericValueSupportsStructuralFlatItemsWithoutHost(right))
                     null
@@ -16569,7 +18639,7 @@ fn valueHostIntStructuralView(value: Value) ?HostIntDenseView {
                 const slice = handle.first_axis_slice orelse break :blk null;
                 if (slice.step != 1) break :blk null;
                 const source_handle = shapedNumericHandle(slice.source) orelse break :blk null;
-                const source_host = if (hostArrayIfPresent(slice.source)) |array|
+                const source_host = if (hostDenseIfPresent(slice.source)) |array|
                     if (hostIntArrayView(array) != null) array else break :blk null
                 else if (numericValueSupportsStructuralFlatItemsWithoutHost(slice.source))
                     null
@@ -16587,7 +18657,7 @@ fn valueHostIntStructuralView(value: Value) ?HostIntDenseView {
             if (numericArrayIsFirstAxisIndex(handle)) {
                 const index = handle.first_axis_index orelse break :blk null;
                 const source_handle = shapedNumericHandle(index.source) orelse break :blk null;
-                const source_host = if (hostArrayIfPresent(index.source)) |array|
+                const source_host = if (hostDenseIfPresent(index.source)) |array|
                     if (hostIntArrayView(array) != null) array else break :blk null
                 else if (numericValueSupportsStructuralFlatItemsWithoutHost(index.source))
                     null
@@ -16605,7 +18675,7 @@ fn valueHostIntStructuralView(value: Value) ?HostIntDenseView {
             if (numericArrayIsTransposeView(handle)) {
                 const source = numericArrayTransposeSource(handle) orelse break :blk null;
                 const source_shape = valueNumericMatrixShape(source) orelse break :blk null;
-                const source_host = if (hostArrayIfPresent(source)) |array|
+                const source_host = if (hostDenseIfPresent(source)) |array|
                     if (hostIntArrayView(array) != null) array else break :blk null
                 else if (numericValueSupportsStructuralFlatItemsWithoutHost(source))
                     null
@@ -16623,17 +18693,17 @@ fn valueHostIntStructuralView(value: Value) ?HostIntDenseView {
                 const source = numericArrayReshapeSource(handle) orelse break :blk null;
                 break :blk valueHostIntStructuralView(source);
             }
-            if (handle.host) |array| {
+            if (numericHostAttachment(handle)) |array| {
                 if (hostIntArrayView(array)) |view| break :blk .{ .dense = view };
             }
             break :blk null;
         },
-        .mlx_array => blk: {
+        .backend_array => blk: {
             const handle = valueNumericHandle(value) orelse break :blk null;
             if (numericArrayIsRangeIota(handle)) break :blk .{ .range_iota = .{ .handle = handle } };
             if (numericArrayIsFlatSlice(handle)) {
                 const source = numericArrayFlatSliceSource(handle) orelse break :blk null;
-                const source_host = if (hostArrayIfPresent(source)) |array|
+                const source_host = if (hostDenseIfPresent(source)) |array|
                     if (hostIntArrayView(array) != null) array else break :blk null
                 else if (numericValueSupportsStructuralFlatItemsWithoutHost(source))
                     null
@@ -16650,13 +18720,13 @@ fn valueHostIntStructuralView(value: Value) ?HostIntDenseView {
             if (numericArrayIsFlatConcat(handle)) {
                 const left = numericArrayFlatConcatLeft(handle) orelse break :blk null;
                 const right = numericArrayFlatConcatRight(handle) orelse break :blk null;
-                const left_host = if (hostArrayIfPresent(left)) |array|
+                const left_host = if (hostDenseIfPresent(left)) |array|
                     if (hostIntArrayView(array) != null) array else break :blk null
                 else if (numericValueSupportsStructuralFlatItemsWithoutHost(left))
                     null
                 else
                     break :blk null;
-                const right_host = if (hostArrayIfPresent(right)) |array|
+                const right_host = if (hostDenseIfPresent(right)) |array|
                     if (hostIntArrayView(array) != null) array else break :blk null
                 else if (numericValueSupportsStructuralFlatItemsWithoutHost(right))
                     null
@@ -16683,7 +18753,7 @@ fn valueHostIntStructuralView(value: Value) ?HostIntDenseView {
                 const slice = handle.first_axis_slice orelse break :blk null;
                 if (slice.step != 1) break :blk null;
                 const source_handle = shapedNumericHandle(slice.source) orelse break :blk null;
-                const source_host = if (hostArrayIfPresent(slice.source)) |array|
+                const source_host = if (hostDenseIfPresent(slice.source)) |array|
                     if (hostIntArrayView(array) != null) array else break :blk null
                 else if (numericValueSupportsStructuralFlatItemsWithoutHost(slice.source))
                     null
@@ -16701,7 +18771,7 @@ fn valueHostIntStructuralView(value: Value) ?HostIntDenseView {
             if (numericArrayIsFirstAxisIndex(handle)) {
                 const index = handle.first_axis_index orelse break :blk null;
                 const source_handle = shapedNumericHandle(index.source) orelse break :blk null;
-                const source_host = if (hostArrayIfPresent(index.source)) |array|
+                const source_host = if (hostDenseIfPresent(index.source)) |array|
                     if (hostIntArrayView(array) != null) array else break :blk null
                 else if (numericValueSupportsStructuralFlatItemsWithoutHost(index.source))
                     null
@@ -16719,7 +18789,7 @@ fn valueHostIntStructuralView(value: Value) ?HostIntDenseView {
             if (numericArrayIsTransposeView(handle)) {
                 const source = numericArrayTransposeSource(handle) orelse break :blk null;
                 const source_shape = valueNumericMatrixShape(source) orelse break :blk null;
-                const source_host = if (hostArrayIfPresent(source)) |array|
+                const source_host = if (hostDenseIfPresent(source)) |array|
                     if (hostIntArrayView(array) != null) array else break :blk null
                 else if (numericValueSupportsStructuralFlatItemsWithoutHost(source))
                     null
@@ -16737,7 +18807,7 @@ fn valueHostIntStructuralView(value: Value) ?HostIntDenseView {
                 const source = numericArrayReshapeSource(handle) orelse break :blk null;
                 break :blk valueHostIntStructuralView(source);
             }
-            if (handle.host) |array| {
+            if (numericHostAttachment(handle)) |array| {
                 if (hostIntArrayView(array)) |view| break :blk .{ .dense = view };
             }
             break :blk null;
@@ -16754,7 +18824,7 @@ fn normalizeIndex(raw_index: i64, len: usize) KError!usize {
     return @intCast(index);
 }
 
-fn hostStorageCopyIntSlice(array: *const HostArray) []const i64 {
+fn hostStorageCopyIntSlice(array: *const HostDenseArray) []const i64 {
     return switch (array.storage) {
         .int64 => |items| items,
         .bit, .int8, .int16, .int32, .float64 => unreachable,
@@ -16762,7 +18832,7 @@ fn hostStorageCopyIntSlice(array: *const HostArray) []const i64 {
     };
 }
 
-fn destroyManagedHostArrayNoPool(allocator: std.mem.Allocator, array: *HostArray) void {
+fn destroyManagedHostArrayNoPool(allocator: std.mem.Allocator, array: *HostDenseArray) void {
     array.logical_handle = null;
     switch (array.storage) {
         .bit => |words| allocator.free(words),
@@ -16771,15 +18841,17 @@ fn destroyManagedHostArrayNoPool(allocator: std.mem.Allocator, array: *HostArray
         .int32 => |items| allocator.free(items),
         .int64 => |items| allocator.free(items),
         .float64 => |items| allocator.free(items),
-        .boxed => |items| {
-            for (items) |item| releaseHeapValue(allocator, item);
-            allocator.free(items);
-        },
     }
     allocator.destroy(array);
 }
 
-fn destroyManagedMlxArrayNoPool(allocator: std.mem.Allocator, array: *MlxArray) void {
+fn destroyManagedHostBoxedArrayNoPool(allocator: std.mem.Allocator, array: *HostBoxedArray) void {
+    for (array.items) |item| releaseHeapValue(allocator, item);
+    allocator.free(array.items);
+    allocator.destroy(array);
+}
+
+fn destroyManagedBackendArrayNoPool(allocator: std.mem.Allocator, array: *BackendArray) void {
     array.logical_handle = null;
     array.array.deinit();
     allocator.destroy(array);
@@ -16822,7 +18894,7 @@ fn releaseManagedNumericHandleNoPool(allocator: std.mem.Allocator, handle: *Nume
         if (handle.reshape_view) |reshape| releaseHeapValue(allocator, reshape.source);
         if (handle.transpose_view) |transpose| releaseHeapValue(allocator, transpose.source);
         if (handle.host) |array| destroyManagedHostArrayNoPool(allocator, array);
-        if (handle.mlx) |array| destroyManagedMlxArrayNoPool(allocator, array);
+        if (handle.mlx) |array| destroyManagedBackendArrayNoPool(allocator, array);
         allocator.destroy(handle);
     }
 }
@@ -16850,16 +18922,20 @@ fn retainHeapValue(value: Value) void {
                         syncNumericArrayChildren(handle);
                     }
                 },
-                .host_array => {
+                .host_dense_array => {
                     if (logicalHandleForNumericPayloadValue(value)) |handle| {
                         if (handle.header.owner == .managed) {
                             handle.header.ref_count += 1;
                             syncNumericArrayChildren(handle);
                         }
                     } else {
-                        const array = @constCast(value.asHostArray());
+                        const array = @constCast(value.asHostDenseArray());
                         if (array.header.owner == .managed) array.header.ref_count += 1;
                     }
+                },
+                .host_boxed_array => {
+                    const array = @constCast(value.asHostBoxedArray());
+                    if (array.header.owner == .managed) array.header.ref_count += 1;
                 },
                 .host_string => {
                     const text = @constCast(value.asHostString());
@@ -16877,14 +18953,14 @@ fn retainHeapValue(value: Value) void {
                     const list = @constCast(value.asHostStringList());
                     if (list.header.owner == .managed) list.header.ref_count += 1;
                 },
-                .mlx_array => {
+                .backend_array => {
                     if (logicalHandleForNumericPayloadValue(value)) |handle| {
                         if (handle.header.owner == .managed) {
                             handle.header.ref_count += 1;
                             syncNumericArrayChildren(handle);
                         }
                     } else {
-                        const array = @constCast(value.asMlxArray());
+                        const array = @constCast(value.asBackendArray());
                         if (array.header.owner == .managed) array.header.ref_count += 1;
                     }
                 },
@@ -16928,18 +19004,27 @@ fn releaseHeapValue(allocator: std.mem.Allocator, value: Value) void {
                     if (handle.header.owner != .managed) return;
                     releaseManagedNumericHandleNoPool(allocator, handle);
                 },
-                .host_array => {
+                .host_dense_array => {
                     if (logicalHandleForNumericPayloadValue(value)) |handle| {
                         if (handle.header.owner != .managed) return;
                         releaseManagedNumericHandleNoPool(allocator, handle);
                     } else {
-                        const array = @constCast(value.asHostArray());
+                        const array = @constCast(value.asHostDenseArray());
                         if (array.header.owner != .managed) return;
                         std.debug.assert(array.header.ref_count != 0);
                         array.header.ref_count -= 1;
                         if (array.header.ref_count == 0) {
                             destroyManagedHostArrayNoPool(allocator, array);
                         }
+                    }
+                },
+                .host_boxed_array => {
+                    const array = @constCast(value.asHostBoxedArray());
+                    if (array.header.owner != .managed) return;
+                    std.debug.assert(array.header.ref_count != 0);
+                    array.header.ref_count -= 1;
+                    if (array.header.ref_count == 0) {
+                        destroyManagedHostBoxedArrayNoPool(allocator, array);
                     }
                 },
                 .host_string, .host_symbol => {
@@ -16982,17 +19067,17 @@ fn releaseHeapValue(allocator: std.mem.Allocator, value: Value) void {
                         }
                     }
                 },
-                .mlx_array => {
+                .backend_array => {
                     if (logicalHandleForNumericPayloadValue(value)) |handle| {
                         if (handle.header.owner != .managed) return;
                         releaseManagedNumericHandleNoPool(allocator, handle);
                     } else {
-                        const array = @constCast(value.asMlxArray());
+                        const array = @constCast(value.asBackendArray());
                         if (array.header.owner != .managed) return;
                         std.debug.assert(array.header.ref_count != 0);
                         array.header.ref_count -= 1;
                         if (array.header.ref_count == 0) {
-                            destroyManagedMlxArrayNoPool(allocator, array);
+                            destroyManagedBackendArrayNoPool(allocator, array);
                         }
                     }
                 },
@@ -17064,20 +19149,20 @@ fn newNumericArrayValue(
     self: *Session,
     owner: HeapOwner,
     preferred: NumericArrayPreferred,
-    host: ?*HostArray,
-    mlx_array: ?*MlxArray,
+    host: ?*HostDenseArray,
+    backend_array: ?*BackendArray,
 ) !Value {
     const handle = try allocNumericArrayHandle(self, owner);
     handle.* = .{
         .header = HeapHeader.init(.numeric_array, owner),
         .preferred = preferred,
         .host = host,
-        .mlx = mlx_array,
+        .mlx = backend_array,
     };
     if (host) |array| {
         numericArraySetVectorShape(handle, array.len());
-    } else if (mlx_array) |array| {
-        numericArraySetShapeFromMlx(handle, array.array);
+    } else if (backend_array) |array| {
+        numericArraySetShapeFromBackend(handle, array.array);
     }
     syncNumericArrayChildren(handle);
     self.registerManagedNumericHandle(handle);
@@ -17124,7 +19209,7 @@ fn newFlatSliceValue(self: *Session, source: Value, start: usize, len: usize) KE
     const source_handle = valueNumericHandle(source);
     const preferred: NumericArrayPreferred = if (source_handle) |handle|
         handle.preferred
-    else if (source.tag() == .array and source.arrayKind() == .mlx_array)
+    else if (source.tag() == .array and source.arrayKind() == .backend_array)
         .mlx
     else
         .host;
@@ -17199,7 +19284,7 @@ fn newFlatSegmentsValue(self: *Session, segments: []const FlatNumericSegment) KE
         total_len += segment.len;
         if (valueNumericHandle(segment.value)) |handle| {
             if (handle.preferred == .mlx) preferred = .mlx;
-        } else if (segment.value.tag() == .array and segment.value.arrayKind() == .mlx_array) {
+        } else if (segment.value.tag() == .array and segment.value.arrayKind() == .backend_array) {
             preferred = .mlx;
         }
     }
@@ -17349,8 +19434,8 @@ fn newReshapeViewValue(self: *Session, source: Value, shape: NumericShapeSnapsho
     const preferred: NumericArrayPreferred = if (source_handle) |handle|
         handle.preferred
     else switch (source.arrayKind()) {
-        .mlx_array => .mlx,
-        .host_array => .host,
+        .backend_array => .mlx,
+        .host_dense_array => .host,
         else => return error.Type,
     };
 
@@ -17399,39 +19484,39 @@ fn newTransposeViewValue(self: *Session, source: Value) KError!Value {
     return Value.array(handle);
 }
 
-fn wrapOwnedHostArrayValue(self: *Session, array: *HostArray) !Value {
-    if (std.meta.activeTag(array.storage) == .boxed) return Value.array(array);
+fn wrapOwnedHostArrayValue(self: *Session, array: *HostDenseArray) !Value {
     if (array.logical_handle) |handle| return Value.array(handle);
     return try newNumericArrayValue(self, array.header.owner, .host, array, null);
 }
 
-fn wrapOwnedMlxArrayValue(self: *Session, array: *MlxArray) !Value {
+fn wrapOwnedBackendArrayValue(self: *Session, array: *BackendArray) !Value {
     if (array.logical_handle) |handle| return Value.array(handle);
     return try newNumericArrayValue(self, array.header.owner, .mlx, null, array);
 }
 
-fn hostArraySourceValue(array: *const HostArray) Value {
+fn hostDenseSourceValue(array: *const HostDenseArray) Value {
     if (array.logical_handle) |handle| return Value.array(handle);
     return Value.array(@constCast(array));
 }
 
-const dense_mlx_min_len_dyad: usize = 500_000;
-const dense_mlx_min_len_reduce: usize = 500_000;
-const dense_mlx_min_len_autodiff: usize = 1024;
-const dense_mlx_min_len_transpose: usize = 2_048;
-const dense_mlx_min_len_matmul: usize = 65_536;
+const dense_backend_min_len_dyad: usize = 500_000;
+const dense_backend_min_len_reduce: usize = 500_000;
+const dense_backend_min_len_autodiff: usize = 1024;
+const dense_backend_min_len_transpose: usize = 2_048;
+const dense_backend_min_len_matmul: usize = 65_536;
+const dense_backend_row_host_len_dyad: usize = 512;
 const dual_resident_numeric_budget: usize = 8;
 
 const DenseRegionFacts = struct {
     elem_count: usize = 0,
     matrix_rows: usize = 0,
     matrix_cols: usize = 0,
-    has_mlx_residency: bool = false,
+    has_backend_residency: bool = false,
     has_unmaterialized_range: bool = false,
     has_packed_bit_input: bool = false,
     prefer_host_kernel: bool = false,
-    prefer_mlx_pipeline: bool = false,
-    supports_mlx: bool = true,
+    prefer_backend_pipeline: bool = false,
+    supports_backend: bool = true,
     device_preference: device.DevicePreference = .cpu,
 };
 
@@ -17440,13 +19525,28 @@ const DensePlanDecision = struct {
     reason: DensePlanReason,
 };
 
+const DenseValuePlanFacts = struct {
+    has_backend_residency: bool = false,
+    has_unmaterialized_range: bool = false,
+    supports_host_dense: bool = false,
+    supports_cheap_host_dense: bool = false,
+};
+
+fn denseValuePlanFacts(value: Value) DenseValuePlanFacts {
+    return .{
+        .has_backend_residency = hasBackendRealization(value),
+        .has_unmaterialized_range = isUnmaterializedRangeIotaValue(value),
+        .supports_host_dense = valueSupportsHostDensePlanning(value),
+        .supports_cheap_host_dense = valueSupportsCheapHostDensePlanning(value),
+    };
+}
+
 fn ensureNumericArrayHandle(self: *Session, value: Value) !*NumericArray {
     std.debug.assert(value.tag() == .array);
     return switch (value.arraySubkind()) {
         .numeric_array => @constCast(value.asNumericArray()),
-        .host_array => blk: {
-            const array = @constCast(value.asHostArray());
-            if (hostArrayNumericMode(array) == null) return error.Type;
+        .host_dense_array => blk: {
+            const array = @constCast(value.asHostDenseArray());
             if (array.logical_handle) |handle| break :blk handle;
             const handle = try allocNumericArrayHandle(self, array.header.owner);
             handle.* = .{
@@ -17464,8 +19564,8 @@ fn ensureNumericArrayHandle(self: *Session, value: Value) !*NumericArray {
             self.registerManagedNumericHandle(handle);
             break :blk handle;
         },
-        .mlx_array => blk: {
-            const array = @constCast(value.asMlxArray());
+        .backend_array => blk: {
+            const array = @constCast(value.asBackendArray());
             if (array.logical_handle) |handle| break :blk handle;
             const handle = try allocNumericArrayHandle(self, array.header.owner);
             handle.* = .{
@@ -17478,7 +19578,7 @@ fn ensureNumericArrayHandle(self: *Session, value: Value) !*NumericArray {
                 .host = null,
                 .mlx = array,
             };
-            numericArraySetShapeFromMlx(handle, array.array);
+            numericArraySetShapeFromBackend(handle, array.array);
             syncNumericArrayChildren(handle);
             self.registerManagedNumericHandle(handle);
             break :blk handle;
@@ -17487,98 +19587,77 @@ fn ensureNumericArrayHandle(self: *Session, value: Value) !*NumericArray {
     };
 }
 
-fn hasMlxRealization(value: Value) bool {
+fn hasBackendRealization(value: Value) bool {
     if (value.tag() != .array) return false;
     return switch (value.arraySubkind()) {
         .numeric_array => blk: {
             const handle = value.asNumericArray();
-            if (handle.mlx != null) break :blk true;
-            if (numericArrayFlatSliceSource(handle)) |source| break :blk hasMlxRealization(source);
+            if (numericHasBackendAttachment(handle)) break :blk true;
+            if (numericArrayFlatSliceSource(handle)) |source| break :blk hasBackendRealization(source);
             if (numericArrayFlatConcatLeft(handle)) |left| {
-                const right = numericArrayFlatConcatRight(handle) orelse break :blk hasMlxRealization(left);
-                break :blk hasMlxRealization(left) or hasMlxRealization(right);
+                const right = numericArrayFlatConcatRight(handle) orelse break :blk hasBackendRealization(left);
+                break :blk hasBackendRealization(left) or hasBackendRealization(right);
             }
             if (numericArrayFlatSegmentsValues(handle)) |segments| {
                 for (segments) |segment| {
-                    if (hasMlxRealization(segment)) break :blk true;
+                    if (hasBackendRealization(segment)) break :blk true;
                 }
             }
-            if (numericArrayFirstAxisSliceSource(handle)) |source| break :blk hasMlxRealization(source);
-            if (numericArrayFirstAxisIndexSource(handle)) |source| break :blk hasMlxRealization(source);
+            if (numericArrayFirstAxisSliceSource(handle)) |source| break :blk hasBackendRealization(source);
+            if (numericArrayFirstAxisIndexSource(handle)) |source| break :blk hasBackendRealization(source);
             if (numericArrayFirstAxisConcatLeft(handle)) |left| {
-                const right = numericArrayFirstAxisConcatRight(handle) orelse break :blk hasMlxRealization(left);
-                break :blk hasMlxRealization(left) or hasMlxRealization(right);
+                const right = numericArrayFirstAxisConcatRight(handle) orelse break :blk hasBackendRealization(left);
+                break :blk hasBackendRealization(left) or hasBackendRealization(right);
             }
-            if (numericArrayReshapeSource(handle)) |source| break :blk hasMlxRealization(source);
-            if (numericArrayTransposeSource(handle)) |source| break :blk hasMlxRealization(source);
+            if (numericArrayReshapeSource(handle)) |source| break :blk hasBackendRealization(source);
+            if (numericArrayTransposeSource(handle)) |source| break :blk hasBackendRealization(source);
             break :blk false;
         },
-        .host_array => if (hostArrayNumericMode(value.asHostArray()) != null and value.asHostArray().logical_handle != null)
-            value.asHostArray().logical_handle.?.mlx != null
+        .host_dense_array => if (value.asHostDenseArray().logical_handle != null)
+            numericHasBackendAttachment(value.asHostDenseArray().logical_handle.?)
         else
             false,
-        .mlx_array => true,
+        .backend_array => true,
         else => false,
     };
 }
 
 fn numericVectorLen(value: Value) ?usize {
-    return switch (value.tag()) {
-        .array => switch (value.arrayKind()) {
-            .host_array => blk: {
-                if (valueNumericMode(value) == null) break :blk null;
-                if (valueNumericHandle(value)) |handle| {
-                    if (handle.rank > 1) break :blk null;
-                }
-                break :blk value.asHostArray().len();
-            },
-            .mlx_array => blk: {
-                const array = value.asMlxArray().array;
-                if (array.ndim() != 1) break :blk null;
-                const shape = array.shape();
-                if (shape.len != 1) break :blk null;
-                break :blk @intCast(shape[0]);
-            },
-            .numeric_array => blk: {
-                const handle = value.asNumericArray();
-                if (handle.rank != 1) break :blk null;
-                break :blk @intCast(handle.shape[0]);
-            },
-            else => null,
+    if (valueNumericHandle(value)) |handle| {
+        if (handle.rank != 1) return null;
+        return @intCast(handle.shape[0]);
+    }
+    if (value.tag() != .array) return null;
+    return switch (value.arrayKind()) {
+        .host_dense_array => value.asHostDenseArray().len(),
+        .backend_array => blk: {
+            const array = value.asBackendArray().array;
+            if (array.ndim() != 1) break :blk null;
+            const shape = array.shape();
+            if (shape.len != 1) break :blk null;
+            break :blk @intCast(shape[0]);
         },
         else => null,
     };
 }
 
-fn supportsMlxDyad(op: BuiltinId) bool {
+fn supportsBackendDyad(op: BuiltinId) bool {
     return switch (op) {
         .add, .sub, .mul, .div, .less, .more, .equal => true,
         else => false,
     };
 }
 
-fn supportsMlxMonad(op: BuiltinId) bool {
+fn supportsBackendMonad(op: BuiltinId) bool {
     return switch (op) {
         .add, .sub, .div, .exp, .log, .tanh, .sigmoid => true,
         else => false,
     };
 }
 
-fn mlxDtypeIsFloat(dtype: c.mlx_dtype) bool {
-    return dtype == c.MLX_FLOAT32 or dtype == c.MLX_FLOAT64;
-}
-
-fn castMlxBoolArrayTo(self: *Session, array: *mlx.Array, target_dtype: c.mlx_dtype) KError!void {
-    if (array.dtype() != c.MLX_BOOL) return;
-    const ctx = try self.mlxContext();
-    const casted = mlx.Array.cast(ctx.*, array.*, target_dtype) catch |err| return mapMlxError(err);
-    array.deinit();
-    array.* = casted;
-}
-
-fn createMlxArrayFromHostArray(self: *Session, array: *const HostArray) KError!mlx.Array {
+fn createBackendArrayFromHostArray(self: *Session, array: *const HostDenseArray) KError!mlx.Array {
     var dims_buf: [numeric_array_max_rank]i32 = [_]i32{0} ** numeric_array_max_rank;
-    const dims = hostArrayShapeDims(array, &dims_buf);
+    const dims = hostDenseShapeDims(array, &dims_buf);
     return switch (array.storage) {
         .bit => |words| blk: {
             const converted = try self.allocator.alloc(bool, array.logical_len);
@@ -17615,26 +19694,10 @@ fn createMlxArrayFromHostArray(self: *Session, array: *const HostArray) KError!m
             for (items, 0..) |item, idx| converted[idx] = @floatCast(item);
             break :blk mlx.Array.fromFloatSlice(converted, dims);
         },
-        .boxed => |items| blk: {
-            if (!isRenderableMatrix(items)) return error.Type;
-            const rows = items.len;
-            const cols = items[0].asHostArray().len();
-            const matrix_dims = [_]i32{ @intCast(rows), @intCast(cols) };
-            const converted = try self.allocator.alloc(f32, rows * cols);
-            defer self.allocator.free(converted);
-            var out_idx: usize = 0;
-            for (items) |row| {
-                for (0..cols) |col| {
-                    converted[out_idx] = @floatCast(try numericFloatAt(row, col));
-                    out_idx += 1;
-                }
-            }
-            break :blk mlx.Array.fromFloatSlice(converted, &matrix_dims);
-        },
     };
 }
 
-fn mlxArrayElementCount(array: mlx.Array) usize {
+fn backendArrayElementCount(array: mlx.Array) usize {
     if (array.ndim() == 0) return 1;
     var total: usize = 1;
     for (array.shape()) |dim| total *= @as(usize, @intCast(dim));
@@ -17668,18 +19731,18 @@ fn transposeBlockedTyped(comptime T: type, out: []T, source: []const T, rows: us
     }
 }
 
-fn transposeBlockedIntResult(comptime T: type, out: *HostArrayAlloc(T), source: []const T, rows: usize, cols: usize) void {
+fn transposeBlockedIntResult(comptime T: type, out: *HostDenseAlloc(T), source: []const T, rows: usize, cols: usize) void {
     transposeBlockedTyped(T, out.items, source, rows, cols);
 }
 
-fn sourceHostIntRange(value: Value, array: *const HostArray) HostIntRange {
+fn sourceHostIntRange(value: Value, array: *const HostDenseArray) HostIntRange {
     return if (hostIntArrayView(array)) |view|
         hostIntDenseValueRange(value, .{ .dense = view })
     else
         .{ .min = 0, .max = 0 };
 }
 
-fn createHostArrayFromTransposeView(self: *Session, owner: HeapOwner, handle: *const NumericArray) KError!*HostArray {
+fn createHostArrayFromTransposeView(self: *Session, owner: HeapOwner, handle: *const NumericArray) KError!*HostDenseArray {
     if (!numericArrayIsTransposeView(handle)) return error.Type;
     const value = Value.array(@constCast(handle));
     const source = numericArrayTransposeSource(handle) orelse return error.Type;
@@ -17697,7 +19760,7 @@ fn createHostArrayFromTransposeView(self: *Session, owner: HeapOwner, handle: *c
                     const out = try self.allocOwnedHostFloatResult(owner, total_len);
                     transposeBlockedTyped(f64, out.items, items, rows, cols);
                     const analysis = analyzeFloatSlice(out.items);
-                    hostArraySetFlags(out.array, analysis.flags);
+                    hostDenseSetFlags(out.array, analysis.flags);
                     return out.array;
                 }
             },
@@ -17706,8 +19769,8 @@ fn createHostArrayFromTransposeView(self: *Session, owner: HeapOwner, handle: *c
                     var out = try self.allocHostArrayTyped(i8, .int8, owner, total_len);
                     transposeBlockedIntResult(i8, &out, items, rows, cols);
                     const host = out.array;
-                    hostArraySetFlags(host, host_array_flag_normalized);
-                    hostArraySetCachedIntRange(host, sourceHostIntRange(source, array));
+                    hostDenseSetFlags(host, host_dense_flag_normalized);
+                    hostDenseSetCachedIntRange(host, sourceHostIntRange(source, array));
                     return host;
                 }
             },
@@ -17716,8 +19779,8 @@ fn createHostArrayFromTransposeView(self: *Session, owner: HeapOwner, handle: *c
                     var out = try self.allocHostArrayTyped(i16, .int16, owner, total_len);
                     transposeBlockedIntResult(i16, &out, items, rows, cols);
                     const host = out.array;
-                    hostArraySetFlags(host, host_array_flag_normalized);
-                    hostArraySetCachedIntRange(host, sourceHostIntRange(source, array));
+                    hostDenseSetFlags(host, host_dense_flag_normalized);
+                    hostDenseSetCachedIntRange(host, sourceHostIntRange(source, array));
                     return host;
                 }
             },
@@ -17726,8 +19789,8 @@ fn createHostArrayFromTransposeView(self: *Session, owner: HeapOwner, handle: *c
                     var out = try self.allocHostArrayTyped(i32, .int32, owner, total_len);
                     transposeBlockedIntResult(i32, &out, items, rows, cols);
                     const host = out.array;
-                    hostArraySetFlags(host, host_array_flag_normalized);
-                    hostArraySetCachedIntRange(host, sourceHostIntRange(source, array));
+                    hostDenseSetFlags(host, host_dense_flag_normalized);
+                    hostDenseSetCachedIntRange(host, sourceHostIntRange(source, array));
                     return host;
                 }
             },
@@ -17736,8 +19799,8 @@ fn createHostArrayFromTransposeView(self: *Session, owner: HeapOwner, handle: *c
                     var out = try self.allocHostArrayTyped(i64, .int64, owner, total_len);
                     transposeBlockedIntResult(i64, &out, items, rows, cols);
                     const host = out.array;
-                    hostArraySetFlags(host, host_array_flag_normalized);
-                    hostArraySetCachedIntRange(host, sourceHostIntRange(source, array));
+                    hostDenseSetFlags(host, host_dense_flag_normalized);
+                    hostDenseSetCachedIntRange(host, sourceHostIntRange(source, array));
                     return host;
                 }
             },
@@ -17761,7 +19824,7 @@ fn createHostArrayFromTransposeView(self: *Session, owner: HeapOwner, handle: *c
                 .source_cols = transpose_view.source_cols,
             } }, idx);
             const analysis = analyzeFloatSlice(out.items);
-            hostArraySetFlags(out.array, analysis.flags);
+            hostDenseSetFlags(out.array, analysis.flags);
             break :blk out.array;
         },
         .int => blk: {
@@ -17780,25 +19843,25 @@ fn createHostArrayFromTransposeView(self: *Session, owner: HeapOwner, handle: *c
             for (0..total_len) |idx| try out.set(idx, try hostTransposeIntItem(transpose_view, idx));
             const host = out.arrayPtr();
             if (analysis.kind == .bit) bitClearUnusedTail(host.storage.bit, host.logical_len);
-            hostArraySetFlags(host, hostTransposeIntFlags(transpose_view));
-            hostArraySetCachedIntRange(host, analysis.range);
+            hostDenseSetFlags(host, hostTransposeIntFlags(transpose_view));
+            hostDenseSetCachedIntRange(host, analysis.range);
             break :blk host;
         },
     };
 }
 
-fn createMlxArrayFromTransposeView(self: *Session, handle: *const NumericArray) KError!mlx.Array {
+fn createBackendArrayFromTransposeView(self: *Session, handle: *const NumericArray) KError!mlx.Array {
     if (!numericArrayIsTransposeView(handle)) return error.Type;
     const value = Value.array(@constCast(handle));
     const source = numericArrayTransposeSource(handle) orelse return error.Type;
     noteTransposeMaterializationDecision(self, value, numericArrayElementCount(handle), .mlx);
-    var source_array = try self.materializeMlxArray(source);
+    var source_array = try self.materializeBackendArray(source);
     defer source_array.deinit();
-    const ctx = try self.mlxContext();
+    const ctx = try self.backendContext();
     return mlx.Array.transpose(ctx.*, source_array) catch |err| return mapMlxError(err);
 }
 
-fn createHostArrayFromRangeIota(self: *Session, owner: HeapOwner, handle: *const NumericArray) KError!*HostArray {
+fn createHostArrayFromRangeIota(self: *Session, owner: HeapOwner, handle: *const NumericArray) KError!*HostDenseArray {
     if (!numericArrayIsRangeIota(handle)) return error.Type;
     const len = numericArrayRangeLen(handle);
     const bounds = numericArrayRangeIotaBounds(handle);
@@ -17807,28 +19870,51 @@ fn createHostArrayFromRangeIota(self: *Session, owner: HeapOwner, handle: *const
     for (0..len) |idx| try out.set(idx, try numericArrayRangeIotaValueAt(handle, idx));
     const host = out.arrayPtr();
     if (kind == .bit) bitClearUnusedTail(host.storage.bit, host.logical_len);
-    hostArraySetFlags(
+    hostDenseSetFlags(
         host,
-        host_array_flag_normalized |
+        host_dense_flag_normalized |
             orderFlagsFromMonotonic(handle.range_iota.step >= 0, handle.range_iota.step <= 0),
     );
-    hostArraySetCachedIntRange(host, bounds);
+    hostDenseSetCachedIntRange(host, bounds);
     return host;
 }
 
-fn createMlxArrayFromRangeIota(self: *Session, handle: *const NumericArray) KError!mlx.Array {
+fn createBackendArrayFromRangeIota(self: *Session, handle: *const NumericArray) KError!mlx.Array {
     if (!numericArrayIsRangeIota(handle)) return error.Type;
     const len = numericArrayRangeLen(handle);
-    const converted = try self.allocator.alloc(i32, len);
-    defer self.allocator.free(converted);
-
-    for (0..len) |idx| {
-        converted[idx] = std.math.cast(i32, try numericArrayRangeIotaValueAt(handle, idx)) orelse return error.Unsupported;
+    const ctx = try self.backendContext();
+    if (len == 0) {
+        return mlx.Array.zeros(ctx.*, handle.shapeSlice(), c.MLX_INT32) catch |err| return mapMlxError(err);
     }
-    return mlx.Array.fromIntSlice(converted, handle.shapeSlice());
+
+    const start = handle.range_iota.start;
+    const step = handle.range_iota.step;
+    if (step == 0) {
+        const scalar = std.math.cast(i32, start) orelse return error.Unsupported;
+        var base = mlx.Array.zeros(ctx.*, handle.shapeSlice(), c.MLX_INT32) catch |err| return mapMlxError(err);
+        defer base.deinit();
+        var offset = mlx.Array.fromInt(scalar);
+        defer offset.deinit();
+        return mlx.Array.add(ctx.*, base, offset) catch |err| return mapMlxError(err);
+    }
+
+    const last = try numericArrayRangeIotaValueAt(handle, len - 1);
+    _ = std.math.cast(i32, start) orelse return error.Unsupported;
+    _ = std.math.cast(i32, last) orelse return error.Unsupported;
+
+    const len_i64 = std.math.cast(i64, len) orelse return error.Unsupported;
+    const stop = std.math.add(i64, start, std.math.mul(i64, step, len_i64) catch return error.Unsupported) catch return error.Unsupported;
+    var out = mlx.Array.arange(ctx.*, @floatFromInt(start), @floatFromInt(stop), @floatFromInt(step), c.MLX_INT32) catch |err| return mapMlxError(err);
+    if (handle.rank == 1) return out;
+    const reshaped = mlx.Array.reshape(ctx.*, out, handle.shapeSlice()) catch |err| {
+        out.deinit();
+        return mapMlxError(err);
+    };
+    out.deinit();
+    return reshaped;
 }
 
-fn createHostArrayFromFlatSlice(self: *Session, owner: HeapOwner, handle: *const NumericArray) KError!*HostArray {
+fn createHostArrayFromFlatSlice(self: *Session, owner: HeapOwner, handle: *const NumericArray) KError!*HostDenseArray {
     if (!numericArrayIsFlatSlice(handle)) return error.Type;
     const source = numericArrayFlatSliceSource(handle) orelse return error.Type;
     const start = numericArrayFlatSliceStart(handle) orelse return error.Type;
@@ -17859,7 +19945,7 @@ fn createHostArrayFromFlatSlice(self: *Session, owner: HeapOwner, handle: *const
                             const out = try self.allocHostArrayTyped(f64, .float64, owner, len);
                             @memcpy(out.items, values[items.start .. items.start + len]);
                             const analysis = analyzeFloatSlice(out.items);
-                            hostArraySetFlags(out.array, analysis.flags);
+                            hostDenseSetFlags(out.array, analysis.flags);
                             break :blk out.array;
                         },
                         else => {},
@@ -17867,23 +19953,23 @@ fn createHostArrayFromFlatSlice(self: *Session, owner: HeapOwner, handle: *const
                     const out = try self.allocHostArrayTyped(f64, .float64, owner, len);
                     for (0..len) |idx| out.items[idx] = try hostFlatSliceFloatItem(items, idx);
                     const analysis = analyzeFloatSlice(out.items);
-                    hostArraySetFlags(out.array, analysis.flags);
+                    hostDenseSetFlags(out.array, analysis.flags);
                     break :blk out.array;
                 },
                 .flat_stride => |items| {
                     const out = try self.allocHostArrayTyped(f64, .float64, owner, len);
                     for (0..len) |idx| out.items[idx] = try hostFlatStrideFloatItem(items, idx);
                     const analysis = analyzeFloatSlice(out.items);
-                    hostArraySetFlags(out.array, analysis.flags);
+                    hostDenseSetFlags(out.array, analysis.flags);
                     break :blk out.array;
                 },
             };
-            if (hostArrayIfPresent(source)) |array| switch (array.storage) {
+            if (hostDenseIfPresent(source)) |array| switch (array.storage) {
                 .float64 => |items| {
                     const out = try self.allocHostArrayTyped(f64, .float64, owner, len);
                     @memcpy(out.items, items[start .. start + len]);
                     const analysis = analyzeFloatSlice(out.items);
-                    hostArraySetFlags(out.array, analysis.flags);
+                    hostDenseSetFlags(out.array, analysis.flags);
                     break :blk out.array;
                 },
                 else => {},
@@ -17891,7 +19977,7 @@ fn createHostArrayFromFlatSlice(self: *Session, owner: HeapOwner, handle: *const
             const out = try self.allocHostArrayTyped(f64, .float64, owner, len);
             for (0..len) |idx| out.items[idx] = try numericFloatAt(source, start + idx);
             const analysis = analyzeFloatSlice(out.items);
-            hostArraySetFlags(out.array, analysis.flags);
+            hostDenseSetFlags(out.array, analysis.flags);
             break :blk out.array;
         },
         .int => blk: {
@@ -17905,8 +19991,8 @@ fn createHostArrayFromFlatSlice(self: *Session, owner: HeapOwner, handle: *const
                     for (values, 0..) |item, idx| try out.set(idx, item);
                     const host = out.arrayPtr();
                     if (analysis.kind == .bit) bitClearUnusedTail(host.storage.bit, host.logical_len);
-                    hostArraySetFlags(host, analysis.flags);
-                    hostArraySetCachedIntRange(host, analysis.range);
+                    hostDenseSetFlags(host, analysis.flags);
+                    hostDenseSetCachedIntRange(host, analysis.range);
                     break :blk host;
                 },
                 .flat_stride => |items| {
@@ -17918,8 +20004,8 @@ fn createHostArrayFromFlatSlice(self: *Session, owner: HeapOwner, handle: *const
                     for (values, 0..) |item, idx| try out.set(idx, item);
                     const host = out.arrayPtr();
                     if (analysis.kind == .bit) bitClearUnusedTail(host.storage.bit, host.logical_len);
-                    hostArraySetFlags(host, analysis.flags);
-                    hostArraySetCachedIntRange(host, analysis.range);
+                    hostDenseSetFlags(host, analysis.flags);
+                    hostDenseSetCachedIntRange(host, analysis.range);
                     break :blk host;
                 },
             };
@@ -17931,36 +20017,36 @@ fn createHostArrayFromFlatSlice(self: *Session, owner: HeapOwner, handle: *const
             for (values, 0..) |item, idx| try out.set(idx, item);
             const host = out.arrayPtr();
             if (analysis.kind == .bit) bitClearUnusedTail(host.storage.bit, host.logical_len);
-            hostArraySetFlags(host, analysis.flags);
-            hostArraySetCachedIntRange(host, analysis.range);
+            hostDenseSetFlags(host, analysis.flags);
+            hostDenseSetCachedIntRange(host, analysis.range);
             break :blk host;
         },
     };
 }
 
-fn createMlxArrayFromFlatSlice(self: *Session, handle: *const NumericArray) KError!mlx.Array {
+fn createBackendArrayFromFlatSlice(self: *Session, handle: *const NumericArray) KError!mlx.Array {
     if (!numericArrayIsFlatSlice(handle)) return error.Type;
     const source = numericArrayFlatSliceSource(handle) orelse return error.Type;
     const source_len = numericFlatLen(source) orelse return error.Type;
     const start = numericArrayFlatSliceStart(handle) orelse return error.Type;
     const len = numericVectorLen(Value.array(@constCast(handle))) orelse return error.Type;
 
-    var source_array = try self.materializeMlxArray(source);
+    var source_array = try self.materializeBackendArray(source);
     defer source_array.deinit();
     if (source_array.ndim() != 1) {
         const dims = [_]i32{std.math.cast(i32, source_len) orelse return error.Unsupported};
-        const reshaped = mlx.Array.reshape((try self.mlxContext()).*, source_array, &dims) catch |err| return mapMlxError(err);
+        const reshaped = mlx.Array.reshape((try self.backendContext()).*, source_array, &dims) catch |err| return mapMlxError(err);
         source_array.deinit();
         source_array = reshaped;
     }
-    const ctx = try self.mlxContext();
+    const ctx = try self.backendContext();
     const start_buf = [_]i32{std.math.cast(i32, start) orelse return error.Unsupported};
     const stop_buf = [_]i32{std.math.cast(i32, start + len) orelse return error.Unsupported};
     const stride_buf = [_]i32{1};
     return mlx.Array.slice(ctx.*, source_array, &start_buf, &stop_buf, &stride_buf) catch |err| return mapMlxError(err);
 }
 
-fn createHostArrayFromFlatValues(self: *Session, owner: HeapOwner, segments: []const Value) KError!*HostArray {
+fn createHostArrayFromFlatValues(self: *Session, owner: HeapOwner, segments: []const Value) KError!*HostDenseArray {
     if (segments.len == 0) return error.Type;
     const mode = valueNumericMode(segments[0]) orelse return error.Type;
     var total_len: usize = 0;
@@ -18005,8 +20091,8 @@ fn createHostArrayFromFlatValues(self: *Session, owner: HeapOwner, segments: []c
             for (out_bits.items, 0..) |item, idx| try out.set(idx, @intFromBool(item));
             const host = out.arrayPtr();
             bitClearUnusedTail(host.storage.bit, host.logical_len);
-            hostArraySetFlags(host, host_array_flag_normalized | orderFlagsFromMonotonic(asc, dsc));
-            hostArraySetCachedIntRange(host, .{
+            hostDenseSetFlags(host, host_dense_flag_normalized | orderFlagsFromMonotonic(asc, dsc));
+            hostDenseSetCachedIntRange(host, .{
                 .min = if (saw_zero) 0 else 1,
                 .max = if (saw_one) 1 else 0,
             });
@@ -18028,8 +20114,8 @@ fn createHostArrayFromFlatValues(self: *Session, owner: HeapOwner, segments: []c
         for (values, 0..) |item, idx| try out.set(idx, item);
         const host = out.arrayPtr();
         if (analysis.kind == .bit) bitClearUnusedTail(host.storage.bit, host.logical_len);
-        hostArraySetFlags(host, analysis.flags);
-        hostArraySetCachedIntRange(host, analysis.range);
+        hostDenseSetFlags(host, analysis.flags);
+        hostDenseSetCachedIntRange(host, analysis.range);
         return host;
     }
 
@@ -18043,49 +20129,49 @@ fn createHostArrayFromFlatValues(self: *Session, owner: HeapOwner, segments: []c
         }
     }
     const analysis = analyzeFloatSlice(out.items);
-    hostArraySetFlags(out.array, analysis.flags);
+    hostDenseSetFlags(out.array, analysis.flags);
     return out.array;
 }
 
-fn createMlxArrayFromFlatValues(self: *Session, segments: []const Value) KError!mlx.Array {
+fn createBackendArrayFromFlatValues(self: *Session, segments: []const Value) KError!mlx.Array {
     if (segments.len == 0) return error.Type;
     var arrays = try self.allocator.alloc(mlx.Array, segments.len);
     defer self.allocator.free(arrays);
     defer for (arrays[0..segments.len]) |*item| item.deinit();
 
     for (segments, 0..) |segment, idx| {
-        arrays[idx] = try self.materializeMlxArray(segment);
+        arrays[idx] = try self.materializeBackendArray(segment);
     }
-    return try mlxConcatAxis0((try self.mlxContext()).*, arrays[0..segments.len]);
+    return try mlxConcatAxis0((try self.backendContext()).*, arrays[0..segments.len]);
 }
 
-fn createHostArrayFromFlatConcat(self: *Session, owner: HeapOwner, handle: *const NumericArray) KError!*HostArray {
+fn createHostArrayFromFlatConcat(self: *Session, owner: HeapOwner, handle: *const NumericArray) KError!*HostDenseArray {
     if (!numericArrayIsFlatConcat(handle)) return error.Type;
     const left = numericArrayFlatConcatLeft(handle) orelse return error.Type;
     const right = numericArrayFlatConcatRight(handle) orelse return error.Type;
     return try createHostArrayFromFlatValues(self, owner, &[_]Value{ left, right });
 }
 
-fn createMlxArrayFromFlatConcat(self: *Session, handle: *const NumericArray) KError!mlx.Array {
+fn createBackendArrayFromFlatConcat(self: *Session, handle: *const NumericArray) KError!mlx.Array {
     if (!numericArrayIsFlatConcat(handle)) return error.Type;
     const left = numericArrayFlatConcatLeft(handle) orelse return error.Type;
     const right = numericArrayFlatConcatRight(handle) orelse return error.Type;
-    return try createMlxArrayFromFlatValues(self, &[_]Value{ left, right });
+    return try createBackendArrayFromFlatValues(self, &[_]Value{ left, right });
 }
 
-fn createHostArrayFromFlatSegments(self: *Session, owner: HeapOwner, handle: *const NumericArray) KError!*HostArray {
+fn createHostArrayFromFlatSegments(self: *Session, owner: HeapOwner, handle: *const NumericArray) KError!*HostDenseArray {
     if (!numericArrayIsFlatSegments(handle)) return error.Type;
     const segments = numericArrayFlatSegmentsValues(handle) orelse return error.Type;
     return try createHostArrayFromFlatValues(self, owner, segments);
 }
 
-fn createMlxArrayFromFlatSegments(self: *Session, handle: *const NumericArray) KError!mlx.Array {
+fn createBackendArrayFromFlatSegments(self: *Session, handle: *const NumericArray) KError!mlx.Array {
     if (!numericArrayIsFlatSegments(handle)) return error.Type;
     const segments = numericArrayFlatSegmentsValues(handle) orelse return error.Type;
-    return try createMlxArrayFromFlatValues(self, segments);
+    return try createBackendArrayFromFlatValues(self, segments);
 }
 
-fn createHostArrayFromFirstAxisSlice(self: *Session, owner: HeapOwner, handle: *const NumericArray) KError!*HostArray {
+fn createHostArrayFromFirstAxisSlice(self: *Session, owner: HeapOwner, handle: *const NumericArray) KError!*HostDenseArray {
     if (!numericArrayIsFirstAxisSlice(handle)) return error.Type;
     const slice = handle.first_axis_slice orelse return error.Type;
     const source_handle = shapedNumericHandle(slice.source) orelse return error.Type;
@@ -18112,8 +20198,8 @@ fn createHostArrayFromFirstAxisSlice(self: *Session, owner: HeapOwner, handle: *
         for (values, 0..) |item, idx| try out.set(idx, item);
         const host = out.arrayPtr();
         if (analysis.kind == .bit) bitClearUnusedTail(host.storage.bit, host.logical_len);
-        hostArraySetFlags(host, analysis.flags);
-        hostArraySetCachedIntRange(host, analysis.range);
+        hostDenseSetFlags(host, analysis.flags);
+        hostDenseSetCachedIntRange(host, analysis.range);
         return host;
     }
 
@@ -18137,11 +20223,10 @@ fn createHostArrayFromFirstAxisSlice(self: *Session, owner: HeapOwner, handle: *
             host.flags = source_array.flags;
             return host;
         },
-        .boxed => return error.Type,
         else => {
             const kind = hostIntArrayViewKind(hostIntArrayView(source_array).?);
             var out = try self.allocOwnedHostIntResult(owner, kind, total_len);
-            for (0..total_len) |idx| try out.set(idx, try hostArrayIntAt(source_array, start + idx));
+            for (0..total_len) |idx| try out.set(idx, try hostDenseIntAt(source_array, start + idx));
             const host = out.arrayPtr();
             host.flags = source_array.flags;
             host.int_range_known = source_array.int_range_known;
@@ -18151,7 +20236,7 @@ fn createHostArrayFromFirstAxisSlice(self: *Session, owner: HeapOwner, handle: *
         },
     };
 
-    switch (hostArrayNumericMode(source_array) orelse return error.Type) {
+    switch (hostDenseNumericMode(source_array)) {
         .float => {
             const out = try self.allocHostArrayTyped(f64, .float64, owner, total_len);
             var out_idx: usize = 0;
@@ -18160,12 +20245,12 @@ fn createHostArrayFromFirstAxisSlice(self: *Session, owner: HeapOwner, handle: *
                 if (source_row_i64 < 0) return error.Type;
                 const base_idx = @as(usize, @intCast(source_row_i64)) * row_width;
                 for (0..row_width) |col| {
-                    out.items[out_idx] = try hostArrayFloatAt(source_array, base_idx + col);
+                    out.items[out_idx] = try hostDenseFloatAt(source_array, base_idx + col);
                     out_idx += 1;
                 }
             }
             const analysis = analyzeFloatSlice(out.items);
-            hostArraySetFlags(out.array, analysis.flags);
+            hostDenseSetFlags(out.array, analysis.flags);
             return out.array;
         },
         .int => {
@@ -18177,7 +20262,7 @@ fn createHostArrayFromFirstAxisSlice(self: *Session, owner: HeapOwner, handle: *
                 if (source_row_i64 < 0) return error.Type;
                 const base_idx = @as(usize, @intCast(source_row_i64)) * row_width;
                 for (0..row_width) |col| {
-                    values[out_idx] = try hostArrayIntAt(source_array, base_idx + col);
+                    values[out_idx] = try hostDenseIntAt(source_array, base_idx + col);
                     out_idx += 1;
                 }
             }
@@ -18186,20 +20271,20 @@ fn createHostArrayFromFirstAxisSlice(self: *Session, owner: HeapOwner, handle: *
             for (values, 0..) |item, idx| try out.set(idx, item);
             const host = out.arrayPtr();
             if (analysis.kind == .bit) bitClearUnusedTail(host.storage.bit, host.logical_len);
-            hostArraySetFlags(host, analysis.flags);
-            hostArraySetCachedIntRange(host, analysis.range);
+            hostDenseSetFlags(host, analysis.flags);
+            hostDenseSetCachedIntRange(host, analysis.range);
             return host;
         },
     }
 }
 
-fn createMlxArrayFromFirstAxisSlice(self: *Session, handle: *const NumericArray) KError!mlx.Array {
+fn createBackendArrayFromFirstAxisSlice(self: *Session, handle: *const NumericArray) KError!mlx.Array {
     if (!numericArrayIsFirstAxisSlice(handle)) return error.Type;
     const slice = handle.first_axis_slice orelse return error.Type;
     const source_handle = shapedNumericHandle(slice.source) orelse return error.Type;
     if (source_handle.rank != handle.rank) return error.Type;
 
-    var source_array = try self.materializeMlxArray(slice.source);
+    var source_array = try self.materializeBackendArray(slice.source);
     defer source_array.deinit();
 
     var start_buf: [numeric_array_max_rank]i32 = [_]i32{0} ** numeric_array_max_rank;
@@ -18210,7 +20295,7 @@ fn createMlxArrayFromFirstAxisSlice(self: *Session, handle: *const NumericArray)
     }
 
     const row_count: usize = @intCast(handle.shape[0]);
-    const ctx = try self.mlxContext();
+    const ctx = try self.backendContext();
     if (slice.step == 1) {
         start_buf[0] = std.math.cast(i32, slice.start) orelse return error.Unsupported;
         stop_buf[0] = std.math.cast(i32, slice.start + row_count) orelse return error.Unsupported;
@@ -18236,7 +20321,7 @@ fn createMlxArrayFromFirstAxisSlice(self: *Session, handle: *const NumericArray)
     return mlx.Array.takeAxis(ctx.*, source_array, indices, 0) catch |err| return mapMlxError(err);
 }
 
-fn createHostArrayFromFirstAxisIndex(self: *Session, owner: HeapOwner, handle: *const NumericArray) KError!*HostArray {
+fn createHostArrayFromFirstAxisIndex(self: *Session, owner: HeapOwner, handle: *const NumericArray) KError!*HostDenseArray {
     if (!numericArrayIsFirstAxisIndex(handle)) return error.Type;
     const index = handle.first_axis_index orelse return error.Type;
     const source_handle = shapedNumericHandle(index.source) orelse return error.Type;
@@ -18258,7 +20343,7 @@ fn createHostArrayFromFirstAxisIndex(self: *Session, owner: HeapOwner, handle: *
                 }
             }
             const analysis = analyzeFloatSlice(out.items);
-            hostArraySetFlags(out.array, analysis.flags);
+            hostDenseSetFlags(out.array, analysis.flags);
             break :blk out.array;
         },
         .int => blk: {
@@ -18279,14 +20364,14 @@ fn createHostArrayFromFirstAxisIndex(self: *Session, owner: HeapOwner, handle: *
             for (values, 0..) |item, idx| try out.set(idx, item);
             const host = out.arrayPtr();
             if (analysis.kind == .bit) bitClearUnusedTail(host.storage.bit, host.logical_len);
-            hostArraySetFlags(host, analysis.flags);
-            hostArraySetCachedIntRange(host, analysis.range);
+            hostDenseSetFlags(host, analysis.flags);
+            hostDenseSetCachedIntRange(host, analysis.range);
             break :blk host;
         },
     };
 }
 
-fn createMlxArrayFromFirstAxisIndex(self: *Session, handle: *const NumericArray) KError!mlx.Array {
+fn createBackendArrayFromFirstAxisIndex(self: *Session, handle: *const NumericArray) KError!mlx.Array {
     if (!numericArrayIsFirstAxisIndex(handle)) return error.Type;
     const index = handle.first_axis_index orelse return error.Type;
     const row_count: usize = @intCast(handle.shape[0]);
@@ -18299,15 +20384,15 @@ fn createMlxArrayFromFirstAxisIndex(self: *Session, handle: *const NumericArray)
         indices_buf[row] = std.math.cast(i32, row_i64) orelse return error.Unsupported;
     }
 
-    var source_array = try self.materializeMlxArray(index.source);
+    var source_array = try self.materializeBackendArray(index.source);
     defer source_array.deinit();
     var indices = mlx.Array.fromIntSlice(indices_buf, &idx_dims);
     defer indices.deinit();
-    const ctx = try self.mlxContext();
+    const ctx = try self.backendContext();
     return mlx.Array.takeAxis(ctx.*, source_array, indices, 0) catch |err| return mapMlxError(err);
 }
 
-fn createHostArrayFromFirstAxisConcat(self: *Session, owner: HeapOwner, handle: *const NumericArray) KError!*HostArray {
+fn createHostArrayFromFirstAxisConcat(self: *Session, owner: HeapOwner, handle: *const NumericArray) KError!*HostDenseArray {
     if (!numericArrayIsFirstAxisConcat(handle)) return error.Type;
     const cols: usize = @intCast(handle.shape[1]);
     var segments = std.ArrayList(FirstAxisMatrixSegment).empty;
@@ -18317,7 +20402,7 @@ fn createHostArrayFromFirstAxisConcat(self: *Session, owner: HeapOwner, handle: 
 
     const left = segments.items[0].value;
     const left_mode = valueNumericMode(left) orelse return error.Type;
-    var right_mode: HostArrayElem = left_mode;
+    var right_mode: HostDenseElem = left_mode;
     var total_len: usize = 0;
     for (segments.items) |segment| {
         const mode = valueNumericMode(segment.value) orelse return error.Type;
@@ -18359,8 +20444,8 @@ fn createHostArrayFromFirstAxisConcat(self: *Session, owner: HeapOwner, handle: 
             for (out_bits.items, 0..) |item, idx| try out.set(idx, @intFromBool(item));
             const host = out.arrayPtr();
             bitClearUnusedTail(host.storage.bit, host.logical_len);
-            hostArraySetFlags(host, host_array_flag_normalized | orderFlagsFromMonotonic(asc, dsc));
-            hostArraySetCachedIntRange(host, .{
+            hostDenseSetFlags(host, host_dense_flag_normalized | orderFlagsFromMonotonic(asc, dsc));
+            hostDenseSetCachedIntRange(host, .{
                 .min = if (saw_zero) 0 else 1,
                 .max = if (saw_one) 1 else 0,
             });
@@ -18382,8 +20467,8 @@ fn createHostArrayFromFirstAxisConcat(self: *Session, owner: HeapOwner, handle: 
         for (values, 0..) |item, idx| try out.set(idx, item);
         const host = out.arrayPtr();
         if (analysis.kind == .bit) bitClearUnusedTail(host.storage.bit, host.logical_len);
-        hostArraySetFlags(host, analysis.flags);
-        hostArraySetCachedIntRange(host, analysis.range);
+        hostDenseSetFlags(host, analysis.flags);
+        hostDenseSetCachedIntRange(host, analysis.range);
         return host;
     }
 
@@ -18397,12 +20482,12 @@ fn createHostArrayFromFirstAxisConcat(self: *Session, owner: HeapOwner, handle: 
         }
     }
     const analysis = analyzeFloatSlice(out.items);
-    hostArraySetFlags(out.array, analysis.flags);
+    hostDenseSetFlags(out.array, analysis.flags);
     return out.array;
 }
 
 fn createMlxConcatOperand(self: *Session, value: Value, cols: usize) KError!mlx.Array {
-    var array = try self.materializeMlxArray(value);
+    var array = try self.materializeBackendArray(value);
     errdefer array.deinit();
     if (valueNumericMatrixShape(value) != null) return array;
 
@@ -18410,7 +20495,7 @@ fn createMlxConcatOperand(self: *Session, value: Value, cols: usize) KError!mlx.
         1,
         std.math.cast(i32, cols) orelse return error.Unsupported,
     };
-    const ctx = try self.mlxContext();
+    const ctx = try self.backendContext();
     const reshaped = mlx.Array.reshape(ctx.*, array, &dims) catch |err| return mapMlxError(err);
     array.deinit();
     return reshaped;
@@ -18418,7 +20503,7 @@ fn createMlxConcatOperand(self: *Session, value: Value, cols: usize) KError!mlx.
 
 fn mlxConcatAxis0(ctx: mlx.Context, arrays: []const mlx.Array) KError!mlx.Array {
     if (comptime !runtime_has_mlx) return error.Unsupported;
-    if (comptime mlx.backend_kind == .wasm_bridge) {
+    if (comptime mlx.backend_kind == .webgpu) {
         return mlx.Array.concat(ctx, arrays) catch |err| return mapMlxError(err);
     }
     const vec = c.mlx_vector_array_new();
@@ -18431,7 +20516,7 @@ fn mlxConcatAxis0(ctx: mlx.Context, arrays: []const mlx.Array) KError!mlx.Array 
     return .{ .handle = out };
 }
 
-fn createMlxArrayFromFirstAxisConcat(self: *Session, handle: *const NumericArray) KError!mlx.Array {
+fn createBackendArrayFromFirstAxisConcat(self: *Session, handle: *const NumericArray) KError!mlx.Array {
     if (!numericArrayIsFirstAxisConcat(handle)) return error.Type;
     if (handle.rank != 2) return error.Type;
     const cols: usize = @intCast(handle.shape[1]);
@@ -18448,23 +20533,23 @@ fn createMlxArrayFromFirstAxisConcat(self: *Session, handle: *const NumericArray
         arrays[idx] = try createMlxConcatOperand(self, segment.value, cols);
     }
 
-    return try mlxConcatAxis0((try self.mlxContext()).*, arrays[0..segments.items.len]);
+    return try mlxConcatAxis0((try self.backendContext()).*, arrays[0..segments.items.len]);
 }
 
-fn createHostArrayFromReshapeView(self: *Session, owner: HeapOwner, handle: *const NumericArray) KError!*HostArray {
+fn createHostArrayFromReshapeView(self: *Session, owner: HeapOwner, handle: *const NumericArray) KError!*HostDenseArray {
     if (!numericArrayIsReshapeView(handle)) return error.Type;
     const source = numericArrayReshapeSource(handle) orelse return error.Type;
     const source_array = try hostStructuralArrayForHandle(self, try numericHandleRequired(source));
     const total_len = numericArrayElementCount(handle);
 
-    return switch (hostArrayNumericMode(source_array) orelse return error.Type) {
+    return switch (hostDenseNumericMode(source_array)) {
         .float => switch (source_array.storage) {
             .float64 => |items| blk: {
                 if (items.len != total_len) return error.Type;
                 const out = try self.allocHostArrayTyped(f64, .float64, owner, total_len);
                 @memcpy(out.items, items);
                 const analysis = analyzeFloatSlice(out.items);
-                hostArraySetFlags(out.array, analysis.flags);
+                hostDenseSetFlags(out.array, analysis.flags);
                 break :blk out.array;
             },
             else => error.Type,
@@ -18480,154 +20565,113 @@ fn createHostArrayFromReshapeView(self: *Session, owner: HeapOwner, handle: *con
             for (values, 0..) |item, idx| try out.set(idx, item);
             const host = out.arrayPtr();
             if (analysis.kind == .bit) bitClearUnusedTail(host.storage.bit, host.logical_len);
-            hostArraySetFlags(host, analysis.flags);
-            hostArraySetCachedIntRange(host, analysis.range);
+            hostDenseSetFlags(host, analysis.flags);
+            hostDenseSetCachedIntRange(host, analysis.range);
             break :blk host;
         },
     };
 }
 
-fn createMlxArrayFromReshapeView(self: *Session, handle: *const NumericArray) KError!mlx.Array {
+fn createBackendArrayFromReshapeView(self: *Session, handle: *const NumericArray) KError!mlx.Array {
     if (!numericArrayIsReshapeView(handle)) return error.Type;
     const source = numericArrayReshapeSource(handle) orelse return error.Type;
-    var source_array = try self.materializeMlxArray(source);
+    var source_array = try self.materializeBackendArray(source);
     defer source_array.deinit();
-    const ctx = try self.mlxContext();
+    const ctx = try self.backendContext();
     return mlx.Array.reshape(ctx.*, source_array, handle.shapeSlice()) catch |err| return mapMlxError(err);
 }
 
-fn createHostArrayFromMlxArray(self: *Session, owner: HeapOwner, array: mlx.Array) KError!*HostArray {
-    var owned = array.clone() catch |err| return mapMlxError(err);
-    defer owned.deinit();
-    owned.eval() catch |err| return mapMlxError(err);
-
-    const len = mlxArrayElementCount(owned);
-    return switch (owned.dtype()) {
-        c.MLX_BOOL => blk: {
-            const items = owned.readBools(self.allocator) catch |err| return mapMlxError(err);
-            defer self.allocator.free(items);
-
-            var asc = true;
-            var dsc = true;
-            var saw_zero = items.len == 0;
-            var saw_one = false;
-            if (items.len != 0) {
-                if (items[0]) saw_one = true else saw_zero = true;
-                var prev = items[0];
-                for (items[1..]) |item| {
-                    if (item) saw_one = true else saw_zero = true;
-                    if (@intFromBool(prev) > @intFromBool(item)) asc = false;
-                    if (@intFromBool(prev) < @intFromBool(item)) dsc = false;
-                    prev = item;
-                }
-            }
-
-            var out = try self.allocOwnedHostIntResult(owner, .bit, len);
-            for (items, 0..) |item, idx| try out.set(idx, @intFromBool(item));
-            const host = out.arrayPtr();
-            bitClearUnusedTail(host.storage.bit, host.logical_len);
-            hostArraySetFlags(host, host_array_flag_normalized | orderFlagsFromMonotonic(asc, dsc));
-            hostArraySetCachedIntRange(host, .{
-                .min = if (saw_zero) 0 else 1,
-                .max = if (saw_one) 1 else 0,
-            });
-            break :blk host;
-        },
-        c.MLX_INT32, c.MLX_INT64, c.MLX_UINT32 => blk: {
-            const items = owned.readInts(self.allocator) catch |err| return mapMlxError(err);
-            defer self.allocator.free(items);
-
-            var values = try self.allocator.alloc(i64, items.len);
-            defer self.allocator.free(values);
-            for (items, 0..) |item, idx| values[idx] = item;
-
-            const analysis = analyzeIntSlice(values);
-            var out = try self.allocOwnedHostIntResult(owner, analysis.kind, len);
-            for (values, 0..) |item, idx| try out.set(idx, item);
-            const host = out.arrayPtr();
-            if (analysis.kind == .bit) bitClearUnusedTail(host.storage.bit, host.logical_len);
-            hostArraySetFlags(host, analysis.flags);
-            hostArraySetCachedIntRange(host, analysis.range);
-            break :blk host;
-        },
-        c.MLX_FLOAT32, c.MLX_FLOAT64 => blk: {
-            const items = owned.readFloats(self.allocator) catch |err| return mapMlxError(err);
-            defer self.allocator.free(items);
-
-            const out = try self.allocOwnedHostFloatResult(owner, len);
-            for (items, 0..) |item, idx| out.items[idx] = @floatCast(item);
-            const analysis = analyzeFloatSlice(out.items);
-            hostArraySetFlags(out.array, analysis.flags);
-            break :blk out.array;
-        },
-        else => error.Type,
-    };
-}
-
-fn tryEnsureManagedMlxRealizationForHandle(self: *Session, handle: *NumericArray) KError!?*MlxArray {
-    if (handle.mlx) |array| {
-        if (comptime enable_probe_instrumentation) self.debug_mlx_realization_reuse_count += 1;
-        self.touchMlxAttachment(handle);
-        return array;
+fn createHostDenseArrayFromBackendArray(self: *Session, owner: HeapOwner, array: mlx.Array) KError!*HostDenseArray {
+    if (comptime runtime_has_mlx) {
+        return runtime_backend_materialize.createHostDenseArrayFromBackendArray(.{
+            .Session = Session,
+            .HeapOwner = HeapOwner,
+            .HostDenseArray = HostDenseArray,
+            .KError = KError,
+            .mlx = mlx,
+            .c = c,
+            .mapMlxError = mapMlxError,
+            .backendArrayElementCount = backendArrayElementCount,
+            .analyzeIntSlice = analyzeIntSlice,
+            .analyzeFloatSlice = analyzeFloatSlice,
+            .allocOwnedHostIntResult = Session.allocOwnedHostIntResult,
+            .allocOwnedHostFloatResult = Session.allocOwnedHostFloatResult,
+            .hostIntResultSet = hostIntResultSet,
+            .hostIntResultArrayPtr = hostIntResultArrayPtr,
+            .bitClearUnusedTail = bitClearUnusedTail,
+            .hostDenseSetFlags = hostDenseSetFlags,
+            .hostDenseSetCachedIntRange = hostDenseSetCachedIntRange,
+            .host_dense_flag_normalized = host_dense_flag_normalized,
+            .orderFlagsFromMonotonic = orderFlagsFromMonotonic,
+        }, self, owner, array);
     }
-    if (handle.header.owner != .managed) return null;
-    const had_host_attachment = handle.host != null;
-    var materialized = if (numericArrayIsRangeIota(handle))
-        try createMlxArrayFromRangeIota(self, handle)
-    else if (numericArrayIsFlatSlice(handle))
-        try createMlxArrayFromFlatSlice(self, handle)
-    else if (numericArrayIsFlatConcat(handle))
-        try createMlxArrayFromFlatConcat(self, handle)
-    else if (numericArrayIsFlatSegments(handle))
-        try createMlxArrayFromFlatSegments(self, handle)
-    else if (numericArrayIsFirstAxisSlice(handle))
-        try createMlxArrayFromFirstAxisSlice(self, handle)
-    else if (numericArrayIsFirstAxisIndex(handle))
-        try createMlxArrayFromFirstAxisIndex(self, handle)
-    else if (numericArrayIsFirstAxisConcat(handle))
-        try createMlxArrayFromFirstAxisConcat(self, handle)
-    else if (numericArrayIsReshapeView(handle))
-        try createMlxArrayFromReshapeView(self, handle)
-    else if (numericArrayIsTransposeView(handle))
-        try createMlxArrayFromTransposeView(self, handle)
-    else blk: {
-        const host = if (handle.host) |array|
-            array
-        else
-            (try tryEnsureHostRealizationForHandle(self, handle) orelse return null);
-        if (hostArrayNumericMode(host) == null) return null;
-        break :blk try createMlxArrayFromHostArray(self, host);
-    };
-    errdefer materialized.deinit();
-    const owned = try self.allocManagedMlxPayload(materialized);
-    materialized = mlx.Array.empty();
-    if (comptime enable_probe_instrumentation) {
-        self.debug_mlx_realization_count += 1;
-        if (handle.structural != .materialized) self.debug_structural_mlx_realization_count += 1;
-        if (had_host_attachment) self.debug_mlx_promotion_count += 1;
+    return error.Unsupported;
+}
+
+fn tryEnsureManagedBackendRealizationForHandle(self: *Session, handle: *NumericArray) KError!?*BackendArray {
+    if (comptime runtime_has_mlx) {
+        return runtime_backend_materialize.tryEnsureManagedBackendRealizationForHandle(.{
+            .Session = Session,
+            .Value = Value,
+            .NumericArray = NumericArray,
+            .BackendArray = BackendArray,
+            .KError = KError,
+            .mlx = mlx,
+            .enable_probe_instrumentation = enable_probe_instrumentation,
+            .numericArrayIsRangeIota = numericArrayIsRangeIota,
+            .numericArrayIsFlatSlice = numericArrayIsFlatSlice,
+            .numericArrayIsFlatConcat = numericArrayIsFlatConcat,
+            .numericArrayIsFlatSegments = numericArrayIsFlatSegments,
+            .numericArrayIsFirstAxisSlice = numericArrayIsFirstAxisSlice,
+            .numericArrayIsFirstAxisIndex = numericArrayIsFirstAxisIndex,
+            .numericArrayIsFirstAxisConcat = numericArrayIsFirstAxisConcat,
+            .numericArrayIsReshapeView = numericArrayIsReshapeView,
+            .numericArrayIsTransposeView = numericArrayIsTransposeView,
+            .createBackendArrayFromRangeIota = createBackendArrayFromRangeIota,
+            .createBackendArrayFromFlatSlice = createBackendArrayFromFlatSlice,
+            .createBackendArrayFromFlatConcat = createBackendArrayFromFlatConcat,
+            .createBackendArrayFromFlatSegments = createBackendArrayFromFlatSegments,
+            .createBackendArrayFromFirstAxisSlice = createBackendArrayFromFirstAxisSlice,
+            .createBackendArrayFromFirstAxisIndex = createBackendArrayFromFirstAxisIndex,
+            .createBackendArrayFromFirstAxisConcat = createBackendArrayFromFirstAxisConcat,
+            .createBackendArrayFromReshapeView = createBackendArrayFromReshapeView,
+            .createBackendArrayFromTransposeView = createBackendArrayFromTransposeView,
+            .tryEnsureHostRealizationForHandle = tryEnsureHostRealizationForHandle,
+            .hostDenseNumericMode = hostDenseNumericMode,
+            .createBackendArrayFromHostArray = createBackendArrayFromHostArray,
+            .allocManagedBackendPayload = Session.allocManagedBackendPayload,
+            .syncNumericArrayChildren = syncNumericArrayChildren,
+            .touchBackendAttachment = Session.touchBackendAttachment,
+            .enforceDualResidentBudget = Session.enforceDualResidentBudget,
+        }, self, handle);
     }
-    handle.mlx = owned;
-    syncNumericArrayChildren(handle);
-    self.touchMlxAttachment(handle);
-    if (handle.host != null) self.enforceDualResidentBudget(handle);
-    return owned;
+    return null;
 }
 
-fn tryEnsureManagedMlxRealization(self: *Session, value: Value) KError!?*MlxArray {
-    const handle = mutableNumericHandle(value) orelse return null;
-    return try tryEnsureManagedMlxRealizationForHandle(self, handle);
+fn tryEnsureManagedBackendRealization(self: *Session, value: Value) KError!?*BackendArray {
+    if (comptime runtime_has_mlx) {
+        return runtime_backend_materialize.tryEnsureManagedBackendRealization(.{
+            .Session = Session,
+            .Value = Value,
+            .BackendArray = BackendArray,
+            .KError = KError,
+            .mutableNumericHandle = mutableNumericHandle,
+            .tryEnsureManagedBackendRealizationForHandle = tryEnsureManagedBackendRealizationForHandle,
+        }, self, value);
+    }
+    return null;
 }
 
-fn tryEnsureHostRealizationForHandle(self: *Session, handle: *NumericArray) KError!?*HostArray {
+fn tryEnsureHostRealizationForHandle(self: *Session, handle: *NumericArray) KError!?*HostDenseArray {
     var profile_scope = self.beginSamplingProfileScope(.host_realization);
     defer profile_scope.end();
-    if (handle.host) |array| {
+    if (numericHostAttachment(handle)) |array| {
         if (comptime enable_probe_instrumentation) self.debug_host_realization_reuse_count += 1;
         self.touchHostAttachment(handle);
-        return array;
+        return @constCast(array);
     }
     if (handle.header.owner == .frozen) return error.Unsupported;
-    const had_mlx_attachment = handle.mlx != null;
+    const had_mlx_attachment = numericHasBackendAttachment(handle);
 
     const host = if (numericArrayIsRangeIota(handle))
         try createHostArrayFromRangeIota(self, handle.header.owner, handle)
@@ -18648,9 +20692,9 @@ fn tryEnsureHostRealizationForHandle(self: *Session, handle: *NumericArray) KErr
     else if (numericArrayIsTransposeView(handle))
         try createHostArrayFromTransposeView(self, handle.header.owner, handle)
     else blk: {
-        const mlx_array = handle.mlx orelse return null;
-        if (handle.rank == 0) numericArraySetShapeFromMlx(handle, mlx_array.array);
-        break :blk try createHostArrayFromMlxArray(self, handle.header.owner, mlx_array.array);
+        const backend_array = numericBackendAttachment(handle) orelse return null;
+        if (handle.rank == 0) numericArraySetShapeFromBackend(handle, backend_array.array);
+        break :blk try createHostDenseArrayFromBackendArray(self, handle.header.owner, backend_array.array);
     };
     if (comptime enable_probe_instrumentation) {
         self.debug_host_realization_count += 1;
@@ -18660,47 +20704,45 @@ fn tryEnsureHostRealizationForHandle(self: *Session, handle: *NumericArray) KErr
     handle.host = host;
     syncNumericArrayChildren(handle);
     self.touchHostAttachment(handle);
-    if (handle.mlx != null) self.enforceDualResidentBudget(handle);
+    if (numericHasBackendAttachment(handle)) self.enforceDualResidentBudget(handle);
     return host;
 }
 
-fn tryEnsureHostRealization(self: *Session, value: Value) KError!?*HostArray {
+fn tryEnsureHostRealization(self: *Session, value: Value) KError!?*HostDenseArray {
     if (value.tag() != .array) return null;
+    if (valueNumericHandle(value)) |handle| {
+        return try tryEnsureHostRealizationForHandle(self, @constCast(handle));
+    }
     return switch (value.arraySubkind()) {
-        .host_array => @constCast(value.asHostArray()),
-        .numeric_array => try tryEnsureHostRealizationForHandle(self, @constCast(value.asNumericArray())),
-        .mlx_array => if (value.asMlxArray().logical_handle) |handle|
-            try tryEnsureHostRealizationForHandle(self, handle)
-        else
-            null,
+        .host_dense_array => @constCast(value.asHostDenseArray()),
         else => null,
     };
 }
 
-fn hostStructuralArrayForHandle(self: *Session, handle: *NumericArray) KError!*const HostArray {
+fn hostStructuralArrayForHandle(self: *Session, handle: *NumericArray) KError!*const HostDenseArray {
     return try tryEnsureHostRealizationForHandle(self, handle) orelse return error.Unsupported;
 }
 
-// Generic array compatibility wrapper. Numeric execution should prefer
-// handle-native helpers; this remains for boxed-array and boundary code.
-fn hostStructuralArrayValue(self: *Session, value: Value) KError!*const HostArray {
+fn numericHostArrayValue(self: *Session, value: Value) KError!*const HostDenseArray {
     if (value.tag() != .array) return error.Type;
-    return switch (value.arraySubkind()) {
-        .host_array => value.asHostArray(),
-        .numeric_array => try hostStructuralArrayForHandle(self, @constCast(value.asNumericArray())),
-        .mlx_array => if (value.asMlxArray().logical_handle) |handle|
-            try hostStructuralArrayForHandle(self, handle)
-        else
-            error.Unsupported,
+    if (valueNumericHandle(value)) |handle| {
+        return try hostStructuralArrayForHandle(self, @constCast(handle));
+    }
+    return switch (value.arrayKind()) {
+        .host_dense_array => value.asHostDenseArray(),
         else => error.Type,
     };
 }
 
-fn actualDenseBackend(self: *Session, supports_mlx: bool, planned: DenseExecBackend) DenseExecBackend {
+fn mutableNumericHostArrayValue(self: *Session, value: Value) KError!*HostDenseArray {
+    return @constCast(try numericHostArrayValue(self, value));
+}
+
+fn actualDenseBackend(self: *Session, supports_backend: bool, planned: DenseExecBackend) DenseExecBackend {
     return switch (self.dense_backend_override) {
         .auto => planned,
         .host => .host,
-        .mlx => if (supports_mlx) .mlx else planned,
+        .mlx => if (supports_backend) .mlx else planned,
     };
 }
 
@@ -18727,67 +20769,70 @@ fn countDensePlanDecision(self: *Session, kind: DenseRegionKind, planned_backend
 
 fn planDenseRegionDecision(kind: DenseRegionKind, facts: DenseRegionFacts) DensePlanDecision {
     return switch (kind) {
-        .numeric_dyad => if (!facts.supports_mlx)
-            .{ .backend = .host, .reason = .no_mlx_support }
-        else if (facts.has_unmaterialized_range and !facts.has_mlx_residency)
+        .numeric_dyad => if (!facts.supports_backend)
+            .{ .backend = .host, .reason = .no_backend_support }
+        else if (facts.has_unmaterialized_range and !facts.has_backend_residency)
             .{ .backend = .host, .reason = .unmaterialized_range_host }
-        else if (facts.prefer_mlx_pipeline)
+        else if (facts.prefer_backend_pipeline)
             .{ .backend = .mlx, .reason = .large_problem }
-        else if (facts.prefer_host_kernel and facts.elem_count < dense_mlx_min_len_dyad)
+        else if (facts.prefer_host_kernel and facts.elem_count < dense_backend_min_len_dyad)
             .{ .backend = .host, .reason = .host_fast_kernel }
-        else if (facts.has_mlx_residency)
-            .{ .backend = .mlx, .reason = .already_mlx_resident }
-        else if (facts.elem_count < dense_mlx_min_len_dyad)
+        else if (facts.has_backend_residency)
+            .{ .backend = .mlx, .reason = .already_backend_resident }
+        else if (facts.elem_count < dense_backend_min_len_dyad)
             .{ .backend = .host, .reason = .small_problem }
         else
             .{ .backend = .mlx, .reason = .large_problem },
-        .compare_mask => if (!facts.supports_mlx)
-            .{ .backend = .host, .reason = .no_mlx_support }
-        else if (facts.has_unmaterialized_range and !facts.has_mlx_residency)
-            .{ .backend = .host, .reason = .unmaterialized_range_host }
-        else if (facts.has_packed_bit_input and !facts.has_mlx_residency)
+        .compare_mask => if (!facts.supports_backend)
+            .{ .backend = .host, .reason = .no_backend_support }
+        else if (facts.has_packed_bit_input and !facts.has_backend_residency)
             .{ .backend = .host, .reason = .packed_mask_host }
-        else if (facts.has_mlx_residency)
-            .{ .backend = .mlx, .reason = .already_mlx_resident }
+        else if (facts.has_unmaterialized_range and
+            (facts.device_preference == .gpu or facts.elem_count >= dense_backend_min_len_dyad))
+            .{ .backend = .mlx, .reason = .large_problem }
+        else if (facts.has_unmaterialized_range)
+            .{ .backend = .host, .reason = .small_problem }
+        else if (facts.has_backend_residency)
+            .{ .backend = .mlx, .reason = .already_backend_resident }
         else
             .{ .backend = .host, .reason = .compare_host_default },
-        .reduce, .scan => if (!facts.supports_mlx)
-            .{ .backend = .host, .reason = .no_mlx_support }
+        .reduce, .scan => if (!facts.supports_backend)
+            .{ .backend = .host, .reason = .no_backend_support }
         else if (facts.has_unmaterialized_range)
             .{ .backend = .host, .reason = .unmaterialized_range_host }
-        else if (facts.has_packed_bit_input and !facts.has_mlx_residency)
+        else if (facts.has_packed_bit_input and !facts.has_backend_residency)
             .{ .backend = .host, .reason = .packed_mask_host }
-        else if (facts.prefer_host_kernel and facts.elem_count < dense_mlx_min_len_reduce)
+        else if (facts.prefer_host_kernel and facts.elem_count < dense_backend_min_len_reduce)
             .{ .backend = .host, .reason = .host_fast_kernel }
-        else if ((!runtime_has_mlx or mlx.backend_kind == .wasm_bridge) and facts.elem_count < dense_mlx_min_len_reduce)
+        else if ((!runtime_has_mlx or !mlx.supports_full_ops) and facts.elem_count < dense_backend_min_len_reduce)
             .{ .backend = .host, .reason = .small_problem }
-        else if (facts.has_mlx_residency)
-            .{ .backend = .mlx, .reason = .already_mlx_resident }
-        else if (facts.elem_count < dense_mlx_min_len_reduce)
+        else if (facts.has_backend_residency)
+            .{ .backend = .mlx, .reason = .already_backend_resident }
+        else if (facts.elem_count < dense_backend_min_len_reduce)
             .{ .backend = .host, .reason = .small_problem }
         else
             .{ .backend = .mlx, .reason = .large_problem },
-        .matmul => if (!facts.supports_mlx)
-            .{ .backend = .host, .reason = .no_mlx_support }
-        else if (facts.prefer_host_kernel and facts.elem_count <= dense_mlx_min_len_matmul)
+        .matmul => if (!facts.supports_backend)
+            .{ .backend = .host, .reason = .no_backend_support }
+        else if (facts.prefer_host_kernel and facts.elem_count <= dense_backend_min_len_matmul)
             .{ .backend = .host, .reason = .host_fast_kernel }
-        else if (facts.has_mlx_residency)
-            .{ .backend = .mlx, .reason = .already_mlx_resident }
-        else if (facts.elem_count < dense_mlx_min_len_matmul)
+        else if (facts.has_backend_residency)
+            .{ .backend = .mlx, .reason = .already_backend_resident }
+        else if (facts.elem_count < dense_backend_min_len_matmul)
             .{ .backend = .host, .reason = .small_problem }
         else
             .{ .backend = .mlx, .reason = .large_problem },
-        .transpose => if (!facts.supports_mlx)
-            .{ .backend = .host, .reason = .no_mlx_support }
+        .transpose => if (!facts.supports_backend)
+            .{ .backend = .host, .reason = .no_backend_support }
         else if (facts.device_preference == .gpu and
             facts.matrix_rows != 0 and facts.matrix_cols != 0 and
-            (!facts.has_mlx_residency or facts.prefer_host_kernel) and
+            (!facts.has_backend_residency or facts.prefer_host_kernel) and
             facts.elem_count <= 16_384 and
             @max(facts.matrix_rows, facts.matrix_cols) <= 128)
             .{ .backend = .host, .reason = .host_fast_kernel }
         else if (facts.device_preference == .gpu and
             facts.matrix_rows != 0 and facts.matrix_cols != 0 and
-            (!facts.has_mlx_residency or facts.prefer_host_kernel) and
+            (!facts.has_backend_residency or facts.prefer_host_kernel) and
             facts.elem_count <= 16_384 and
             @min(facts.matrix_rows, facts.matrix_cols) <= 32)
             .{ .backend = .host, .reason = .host_fast_kernel }
@@ -18802,19 +20847,19 @@ fn planDenseRegionDecision(kind: DenseRegionKind, facts: DenseRegionFacts) Dense
             @min(facts.matrix_rows, facts.matrix_cols) <= 8 and
             facts.elem_count <= 32_768)
             .{ .backend = .host, .reason = .host_fast_kernel }
-        else if (facts.has_mlx_residency)
-            .{ .backend = .mlx, .reason = .already_mlx_resident }
-        else if (facts.elem_count < dense_mlx_min_len_transpose)
+        else if (facts.has_backend_residency)
+            .{ .backend = .mlx, .reason = .already_backend_resident }
+        else if (facts.elem_count < dense_backend_min_len_transpose)
             .{ .backend = .host, .reason = .small_problem }
         else
             .{ .backend = .mlx, .reason = .large_problem },
-        .dense_autodiff => if (!facts.supports_mlx)
-            .{ .backend = .host, .reason = .no_mlx_support }
+        .dense_autodiff => if (!facts.supports_backend)
+            .{ .backend = .host, .reason = .no_backend_support }
         else if (facts.has_unmaterialized_range)
             .{ .backend = .host, .reason = .unmaterialized_range_host }
-        else if (facts.has_mlx_residency)
-            .{ .backend = .mlx, .reason = .already_mlx_resident }
-        else if (facts.elem_count < dense_mlx_min_len_autodiff)
+        else if (facts.has_backend_residency)
+            .{ .backend = .mlx, .reason = .already_backend_resident }
+        else if (facts.elem_count < dense_backend_min_len_autodiff)
             .{ .backend = .host, .reason = .small_problem }
         else
             .{ .backend = .mlx, .reason = .large_problem },
@@ -18823,34 +20868,58 @@ fn planDenseRegionDecision(kind: DenseRegionKind, facts: DenseRegionFacts) Dense
 
 fn chooseDenseRegionBackend(self: *Session, kind: DenseRegionKind, facts: DenseRegionFacts) DenseExecBackend {
     const decision = planDenseRegionDecision(kind, facts);
-    const actual_backend = actualDenseBackend(self, facts.supports_mlx, decision.backend);
+    const actual_backend = actualDenseBackend(self, facts.supports_backend, decision.backend);
     noteDensePlanDecision(self, kind, decision.backend, actual_backend, decision.reason);
     return actual_backend;
 }
 
+fn backendResidentSmallVectorDyadPrefersHost(
+    self: *Session,
+    left: Value,
+    right: Value,
+    left_facts: DenseValuePlanFacts,
+    right_facts: DenseValuePlanFacts,
+    elem_count: usize,
+) bool {
+    if (self.device_preference == .gpu) return false;
+    if (elem_count == 0 or elem_count > dense_backend_row_host_len_dyad) return false;
+    if (!left_facts.supports_host_dense or !right_facts.supports_host_dense) return false;
+    return numericVectorLen(left) != null and numericVectorLen(right) != null;
+}
+
 fn planDenseNumericDyadBackend(self: *Session, op: BuiltinId, left: Value, right: Value) DenseExecBackend {
-    const has_mlx_residency = isMlxBackedArray(left) or isMlxBackedArray(right) or hasMlxRealization(left) or hasMlxRealization(right);
-    const preserve_mlx_pipeline = has_mlx_residency and
+    const left_facts = denseValuePlanFacts(left);
+    const right_facts = denseValuePlanFacts(right);
+    const elem_count = arrayResultLen(left, right) catch 0;
+    const has_backend_residency = left_facts.has_backend_residency or right_facts.has_backend_residency;
+    const preserve_mlx_pipeline = has_backend_residency and
         (valueNonVectorNumericShape(left) != null or valueNonVectorNumericShape(right) != null);
+    const prefer_small_vector_host_kernel = !preserve_mlx_pipeline and
+        has_backend_residency and
+        backendResidentSmallVectorDyadPrefersHost(self, left, right, left_facts, right_facts, elem_count);
     return chooseDenseRegionBackend(self, .numeric_dyad, .{
-        .elem_count = arrayResultLen(left, right) catch 0,
-        .has_mlx_residency = has_mlx_residency,
-        .has_unmaterialized_range = isUnmaterializedRangeIotaValue(left) or isUnmaterializedRangeIotaValue(right),
-        .prefer_host_kernel = !preserve_mlx_pipeline and
-            has_mlx_residency and
-            valueSupportsHostDensePlanning(left) and valueSupportsHostDensePlanning(right),
-        .prefer_mlx_pipeline = transposePipelinePrefersMlx(self, left) or transposePipelinePrefersMlx(self, right),
-        .supports_mlx = supportsMlxDyad(op),
+        .elem_count = elem_count,
+        .has_backend_residency = has_backend_residency,
+        .has_unmaterialized_range = left_facts.has_unmaterialized_range or right_facts.has_unmaterialized_range,
+        .prefer_host_kernel = prefer_small_vector_host_kernel or
+            (!preserve_mlx_pipeline and
+            has_backend_residency and
+            left_facts.supports_cheap_host_dense and right_facts.supports_cheap_host_dense),
+        .prefer_backend_pipeline = transposePipelinePrefersBackend(self, left) or transposePipelinePrefersBackend(self, right),
+        .supports_backend = supportsBackendDyad(op),
     });
 }
 
 fn planCompareMaskBackend(self: *Session, op: BuiltinId, left: Value, right: Value) DenseExecBackend {
+    const left_facts = denseValuePlanFacts(left);
+    const right_facts = denseValuePlanFacts(right);
     return chooseDenseRegionBackend(self, .compare_mask, .{
         .elem_count = arrayResultLen(left, right) catch 0,
-        .has_mlx_residency = isMlxBackedArray(left) or isMlxBackedArray(right) or hasMlxRealization(left) or hasMlxRealization(right),
-        .has_unmaterialized_range = isUnmaterializedRangeIotaValue(left) or isUnmaterializedRangeIotaValue(right),
+        .has_backend_residency = left_facts.has_backend_residency or right_facts.has_backend_residency,
+        .has_unmaterialized_range = left_facts.has_unmaterialized_range or right_facts.has_unmaterialized_range,
         .has_packed_bit_input = valueNumericBitSlice(left) != null or valueNumericBitSlice(right) != null,
-        .supports_mlx = op == .equal or op == .less or op == .more,
+        .supports_backend = op == .equal or op == .less or op == .more,
+        .device_preference = self.device_preference,
     });
 }
 
@@ -18859,86 +20928,42 @@ fn planDenseReduceScanBackend(self: *Session, collect: bool, value: Value) Dense
 }
 
 fn denseReduceScanFacts(value: Value) DenseRegionFacts {
+    const facts = denseValuePlanFacts(value);
     return .{
         .elem_count = numericVectorLen(value) orelse 0,
-        .has_mlx_residency = isMlxBackedArray(value) or hasMlxRealization(value),
-        .has_unmaterialized_range = isUnmaterializedRangeIotaValue(value),
+        .has_backend_residency = facts.has_backend_residency,
+        .has_unmaterialized_range = facts.has_unmaterialized_range,
         .has_packed_bit_input = valueNumericBitSlice(value) != null,
-        .prefer_host_kernel = (isMlxBackedArray(value) or hasMlxRealization(value)) and
-            valueSupportsHostDensePlanning(value),
+        .prefer_host_kernel = facts.has_backend_residency and facts.supports_cheap_host_dense,
     };
 }
 
 fn valueSupportsHostDensePlanning(value: Value) bool {
-    const source_supported = struct {
-        fn check(source: Value) bool {
-            return switch (source.tag()) {
-                .int, .bool, .float => true,
-                .array => switch (source.arraySubkind()) {
-                    .host_array => hostArrayNumericMode(source.asHostArray()) != null,
-                    .numeric_array => true,
-                    .mlx_array => source.asMlxArray().logical_handle != null,
-                    else => false,
-                },
-                else => false,
-            };
-        }
-    }.check;
-
     return switch (value.tag()) {
         .int, .bool, .float => true,
         .array => switch (value.arraySubkind()) {
-            .host_array => hostArrayNumericMode(value.asHostArray()) != null,
-            .numeric_array => blk: {
-                const handle = value.asNumericArray();
-                if (handle.host != null or numericArrayIsRangeIota(handle)) break :blk true;
-                if (numericArrayIsFlatSlice(handle)) {
-                    const source = numericArrayFlatSliceSource(handle) orelse break :blk false;
-                    break :blk source_supported(source);
-                }
-                if (numericArrayIsFlatConcat(handle)) {
-                    const left = numericArrayFlatConcatLeft(handle) orelse break :blk false;
-                    const right = numericArrayFlatConcatRight(handle) orelse break :blk false;
-                    break :blk source_supported(left) and source_supported(right);
-                }
-                if (numericArrayIsFlatSegments(handle)) {
-                    const segments = numericArrayFlatSegmentsValues(handle) orelse break :blk false;
-                    for (segments) |segment| {
-                        if (!source_supported(segment)) break :blk false;
-                    }
-                    break :blk true;
-                }
-                if (numericArrayIsFirstAxisSlice(handle)) {
-                    const source = numericArrayFirstAxisSliceSource(handle) orelse break :blk false;
-                    break :blk source_supported(source);
-                }
-                if (numericArrayIsFirstAxisIndex(handle)) {
-                    const source = numericArrayFirstAxisIndexSource(handle) orelse break :blk false;
-                    const row_indices = numericArrayFirstAxisIndexRows(handle) orelse break :blk false;
-                    break :blk source_supported(source) and source_supported(row_indices);
-                }
-                if (numericArrayIsFirstAxisConcat(handle)) {
-                    const left = numericArrayFirstAxisConcatLeft(handle) orelse break :blk false;
-                    const right = numericArrayFirstAxisConcatRight(handle) orelse break :blk false;
-                    break :blk source_supported(left) and source_supported(right);
-                }
-                if (numericArrayIsReshapeView(handle)) {
-                    const source = numericArrayReshapeSource(handle) orelse break :blk false;
-                    break :blk source_supported(source);
-                }
-                if (numericArrayIsTransposeView(handle)) {
-                    const source = numericArrayTransposeSource(handle) orelse break :blk false;
-                    break :blk source_supported(source);
-                }
-                break :blk false;
-            },
-            .mlx_array => blk: {
-                const handle = value.asMlxArray().logical_handle orelse break :blk false;
-                if (handle.host != null) break :blk true;
-                if (!numericArrayIsTransposeView(handle)) break :blk false;
-                const source = numericArrayTransposeSource(handle) orelse break :blk false;
-                break :blk source_supported(source);
-            },
+            .host_dense_array => true,
+            .numeric_array => handleSupportsHostDense(value.asNumericArray()),
+            .backend_array => if (value.asBackendArray().logical_handle) |handle|
+                handleSupportsHostDense(handle)
+            else
+                false,
+            else => false,
+        },
+        else => false,
+    };
+}
+
+fn valueSupportsCheapHostDensePlanning(value: Value) bool {
+    return switch (value.tag()) {
+        .int, .bool, .float => true,
+        .array => switch (value.arraySubkind()) {
+            .host_dense_array => true,
+            .numeric_array => handleSupportsCheapHostDense(value.asNumericArray()),
+            .backend_array => if (value.asBackendArray().logical_handle) |handle|
+                handleSupportsCheapHostDense(handle)
+            else
+                false,
             else => false,
         },
         else => false,
@@ -18947,26 +20972,31 @@ fn valueSupportsHostDensePlanning(value: Value) bool {
 
 fn matmulPrefersHostKernel(left: Value, right: Value, result_rank: usize) bool {
     if (result_rank != 0) return false;
-    return valueSupportsHostDensePlanning(left) and valueSupportsHostDensePlanning(right);
+    const left_facts = denseValuePlanFacts(left);
+    const right_facts = denseValuePlanFacts(right);
+    return left_facts.supports_cheap_host_dense and right_facts.supports_cheap_host_dense;
 }
 
 fn planMatmulBackend(self: *Session, left: Value, right: Value) DenseExecBackend {
     const shape = Session.matmulShapeForValues(left, right) catch null;
-    const has_mlx_residency = isMlxBackedArray(left) or isMlxBackedArray(right) or hasMlxRealization(left) or hasMlxRealization(right);
+    const left_facts = denseValuePlanFacts(left);
+    const right_facts = denseValuePlanFacts(right);
+    const has_backend_residency = left_facts.has_backend_residency or right_facts.has_backend_residency;
     return chooseDenseRegionBackend(self, .matmul, .{
         .elem_count = if (shape) |info| info.result_rows * info.left_cols * info.result_cols else 0,
         .matrix_rows = if (shape) |info| info.result_rows else 0,
         .matrix_cols = if (shape) |info| info.result_cols else 0,
-        .has_mlx_residency = has_mlx_residency,
+        .has_backend_residency = has_backend_residency,
         .prefer_host_kernel = if (shape) |info| matmulPrefersHostKernel(left, right, info.result_rank) else false,
     });
 }
 
 fn planDenseAutodiffBackend(self: *Session, value: Value) DenseExecBackend {
+    const facts = denseValuePlanFacts(value);
     return chooseDenseRegionBackend(self, .dense_autodiff, .{
         .elem_count = numericVectorLen(value) orelse 0,
-        .has_mlx_residency = isMlxBackedArray(value) or hasMlxRealization(value),
-        .has_unmaterialized_range = isUnmaterializedRangeIotaValue(value),
+        .has_backend_residency = facts.has_backend_residency,
+        .has_unmaterialized_range = facts.has_unmaterialized_range,
     });
 }
 
@@ -18978,7 +21008,7 @@ fn transposeSourceValue(value: Value) Value {
 
 fn transposeHasFastHostKernel(value: Value) bool {
     const source = transposeSourceValue(value);
-    const array = hostArrayIfPresent(source) orelse return false;
+    const array = hostDenseIfPresent(source) orelse return false;
     return switch (array.storage) {
         .float64, .int8, .int16, .int32, .int64 => true,
         else => false,
@@ -18988,19 +21018,19 @@ fn transposeHasFastHostKernel(value: Value) bool {
 fn transposeRegionFacts(self: *Session, value: Value, elem_count: usize) DenseRegionFacts {
     const source = transposeSourceValue(value);
     const shape = valueNumericMatrixShape(value) orelse valueNumericMatrixShape(source);
-    const has_mlx_residency = isMlxBackedArray(source) or hasMlxRealization(source);
-    const preserve_mlx_pipeline = has_mlx_residency and shape != null;
+    const source_facts = denseValuePlanFacts(source);
+    const preserve_mlx_pipeline = source_facts.has_backend_residency and shape != null;
     return .{
         .elem_count = elem_count,
         .matrix_rows = if (shape) |matrix| matrix.rows else 0,
         .matrix_cols = if (shape) |matrix| matrix.cols else 0,
-        .has_mlx_residency = has_mlx_residency,
+        .has_backend_residency = source_facts.has_backend_residency,
         .prefer_host_kernel = !preserve_mlx_pipeline and transposeHasFastHostKernel(value),
         .device_preference = self.device_preference,
     };
 }
 
-fn transposePipelinePrefersMlx(self: *Session, value: Value) bool {
+fn transposePipelinePrefersBackend(self: *Session, value: Value) bool {
     const handle = valueNumericHandle(value) orelse return false;
     if (!numericArrayIsTransposeView(handle)) return false;
     const decision = planDenseRegionDecision(.transpose, transposeRegionFacts(self, value, numericArrayElementCount(handle)));
@@ -19024,89 +21054,81 @@ fn countTransposeStructuralHostUse(self: *Session, value: Value) void {
     countDensePlanDecision(self, .transpose, decision.backend, .host);
 }
 
-fn valueNumericMode(value: Value) ?HostArrayElem {
+fn handleMode(handle: *const NumericArray) ?HostDenseElem {
+    if (numericHostAttachment(handle)) |array| return hostDenseNumericMode(array);
+    if (numericHasBackendAttachment(handle)) return .float;
+    if (numericArrayIsRangeIota(handle)) return .int;
+    if (numericArrayFlatSliceSource(handle)) |source| return valueNumericMode(source);
+    if (numericArrayFlatConcatLeft(handle)) |left| {
+        const right = numericArrayFlatConcatRight(handle) orelse return valueNumericMode(left);
+        const left_mode = valueNumericMode(left) orelse return null;
+        const right_mode = valueNumericMode(right) orelse return null;
+        return if (left_mode == .float or right_mode == .float) .float else .int;
+    }
+    if (numericArrayFlatSegmentsValues(handle)) |segments| {
+        var saw_float = false;
+        for (segments) |segment| {
+            const segment_mode = valueNumericMode(segment) orelse return null;
+            if (segment_mode == .float) saw_float = true;
+        }
+        return if (saw_float) .float else .int;
+    }
+    if (numericArrayFirstAxisSliceSource(handle)) |source| return valueNumericMode(source);
+    if (numericArrayFirstAxisIndexSource(handle)) |source| return valueNumericMode(source);
+    if (numericArrayFirstAxisConcatLeft(handle)) |left| {
+        const right = numericArrayFirstAxisConcatRight(handle) orelse return valueNumericMode(left);
+        const left_mode = valueNumericMode(left) orelse return null;
+        const right_mode = valueNumericMode(right) orelse return null;
+        return if (left_mode == .float or right_mode == .float) .float else .int;
+    }
+    if (numericArrayReshapeSource(handle)) |source| return valueNumericMode(source);
+    if (numericArrayTransposeSource(handle)) |source| return valueNumericMode(source);
+    return null;
+}
+
+fn valueNumericMode(value: Value) ?HostDenseElem {
     return switch (value.tag()) {
         .int, .bool => .int,
         .float => .float,
-        .array => switch (value.arrayKind()) {
-            .host_array => hostArrayNumericMode(value.asHostArray()),
-            .mlx_array => .float,
-            .numeric_array => blk: {
-                const handle = value.asNumericArray();
-                if (handle.host) |array| break :blk hostArrayNumericMode(array);
-                if (handle.mlx != null) break :blk .float;
-                if (numericArrayIsRangeIota(handle)) break :blk .int;
-                if (numericArrayFlatSliceSource(handle)) |source| break :blk valueNumericMode(source);
-                if (numericArrayFlatConcatLeft(handle)) |left| {
-                    const right = numericArrayFlatConcatRight(handle) orelse break :blk valueNumericMode(left);
-                    const left_mode = valueNumericMode(left) orelse break :blk null;
-                    const right_mode = valueNumericMode(right) orelse break :blk null;
-                    break :blk if (left_mode == .float or right_mode == .float) .float else .int;
-                }
-                if (numericArrayFlatSegmentsValues(handle)) |segments| {
-                    var saw_float = false;
-                    for (segments) |segment| {
-                        const segment_mode = valueNumericMode(segment) orelse break :blk null;
-                        if (segment_mode == .float) saw_float = true;
-                    }
-                    break :blk if (saw_float) .float else .int;
-                }
-                if (numericArrayFirstAxisSliceSource(handle)) |source| break :blk valueNumericMode(source);
-                if (numericArrayFirstAxisIndexSource(handle)) |source| break :blk valueNumericMode(source);
-                if (numericArrayFirstAxisConcatLeft(handle)) |left| {
-                    const right = numericArrayFirstAxisConcatRight(handle) orelse break :blk valueNumericMode(left);
-                    const left_mode = valueNumericMode(left) orelse break :blk null;
-                    const right_mode = valueNumericMode(right) orelse break :blk null;
-                    break :blk if (left_mode == .float or right_mode == .float) .float else .int;
-                }
-                if (numericArrayReshapeSource(handle)) |source| break :blk valueNumericMode(source);
-                if (numericArrayTransposeSource(handle)) |source| break :blk valueNumericMode(source);
-                break :blk null;
-            },
+        .array => if (valueNumericHandle(value)) |handle|
+            handleMode(handle)
+        else switch (value.arrayKind()) {
+            .host_dense_array => hostDenseNumericMode(value.asHostDenseArray()),
+            .backend_array => .float,
             else => null,
         },
         else => null,
     };
 }
 
-fn isMlxBackedArray(value: Value) bool {
-    return value.tag() == .array and value.arrayKind() == .mlx_array;
+fn isBackendArrayValue(value: Value) bool {
+    return value.tag() == .array and value.arrayKind() == .backend_array;
 }
 
-fn arrayResultMode(op: BuiltinId, left: Value, right: Value) ?HostArrayElem {
+fn arrayResultMode(op: BuiltinId, left: Value, right: Value) ?HostDenseElem {
     const left_mode = valueNumericMode(left) orelse return null;
     const right_mode = valueNumericMode(right) orelse return null;
     if (op == .div or left_mode == .float or right_mode == .float) return .float;
     return .int;
 }
 
-fn denseResultMode(op: BuiltinId, left_mode: HostArrayElem, right_mode: HostArrayElem) HostArrayElem {
+fn denseResultMode(op: BuiltinId, left_mode: HostDenseElem, right_mode: HostDenseElem) HostDenseElem {
     if (op == .div or left_mode == .float or right_mode == .float) return .float;
     return .int;
 }
 
 fn numericFlatLen(value: Value) ?usize {
     if (value.tag() != .array) return null;
+    if (valueNumericHandle(value)) |handle| {
+        if (numericHostAttachment(handle)) |array| return array.len();
+        if (handle.rank == 0) return null;
+        var total: usize = 1;
+        for (handle.shapeSlice()) |dim| total *= @as(usize, @intCast(dim));
+        return total;
+    }
     return switch (value.arrayKind()) {
-        .host_array => value.asHostArray().len(),
-        .mlx_array => blk: {
-            if (valueNumericHandle(value)) |handle| {
-                if (handle.host) |array| break :blk array.len();
-                if (handle.rank != 0) {
-                    var total: usize = 1;
-                    for (handle.shapeSlice()) |dim| total *= @as(usize, @intCast(dim));
-                    break :blk total;
-                }
-            }
-            break :blk mlxArrayElementCount(value.asMlxArray().array);
-        },
-        .numeric_array => blk: {
-            const handle = value.asNumericArray();
-            if (handle.rank == 0) break :blk null;
-            var total: usize = 1;
-            for (handle.shapeSlice()) |dim| total *= @as(usize, @intCast(dim));
-            break :blk total;
-        },
+        .host_dense_array => value.asHostDenseArray().len(),
+        .backend_array => backendArrayElementCount(value.asBackendArray().array),
         else => null,
     };
 }
@@ -19115,7 +21137,8 @@ fn arrayResultLen(left: Value, right: Value) KError!usize {
     if (rowwiseMatrixVectorDyad(left, right)) |shape| return shape.rows * shape.cols;
     const left_len = switch (left.tag()) {
         .array => switch (left.arrayKind()) {
-            .host_array, .mlx_array, .numeric_array => numericFlatLen(left) orelse return error.Type,
+            .host_dense_array, .backend_array, .numeric_array => numericFlatLen(left) orelse return error.Type,
+            .host_boxed_array => left.asHostBoxedArray().len(),
             else => return error.Internal,
         },
         .int, .float, .bool => null,
@@ -19123,7 +21146,8 @@ fn arrayResultLen(left: Value, right: Value) KError!usize {
     };
     const right_len = switch (right.tag()) {
         .array => switch (right.arrayKind()) {
-            .host_array, .mlx_array, .numeric_array => numericFlatLen(right) orelse return error.Type,
+            .host_dense_array, .backend_array, .numeric_array => numericFlatLen(right) orelse return error.Type,
+            .host_boxed_array => right.asHostBoxedArray().len(),
             else => return error.Internal,
         },
         .int, .float, .bool => null,
@@ -19132,7 +21156,9 @@ fn arrayResultLen(left: Value, right: Value) KError!usize {
 
     if (left_len) |llen| {
         if (right_len) |rlen| {
-            _ = try nonVectorNumericShapeForDyad(left, right);
+            if (!isGenericArrayValue(left) and !isGenericArrayValue(right)) {
+                _ = try nonVectorNumericShapeForDyad(left, right);
+            }
             if (llen != rlen) return error.Type;
             return llen;
         }
@@ -19142,9 +21168,7 @@ fn arrayResultLen(left: Value, right: Value) KError!usize {
 }
 
 fn isBoxedHostArrayValue(value: Value) bool {
-    return value.tag() == .array and
-        value.arrayKind() == .host_array and
-        std.meta.activeTag(value.asHostArray().storage) == .boxed;
+    return boxedArrayItems(value) != null;
 }
 
 fn isGenericArrayValue(value: Value) bool {
@@ -19152,7 +21176,7 @@ fn isGenericArrayValue(value: Value) bool {
 }
 
 fn shouldUseGenericArrayDyad(left: Value, right: Value) bool {
-    if (isMlxBackedArray(left) or isMlxBackedArray(right)) return false;
+    if (isBackendArrayValue(left) or isBackendArrayValue(right)) return false;
     if ((valueIsRenderableMatrixLike(left) and valueNumericMode(right) != null) or
         (valueIsRenderableMatrixLike(right) and valueNumericMode(left) != null))
     {
@@ -19168,14 +21192,14 @@ const HostRangeIotaView = struct {
 
 const HostFlatSliceView = struct {
     source_value: Value,
-    source_host: ?*const HostArray = null,
+    source_host: ?*const HostDenseArray = null,
     start: usize,
     len: usize,
 };
 
 const HostFlatStrideView = struct {
     source_value: Value,
-    source_host: ?*const HostArray = null,
+    source_host: ?*const HostDenseArray = null,
     start: usize,
     len: usize,
     step: usize = 1,
@@ -19188,7 +21212,7 @@ const HostFlatSegmentsView = struct {
 
 const HostFirstAxisSliceView = struct {
     source_value: Value,
-    source_host: ?*const HostArray = null,
+    source_host: ?*const HostDenseArray = null,
     start_row: usize,
     len: usize,
     row_width: usize = 1,
@@ -19197,7 +21221,7 @@ const HostFirstAxisSliceView = struct {
 
 const HostFirstAxisIndexView = struct {
     source_value: Value,
-    source_host: ?*const HostArray = null,
+    source_host: ?*const HostDenseArray = null,
     row_indices: Value,
     len: usize,
     row_width: usize = 1,
@@ -19205,16 +21229,16 @@ const HostFirstAxisIndexView = struct {
 
 const HostFirstAxisConcatView = struct {
     left_value: Value,
-    left_host: ?*const HostArray = null,
+    left_host: ?*const HostDenseArray = null,
     right_value: Value,
-    right_host: ?*const HostArray = null,
+    right_host: ?*const HostDenseArray = null,
     left_len: usize,
     len: usize,
 };
 
 const HostTransposeView = struct {
     source_value: Value,
-    source_host: ?*const HostArray = null,
+    source_host: ?*const HostDenseArray = null,
     source_rows: usize,
     source_cols: usize,
 };
@@ -19256,271 +21280,247 @@ const HostCollapsedFlatSlice = union(enum) {
     flat_stride: HostFlatStrideView,
 };
 
+fn hostDenseViewForHostArray(array: *const HostDenseArray) KError!HostDenseView {
+    return switch (array.storage) {
+        .bit => |words| .{ .int_array = .{ .dense = .{ .bit = .{ .words = words, .len = array.logical_len } } } },
+        .int8 => |items| .{ .int_array = .{ .dense = .{ .int8 = items } } },
+        .int16 => |items| .{ .int_array = .{ .dense = .{ .int16 = items } } },
+        .int32 => |items| .{ .int_array = .{ .dense = .{ .int32 = items } } },
+        .int64 => |items| .{ .int_array = .{ .dense = .{ .int64 = items } } },
+        .float64 => |items| .{ .float_array = .{ .dense = items } },
+    };
+}
+
+fn hostDenseViewForNumericHandle(self: *Session, value: Value, handle: *const NumericArray) KError!HostDenseView {
+    if (numericHostAttachment(handle)) |array| return try hostDenseViewForHostArray(array);
+    if (numericArrayIsRangeIota(handle)) {
+        return .{ .int_array = .{ .range_iota = .{ .handle = handle } } };
+    }
+    if (numericArrayIsFlatSlice(handle)) {
+        const source = numericArrayFlatSliceSource(handle) orelse return error.Type;
+        const flat_len = numericFlatLen(value) orelse return error.Type;
+        const start = numericArrayFlatSliceStart(handle) orelse return error.Type;
+        if (try tryCollapseHostFlatSlice(self, source, start, flat_len)) |collapsed| {
+            return switch (valueNumericMode(source) orelse return error.Type) {
+                .float => switch (collapsed) {
+                    .flat_slice => |items| .{ .float_array = .{ .flat_slice = items } },
+                    .flat_stride => |items| .{ .float_array = .{ .flat_stride = items } },
+                },
+                .int => switch (collapsed) {
+                    .flat_slice => |items| .{ .int_array = .{ .flat_slice = items } },
+                    .flat_stride => |items| .{ .int_array = .{ .flat_stride = items } },
+                },
+            };
+        }
+        const source_host = try ensureNumericHostAttachmentForDenseView(self, source);
+        return switch (valueNumericMode(source) orelse return error.Type) {
+            .float => .{ .float_array = .{ .flat_slice = .{
+                .source_value = source,
+                .source_host = source_host,
+                .start = start,
+                .len = flat_len,
+            } } },
+            .int => .{ .int_array = .{ .flat_slice = .{
+                .source_value = source,
+                .source_host = source_host,
+                .start = start,
+                .len = flat_len,
+            } } },
+        };
+    }
+    if (numericArrayIsFlatConcat(handle)) {
+        const left = numericArrayFlatConcatLeft(handle) orelse return error.Type;
+        const right = numericArrayFlatConcatRight(handle) orelse return error.Type;
+        const left_len = numericVectorLen(left) orelse return error.Type;
+        const right_len = numericVectorLen(right) orelse return error.Type;
+        const left_host = try ensureNumericHostAttachmentForDenseView(self, left);
+        const right_host = try ensureNumericHostAttachmentForDenseView(self, right);
+        if (comptime enable_probe_instrumentation) self.debug_flat_concat_dense_view_count += 1;
+        return switch (valueNumericMode(value) orelse return error.Type) {
+            .float => .{ .float_array = .{ .flat_concat = .{
+                .left_value = left,
+                .left_host = left_host,
+                .right_value = right,
+                .right_host = right_host,
+                .left_len = left_len,
+                .len = left_len + right_len,
+            } } },
+            .int => .{ .int_array = .{ .flat_concat = .{
+                .left_value = left,
+                .left_host = left_host,
+                .right_value = right,
+                .right_host = right_host,
+                .left_len = left_len,
+                .len = left_len + right_len,
+            } } },
+        };
+    }
+    if (numericArrayIsFlatSegments(handle)) {
+        const segments = numericArrayFlatSegmentsValues(handle) orelse return error.Type;
+        const flat_len = numericFlatLen(value) orelse return error.Type;
+        return switch (valueNumericMode(value) orelse return error.Type) {
+            .float => .{ .float_array = .{ .flat_segments = .{
+                .values = segments,
+                .len = flat_len,
+            } } },
+            .int => .{ .int_array = .{ .flat_segments = .{
+                .values = segments,
+                .len = flat_len,
+            } } },
+        };
+    }
+    if (numericArrayIsFirstAxisSlice(handle)) {
+        const slice = handle.first_axis_slice orelse return error.Type;
+        const source_handle = shapedNumericHandle(slice.source) orelse return error.Type;
+        const row_width = numericShapeInnerBlockLen(source_handle);
+        const row_count: usize = @intCast(handle.shape[0]);
+        const flat_len = numericFlatLen(value) orelse return error.Type;
+        const source_host = try ensureNumericHostAttachmentForDenseView(self, slice.source);
+        if (slice.step == 1 and row_count == 1) {
+            const start = slice.start * row_width;
+            return switch (valueNumericMode(slice.source) orelse return error.Type) {
+                .float => .{ .float_array = .{ .flat_slice = .{
+                    .source_value = slice.source,
+                    .source_host = source_host,
+                    .start = start,
+                    .len = flat_len,
+                } } },
+                .int => .{ .int_array = .{ .flat_slice = .{
+                    .source_value = slice.source,
+                    .source_host = source_host,
+                    .start = start,
+                    .len = flat_len,
+                } } },
+            };
+        }
+        if (comptime enable_probe_instrumentation) self.debug_first_axis_slice_dense_view_count += 1;
+        return switch (valueNumericMode(slice.source) orelse return error.Type) {
+            .float => .{ .float_array = .{ .first_axis_slice = .{
+                .source_value = slice.source,
+                .source_host = source_host,
+                .start_row = slice.start,
+                .len = flat_len,
+                .row_width = row_width,
+                .row_step = slice.step,
+            } } },
+            .int => .{ .int_array = .{ .first_axis_slice = .{
+                .source_value = slice.source,
+                .source_host = source_host,
+                .start_row = slice.start,
+                .len = flat_len,
+                .row_width = row_width,
+                .row_step = slice.step,
+            } } },
+        };
+    }
+    if (numericArrayIsFirstAxisIndex(handle)) {
+        const index = handle.first_axis_index orelse return error.Type;
+        const source_handle = shapedNumericHandle(index.source) orelse return error.Type;
+        const row_width = numericShapeInnerBlockLen(source_handle);
+        const flat_len = numericFlatLen(value) orelse return error.Type;
+        const source_host = try ensureNumericHostAttachmentForDenseView(self, index.source);
+        if (comptime enable_probe_instrumentation) self.debug_first_axis_index_dense_view_count += 1;
+        return switch (valueNumericMode(index.source) orelse return error.Type) {
+            .float => .{ .float_array = .{ .first_axis_index = .{
+                .source_value = index.source,
+                .source_host = source_host,
+                .row_indices = index.row_indices,
+                .len = flat_len,
+                .row_width = row_width,
+            } } },
+            .int => .{ .int_array = .{ .first_axis_index = .{
+                .source_value = index.source,
+                .source_host = source_host,
+                .row_indices = index.row_indices,
+                .len = flat_len,
+                .row_width = row_width,
+            } } },
+        };
+    }
+    if (numericArrayIsFirstAxisConcat(handle)) {
+        const left = numericArrayFirstAxisConcatLeft(handle) orelse return error.Type;
+        const right = numericArrayFirstAxisConcatRight(handle) orelse return error.Type;
+        const left_len = numericFlatLen(left) orelse return error.Type;
+        const right_len = numericFlatLen(right) orelse return error.Type;
+        const left_host = try ensureNumericHostAttachmentForDenseView(self, left);
+        const right_host = try ensureNumericHostAttachmentForDenseView(self, right);
+        if (comptime enable_probe_instrumentation) self.debug_first_axis_concat_dense_view_count += 1;
+        return switch (valueNumericMode(value) orelse return error.Type) {
+            .float => .{ .float_array = .{ .first_axis_concat = .{
+                .left_value = left,
+                .left_host = left_host,
+                .right_value = right,
+                .right_host = right_host,
+                .left_len = left_len,
+                .len = left_len + right_len,
+            } } },
+            .int => .{ .int_array = .{ .first_axis_concat = .{
+                .left_value = left,
+                .left_host = left_host,
+                .right_value = right,
+                .right_host = right_host,
+                .left_len = left_len,
+                .len = left_len + right_len,
+            } } },
+        };
+    }
+    if (numericArrayIsTransposeView(handle)) {
+        countTransposeStructuralHostUse(self, value);
+        const source = numericArrayTransposeSource(handle) orelse return error.Type;
+        const source_shape = valueNumericMatrixShape(source) orelse return error.Type;
+        const source_host = try ensureNumericHostAttachmentForDenseView(self, source);
+        return switch (valueNumericMode(source) orelse return error.Type) {
+            .float => .{ .float_array = .{ .transpose = .{
+                .source_value = source,
+                .source_host = source_host,
+                .source_rows = source_shape.rows,
+                .source_cols = source_shape.cols,
+            } } },
+            .int => .{ .int_array = .{ .transpose = .{
+                .source_value = source,
+                .source_host = source_host,
+                .source_rows = source_shape.rows,
+                .source_cols = source_shape.cols,
+            } } },
+        };
+    }
+    if (numericArrayIsReshapeView(handle)) {
+        const source = numericArrayReshapeSource(handle) orelse return error.Type;
+        if (valueNumericHandle(source)) |source_handle| {
+            if (!numericHasHostAttachment(source_handle) and numericHasBackendAttachment(source_handle) and
+                !numericArrayIsRangeIota(source_handle) and
+                !numericArrayIsFlatSlice(source_handle) and
+                !numericArrayIsFlatConcat(source_handle) and
+                !numericArrayIsFlatSegments(source_handle) and
+                !numericArrayIsFirstAxisSlice(source_handle) and
+                !numericArrayIsFirstAxisIndex(source_handle) and
+                !numericArrayIsFirstAxisConcat(source_handle) and
+                !numericArrayIsTransposeView(source_handle))
+            {
+                _ = try tryEnsureHostRealizationForHandle(self, @constCast(source_handle)) orelse return error.Type;
+            }
+        }
+        return try hostDenseView(self, source);
+    }
+    if (numericHasBackendAttachment(handle)) {
+        _ = try tryEnsureHostRealizationForHandle(self, @constCast(handle)) orelse return error.Type;
+        return try hostDenseViewForHostArray(numericHostAttachment(handle) orelse return error.Type);
+    }
+    return error.Type;
+}
+
 fn hostDenseView(self: *Session, value: Value) KError!HostDenseView {
     return switch (value.tag()) {
         .int => .{ .scalar_int = value.asInt() },
         .bool => .{ .scalar_int = @intFromBool(value.asBool()) },
         .float => .{ .scalar_float = value.asFloat() },
-        .array => switch (value.arrayKind()) {
-            .host_array => switch (value.asHostArray().storage) {
-                .bit => |words| .{ .int_array = .{ .dense = .{ .bit = .{ .words = words, .len = value.asHostArray().logical_len } } } },
-                .int8 => |items| .{ .int_array = .{ .dense = .{ .int8 = items } } },
-                .int16 => |items| .{ .int_array = .{ .dense = .{ .int16 = items } } },
-                .int32 => |items| .{ .int_array = .{ .dense = .{ .int32 = items } } },
-                .int64 => |items| .{ .int_array = .{ .dense = .{ .int64 = items } } },
-                .float64 => |items| .{ .float_array = .{ .dense = items } },
-                .boxed => error.Type,
-            },
-            .numeric_array => blk: {
-                const handle = value.asNumericArray();
-                if (handle.host) |array| {
-                    break :blk try hostDenseView(self, Value.array(array));
-                }
-                if (numericArrayIsRangeIota(handle)) {
-                    break :blk .{ .int_array = .{ .range_iota = .{ .handle = handle } } };
-                }
-                if (numericArrayIsFlatSlice(handle)) {
-                    const source = numericArrayFlatSliceSource(handle) orelse return error.Type;
-                    const flat_len = numericFlatLen(value) orelse return error.Type;
-                    const start = numericArrayFlatSliceStart(handle) orelse return error.Type;
-                    if (try tryCollapseHostFlatSlice(self, source, start, flat_len)) |collapsed| {
-                        break :blk switch (valueNumericMode(source) orelse return error.Type) {
-                            .float => switch (collapsed) {
-                                .flat_slice => |items| .{ .float_array = .{ .flat_slice = items } },
-                                .flat_stride => |items| .{ .float_array = .{ .flat_stride = items } },
-                            },
-                            .int => switch (collapsed) {
-                                .flat_slice => |items| .{ .int_array = .{ .flat_slice = items } },
-                                .flat_stride => |items| .{ .int_array = .{ .flat_stride = items } },
-                            },
-                        };
-                    }
-                    const source_host = try ensureNumericHostAttachmentForDenseView(self, source);
-                    break :blk switch (valueNumericMode(source) orelse return error.Type) {
-                        .float => .{ .float_array = .{ .flat_slice = .{
-                            .source_value = source,
-                            .source_host = source_host,
-                            .start = start,
-                            .len = flat_len,
-                        } } },
-                        .int => .{ .int_array = .{ .flat_slice = .{
-                            .source_value = source,
-                            .source_host = source_host,
-                            .start = start,
-                            .len = flat_len,
-                        } } },
-                    };
-                }
-                if (numericArrayIsFlatConcat(handle)) {
-                    const left = numericArrayFlatConcatLeft(handle) orelse return error.Type;
-                    const right = numericArrayFlatConcatRight(handle) orelse return error.Type;
-                    const left_len = numericVectorLen(left) orelse return error.Type;
-                    const right_len = numericVectorLen(right) orelse return error.Type;
-                    const left_host = try ensureNumericHostAttachmentForDenseView(self, left);
-                    const right_host = try ensureNumericHostAttachmentForDenseView(self, right);
-                    if (comptime enable_probe_instrumentation) self.debug_flat_concat_dense_view_count += 1;
-                    break :blk switch (valueNumericMode(value) orelse return error.Type) {
-                        .float => .{ .float_array = .{ .flat_concat = .{
-                            .left_value = left,
-                            .left_host = left_host,
-                            .right_value = right,
-                            .right_host = right_host,
-                            .left_len = left_len,
-                            .len = left_len + right_len,
-                        } } },
-                        .int => .{ .int_array = .{ .flat_concat = .{
-                            .left_value = left,
-                            .left_host = left_host,
-                            .right_value = right,
-                            .right_host = right_host,
-                            .left_len = left_len,
-                            .len = left_len + right_len,
-                        } } },
-                    };
-                }
-                if (numericArrayIsFlatSegments(handle)) {
-                    const segments = numericArrayFlatSegmentsValues(handle) orelse return error.Type;
-                    const flat_len = numericFlatLen(value) orelse return error.Type;
-                    break :blk switch (valueNumericMode(value) orelse return error.Type) {
-                        .float => .{ .float_array = .{ .flat_segments = .{
-                            .values = segments,
-                            .len = flat_len,
-                        } } },
-                        .int => .{ .int_array = .{ .flat_segments = .{
-                            .values = segments,
-                            .len = flat_len,
-                        } } },
-                    };
-                }
-                if (numericArrayIsFirstAxisSlice(handle)) {
-                    const slice = handle.first_axis_slice orelse return error.Type;
-                    const source_handle = shapedNumericHandle(slice.source) orelse return error.Type;
-                    const row_width = numericShapeInnerBlockLen(source_handle);
-                    const row_count: usize = @intCast(handle.shape[0]);
-                    const flat_len = numericFlatLen(value) orelse return error.Type;
-                    const source_host = try ensureNumericHostAttachmentForDenseView(self, slice.source);
-                    if (slice.step == 1 and row_count == 1) {
-                        const start = slice.start * row_width;
-                        break :blk switch (valueNumericMode(slice.source) orelse return error.Type) {
-                            .float => .{ .float_array = .{ .flat_slice = .{
-                                .source_value = slice.source,
-                                .source_host = source_host,
-                                .start = start,
-                                .len = flat_len,
-                            } } },
-                            .int => .{ .int_array = .{ .flat_slice = .{
-                                .source_value = slice.source,
-                                .source_host = source_host,
-                                .start = start,
-                                .len = flat_len,
-                            } } },
-                        };
-                    }
-                    if (comptime enable_probe_instrumentation) self.debug_first_axis_slice_dense_view_count += 1;
-                    break :blk switch (valueNumericMode(slice.source) orelse return error.Type) {
-                        .float => .{ .float_array = .{ .first_axis_slice = .{
-                            .source_value = slice.source,
-                            .source_host = source_host,
-                            .start_row = slice.start,
-                            .len = flat_len,
-                            .row_width = row_width,
-                            .row_step = slice.step,
-                        } } },
-                        .int => .{ .int_array = .{ .first_axis_slice = .{
-                            .source_value = slice.source,
-                            .source_host = source_host,
-                            .start_row = slice.start,
-                            .len = flat_len,
-                            .row_width = row_width,
-                            .row_step = slice.step,
-                        } } },
-                    };
-                }
-                if (numericArrayIsFirstAxisIndex(handle)) {
-                    const index = handle.first_axis_index orelse return error.Type;
-                    const source_handle = shapedNumericHandle(index.source) orelse return error.Type;
-                    const row_width = numericShapeInnerBlockLen(source_handle);
-                    const flat_len = numericFlatLen(value) orelse return error.Type;
-                    const source_host = try ensureNumericHostAttachmentForDenseView(self, index.source);
-                    if (comptime enable_probe_instrumentation) self.debug_first_axis_index_dense_view_count += 1;
-                    break :blk switch (valueNumericMode(index.source) orelse return error.Type) {
-                        .float => .{ .float_array = .{ .first_axis_index = .{
-                            .source_value = index.source,
-                            .source_host = source_host,
-                            .row_indices = index.row_indices,
-                            .len = flat_len,
-                            .row_width = row_width,
-                        } } },
-                        .int => .{ .int_array = .{ .first_axis_index = .{
-                            .source_value = index.source,
-                            .source_host = source_host,
-                            .row_indices = index.row_indices,
-                            .len = flat_len,
-                            .row_width = row_width,
-                        } } },
-                    };
-                }
-                if (numericArrayIsFirstAxisConcat(handle)) {
-                    const left = numericArrayFirstAxisConcatLeft(handle) orelse return error.Type;
-                    const right = numericArrayFirstAxisConcatRight(handle) orelse return error.Type;
-                    const left_len = numericFlatLen(left) orelse return error.Type;
-                    const right_len = numericFlatLen(right) orelse return error.Type;
-                    const left_host = try ensureNumericHostAttachmentForDenseView(self, left);
-                    const right_host = try ensureNumericHostAttachmentForDenseView(self, right);
-                    if (comptime enable_probe_instrumentation) self.debug_first_axis_concat_dense_view_count += 1;
-                    break :blk switch (valueNumericMode(value) orelse return error.Type) {
-                        .float => .{ .float_array = .{ .first_axis_concat = .{
-                            .left_value = left,
-                            .left_host = left_host,
-                            .right_value = right,
-                            .right_host = right_host,
-                            .left_len = left_len,
-                            .len = left_len + right_len,
-                        } } },
-                        .int => .{ .int_array = .{ .first_axis_concat = .{
-                            .left_value = left,
-                            .left_host = left_host,
-                            .right_value = right,
-                            .right_host = right_host,
-                            .left_len = left_len,
-                            .len = left_len + right_len,
-                        } } },
-                    };
-                }
-                if (numericArrayIsTransposeView(handle)) {
-                    countTransposeStructuralHostUse(self, value);
-                    const source = numericArrayTransposeSource(handle) orelse return error.Type;
-                    const source_shape = valueNumericMatrixShape(source) orelse return error.Type;
-                    const source_host = try ensureNumericHostAttachmentForDenseView(self, source);
-                    break :blk switch (valueNumericMode(source) orelse return error.Type) {
-                        .float => .{ .float_array = .{ .transpose = .{
-                            .source_value = source,
-                            .source_host = source_host,
-                            .source_rows = source_shape.rows,
-                            .source_cols = source_shape.cols,
-                        } } },
-                        .int => .{ .int_array = .{ .transpose = .{
-                            .source_value = source,
-                            .source_host = source_host,
-                            .source_rows = source_shape.rows,
-                            .source_cols = source_shape.cols,
-                        } } },
-                    };
-                }
-                if (numericArrayIsReshapeView(handle)) {
-                    const source = numericArrayReshapeSource(handle) orelse return error.Type;
-                    if (valueNumericHandle(source)) |source_handle| {
-                        if (source_handle.host == null and source_handle.mlx != null and
-                            !numericArrayIsRangeIota(source_handle) and
-                            !numericArrayIsFlatSlice(source_handle) and
-                            !numericArrayIsFlatConcat(source_handle) and
-                            !numericArrayIsFlatSegments(source_handle) and
-                            !numericArrayIsFirstAxisSlice(source_handle) and
-                            !numericArrayIsFirstAxisIndex(source_handle) and
-                            !numericArrayIsFirstAxisConcat(source_handle) and
-                            !numericArrayIsTransposeView(source_handle))
-                        {
-                            _ = try tryEnsureHostRealizationForHandle(self, @constCast(source_handle)) orelse return error.Type;
-                        }
-                    }
-                    break :blk try hostDenseView(self, source);
-                }
-                if (handle.mlx != null) {
-                    _ = try tryEnsureHostRealizationForHandle(self, @constCast(handle)) orelse return error.Type;
-                    break :blk try hostDenseView(self, value);
-                }
-                return error.Type;
-            },
-            .mlx_array => blk: {
-                const handle = valueNumericHandle(value) orelse return error.Type;
-                if (handle.host) |array| break :blk try hostDenseView(self, Value.array(array));
-                if (numericArrayIsTransposeView(handle)) {
-                    countTransposeStructuralHostUse(self, value);
-                    const source = numericArrayTransposeSource(handle) orelse return error.Type;
-                    const source_shape = valueNumericMatrixShape(source) orelse return error.Type;
-                    const source_host = try ensureNumericHostAttachmentForDenseView(self, source);
-                    break :blk switch (valueNumericMode(source) orelse return error.Type) {
-                        .float => .{ .float_array = .{ .transpose = .{
-                            .source_value = source,
-                            .source_host = source_host,
-                            .source_rows = source_shape.rows,
-                            .source_cols = source_shape.cols,
-                        } } },
-                        .int => .{ .int_array = .{ .transpose = .{
-                            .source_value = source,
-                            .source_host = source_host,
-                            .source_rows = source_shape.rows,
-                            .source_cols = source_shape.cols,
-                        } } },
-                    };
-                }
-                if (handle.mlx != null) {
-                    _ = try tryEnsureHostRealizationForHandle(self, @constCast(handle)) orelse return error.Type;
-                    break :blk try hostDenseView(self, value);
-                }
-                return error.Type;
-            },
-            else => error.Internal,
+        .array => blk: {
+            if (valueNumericHandle(value)) |handle| break :blk try hostDenseViewForNumericHandle(self, value, handle);
+            break :blk switch (value.arrayKind()) {
+                .host_dense_array => try hostDenseViewForHostArray(value.asHostDenseArray()),
+                .backend_array => error.Type,
+                else => error.Internal,
+            };
         },
         else => error.Type,
     };
@@ -19562,7 +21562,7 @@ fn hostFloatDenseViewItem(view: HostFloatDenseView, idx: usize) KError!f64 {
     };
 }
 
-fn hostArrayIntAt(array: *const HostArray, idx: usize) KError!i64 {
+fn hostDenseIntAt(array: *const HostDenseArray, idx: usize) KError!i64 {
     return switch (array.storage) {
         .bit => |words| blk: {
             if (idx >= array.logical_len) return error.Internal;
@@ -19585,11 +21585,10 @@ fn hostArrayIntAt(array: *const HostArray, idx: usize) KError!i64 {
             break :blk items[idx];
         },
         .float64 => error.Type,
-        .boxed => error.Type,
     };
 }
 
-fn hostArrayFloatAt(array: *const HostArray, idx: usize) KError!f64 {
+fn hostDenseFloatAt(array: *const HostDenseArray, idx: usize) KError!f64 {
     return switch (array.storage) {
         .bit => |words| blk: {
             if (idx >= array.logical_len) return error.Internal;
@@ -19615,7 +21614,6 @@ fn hostArrayFloatAt(array: *const HostArray, idx: usize) KError!f64 {
             if (idx >= items.len) return error.Internal;
             break :blk items[idx];
         },
-        .boxed => error.Type,
     };
 }
 
@@ -19624,17 +21622,17 @@ fn numericIntAt(value: Value, idx: usize) KError!i64 {
         .int => value.asInt(),
         .bool => @intFromBool(value.asBool()),
         .array => switch (value.arrayKind()) {
-            .host_array => hostArrayIntAt(value.asHostArray(), idx),
-            .mlx_array => if (valueNumericHandle(value)) |handle|
-                if (handle.host) |array|
-                    hostArrayIntAt(array, idx)
+            .host_dense_array => hostDenseIntAt(value.asHostDenseArray(), idx),
+            .backend_array => if (valueNumericHandle(value)) |handle|
+                if (numericHostAttachment(handle)) |array|
+                    hostDenseIntAt(array, idx)
                 else
                     error.Type
             else
                 error.Type,
             .numeric_array => blk: {
                 const handle = value.asNumericArray();
-                if (handle.host) |array| break :blk hostArrayIntAt(array, idx);
+                if (numericHostAttachment(handle)) |array| break :blk hostDenseIntAt(array, idx);
                 if (numericArrayIsRangeIota(handle)) break :blk try numericArrayRangeIotaValueAt(handle, idx);
                 if (numericArrayIsFlatSlice(handle)) {
                     const source = numericArrayFlatSliceSource(handle) orelse break :blk error.Type;
@@ -19713,17 +21711,17 @@ fn numericFloatAt(value: Value, idx: usize) KError!f64 {
         .bool => @as(f64, @floatFromInt(@intFromBool(value.asBool()))),
         .float => value.asFloat(),
         .array => switch (value.arrayKind()) {
-            .host_array => hostArrayFloatAt(value.asHostArray(), idx),
-            .mlx_array => if (valueNumericHandle(value)) |handle|
-                if (handle.host) |array|
-                    hostArrayFloatAt(array, idx)
+            .host_dense_array => hostDenseFloatAt(value.asHostDenseArray(), idx),
+            .backend_array => if (valueNumericHandle(value)) |handle|
+                if (numericHostAttachment(handle)) |array|
+                    hostDenseFloatAt(array, idx)
                 else
                     error.Type
             else
                 error.Type,
             .numeric_array => blk: {
                 const handle = value.asNumericArray();
-                if (handle.host) |array| break :blk hostArrayFloatAt(array, idx);
+                if (numericHostAttachment(handle)) |array| break :blk hostDenseFloatAt(array, idx);
                 if (numericArrayIsRangeIota(handle)) break :blk @floatFromInt(try numericArrayRangeIotaValueAt(handle, idx));
                 if (numericArrayIsFlatSlice(handle)) {
                     const source = numericArrayFlatSliceSource(handle) orelse break :blk error.Type;
@@ -19796,6 +21794,16 @@ fn numericFloatAt(value: Value, idx: usize) KError!f64 {
     };
 }
 
+fn bangIntOp(left: i64, right: i64) i64 {
+    if (left > 0) {
+        return @intCast(@mod(@as(i128, right), @as(i128, left)));
+    }
+    if (left < 0) {
+        return @intCast(@divFloor(@as(i128, right), -@as(i128, left)));
+    }
+    return right;
+}
+
 fn checkedIntOp(op: BuiltinId, left: i64, right: i64) KError!i64 {
     return switch (op) {
         .add => blk: {
@@ -19808,6 +21816,7 @@ fn checkedIntOp(op: BuiltinId, left: i64, right: i64) KError!i64 {
             if (result[1] != 0) return error.Unsupported;
             break :blk result[0];
         },
+        .iota => bangIntOp(left, right),
         .minimum => @min(left, right),
         .maximum => @max(left, right),
         .mul => blk: {
@@ -19847,6 +21856,7 @@ fn applyIntOpUnchecked(op: BuiltinId, left: i64, right: i64) i64 {
     return switch (op) {
         .add => left + right,
         .sub => left - right,
+        .iota => bangIntOp(left, right),
         .minimum => @min(left, right),
         .maximum => @max(left, right),
         .mul => left * right,
@@ -19860,7 +21870,7 @@ fn checkedAddAcc(acc: *i64, value: i64) KError!void {
 }
 
 fn addScanIntFlags(item_range: HostIntRange) u8 {
-    return host_array_flag_normalized | orderFlagsFromMonotonic(item_range.min >= 0, item_range.max <= 0);
+    return host_dense_flag_normalized | orderFlagsFromMonotonic(item_range.min >= 0, item_range.max <= 0);
 }
 
 fn addScanFloatFlags(items: []const f64) u8 {
@@ -19875,7 +21885,7 @@ fn addScanFloatFlags(items: []const f64) u8 {
         if (item < 0) asc = false;
         if (item > 0) dsc = false;
     }
-    return host_array_flag_normalized | orderFlagsFromMonotonic(asc, dsc);
+    return host_dense_flag_normalized | orderFlagsFromMonotonic(asc, dsc);
 }
 
 fn foldAddIntBitSlice(items: HostBitSlice, seed: ?i64) KError!i64 {
@@ -20169,6 +22179,7 @@ fn applyIntOpUncheckedTyped(comptime T: type, op: BuiltinId, left: anytype, righ
     return switch (op) {
         .add => lhs + rhs,
         .sub => lhs - rhs,
+        .iota => castDenseInt(T, bangIntOp(@as(i64, @intCast(lhs)), @as(i64, @intCast(rhs)))),
         .mul => lhs * rhs,
         .div => unreachable,
         else => unreachable,
@@ -20196,6 +22207,7 @@ fn applyIntOpCheckedNarrow(comptime OutT: type, op: BuiltinId, left: anytype, ri
     const result: WideT = switch (op) {
         .add => lhs + rhs,
         .sub => lhs - rhs,
+        .iota => return castCheckedDenseInt(OutT, bangIntOp(@as(i64, @intCast(lhs)), @as(i64, @intCast(rhs)))),
         .mul => lhs * rhs,
         .div => unreachable,
         else => unreachable,
@@ -21079,7 +23091,7 @@ fn builtinChar(id: BuiltinId) u8 {
         .concat => ',',
         .count, .take => '#',
         .floor, .drop => '_',
-        .sort, .reshape => '^',
+        .null_fill_without, .sort, .reshape => '^',
         .equal => '=',
         .stringify, .cast => '$',
         .contains, .split, .join, .unique, .find => '?',
@@ -21087,6 +23099,11 @@ fn builtinChar(id: BuiltinId) u8 {
         .grad => 'g',
         .valuegrad => 'v',
         .prng => 'p',
+        .load => 'l',
+        .rotcache => 'r',
+        .rotcacheupdate => 'u',
+        .rotcacheview => 'w',
+        .rmsnorm => 'n',
     };
 }
 
@@ -21617,233 +23634,6 @@ fn executeDenseAutodiffBinaryReverseMul(program: *const Session.DenseAutodiffPro
     }
 }
 
-fn executeDenseAutodiffProgramMlx(self: *Session, program: *const Session.DenseAutodiffProgram, input: mlx.Array) KError!struct { value: mlx.Array, grad: mlx.Array } {
-    std.debug.assert(program.len > 0);
-    std.debug.assert(program.root < program.len);
-    std.debug.assert(program.nodes[0] == .input);
-
-    const ctx = try self.mlxContext();
-
-    var forward: [Session.dense_autodiff_max_nodes]mlx.Array = [_]mlx.Array{mlx.Array.empty()} ** Session.dense_autodiff_max_nodes;
-    var adjoint: [Session.dense_autodiff_max_nodes]mlx.Array = [_]mlx.Array{mlx.Array.empty()} ** Session.dense_autodiff_max_nodes;
-    defer {
-        for (forward[0..program.len]) |*item| item.deinit();
-        for (adjoint[0..program.len]) |*item| item.deinit();
-    }
-
-    forward[0] = input;
-    for (program.nodes[1..program.len], 1..) |node, idx| {
-        forward[idx] = switch (node) {
-            .input => unreachable,
-            .const_scalar => |value| mlx.Array.fromFloat(@floatCast(value)),
-            .scan_add => |src| mlx.Array.cumsum0Inclusive(ctx.*, forward[src]) catch |err| return mapMlxError(err),
-            .unary_map => |value| try applyDenseAutodiffUnaryMapMlx(ctx, value.op, forward[value.src]),
-            .neg => |src| mlx.Array.negate(ctx.*, forward[src]) catch |err| return mapMlxError(err),
-            .add => |value| mlx.Array.add(ctx.*, forward[value.left], forward[value.right]) catch |err| return mapMlxError(err),
-            .sub => |value| mlx.Array.sub(ctx.*, forward[value.left], forward[value.right]) catch |err| return mapMlxError(err),
-            .mul => |value| mlx.Array.mul(ctx.*, forward[value.left], forward[value.right]) catch |err| return mapMlxError(err),
-            .reduce_add => |src| mlx.Array.sumAxis0(ctx.*, forward[src]) catch |err| return mapMlxError(err),
-        };
-    }
-
-    adjoint[program.root] = mlx.Array.fromFloat(@as(f32, 1.0));
-
-    var rev = program.len;
-    while (rev > 0) {
-        rev -= 1;
-        if (!adjoint[rev].isValid()) continue;
-        switch (program.nodes[rev]) {
-            .input, .const_scalar => {},
-            .scan_add => |src| {
-                var incoming = takeOwnedMlxArray(&adjoint[rev]);
-                defer incoming.deinit();
-                var reversed = mlx.Array.reverse0(ctx.*, incoming) catch |err| return mapMlxError(err);
-                defer reversed.deinit();
-                var suffix = mlx.Array.cumsum0Inclusive(ctx.*, reversed) catch |err| return mapMlxError(err);
-                defer suffix.deinit();
-                const term = mlx.Array.reverse0(ctx.*, suffix) catch |err| return mapMlxError(err);
-                try accumulateOwnedMlxAdjoint(ctx, &adjoint[src], term);
-            },
-            .unary_map => |value| {
-                var incoming = takeOwnedMlxArray(&adjoint[rev]);
-                defer incoming.deinit();
-                var deriv = try denseAutodiffUnaryMapDerivativeMlx(ctx, value.op, forward[value.src], forward[rev]);
-                errdefer deriv.deinit();
-                const term = mlx.Array.mul(ctx.*, incoming, deriv) catch |err| return mapMlxError(err);
-                deriv.deinit();
-                try accumulateOwnedMlxAdjoint(ctx, &adjoint[value.src], term);
-            },
-            .neg => |src| {
-                var incoming = takeOwnedMlxArray(&adjoint[rev]);
-                defer incoming.deinit();
-                const term = mlx.Array.negate(ctx.*, incoming) catch |err| return mapMlxError(err);
-                const projected = try projectMlxAdjointToKind(ctx, term, program.kinds[src], forward[src]);
-                try accumulateOwnedMlxAdjoint(ctx, &adjoint[src], projected);
-            },
-            .add => |value| {
-                var incoming = takeOwnedMlxArray(&adjoint[rev]);
-                defer incoming.deinit();
-                var right_term = incoming.clone() catch |err| return mapMlxError(err);
-                errdefer right_term.deinit();
-                const left_term = try projectMlxAdjointToKind(ctx, incoming, program.kinds[value.left], forward[value.left]);
-                incoming = mlx.Array.empty();
-                right_term = try projectMlxAdjointToKind(ctx, right_term, program.kinds[value.right], forward[value.right]);
-                try accumulateOwnedMlxAdjoint(ctx, &adjoint[value.left], left_term);
-                try accumulateOwnedMlxAdjoint(ctx, &adjoint[value.right], right_term);
-            },
-            .sub => |value| {
-                var incoming = takeOwnedMlxArray(&adjoint[rev]);
-                defer incoming.deinit();
-                var right_base = incoming.clone() catch |err| return mapMlxError(err);
-                errdefer right_base.deinit();
-                var right_term = mlx.Array.negate(ctx.*, right_base) catch |err| return mapMlxError(err);
-                right_base.deinit();
-                errdefer right_term.deinit();
-                const left_term = try projectMlxAdjointToKind(ctx, incoming, program.kinds[value.left], forward[value.left]);
-                incoming = mlx.Array.empty();
-                right_term = try projectMlxAdjointToKind(ctx, right_term, program.kinds[value.right], forward[value.right]);
-                try accumulateOwnedMlxAdjoint(ctx, &adjoint[value.left], left_term);
-                try accumulateOwnedMlxAdjoint(ctx, &adjoint[value.right], right_term);
-            },
-            .mul => |value| {
-                var incoming = takeOwnedMlxArray(&adjoint[rev]);
-                defer incoming.deinit();
-                var left_term = mlx.Array.mul(ctx.*, incoming, forward[value.right]) catch |err| return mapMlxError(err);
-                errdefer {
-                    var owned = left_term;
-                    owned.deinit();
-                }
-                var right_term = mlx.Array.mul(ctx.*, incoming, forward[value.left]) catch |err| return mapMlxError(err);
-                errdefer {
-                    var owned = right_term;
-                    owned.deinit();
-                }
-                left_term = try projectMlxAdjointToKind(ctx, left_term, program.kinds[value.left], forward[value.left]);
-                right_term = try projectMlxAdjointToKind(ctx, right_term, program.kinds[value.right], forward[value.right]);
-                try accumulateOwnedMlxAdjoint(ctx, &adjoint[value.left], left_term);
-                try accumulateOwnedMlxAdjoint(ctx, &adjoint[value.right], right_term);
-            },
-            .reduce_add => |src| {
-                var incoming = takeOwnedMlxArray(&adjoint[rev]);
-                defer incoming.deinit();
-                const term = try broadcastScalarLikeMlx(ctx, incoming, forward[src]);
-                try accumulateOwnedMlxAdjoint(ctx, &adjoint[src], term);
-            },
-        }
-    }
-
-    if (!adjoint[0].isValid()) {
-        const zero = mlx.Array.sub(ctx.*, forward[0], forward[0]) catch |err| return mapMlxError(err);
-        adjoint[0] = zero;
-    }
-
-    const value = forward[program.root];
-    forward[program.root] = mlx.Array.empty();
-    const grad = adjoint[0];
-    adjoint[0] = mlx.Array.empty();
-    return .{ .value = value, .grad = grad };
-}
-
-fn projectMlxAdjointToKind(ctx: *mlx.Context, term: mlx.Array, target_kind: Session.DenseAutodiffNodeKind, like: mlx.Array) KError!mlx.Array {
-    return switch (target_kind) {
-        .vector => if (term.ndim() == 0) blk: {
-            const projected = try broadcastScalarLikeMlx(ctx, term, like);
-            var owned_term = term;
-            owned_term.deinit();
-            break :blk projected;
-        } else term,
-        .scalar => if (term.ndim() == 0)
-            term
-        else blk: {
-            const reduced = mlx.Array.sumAxis0(ctx.*, term) catch |err| return mapMlxError(err);
-            var owned_term = term;
-            owned_term.deinit();
-            break :blk reduced;
-        },
-    };
-}
-
-fn accumulateOwnedMlxAdjoint(ctx: *mlx.Context, slot: *mlx.Array, term: mlx.Array) KError!void {
-    if (!slot.isValid()) {
-        slot.* = term;
-        return;
-    }
-
-    const combined = mlx.Array.add(ctx.*, slot.*, term) catch |err| return mapMlxError(err);
-    slot.deinit();
-    var owned_term = term;
-    owned_term.deinit();
-    slot.* = combined;
-}
-
-fn takeOwnedMlxArray(slot: *mlx.Array) mlx.Array {
-    const value = slot.*;
-    slot.* = mlx.Array.empty();
-    return value;
-}
-
-fn applyDenseAutodiffUnaryMapMlx(ctx: *mlx.Context, op: BuiltinId, input: mlx.Array) KError!mlx.Array {
-    return switch (op) {
-        .exp => mlx.Array.exp(ctx.*, input) catch |err| return mapMlxError(err),
-        .log => mlx.Array.log(ctx.*, input) catch |err| return mapMlxError(err),
-        .tanh => mlx.Array.tanh(ctx.*, input) catch |err| return mapMlxError(err),
-        .sigmoid => mlx.Array.sigmoid(ctx.*, input) catch |err| return mapMlxError(err),
-        else => error.Internal,
-    };
-}
-
-fn denseAutodiffUnaryMapDerivativeMlx(ctx: *mlx.Context, op: BuiltinId, input: mlx.Array, output: mlx.Array) KError!mlx.Array {
-    return switch (op) {
-        .exp => output.clone() catch |err| return mapMlxError(err),
-        .log => blk: {
-            const one = mlx.Array.fromFloat(@as(f32, 1.0));
-            break :blk mlx.Array.div(ctx.*, one, input) catch |err| return mapMlxError(err);
-        },
-        .tanh => blk: {
-            var sq = mlx.Array.mul(ctx.*, output, output) catch |err| return mapMlxError(err);
-            defer sq.deinit();
-            const one = mlx.Array.fromFloat(@as(f32, 1.0));
-            break :blk mlx.Array.sub(ctx.*, one, sq) catch |err| return mapMlxError(err);
-        },
-        .sigmoid => blk: {
-            const one = mlx.Array.fromFloat(@as(f32, 1.0));
-            var one_minus = mlx.Array.sub(ctx.*, one, output) catch |err| return mapMlxError(err);
-            defer one_minus.deinit();
-            break :blk mlx.Array.mul(ctx.*, output, one_minus) catch |err| return mapMlxError(err);
-        },
-        else => error.Internal,
-    };
-}
-
-fn broadcastScalarLikeMlx(ctx: *mlx.Context, scalar: mlx.Array, like: mlx.Array) KError!mlx.Array {
-    var zero = mlx.Array.sub(ctx.*, like, like) catch |err| return mapMlxError(err);
-    defer zero.deinit();
-    return mlx.Array.add(ctx.*, zero, scalar) catch |err| return mapMlxError(err);
-}
-
-fn scalarNumericMlxArrayResultOwned(value: *mlx.Array) KError!f64 {
-    value.eval() catch |err| return mapMlxError(err);
-    if (value.ndim() != 0) return error.Type;
-    return switch (value.dtype()) {
-        c.MLX_BOOL => @floatFromInt(@intFromBool(value.boolItem() catch |err| return mapMlxError(err))),
-        c.MLX_INT32, c.MLX_INT64, c.MLX_UINT32 => @floatFromInt(value.intItem() catch |err| return mapMlxError(err)),
-        c.MLX_FLOAT32, c.MLX_FLOAT64 => value.floatItem() catch |err| return mapMlxError(err),
-        else => error.Type,
-    };
-}
-
-fn materializeMlxAutogradInput(self: *Session, value: Value) KError!mlx.Array {
-    var arr = try self.materializeMlxArray(value);
-    errdefer arr.deinit();
-    if (arr.ndim() == 0) return arr;
-    if (arr.dtype() == c.MLX_FLOAT32 or arr.dtype() == c.MLX_FLOAT64) return arr;
-
-    const ctx = try self.mlxContext();
-    const casted = mlx.Array.cast(ctx.*, arr, c.MLX_FLOAT32) catch |err| return mapMlxError(err);
-    arr.deinit();
-    return casted;
-}
-
 fn materializeAutogradTarget(allocator: std.mem.Allocator, value: Value) KError!Session.AutogradTarget {
     return switch (value.tag()) {
         .int => blk: {
@@ -21877,8 +23667,8 @@ fn materializeAutogradTarget(allocator: std.mem.Allocator, value: Value) KError!
             };
         },
         .array => switch (value.activeArrayKind()) {
-            .host_array => blk: {
-                const array = value.asHostArray();
+            .host_dense_array => blk: {
+                const array = hostDenseIfPresent(value) orelse return error.Type;
                 const shape = try allocator.alloc(i32, 1);
                 shape[0] = @intCast(array.len());
                 const view = hostIntArrayView(array);
@@ -21905,8 +23695,8 @@ fn materializeAutogradTarget(allocator: std.mem.Allocator, value: Value) KError!
                     else => return error.Type,
                 }
             },
-            .mlx_array => blk: {
-                var owned = value.asMlxArray().array.clone() catch |err| return mapMlxError(err);
+            .backend_array => blk: {
+                var owned = value.asBackendArray().array.clone() catch |err| return mapMlxError(err);
                 defer owned.deinit();
                 owned.eval() catch |err| return mapMlxError(err);
 
@@ -21918,7 +23708,7 @@ fn materializeAutogradTarget(allocator: std.mem.Allocator, value: Value) KError!
                     items[0] = switch (owned.dtype()) {
                         c.MLX_BOOL => @floatFromInt(@intFromBool(owned.boolItem() catch |err| return mapMlxError(err))),
                         c.MLX_INT32, c.MLX_INT64, c.MLX_UINT32 => @floatFromInt(owned.intItem() catch |err| return mapMlxError(err)),
-                        c.MLX_FLOAT32, c.MLX_FLOAT64 => owned.floatItem() catch |err| return mapMlxError(err),
+                        c.MLX_FLOAT16, c.MLX_FLOAT32, c.MLX_FLOAT64, c.MLX_BFLOAT16 => owned.floatItem() catch |err| return mapMlxError(err),
                         else => return error.Type,
                     };
                     break :blk .{
@@ -21960,7 +23750,7 @@ fn materializeAutogradTarget(allocator: std.mem.Allocator, value: Value) KError!
                             .backend = .mlx,
                         };
                     },
-                    c.MLX_FLOAT32, c.MLX_FLOAT64 => blk_float: {
+                    c.MLX_FLOAT16, c.MLX_FLOAT32, c.MLX_FLOAT64, c.MLX_BFLOAT16 => blk_float: {
                         const items = owned.readFloats(allocator) catch |err| switch (err) {
                             error.OutOfMemory => return error.OutOfMemory,
                             else => return mapMlxError(err),
@@ -22017,7 +23807,7 @@ const max_body_templates = 32;
 const max_body_constants = 64;
 const max_runtime_stack = 512;
 const max_runtime_frames = 64;
-const max_inline_frames = 64;
+const max_inline_frames = 256;
 const max_pooled_objects = 128;
 
 const ParamBindingKind = enum {
@@ -22091,6 +23881,16 @@ const PendingPrimary = union(enum) {
     builtin: BuiltinId,
     const_value: Value,
     lambda_source: ParsedLambda,
+};
+
+const ExprForm = enum {
+    nounish,
+    verbial,
+};
+
+const ParsedPrimary = struct {
+    pending: PendingPrimary,
+    form: ExprForm,
 };
 
 const ProjectionSlotSummary = struct {
@@ -22176,7 +23976,7 @@ const ProducedValue = union(enum) {
     array_value: struct {
         start: usize,
         end: usize,
-        elem_mode: ?HostArrayElem,
+        elem_mode: ?HostDenseElem,
     },
 
     fn start(self: ProducedValue) usize {
@@ -22325,7 +24125,7 @@ const InstructionBuffer = struct {
         self.noteSimple(.{ .load_capture = .{ .start = start, .end = self.byte_len, .slot = pooled } });
     }
 
-    fn noteArrayValue(self: *InstructionBuffer, start: usize, end: usize, elem_mode: ?HostArrayElem) void {
+    fn noteArrayValue(self: *InstructionBuffer, start: usize, end: usize, elem_mode: ?HostDenseElem) void {
         const previous = self.last_simple;
         self.previous_simple = previous;
         self.last_simple = .{
@@ -22380,7 +24180,7 @@ const InstructionBuffer = struct {
         };
     }
 
-    fn simpleNumericMode(simple: ProducedValue) ?HostArrayElem {
+    fn simpleNumericMode(simple: ProducedValue) ?HostDenseElem {
         return switch (simple) {
             .const_int => .int,
             .const_value => |inst| switch (inst.value.tag()) {
@@ -22725,6 +24525,25 @@ const InstructionBuffer = struct {
         return true;
     }
 
+    fn tryShapeArgmaxSuffix(self: *InstructionBuffer) KError!bool {
+        if (self.byte_len == 0) return false;
+        const last_op = std.meta.intToEnum(Op, self.bytes[self.byte_len - 1]) catch return false;
+        if (last_op != .find and last_op != .call1) return false;
+
+        var start = self.byte_len;
+        while (start > 0) {
+            start -= 1;
+            const slice = self.bytes[start..self.byte_len];
+            const kind = Session.classifyArgmaxBytecode(slice, self.constantSlice()) orelse continue;
+            const operand_len = Session.argmaxBytecodeOperandLen(slice, self.constantSlice(), kind);
+            self.byte_len = start + operand_len;
+            self.invalidateSimple();
+            try self.appendOp(.argmax);
+            return true;
+        }
+        return false;
+    }
+
     fn tryRewriteTailCall(self: *InstructionBuffer) bool {
         if (self.byte_len == 0 or self.last_op_start >= self.byte_len) return false;
         const op = std.meta.intToEnum(Op, self.bytes[self.last_op_start]) catch return false;
@@ -22759,7 +24578,7 @@ const InstructionBuffer = struct {
     }
 };
 
-fn denseDyadOp(op: BuiltinId, left_mode: ?HostArrayElem, right_mode: ?HostArrayElem) ?Op {
+fn denseDyadOp(op: BuiltinId, left_mode: ?HostDenseElem, right_mode: ?HostDenseElem) ?Op {
     const left = left_mode orelse return null;
     const right = right_mode orelse return null;
     return switch (op) {
@@ -22807,7 +24626,7 @@ fn denseDyadOp(op: BuiltinId, left_mode: ?HostArrayElem, right_mode: ?HostArrayE
     };
 }
 
-fn denseUnaryOp(op: Op, elem_mode: ?HostArrayElem) ?Op {
+fn denseUnaryOp(op: Op, elem_mode: ?HostDenseElem) ?Op {
     const mode = elem_mode orelse return null;
     return switch (op) {
         .array_negate => switch (mode) {
@@ -22822,7 +24641,7 @@ fn denseUnaryOp(op: Op, elem_mode: ?HostArrayElem) ?Op {
     };
 }
 
-fn denseResultModeFromOperands(op: Op, left_mode: ?HostArrayElem, right_mode: ?HostArrayElem) ?HostArrayElem {
+fn denseResultModeFromOperands(op: Op, left_mode: ?HostDenseElem, right_mode: ?HostDenseElem) ?HostDenseElem {
     const left = left_mode orelse return null;
     const right = right_mode orelse return null;
     return switch (op) {
@@ -22836,7 +24655,7 @@ fn denseResultModeFromOperands(op: Op, left_mode: ?HostArrayElem, right_mode: ?H
     };
 }
 
-fn denseResultModeFromUnary(op: Op, elem_mode: ?HostArrayElem) ?HostArrayElem {
+fn denseResultModeFromUnary(op: Op, elem_mode: ?HostDenseElem) ?HostDenseElem {
     const mode = elem_mode orelse return null;
     return switch (op) {
         .array_negate,
@@ -23087,7 +24906,7 @@ const Compiler = struct {
             if (after < self.source.len and self.source[after] == ':') {
                 self.index = skipSpacesInSource(self.source, scanned.next_index);
                 try self.expectChar(':');
-                try self.parseExpr(instructions, scope);
+                _ = try self.parseExpr(instructions, scope);
                 try instructions.appendOp(.store_global);
                 try instructions.appendByte(try instructions.internGlobal(try self.globalSlot(scanned.ident.text)));
             } else {
@@ -23119,7 +24938,7 @@ const Compiler = struct {
             self.code_allocator,
             self.compile_mode,
         );
-        try expr_compiler.parseExpr(out, scope);
+        _ = try expr_compiler.parseExpr(out, scope);
         if (!expr_compiler.atEnd()) return error.Parse;
     }
 
@@ -23147,10 +24966,103 @@ const Compiler = struct {
         rhs_source: []const u8,
         body_source: []const u8,
     ) KError!void {
-        const explicit_names = [_]IdentRef{ident};
-        try self.emitLambdaValueFromBodySource(out, parent, false, &explicit_names, body_source);
+        const max_inline_local_binding_body_len = 256;
+        var explicit_names: [max_explicit_params]IdentRef = undefined;
+        var hoisted_sources: [max_explicit_params]CaptureSource = undefined;
+        const maybe_explicit_count = if (body_source.len <= max_inline_local_binding_body_len)
+            self.collectInlineLocalBindingParams(parent, ident, body_source, &explicit_names, &hoisted_sources) catch |err| switch (err) {
+                error.Unsupported => null,
+                else => return err,
+            }
+        else
+            null;
+        if (maybe_explicit_count) |explicit_count| {
+            const hoisted_count = explicit_count - 1;
+            for (hoisted_sources[0..hoisted_count]) |source| try self.emitCaptureSourceLoad(out, source);
+            try self.compileExprSliceInto(out, parent, rhs_source);
+            try self.inlineLambdaCallFromBodySource(out, parent, false, explicit_names[0..explicit_count], body_source, explicit_count);
+            _ = try out.tryShapeArgmaxSuffix();
+            return;
+        }
+
+        const fallback_explicit_names = [_]IdentRef{ident};
+        try self.emitLambdaValueFromBodySource(out, parent, false, &fallback_explicit_names, body_source);
         try self.compileExprSliceInto(out, parent, rhs_source);
         try out.appendOp(.call1);
+        _ = try out.tryShapeArgmaxSuffix();
+    }
+
+    fn collectInlineLocalBindingParams(
+        self: *Compiler,
+        parent: *Scope,
+        ident: IdentRef,
+        body_source: []const u8,
+        explicit_out: *[max_explicit_params]IdentRef,
+        source_out: *[max_explicit_params]CaptureSource,
+    ) KError!u8 {
+        var scope = Scope{
+            .parent = parent,
+            .allow_implicit_params = false,
+        };
+        defer scope.deinit(self.session.allocator);
+        try scope.declareParam(ident);
+
+        var temp_instructions = InstructionBuffer{};
+        try self.compileLambdaBodyInto(&temp_instructions, &scope, body_source);
+
+        var count: u8 = 0;
+        for (scope.capture_bindings[0..scope.capture_count]) |binding| {
+            switch (binding.source) {
+                .local, .inline_local => {
+                    if (count >= max_explicit_params - 1) return error.Unsupported;
+                    explicit_out[count] = binding.ident;
+                    source_out[count] = binding.source;
+                    count += 1;
+                },
+                .capture => {},
+            }
+        }
+        if (count >= max_explicit_params) return error.Unsupported;
+        explicit_out[count] = ident;
+        source_out[count] = .{ .local = 0 };
+        return count + 1;
+    }
+
+    fn emitCaptureSourceLoad(self: *Compiler, out: *InstructionBuffer, source: CaptureSource) KError!void {
+        _ = self;
+        switch (source) {
+            .local => |slot| try out.emitLoadLocal(slot),
+            .inline_local => |slot| try out.emitLoadInlineLocal(slot),
+            .capture => |slot| try out.emitLoadCapture(slot),
+        }
+    }
+
+    fn inlineLambdaCallFromBodySource(
+        self: *Compiler,
+        out: *InstructionBuffer,
+        parent: *Scope,
+        allow_implicit_params: bool,
+        explicit_names: []const IdentRef,
+        body_source: []const u8,
+        argc: u8,
+    ) KError!void {
+        var scope = Scope{
+            .parent = parent,
+            .allow_implicit_params = allow_implicit_params,
+            .param_binding_kind = .inline_local,
+        };
+        defer scope.deinit(self.session.allocator);
+        for (explicit_names) |name| try scope.declareParam(name);
+
+        const call_start = out.byte_len;
+        try out.appendOp(.enter_inline);
+        try out.appendByte(argc);
+        const body_start = out.byte_len;
+        try self.compileLambdaBodyInto(out, &scope, body_source);
+        if (argc != scope.arity) return error.Arity;
+        if (try self.tryShapeInlineCall(out, call_start, body_start, argc)) return;
+        try out.appendOp(.leave_inline);
+        try out.appendByte(argc);
     }
 
     fn scanLocalAssignmentStatement(self: *Compiler, source_slice: []const u8) KError!?LocalAssignment {
@@ -23303,6 +25215,15 @@ const Compiler = struct {
             const arg1 = scanSimpleAtom(text, arg0.next + 1) orelse return false;
             if (arg1.next >= text.len or text[arg1.next] != ']') return false;
             if (skipSpacesInSource(text, arg1.next + 1) != text.len) return false;
+            if (builtinFromName(callee_ident.text)) |builtin| {
+                if (builtinCallRequiresPreEmit(builtin)) {
+                    try self.emitPendingPrimary(out, scope, .{ .builtin = builtin });
+                    try self.emitSimpleAtom(out, scope, arg0.atom);
+                    try self.emitSimpleAtom(out, scope, arg1.atom);
+                    try out.appendOp(.call2);
+                    return true;
+                }
+            }
             try self.emitSimpleAtom(out, scope, arg0.atom);
             try self.emitSimpleAtom(out, scope, arg1.atom);
             if (builtinFromName(callee_ident.text)) |builtin| {
@@ -23329,17 +25250,17 @@ const Compiler = struct {
         return true;
     }
 
-    fn parseExpr(self: *Compiler, out: *InstructionBuffer, scope: *Scope) KError!void {
-        try self.parseDyadExpr(out, scope);
+    fn parseExpr(self: *Compiler, out: *InstructionBuffer, scope: *Scope) KError!ExprForm {
+        return try self.parseDyadExpr(out, scope);
     }
 
-    fn parseDyadExpr(self: *Compiler, out: *InstructionBuffer, scope: *Scope) KError!void {
-        try self.parseApply(out, scope);
+    fn parseDyadExpr(self: *Compiler, out: *InstructionBuffer, scope: *Scope) KError!ExprForm {
+        const left_form = try self.parseApply(out, scope);
         const left_simple = out.last_simple;
-        const op = self.peekDyadOp() orelse return;
+        const op = self.peekDyadOp() orelse return left_form;
         _ = self.consumeByte();
         const derived = if (op != '.') self.matchDerivedVerb() else null;
-        try self.parseDyadExpr(out, scope);
+        _ = try self.parseDyadExpr(out, scope);
         if (left_simple) |left| {
             if (out.last_simple) |right| {
                 if (left.end() == right.start()) {
@@ -23348,11 +25269,12 @@ const Compiler = struct {
             }
         }
         try self.emitParsedDyad(out, op, derived);
+        return .nounish;
     }
 
     fn peekDyadOp(self: *Compiler) ?u8 {
         return switch (self.peekByte() orelse return null) {
-            ',', '=', '<', '>', '+', '-', '&', '|', '#', '_', '^', '?', '$', '*', '%', '.', '@' => |op| op,
+            ',', '=', '<', '>', '+', '-', '!', '&', '|', '#', '_', '^', '?', '$', '*', '%', '.', '@' => |op| op,
             else => null,
         };
     }
@@ -23366,11 +25288,12 @@ const Compiler = struct {
                 '>' => .more,
                 '+' => .add,
                 '-' => .sub,
+                '!' => .iota,
                 '&' => .minimum,
                 '|' => .maximum,
                 '#' => .take,
                 '_' => .drop,
-                '^' => .reshape,
+                '^' => .null_fill_without,
                 '?' => .find,
                 '$' => .cast,
                 '*' => .mul,
@@ -23386,12 +25309,16 @@ const Compiler = struct {
             '>' => try out.appendOp(.more),
             '+' => try out.appendShapedDyad(.add),
             '-' => try out.appendShapedDyad(.sub),
+            '!' => try out.appendOp(.mod),
             '&' => try out.appendOp(.minimum),
             '|' => try out.appendOp(.maximum),
             '#' => try out.appendOp(.take),
             '_' => try out.appendOp(.drop),
-            '^' => try out.appendOp(.reshape),
-            '?' => try out.appendOp(.find),
+            '^' => try out.appendOp(.fill_without),
+            '?' => {
+                try out.appendOp(.find);
+                _ = try out.tryShapeArgmaxSuffix();
+            },
             '$' => try out.appendOp(.cast),
             '*' => try out.appendShapedDyad(.mul),
             '%' => try out.appendShapedDyad(.div),
@@ -23401,19 +25328,26 @@ const Compiler = struct {
         }
     }
 
-    fn parseApply(self: *Compiler, out: *InstructionBuffer, scope: *Scope) KError!void {
-        try self.parseUnary(out, scope);
-        if (self.startsJuxtapositionOperand()) {
-            try self.parseExpr(out, scope);
+    fn parseApply(self: *Compiler, out: *InstructionBuffer, scope: *Scope) KError!ExprForm {
+        const left_form = try self.parseUnary(out, scope);
+        if (self.startsJuxtapositionOperand(left_form)) {
+            _ = try self.parseExpr(out, scope);
             try out.appendOp(.call1);
+            _ = try out.tryShapeArgmaxSuffix();
+            return .nounish;
         }
+        return left_form;
     }
 
-    fn parseUnary(self: *Compiler, out: *InstructionBuffer, scope: *Scope) KError!void {
+    fn parseUnary(self: *Compiler, out: *InstructionBuffer, scope: *Scope) KError!ExprForm {
+        if (self.peekStartsSignedNumericLiteral()) {
+            try self.emitNumericLiteralOrVector(out);
+            return .nounish;
+        }
         if (self.peekPrimaryUnaryOp()) |op| {
             _ = self.consumeByte();
             if (op == '+' or op == '-' or op == '%' or op == '$' or op == '?' or op == '.') {
-                try self.parseUnary(out, scope);
+                _ = try self.parseUnary(out, scope);
                 switch (op) {
                     '+' => try out.appendOp(.transpose),
                     '-' => try out.appendShapedMonad(.negate),
@@ -23423,10 +25357,10 @@ const Compiler = struct {
                     '.' => try out.appendOp(.eval_string),
                     else => unreachable,
                 }
-                return;
+                return .nounish;
             }
             if (op == '!' or op == '|' or op == '<' or op == '>' or op == '~' or op == '#' or op == '_' or op == '^') {
-                try self.parseDyadExpr(out, scope);
+                _ = try self.parseDyadExpr(out, scope);
                 switch (op) {
                     '!' => try out.appendOp(.iota),
                     '|' => try out.appendOp(.reverse),
@@ -23435,18 +25369,18 @@ const Compiler = struct {
                     '~' => try out.appendOp(.not),
                     '#' => try out.appendOp(.count),
                     '_' => try out.appendOp(.floor),
-                    '^' => try out.appendOp(.sort),
+                    '^' => try out.appendOp(.null_test),
                     else => unreachable,
                 }
-                return;
+                return .nounish;
             }
         }
-        try self.parsePostfix(out, scope);
+        return try self.parsePostfix(out, scope);
     }
 
-    fn parsePostfix(self: *Compiler, out: *InstructionBuffer, scope: *Scope) KError!void {
-        const pending = try self.parsePrimary(out, scope);
-        try self.parsePostfixTail(out, scope, pending);
+    fn parsePostfix(self: *Compiler, out: *InstructionBuffer, scope: *Scope) KError!ExprForm {
+        const primary = try self.parsePrimary(out, scope);
+        return try self.parsePostfixTail(out, scope, primary.pending, primary.form);
     }
 
     fn scanProjectionSlots(self: *const Compiler, start_index: usize) KError!ProjectionSlotSummary {
@@ -23535,13 +25469,15 @@ const Compiler = struct {
         return error.Parse;
     }
 
-    fn parsePostfixTail(self: *Compiler, out: *InstructionBuffer, scope: *Scope, initial_pending: PendingPrimary) KError!void {
+    fn parsePostfixTail(self: *Compiler, out: *InstructionBuffer, scope: *Scope, initial_pending: PendingPrimary, initial_form: ExprForm) KError!ExprForm {
         var pending = initial_pending;
+        var form = initial_form;
         while (self.matchDerivedVerb()) |kind| {
             try self.emitPendingPrimary(out, scope, pending);
             pending = .none;
             try out.appendOp(.make_adverb);
             try out.appendByte(@intFromEnum(kind));
+            form = .verbial;
         }
         while (self.matchChar('[')) {
             const global_slot = switch (pending) {
@@ -23566,7 +25502,7 @@ const Compiler = struct {
             var builtin_emitted_pre_args = false;
             if (!needs_projection) {
                 if (builtin_id) |id| {
-                    if (id == .grad or id == .valuegrad) {
+                    if (builtinCallRequiresPreEmit(id)) {
                         try self.emitPendingPrimary(out, scope, .{ .builtin = id });
                         pending = .none;
                         builtin_emitted_pre_args = true;
@@ -23578,7 +25514,7 @@ const Compiler = struct {
             if (needs_projection) {
                 for (0..slot_summary.slot_count) |slot_idx| {
                     if (!slot_summary.isHole(slot_idx)) {
-                        try self.parseExpr(out, scope);
+                        _ = try self.parseExpr(out, scope);
                         argc += 1;
                     }
                     if (slot_idx + 1 == slot_summary.slot_count) {
@@ -23589,7 +25525,7 @@ const Compiler = struct {
                 }
             } else if (!self.matchChar(']')) {
                 while (true) {
-                    try self.parseExpr(out, scope);
+                    _ = try self.parseExpr(out, scope);
                     argc += 1;
                     if (self.matchChar(']')) break;
                     try self.expectChar(';');
@@ -23600,6 +25536,7 @@ const Compiler = struct {
                 try out.appendByte(slot_summary.slot_count);
                 try out.appendU64(slot_summary.hole_mask);
                 pending = .none;
+                form = .nounish;
                 continue;
             }
             if (builtin_id) |id| {
@@ -23612,7 +25549,10 @@ const Compiler = struct {
                     pending = .none;
                 }
                 switch (argc) {
-                    1 => try out.appendOp(.call1),
+                    1 => {
+                        try out.appendOp(.call1);
+                        _ = try out.tryShapeArgmaxSuffix();
+                    },
                     2 => try out.appendOp(.call2),
                     else => {
                         try out.appendOp(.call);
@@ -23639,7 +25579,10 @@ const Compiler = struct {
                 try self.inlineLambdaCall(out, scope, lambda, argc);
             } else {
                 switch (argc) {
-                    1 => try out.appendOp(.call1),
+                    1 => {
+                        try out.appendOp(.call1);
+                        _ = try out.tryShapeArgmaxSuffix();
+                    },
                     2 => try out.appendOp(.call2),
                     else => {
                         try out.appendOp(.call);
@@ -23648,8 +25591,10 @@ const Compiler = struct {
                 }
             }
             pending = .none;
+            form = .nounish;
         }
         try self.emitPendingPrimary(out, scope, pending);
+        return form;
     }
 
     fn matchDerivedVerb(self: *Compiler) ?DerivedVerbKind {
@@ -23705,11 +25650,12 @@ const Compiler = struct {
                     .not => try out.appendOp(.not),
                     .count => try out.appendOp(.count),
                     .floor => try out.appendOp(.floor),
+                    .null_fill_without => try out.appendOp(.null_test),
                     .sort => try out.appendOp(.sort),
                     .stringify => try out.appendOp(.stringify),
                     .unique => try out.appendOp(.unique),
                     .eval_string => try out.appendOp(.eval_string),
-                    .concat, .take, .drop, .equal, .reshape, .cast, .contains, .split, .join, .find, .grad, .valuegrad, .prng => return false,
+                    .concat, .take, .drop, .equal, .reshape, .cast, .contains, .split, .join, .find, .grad, .valuegrad, .prng, .load, .rotcache, .rotcacheupdate, .rotcacheview, .rmsnorm => return false,
                 }
                 return true;
             },
@@ -23719,6 +25665,7 @@ const Compiler = struct {
                     .sub => try out.appendOp(.sub),
                     .mul => try out.appendOp(.mul),
                     .div => try out.appendOp(.div),
+                    .iota => try out.appendOp(.mod),
                     .minimum => try out.appendOp(.minimum),
                     .maximum => try out.appendOp(.maximum),
                     .less => try out.appendOp(.less),
@@ -23727,6 +25674,7 @@ const Compiler = struct {
                     .concat => try out.appendOp(.concat),
                     .count => try out.appendOp(.take),
                     .floor => try out.appendOp(.drop),
+                    .null_fill_without => try out.appendOp(.fill_without),
                     .sort => try out.appendOp(.reshape),
                     .equal => try out.appendOp(.equal),
                     .cast => try out.appendOp(.cast),
@@ -23734,7 +25682,7 @@ const Compiler = struct {
                     .split => try out.appendOp(.split),
                     .join => try out.appendOp(.join),
                     .find => try out.appendOp(.find),
-                    .iota, .reverse, .grade_up, .grade_down, .not, .take, .drop, .reshape, .stringify, .unique, .eval_string, .grad, .valuegrad, .prng => return false,
+                    .reverse, .grade_up, .grade_down, .not, .take, .drop, .reshape, .stringify, .unique, .eval_string, .grad, .valuegrad, .prng, .load, .rotcache, .rotcacheupdate, .rotcacheview, .rmsnorm => return false,
                 }
                 return true;
             },
@@ -23742,27 +25690,37 @@ const Compiler = struct {
         }
     }
 
+    fn builtinCallRequiresPreEmit(builtin: BuiltinId) bool {
+        return switch (builtin) {
+            .exp, .log, .tanh, .sigmoid, .grad, .valuegrad, .prng, .load, .rotcache, .rotcacheupdate, .rotcacheview, .rmsnorm => true,
+            else => false,
+        };
+    }
+
     fn tryParseBuiltinInnerProduct(self: *Compiler) KError!?PendingPrimary {
         const reduce_ch = self.peekByte() orelse return null;
         const reduce = builtinFromChar(reduce_ch) orelse return null;
+        if (!builtinSupportsInnerProductVerb(reduce)) return null;
         var next = skipSpacesInSource(self.source, self.index + 1);
         if (next >= self.source.len or self.source[next] != '/') return null;
         next = skipSpacesInSource(self.source, next + 1);
         if (next >= self.source.len) return null;
         const map_ch = self.source[next];
         const map = builtinFromChar(map_ch) orelse return null;
+        if (!builtinSupportsInnerProductVerb(map)) return null;
+        if (self.peekPrimaryUnaryOpAt(next) != null) return null;
         self.index = skipSpacesInSource(self.source, next + 1);
         return .{ .const_value = Value.closure(try self.session.allocFrozenInnerProductClosure(reduce, map)) };
     }
 
-    fn parsePrimary(self: *Compiler, out: *InstructionBuffer, scope: *Scope) KError!PendingPrimary {
+    fn parsePrimary(self: *Compiler, out: *InstructionBuffer, scope: *Scope) KError!ParsedPrimary {
         const ch = self.peekByte() orelse return error.Parse;
         if (ch == '@') {
             const next = skipSpacesInSource(self.source, self.index + 1);
             if (next < self.source.len and self.source[next] == '[') {
                 self.index = skipSpacesInSource(self.source, next + 1);
                 try self.parseAmendSpecialForm(out, scope, false);
-                return .none;
+                return .{ .pending = .none, .form = .nounish };
             }
         }
         if (ch == '.') {
@@ -23770,12 +25728,12 @@ const Compiler = struct {
             if (next < self.source.len and self.source[next] == '[') {
                 self.index = skipSpacesInSource(self.source, next + 1);
                 try self.parseAmendSpecialForm(out, scope, true);
-                return .none;
+                return .{ .pending = .none, .form = .nounish };
             }
         }
         if (std.ascii.isDigit(ch)) {
             try self.emitNumericLiteralOrVector(out);
-            return .none;
+            return .{ .pending = .none, .form = .nounish };
         }
 
         if (ch == '$') {
@@ -23783,40 +25741,40 @@ const Compiler = struct {
             if (next < self.source.len and self.source[next] == '[') {
                 self.index = skipSpacesInSource(self.source, next + 1);
                 try self.parseCondSpecialForm(out, scope);
-                return .none;
+                return .{ .pending = .none, .form = .nounish };
             }
         }
 
         switch (ch) {
             '(' => {
                 _ = self.consumeByte();
-                try self.parseExpr(out, scope);
+                const form = try self.parseExpr(out, scope);
                 var count: u8 = 1;
                 if (self.matchChar(';')) {
                     while (true) {
-                        try self.parseExpr(out, scope);
+                        _ = try self.parseExpr(out, scope);
                         count = std.math.add(u8, count, 1) catch return error.Unsupported;
                         if (self.matchChar(')')) break;
                         try self.expectChar(';');
                     }
                     try out.appendOp(.make_vector);
                     try out.appendByte(count);
-                    return .none;
+                    return .{ .pending = .none, .form = .nounish };
                 }
                 try self.expectChar(')');
-                return .none;
+                return .{ .pending = .none, .form = form };
             },
             '[' => {
                 const prior = out.previous_simple;
                 const previous = out.last_simple;
                 const literal_start = out.byte_len;
-                var literal_mode: ?HostArrayElem = null;
+                var literal_mode: ?HostDenseElem = null;
                 var literal_mode_known = true;
                 _ = self.consumeByte();
                 var count: u8 = 0;
                 if (!self.matchChar(']')) {
                     while (true) {
-                        try self.parseExpr(out, scope);
+                        _ = try self.parseExpr(out, scope);
                         const item_mode = if (out.last_simple) |simple| InstructionBuffer.simpleNumericMode(simple) else null;
                         if (!literal_mode_known or item_mode == null) {
                             literal_mode = null;
@@ -23848,16 +25806,16 @@ const Compiler = struct {
                     },
                 };
                 if (previous == null) out.previous_simple = prior;
-                return .none;
+                return .{ .pending = .none, .form = .nounish };
             },
             '{' => {
                 _ = self.consumeByte();
-                return .{ .lambda_source = try self.parseLambdaSource() };
+                return .{ .pending = .{ .lambda_source = try self.parseLambdaSource() }, .form = .verbial };
             },
-            '"' => return .{ .const_value = try self.parseStringLiteralValue() },
+            '"' => return .{ .pending = .{ .const_value = try self.parseStringLiteralValue() }, .form = .nounish },
             '`' => {
                 const first = try self.parseSymbolLiteralValue();
-                if (self.peekByte() != '`') return .{ .const_value = first };
+                if (self.peekByte() != '`') return .{ .pending = .{ .const_value = first }, .form = .nounish };
 
                 const vector_start = out.byte_len;
                 try self.emitPendingPrimary(out, scope, .{ .const_value = first });
@@ -23870,35 +25828,39 @@ const Compiler = struct {
                 try out.appendOp(.make_vector);
                 try out.appendByte(count);
                 out.noteArrayValue(vector_start, out.byte_len, null);
-                return .none;
+                return .{ .pending = .none, .form = .nounish };
             },
             '+', '-', '*', '%', '!', '&', '|', '<', '>', '~', ',', '#', '_', '^', '=' => {
-                if (try self.tryParseBuiltinInnerProduct()) |inner_product| return inner_product;
+                if (try self.tryParseBuiltinInnerProduct()) |inner_product| {
+                    return .{ .pending = inner_product, .form = .verbial };
+                }
                 _ = self.consumeByte();
                 const builtin = builtinFromChar(ch) orelse return error.Unsupported;
                 if (self.compile_mode == .frozen) {
                     if (self.matchDerivedVerb()) |kind| {
                         const closure = try self.session.allocFrozenDerivedClosure(kind, Value.builtin(builtin));
-                        return .{ .const_value = Value.closure(closure) };
+                        return .{ .pending = .{ .const_value = Value.closure(closure) }, .form = .verbial };
                     }
                 }
-                return .{ .builtin = builtin };
+                return .{ .pending = .{ .builtin = builtin }, .form = .verbial };
             },
             else => {},
         }
 
         if (isIdentStart(ch)) {
-            if (try self.appendFastSingleCharLocalLoad(out, scope, ch)) return .none;
+            if (try self.appendFastSingleCharLocalLoad(out, scope, ch)) {
+                return .{ .pending = .none, .form = .nounish };
+            }
             const ident = self.scanIdentifier() orelse return error.Parse;
-            return try self.pendingResolvedIdent(out, scope, ident);
+            return .{ .pending = try self.pendingResolvedIdent(out, scope, ident), .form = .nounish };
         }
         return error.Parse;
     }
 
     fn parseAmendSpecialForm(self: *Compiler, out: *InstructionBuffer, scope: *Scope, deep: bool) KError!void {
-        try self.parseExpr(out, scope);
+        _ = try self.parseExpr(out, scope);
         try self.expectChar(';');
-        try self.parseExpr(out, scope);
+        _ = try self.parseExpr(out, scope);
         try self.expectChar(';');
 
         var mode: AmendMode = .unary;
@@ -23906,7 +25868,7 @@ const Compiler = struct {
             _ = self.consumeByte();
             mode = .assign;
         } else {
-            try self.parseExpr(out, scope);
+            _ = try self.parseExpr(out, scope);
         }
 
         if (self.matchChar(']')) {
@@ -23917,28 +25879,28 @@ const Compiler = struct {
         }
 
         try self.expectChar(';');
-        try self.parseExpr(out, scope);
+        _ = try self.parseExpr(out, scope);
         try self.expectChar(']');
         try out.appendOp(if (deep) .deep_amend else .amend);
         try out.appendByte(@intFromEnum(if (mode == .assign) AmendMode.assign else AmendMode.binary));
     }
 
     fn parseCondSpecialForm(self: *Compiler, out: *InstructionBuffer, scope: *Scope) KError!void {
-        try self.parseExpr(out, scope);
+        _ = try self.parseExpr(out, scope);
         try self.expectChar(';');
 
         try out.appendOp(.jump_if_false);
         const false_jump_patch = out.byte_len;
         try out.appendU16(0);
 
-        try self.parseExpr(out, scope);
+        _ = try self.parseExpr(out, scope);
         try out.appendOp(.jump);
         const end_jump_patch = out.byte_len;
         try out.appendU16(0);
 
         try self.expectChar(';');
         try out.patchU16(false_jump_patch, std.math.cast(u16, out.byte_len) orelse return error.Unsupported);
-        try self.parseExpr(out, scope);
+        _ = try self.parseExpr(out, scope);
         try self.expectChar(']');
         try out.patchU16(end_jump_patch, std.math.cast(u16, out.byte_len) orelse return error.Unsupported);
     }
@@ -24019,6 +25981,16 @@ const Compiler = struct {
         }
 
         if (argc == 1) {
+            if (Session.classifyArgmaxBytecode(body, out.constantSlice())) |kind| {
+                const operand_len = Session.argmaxBytecodeOperandLen(body, out.constantSlice(), kind);
+                if (operand_len == 2 and body[0] == @intFromEnum(Op.load_inline_local) and body[1] == 0) {
+                    out.byte_len = call_start;
+                    out.invalidateSimple();
+                    try out.appendOp(.inline_call_argmax1);
+                    return true;
+                }
+            }
+
             if (body.len == 2 and body[1] == 0) {
                 const op: ?Op = switch (body[0]) {
                     @intFromEnum(Op.neg_inline_local) => .inline_call_negate1,
@@ -24137,6 +26109,13 @@ const Compiler = struct {
                     return true;
                 }
             }
+
+            if (body.len == 3 and body[0] == @intFromEnum(Op.load_inline_local) and body[1] == 0 and body[2] == @intFromEnum(Op.argmax)) {
+                out.byte_len = call_start;
+                out.invalidateSimple();
+                try out.appendOp(.inline_call_argmax1);
+                return true;
+            }
         }
 
         return false;
@@ -24171,14 +26150,11 @@ const Compiler = struct {
         try self.compileLambdaBodyInto(body, &scope, body_source);
         try finishCompiledInstructions(body, .tail_position);
 
-        const code = if (self.compile_mode == .scratch)
-            blk: {
-                const scratch_code = lambda_scratch.?.finalize(scope.arity);
-                self.assignCodeProfile(scratch_code, .lambda, body_source);
-                break :blk scratch_code;
-            }
-        else
-            try self.finalizeCode(scope.arity, body, .lambda, body_source);
+        const code = if (self.compile_mode == .scratch) blk: {
+            const scratch_code = lambda_scratch.?.finalize(scope.arity);
+            self.assignCodeProfile(scratch_code, .lambda, body_source);
+            break :blk scratch_code;
+        } else try self.finalizeCode(scope.arity, body, .lambda, body_source);
         const template = try self.code_allocator.create(LambdaTemplate);
         const captures = if (scope.capture_count == 0)
             &[_]CaptureSource{}
@@ -24383,10 +26359,14 @@ const Compiler = struct {
     }
 
     fn peekPrimaryUnaryOp(self: *const Compiler) ?u8 {
-        if (self.index >= self.source.len) return null;
-        const ch = self.source[self.index];
+        return self.peekPrimaryUnaryOpAt(self.index);
+    }
+
+    fn peekPrimaryUnaryOpAt(self: *const Compiler, index: usize) ?u8 {
+        if (index >= self.source.len) return null;
+        const ch = self.source[index];
         if (ch != '+' and ch != '-' and ch != '%' and ch != '!' and ch != '&' and ch != '|' and ch != '<' and ch != '>' and ch != '~' and ch != '#' and ch != '_' and ch != '^' and ch != '$' and ch != '?' and ch != '.') return null;
-        const next = skipSpacesInSource(self.source, self.index + 1);
+        const next = skipSpacesInSource(self.source, index + 1);
         if (next >= self.source.len) return null;
         const follower = self.source[next];
         if (!isIdentStart(follower) and !std.ascii.isDigit(follower) and follower != '(' and follower != '{' and follower != '"' and follower != '`' and builtinFromChar(follower) == null) {
@@ -24395,16 +26375,19 @@ const Compiler = struct {
         return ch;
     }
 
-    fn startsJuxtapositionOperand(self: *const Compiler) bool {
+    fn startsJuxtapositionOperand(self: *const Compiler, left_form: ExprForm) bool {
         if (self.index >= self.source.len) return false;
         if (self.source[self.index] == '$') {
             const next = skipSpacesInSource(self.source, self.index + 1);
             if (next < self.source.len and self.source[next] == '[') return true;
         }
-        return switch (self.source[self.index]) {
+        if (switch (self.source[self.index]) {
             '0'...'9', '(', '{', '[', '"', '`' => true,
             else => isIdentStart(self.source[self.index]) and builtinFromChar(self.source[self.index]) == null,
-        };
+        }) return true;
+        if (left_form != .verbial) return false;
+        const op = self.peekPrimaryUnaryOp() orelse return false;
+        return op != '.';
     }
 
     fn scanIdentifierAt(self: *const Compiler, start: usize) ?ScannedIdent {
@@ -24461,6 +26444,48 @@ const Compiler = struct {
         }
     }
 
+    fn peekStartsSignedNumericLiteral(self: *const Compiler) bool {
+        if (self.index >= self.source.len or self.source[self.index] != '-') return false;
+        const next = skipSpacesInSource(self.source, self.index + 1);
+        return next < self.source.len and std.ascii.isDigit(self.source[next]);
+    }
+
+    fn emitSignedNumber(self: *Compiler, out: *InstructionBuffer) KError!void {
+        if (!self.peekStartsSignedNumericLiteral()) return error.Parse;
+        const digit_start = skipSpacesInSource(self.source, self.index + 1);
+        const scanned = scanNumericLiteral(self.source, digit_start) orelse return error.Parse;
+        self.index = scanned.next;
+
+        switch (scanned.literal) {
+            .bool => return error.Parse,
+            .float => |value| return try self.emitConstFloat(out, -value),
+            .int => |value| {
+                const negated = try checkedIntOp(.sub, 0, value);
+                if (Value.fitsInlineInt(negated)) {
+                    return try out.emitConstInt(negated);
+                }
+                try out.appendOp(.const_value);
+                const pool_slot = try out.internConstant(try self.session.ownedConstantInt(
+                    self.code_allocator,
+                    switch (self.compile_mode) {
+                        .frozen => .frozen,
+                        .scratch => .scratch,
+                    },
+                    negated,
+                ));
+                try out.appendByte(pool_slot);
+                out.noteSimple(.{
+                    .const_value = .{
+                        .start = out.byte_len - 2,
+                        .end = out.byte_len,
+                        .value = out.constants[pool_slot],
+                    },
+                });
+                return;
+            },
+        }
+    }
+
     fn emitConstFloat(self: *Compiler, out: *InstructionBuffer, value: f64) KError!void {
         try out.appendOp(.const_value);
         const pool_slot = try out.internConstant(try self.session.ownedConstantFloat(
@@ -24497,11 +26522,19 @@ const Compiler = struct {
     fn emitNumericLiteralOrVector(self: *Compiler, out: *InstructionBuffer) KError!void {
         const literal_start = out.byte_len;
         var count: u8 = 0;
-        var literal_mode: ?HostArrayElem = null;
+        var literal_mode: ?HostDenseElem = null;
 
         while (true) {
+            if (self.peekStartsSignedNumericLiteral()) {
+                try self.emitSignedNumber(out);
+                count = std.math.add(u8, count, 1) catch return error.Unsupported;
+                literal_mode = mergeLiteralMode(literal_mode, out.last_simple);
+                if (!self.peekStartsNumericLiteral() and !self.peekStartsSignedNumericLiteral()) break;
+                continue;
+            }
+
             if (try self.tryEmitBoolDigitVector(out, &count, &literal_mode)) {
-                if (!self.peekStartsNumericLiteral()) break;
+                if (!self.peekStartsNumericLiteral() and !self.peekStartsSignedNumericLiteral()) break;
                 continue;
             }
 
@@ -24510,7 +26543,7 @@ const Compiler = struct {
             count = std.math.add(u8, count, 1) catch return error.Unsupported;
             literal_mode = mergeLiteralMode(literal_mode, out.last_simple);
 
-            if (!self.peekStartsNumericLiteral()) break;
+            if (!self.peekStartsNumericLiteral() and !self.peekStartsSignedNumericLiteral()) break;
         }
 
         if (count == 0) return error.Parse;
@@ -24521,7 +26554,7 @@ const Compiler = struct {
         out.noteArrayValue(literal_start, out.byte_len, literal_mode);
     }
 
-    fn tryEmitBoolDigitVector(self: *Compiler, out: *InstructionBuffer, count: *u8, literal_mode: *?HostArrayElem) KError!bool {
+    fn tryEmitBoolDigitVector(self: *Compiler, out: *InstructionBuffer, count: *u8, literal_mode: *?HostDenseElem) KError!bool {
         const start = self.index;
         if (start >= self.source.len or !std.ascii.isDigit(self.source[start])) return false;
 
@@ -24548,7 +26581,7 @@ const Compiler = struct {
     }
 };
 
-fn mergeLiteralMode(existing: ?HostArrayElem, simple: ?ProducedValue) ?HostArrayElem {
+fn mergeLiteralMode(existing: ?HostDenseElem, simple: ?ProducedValue) ?HostDenseElem {
     const item_mode = if (simple) |value| InstructionBuffer.simpleNumericMode(value) else null;
     if (item_mode == null) return null;
     if (existing == null) return item_mode;
@@ -24676,9 +26709,16 @@ fn builtinFromChar(ch: u8) ?BuiltinId {
         ',' => .concat,
         '#' => .count,
         '_' => .floor,
-        '^' => .sort,
+        '^' => .null_fill_without,
         '=' => .equal,
         else => null,
+    };
+}
+
+fn builtinSupportsInnerProductVerb(builtin: BuiltinId) bool {
+    return switch (builtin) {
+        .add, .sub, .mul, .div, .minimum, .maximum, .less, .more, .concat, .count, .floor, .sort, .equal => true,
+        .iota, .not, .reverse, .grade_up, .grade_down, .stringify, .unique, .eval_string, .cast, .contains, .split, .join, .find, .grad, .valuegrad, .prng, .load, .rotcache, .rotcacheupdate, .rotcacheview, .rmsnorm, .exp, .log, .tanh, .sigmoid, .take, .drop, .reshape, .null_fill_without => false,
     };
 }
 
@@ -24691,8 +26731,17 @@ fn builtinFromName(name: []const u8) ?BuiltinId {
     if (std.mem.eql(u8, name, "contains")) return .contains;
     if (std.mem.eql(u8, name, "split")) return .split;
     if (std.mem.eql(u8, name, "join")) return .join;
+    if (std.mem.eql(u8, name, "null")) return .null_fill_without;
+    if (std.mem.eql(u8, name, "fill")) return .null_fill_without;
+    if (std.mem.eql(u8, name, "without")) return .null_fill_without;
+    if (std.mem.eql(u8, name, "except")) return .null_fill_without;
     if (std.mem.eql(u8, name, "grad")) return .grad;
     if (std.mem.eql(u8, name, "valuegrad")) return .valuegrad;
     if (std.mem.eql(u8, name, "prng")) return .prng;
+    if (std.mem.eql(u8, name, "load")) return .load;
+    if (std.mem.eql(u8, name, "rotcache")) return .rotcache;
+    if (std.mem.eql(u8, name, "rotcacheupdate")) return .rotcacheupdate;
+    if (std.mem.eql(u8, name, "rotcacheview")) return .rotcacheview;
+    if (std.mem.eql(u8, name, "rmsnorm")) return .rmsnorm;
     return null;
 }

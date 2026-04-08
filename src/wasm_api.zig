@@ -1,8 +1,10 @@
 const std = @import("std");
+const build_options = @import("build_options");
 const runtime_device = @import("device.zig");
 const runtime = @import("runtime.zig");
 
 const page_size: usize = 64 * 1024;
+const wasm_exports_accelerator_handles = build_options.wasm_exports_accelerator_handles;
 
 var heap_offset: usize = 4096;
 var session: ?runtime.Session = null;
@@ -60,6 +62,7 @@ fn clearLastValue() void {
 }
 
 fn ensureLastArrayInfo() bool {
+    if (comptime !wasm_exports_accelerator_handles) return false;
     if (last_array_info != null) return true;
     const active = &(session orelse return false);
     const value = last_value orelse return false;
@@ -156,7 +159,9 @@ pub export fn kiwi_reset_input_arena() void {
 }
 
 pub export fn kiwi_init(device: u32) i32 {
-    if (device == 0xFFFF_FFFF) _ = kiwi_force_backend_surface();
+    if (comptime wasm_exports_accelerator_handles) {
+        if (device == 0xFFFF_FFFF) _ = kiwi_force_backend_surface();
+    }
     clearLastValue();
     clearLastError();
     if (session) |*existing| {
@@ -250,18 +255,22 @@ pub export fn kiwi_last_bool() u32 {
 }
 
 pub export fn kiwi_last_array_handle() u32 {
+    if (comptime !wasm_exports_accelerator_handles) return 0;
     return if (ensureLastArrayInfo()) last_array_info.?.handle else 0;
 }
 
 pub export fn kiwi_last_array_dtype() i32 {
+    if (comptime !wasm_exports_accelerator_handles) return 0;
     return if (ensureLastArrayInfo()) last_array_info.?.dtype else 0;
 }
 
 pub export fn kiwi_last_array_ndim() u32 {
+    if (comptime !wasm_exports_accelerator_handles) return 0;
     return if (ensureLastArrayInfo()) last_array_info.?.ndim else 0;
 }
 
 pub export fn kiwi_last_array_shape_dim(index: u32) i32 {
+    if (comptime !wasm_exports_accelerator_handles) return 0;
     if (!ensureLastArrayInfo()) return 0;
     const info = last_array_info.?;
     if (index >= info.ndim) return 0;
@@ -269,6 +278,7 @@ pub export fn kiwi_last_array_shape_dim(index: u32) i32 {
 }
 
 pub export fn kiwi_last_array_size() u32 {
+    if (comptime !wasm_exports_accelerator_handles) return 0;
     if (!ensureLastArrayInfo()) return 0;
     const info = last_array_info.?;
     var total: usize = 1;
@@ -292,6 +302,7 @@ pub export fn kiwi_last_rendered_len() u32 {
 }
 
 pub export fn kiwi_force_backend_surface() i32 {
+    if (comptime !wasm_exports_accelerator_handles) return 1;
     var probe = runtime.Session.initWithDevice(std.heap.wasm_allocator, .gpu) catch return 1;
     defer probe.deinit();
     const value = probe.evalSource("x:(1 2;3 4);x.(+x)") catch return 2;

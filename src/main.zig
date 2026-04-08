@@ -21,6 +21,11 @@ const bench_tools = if (enable_bench_cli) @import("bench_internal.zig") else str
     };
 
     pub const BenchTiming = struct {};
+    pub const BenchSampleProfile = struct {
+        use_calibration: bool,
+        warmup_samples: usize,
+        measured_samples: usize,
+    };
     pub const DenseAutodiffAuditRow = struct {};
     pub const default_target_batch_ms = 30.0;
     pub const default_vector_size: usize = 100_000;
@@ -57,6 +62,18 @@ const bench_tools = if (enable_bench_cli) @import("bench_internal.zig") else str
         return error.InvalidArgument;
     }
 
+    pub fn sampleProfileForCase(_: []const u8) @This().BenchSampleProfile {
+        return .{
+            .use_calibration = true,
+            .warmup_samples = 1,
+            .measured_samples = 7,
+        };
+    }
+
+    pub fn isDefaultBenchSuiteCase(_: []const u8) bool {
+        return true;
+    }
+
     pub fn auditDenseAutodiffCli(_: std.mem.Allocator) !void {
         return error.InvalidArgument;
     }
@@ -71,6 +88,7 @@ const bench_tools = if (enable_bench_cli) @import("bench_internal.zig") else str
 };
 
 pub const BenchTiming = bench_tools.BenchTiming;
+pub const BenchSampleProfile = bench_tools.BenchSampleProfile;
 pub const DenseAutodiffAuditRow = bench_tools.DenseAutodiffAuditRow;
 
 const TimingRequest = struct {
@@ -446,7 +464,7 @@ fn usage() !void {
     );
     if (comptime enable_bench_cli) {
         try stderr.print(
-            "  {s} bench [--device cpu|gpu] [--backend auto|host|mlx_cpu|mlx_gpu] [--target-batch-ms N] [--size N] [--matmul-size N] case\n",
+            "  {s} bench [--device cpu|gpu] [--backend auto|host|mlx_cpu|mlx_gpu] [--target-batch-ms N] [--size N] [--matmul-size N] case  (case: name, all, all-full, or stress)\n",
             .{cli_invocation},
         );
     }
@@ -591,7 +609,7 @@ fn emitBackendReport(session: *runtime.Session, device: runtime_device.DevicePre
         session.lastDenseAutodiffExecPath().?
     else if (session.lastDenseExecBackend() != null)
         session.lastDenseExecBackend().?
-    else if (session.debugMlxRealizationCount() != 0 and session.debugHostReadbackCount() == 0)
+    else if (session.debugBackendRealizationCount() != 0 and session.debugHostReadbackCount() == 0)
         "mlx"
     else
         "host";
@@ -1111,6 +1129,18 @@ pub fn resolveVectorSizeForTesting(case_name: []const u8, requested_size: usize)
     return bench_tools.resolveVectorSize(case_name, requested_size);
 }
 
+pub fn resolveMatmulSizeForTesting(case_name: []const u8, requested_size: usize) usize {
+    return bench_tools.resolveMatmulSize(case_name, requested_size);
+}
+
 pub fn isRealisticStringBenchCaseForTesting(case_name: []const u8) bool {
     return bench_tools.isRealisticStringBenchCase(case_name);
+}
+
+pub fn benchmarkSampleProfileForTesting(case_name: []const u8) BenchSampleProfile {
+    return bench_tools.sampleProfileForCase(case_name);
+}
+
+pub fn isDefaultBenchSuiteCaseForTesting(case_name: []const u8) bool {
+    return bench_tools.isDefaultBenchSuiteCase(case_name);
 }
