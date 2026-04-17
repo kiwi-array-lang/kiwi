@@ -12,10 +12,275 @@ const c = if (zig_builtin.target.cpu.arch == .wasm32)
 else
     @import("kiwi_runtime_c").c;
 const mlx = @import("mlx.zig");
+const safetensors = @import("safetensors.zig");
 pub const enable_probe_instrumentation = build_options.enable_probe_instrumentation;
 pub const enable_sampling_profile = build_options.enable_sampling_profile;
 const enable_string_instrumentation = build_options.enable_string_instrumentation;
 const runtime_has_mlx = build_options.runtime_has_mlx;
+const runtime_has_duckdb = build_options.runtime_has_duckdb;
+const duckdb_runtime = if (runtime_has_duckdb)
+    @import("duckdb_runtime.zig")
+else
+    struct {
+        pub const SourceKind = enum {
+            csv,
+            parquet,
+
+            pub fn detect(path: []const u8) ?SourceKind {
+                const ext = std.fs.path.extension(path);
+                if (std.ascii.eqlIgnoreCase(ext, ".csv")) return .csv;
+                if (std.ascii.eqlIgnoreCase(ext, ".parquet")) return .parquet;
+                return null;
+            }
+
+            pub fn text(self: SourceKind) []const u8 {
+                return @tagName(self);
+            }
+        };
+
+        pub const Connection = struct {
+            pub fn init(_: std.mem.Allocator, _: ?[]const u8) !Connection {
+                return error.Unsupported;
+            }
+
+            pub fn deinit(_: *Connection) void {}
+
+            pub fn validateQuery(_: *Connection, _: []const u8) !void {
+                return error.Unsupported;
+            }
+
+            pub fn countFileRows(_: *Connection, _: SourceKind, _: []const u8) !usize {
+                return error.Unsupported;
+            }
+
+            pub fn countFileRowsWithDiagnostic(_: *Connection, _: SourceKind, _: []const u8, diagnostic: *?[]u8) !usize {
+                diagnostic.* = null;
+                return error.Unsupported;
+            }
+
+            pub fn countQueryRows(_: *Connection, _: []const u8) !usize {
+                return error.Unsupported;
+            }
+
+            pub fn countQueryRowsWithDiagnostic(_: *Connection, _: []const u8, diagnostic: *?[]u8) !usize {
+                diagnostic.* = null;
+                return error.Unsupported;
+            }
+
+            pub fn executeQueryResult(_: *Connection, _: []const u8) !QueryResult {
+                return error.Unsupported;
+            }
+        };
+
+        pub fn sqlStringLiteral(_: std.mem.Allocator, _: []const u8) ![]u8 {
+            return error.Unsupported;
+        }
+
+        pub fn sqlIdentifier(_: std.mem.Allocator, _: []const u8) ![]u8 {
+            return error.Unsupported;
+        }
+
+        pub const PreparedStatement = struct {
+            pub fn init(_: *Connection, _: []const u8) !PreparedStatement {
+                return error.Unsupported;
+            }
+
+            pub fn initWithDiagnostic(_: *Connection, _: []const u8, diagnostic: *?[]u8) !PreparedStatement {
+                diagnostic.* = null;
+                return error.Unsupported;
+            }
+
+            pub fn deinit(_: *PreparedStatement) void {}
+
+            pub fn paramCount(_: *const PreparedStatement) usize {
+                return 0;
+            }
+
+            pub fn parameterName(_: *PreparedStatement, _: std.mem.Allocator, _: usize) ![]u8 {
+                return error.Unsupported;
+            }
+
+            pub fn bindNull(_: *PreparedStatement, _: usize) !void {
+                return error.Unsupported;
+            }
+
+            pub fn bindBoolean(_: *PreparedStatement, _: usize, _: bool) !void {
+                return error.Unsupported;
+            }
+
+            pub fn bindInt64(_: *PreparedStatement, _: usize, _: i64) !void {
+                return error.Unsupported;
+            }
+
+            pub fn bindDouble(_: *PreparedStatement, _: usize, _: f64) !void {
+                return error.Unsupported;
+            }
+
+            pub fn bindVarchar(_: *PreparedStatement, _: usize, _: []const u8) !void {
+                return error.Unsupported;
+            }
+
+            pub fn clearBindings(_: *PreparedStatement) !void {
+                return error.Unsupported;
+            }
+
+            pub fn querySingleCount(_: *PreparedStatement) !usize {
+                return error.Unsupported;
+            }
+
+            pub fn querySingleCountWithDiagnostic(_: *PreparedStatement, diagnostic: *?[]u8) !usize {
+                diagnostic.* = null;
+                return error.Unsupported;
+            }
+
+            pub fn execute(_: *PreparedStatement) !void {
+                return error.Unsupported;
+            }
+
+            pub fn executeWithDiagnostic(_: *PreparedStatement, diagnostic: *?[]u8) !void {
+                diagnostic.* = null;
+                return error.Unsupported;
+            }
+
+            pub fn executeResult(_: *PreparedStatement) !QueryResult {
+                return error.Unsupported;
+            }
+
+            pub fn executeResultWithDiagnostic(_: *PreparedStatement, diagnostic: *?[]u8) !QueryResult {
+                diagnostic.* = null;
+                return error.Unsupported;
+            }
+        };
+
+        pub const Appender = struct {
+            pub fn init(_: *Connection, _: []const u8) !Appender {
+                return error.Unsupported;
+            }
+
+            pub fn deinit(_: *Appender) void {}
+
+            pub fn closeWithDiagnostic(_: *Appender, diagnostic: *?[]u8) !void {
+                diagnostic.* = null;
+                return error.Unsupported;
+            }
+
+            pub fn endRow(_: *Appender) !void {
+                return error.Unsupported;
+            }
+
+            pub fn appendNull(_: *Appender) !void {
+                return error.Unsupported;
+            }
+
+            pub fn appendBool(_: *Appender, _: bool) !void {
+                return error.Unsupported;
+            }
+
+            pub fn appendInt64(_: *Appender, _: i64) !void {
+                return error.Unsupported;
+            }
+
+            pub fn appendDouble(_: *Appender, _: f64) !void {
+                return error.Unsupported;
+            }
+
+            pub fn appendVarchar(_: *Appender, _: []const u8) !void {
+                return error.Unsupported;
+            }
+
+            pub fn appendDate(_: *Appender, _: i32) !void {
+                return error.Unsupported;
+            }
+
+            pub fn appendTime(_: *Appender, _: i64) !void {
+                return error.Unsupported;
+            }
+
+            pub fn appendTimestamp(_: *Appender, _: i64) !void {
+                return error.Unsupported;
+            }
+
+            pub fn appendTimeNs(_: *Appender, _: i64) !void {
+                return error.Unsupported;
+            }
+
+            pub fn appendTimeTz(_: *Appender, _: i64) !void {
+                return error.Unsupported;
+            }
+
+            pub fn appendTimestampS(_: *Appender, _: i64) !void {
+                return error.Unsupported;
+            }
+
+            pub fn appendTimestampMs(_: *Appender, _: i64) !void {
+                return error.Unsupported;
+            }
+
+            pub fn appendTimestampNs(_: *Appender, _: i64) !void {
+                return error.Unsupported;
+            }
+
+            pub fn appendTimestampTz(_: *Appender, _: i64) !void {
+                return error.Unsupported;
+            }
+        };
+
+        pub const QueryResult = struct {
+            pub fn deinit(_: *QueryResult) void {}
+
+            pub fn rowCount(_: *const QueryResult) usize {
+                return 0;
+            }
+
+            pub fn columnCount(_: *const QueryResult) usize {
+                return 0;
+            }
+
+            pub fn columnName(_: *const QueryResult, _: usize) ![]u8 {
+                return error.Unsupported;
+            }
+
+            pub fn columnTypeId(_: *const QueryResult, _: usize) !TypeId {
+                return error.Unsupported;
+            }
+
+            pub fn fetchChunk(_: *QueryResult) ?DataChunk {
+                return null;
+            }
+        };
+
+        pub const TypeId = enum(u8) {
+            invalid = 0,
+        };
+
+        pub const DataChunk = struct {
+            pub fn deinit(_: *DataChunk) void {}
+
+            pub fn rowCount(_: *const DataChunk) usize {
+                return 0;
+            }
+
+            pub fn rowIsValid(_: *const DataChunk, _: usize, _: usize) bool {
+                return false;
+            }
+
+            pub fn rowBool(_: *const DataChunk, _: usize, _: usize) !bool {
+                return error.Unsupported;
+            }
+
+            pub fn rowInt(_: *const DataChunk, _: usize, _: usize, _: TypeId) !i64 {
+                return error.Unsupported;
+            }
+
+            pub fn rowFloat(_: *const DataChunk, _: usize, _: usize, _: TypeId) !f64 {
+                return error.Unsupported;
+            }
+
+            pub fn rowString(_: *const DataChunk, _: std.mem.Allocator, _: usize, _: usize) ![]u8 {
+                return error.Unsupported;
+            }
+        };
+    };
 
 pub const KError = error{
     Parse,
@@ -38,13 +303,30 @@ pub fn errorCode(err: anyerror) []const u8 {
     };
 }
 
+pub const TokenizerHooks = struct {
+    context: *anyopaque,
+    tokenize_fn: *const fn (context: *anyopaque, allocator: std.mem.Allocator, text: []const u8) anyerror![]i64,
+    detokenize_fn: *const fn (context: *anyopaque, allocator: std.mem.Allocator, ids: []const i64) anyerror![]u8,
+};
+
+fn mapTokenizerHookError(err: anyerror) KError {
+    return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.Unsupported => error.Unsupported,
+        else => error.Internal,
+    };
+}
+
 pub const BuiltinId = enum(u8) {
     add,
     sub,
     mul,
     div,
+    pow,
     exp,
     log,
+    sin,
+    cos,
     tanh,
     sigmoid,
     iota,
@@ -70,17 +352,41 @@ pub const BuiltinId = enum(u8) {
     contains,
     split,
     join,
+    bytes,
+    utf8,
+    char,
     unique,
     find,
+    tokenize,
+    detokenize,
     eval_string,
     grad,
     valuegrad,
     prng,
     load,
+    save,
+    sql,
+    register,
     rotcache,
     rotcacheupdate,
     rotcacheview,
+    rope,
+    ropeflat,
+    ropecisflat,
     rmsnorm,
+    layernorm,
+    gelu,
+    geluapprox,
+    mlpdense,
+    conv2d,
+    convtranspose2d,
+    upsamplenearest2d,
+    groupnorm,
+    softmax,
+    sdpa,
+    sam3boxrpb,
+    sdpamask,
+    sdpaflat,
 };
 
 const StringPerfCounters = if (enable_string_instrumentation) struct {
@@ -543,11 +849,11 @@ pub const Value = struct {
         return switch (self.arraySubkind()) {
             .numeric_array => .numeric_array,
             .host_dense_array => .host_dense_array,
-            .host_boxed_array => .host_boxed_array,
-            .host_string => .host_string,
-            .host_symbol => .host_symbol,
+            .host_boxed_array => self.arrayHeader().kind,
+            .host_string => self.arrayHeader().kind,
+            .host_symbol => self.arrayHeader().kind,
             .host_string_list => .host_string_list,
-            .host_string_view => .host_string_view,
+            .host_string_view => self.arrayHeader().kind,
             .backend_array => .backend_array,
         };
     }
@@ -556,13 +862,7 @@ pub const Value = struct {
         std.debug.assert(self.tag() == .array);
         return switch (self.arraySubkind()) {
             .numeric_array => self.asNumericArray().activeKind(),
-            .host_dense_array => .host_dense_array,
-            .host_boxed_array => .host_boxed_array,
-            .host_string => .host_string,
-            .host_symbol => .host_symbol,
-            .host_string_list => .host_string_list,
-            .host_string_view => .host_string_view,
-            .backend_array => .backend_array,
+            else => self.arrayKind(),
         };
     }
 
@@ -570,13 +870,14 @@ pub const Value = struct {
         std.debug.assert(self.tag() == .array);
         return switch (self.arraySubkind()) {
             .numeric_array => self.asNumericArray().header.owner,
-            .host_dense_array => self.asHostDenseArray().header.owner,
-            .host_boxed_array => self.asHostBoxedArray().header.owner,
-            .host_string => self.asHostString().header.owner,
-            .host_symbol => self.asHostSymbol().header.owner,
-            .host_string_list => self.asHostStringList().header.owner,
-            .host_string_view => self.asHostStringView().header.owner,
-            .backend_array => self.asBackendArray().header.owner,
+            .host_dense_array => if (self.asHostDenseArray().logical_handle) |handle| handle.header.owner else self.asHostDenseArray().header.owner,
+            .host_boxed_array,
+            .host_string,
+            .host_symbol,
+            .host_string_list,
+            .host_string_view,
+            => self.arrayHeader().owner,
+            .backend_array => if (self.asBackendArray().logical_handle) |handle| handle.header.owner else self.asBackendArray().header.owner,
         };
     }
 
@@ -630,6 +931,18 @@ pub const Value = struct {
         return ptr;
     }
 
+    pub fn asHostRelation(self: Value) *const HostRelation {
+        std.debug.assert(self.arrayKind() == .host_relation);
+        const ptr: *const HostRelation = @ptrFromInt(rawPtr(self.arrayPtrRaw()));
+        return ptr;
+    }
+
+    pub fn asHostKeyedStore(self: Value) *const HostKeyedStore {
+        std.debug.assert(self.arrayKind() == .host_keyed_store);
+        const ptr: *const HostKeyedStore = @ptrFromInt(rawPtr(self.arrayPtrRaw()));
+        return ptr;
+    }
+
     fn asBoxedFloat(self: Value) *const BoxedFloat {
         std.debug.assert((self.raw & tag_mask) == boxed_float_tag);
         const ptr: *const BoxedFloat = @ptrFromInt(rawPtr(self.raw & ~tag_mask));
@@ -652,6 +965,12 @@ pub const Value = struct {
         return self.raw & ~array_payload_mask;
     }
 
+    fn arrayHeader(self: Value) *const HeapHeader {
+        std.debug.assert(self.tag() == .array);
+        const ptr: *const HeapHeader = @ptrFromInt(rawPtr(self.arrayPtrRaw()));
+        return ptr;
+    }
+
     fn fitsInlineInt(value: i64) bool {
         const min_inline = -(@as(i64, 1) << 60);
         const max_inline = (@as(i64, 1) << 60) - 1;
@@ -664,6 +983,7 @@ fn arraySubkindFromPtr(ptr: anytype) Value.ArraySubkind {
     if (Child == NumericArray) return .numeric_array;
     if (Child == HostDenseArray) return .host_dense_array;
     if (Child == HostBoxedArray) return .host_boxed_array;
+    if (Child == HostKeyedStore) return .host_boxed_array;
     if (Child == BackendArray) return .backend_array;
     if (Child == HostText) {
         return switch (ptr.header.kind) {
@@ -673,7 +993,9 @@ fn arraySubkindFromPtr(ptr: anytype) Value.ArraySubkind {
         };
     }
     if (Child == HostStringList) return .host_string_list;
+    if (Child == HostRelation) return .host_string_view;
     if (Child == HostStringView) return .host_string_view;
+    if (@hasField(Child, "header") and @hasField(Child, "value") and @hasField(Child, "is_null")) return .host_string_view;
     @compileError("unsupported array pointer type");
 }
 
@@ -700,6 +1022,9 @@ const HeapKind = enum(u8) {
     host_symbol,
     host_string_list,
     host_string_view,
+    host_relation,
+    host_keyed_store,
+    host_table_scalar,
     backend_array,
 };
 
@@ -773,6 +1098,104 @@ const HostStringView = struct {
     span: HostTextSpan,
 };
 
+const HostRelationParam = struct {
+    name: []u8,
+    value: Value,
+};
+
+const HostRelationOrigin = union(enum) {
+    file: struct {
+        source_kind: duckdb_runtime.SourceKind,
+        path: []u8,
+    },
+    sql: struct {
+        text: []u8,
+        params: []HostRelationParam,
+    },
+};
+
+const HostRelation = struct {
+    header: HeapHeader align(64),
+    origin: HostRelationOrigin,
+    cached_row_count_known: bool = false,
+    cached_row_count: usize = 0,
+};
+
+const HostTableColumnKind = enum(u8) {
+    boolean,
+    int,
+    float,
+    string,
+    date,
+    time,
+    time_ns,
+    time_tz,
+    timestamp,
+    timestamp_s,
+    timestamp_ms,
+    timestamp_ns,
+    timestamp_tz,
+};
+
+const HostTableColumn = struct {
+    name: Value,
+    data: Value,
+    validity: ?Value = null,
+    kind: HostTableColumnKind,
+};
+
+const TableColumnBuilder = struct {
+    name: Value,
+    source_type: duckdb_runtime.TypeId,
+    kind: HostTableColumnKind,
+    bool_values: std.ArrayList(bool) = .empty,
+    int_values: std.ArrayList(i64) = .empty,
+    float_values: std.ArrayList(f64) = .empty,
+    string_values: std.ArrayList([]u8) = .empty,
+    validity: std.ArrayList(bool) = .empty,
+    saw_null: bool = false,
+};
+
+const HostKeyedLayout = enum(u8) {
+    dict,
+    table,
+};
+
+const HostKeyedColumnMetadata = struct {
+    kind: HostTableColumnKind,
+    validity: ?Value = null,
+};
+
+const HostKeyedStore = struct {
+    header: HeapHeader align(64),
+    layout: HostKeyedLayout = .dict,
+    row_count: usize = 0,
+    path: []const u8,
+    owns_path: bool = false,
+    names: Value,
+    values: Value,
+    column_metadata: ?[]HostKeyedColumnMetadata = null,
+    lookup: std.StringHashMapUnmanaged(usize) = .empty,
+};
+
+const HostTableScalar = struct {
+    header: HeapHeader align(64),
+    kind: HostTableColumnKind,
+    value: Value,
+    is_null: bool,
+};
+
+fn valueAsHostTableScalar(value: Value) *const HostTableScalar {
+    std.debug.assert(value.arrayKind() == .host_table_scalar);
+    const ptr: *const HostTableScalar = @ptrFromInt(rawPtr(value.raw & ~Value.array_payload_mask));
+    return ptr;
+}
+
+fn hostTableScalar(value: Value) ?*const HostTableScalar {
+    if (value.tag() != .array or value.arrayKind() != .host_table_scalar) return null;
+    return valueAsHostTableScalar(value);
+}
+
 const managed_host_text_intern_limit = 32;
 
 fn hostTextAllocLen(byte_len: usize) usize {
@@ -842,6 +1265,26 @@ fn hostStringPieceBytes(base: ?*const HostText, piece: HostStringPiece) []const 
     };
 }
 
+fn hostStringListItemBytes(list: *const HostStringList, idx: usize) KError![]const u8 {
+    if (idx >= list.len) return error.Type;
+    return switch (list.storage) {
+        .eager => |items| hostStringPieceBytes(list.base, items[idx]),
+        .split_scalar => |lazy| blk: {
+            const base = list.base orelse return error.Internal;
+            const src = hostTextBytes(base);
+            var piece_idx: usize = 0;
+            var start: usize = 0;
+            while (std.mem.indexOfScalarPos(u8, src, start, lazy.sep)) |sep_idx| {
+                if (piece_idx == idx) break :blk src[start..sep_idx];
+                piece_idx += 1;
+                start = sep_idx + 1;
+            }
+            if (piece_idx != idx) return error.Type;
+            break :blk src[start..];
+        },
+    };
+}
+
 fn hostStringViewBytes(view: *const HostStringView) []const u8 {
     return hostTextSpanBytes(view.base, view.span);
 }
@@ -906,6 +1349,7 @@ fn countScalarSplits(src: []const u8, sep: u8) usize {
 
 comptime {
     if (@alignOf(HostText) < 8) @compileError("HostText must remain at least 8-byte aligned for tagged Value pointers.");
+    if (@alignOf(HostRelation) < 8) @compileError("HostRelation must remain at least 8-byte aligned for tagged Value pointers.");
 }
 
 const HostDenseElem = enum(u8) {
@@ -943,6 +1387,12 @@ const host_dense_flag_normalized: u8 = 1 << 0;
 const host_dense_flag_asc: u8 = 1 << 1;
 const host_dense_flag_dsc: u8 = 1 << 2;
 
+const HostDenseFindCacheKind = enum(u8) {
+    none,
+    int,
+    float,
+};
+
 const HostDenseArray = struct {
     header: HeapHeader align(64),
     logical_handle: ?*NumericArray = null,
@@ -951,11 +1401,25 @@ const HostDenseArray = struct {
     int_range_known: bool = false,
     int_range_min: i64 = 0,
     int_range_max: i64 = 0,
+    find_cache_kind: HostDenseFindCacheKind = .none,
+    find_cache_keys: ?[]u64 = null,
+    find_cache_slots: ?[]usize = null,
+    find_cache_mask: usize = 0,
+    float_bounds_known: bool = false,
+    float_bounds_min: f64 = 0.0,
+    float_bounds_max: f64 = 0.0,
     storage: HostDenseStorage,
 
     fn len(self: *const HostDenseArray) usize {
         return self.logical_len;
     }
+};
+
+const managed_host_dense_storage_kind_count = std.meta.fields(HostDenseStorageKind).len;
+
+const ManagedHostDenseBufferEntry = struct {
+    ptr: *anyopaque,
+    len: usize,
 };
 
 const HostBoxedArray = struct {
@@ -999,6 +1463,15 @@ pub const DebugHostStorageTag = enum {
 pub fn debugActiveHostStorageTag(value: Value) ?DebugHostStorageTag {
     if (value.tag() != .array or value.activeArrayKind() != .host_dense_array) return null;
     return @enumFromInt(@intFromEnum(std.meta.activeTag(hostDenseIfPresent(value).?.storage)));
+}
+
+pub fn debugStringBytes(value: Value) ?[]const u8 {
+    if (value.tag() != .array) return null;
+    return switch (value.arrayKind()) {
+        .host_string => hostTextBytes(value.asHostString()),
+        .host_string_view => hostStringViewBytes(value.asHostStringView()),
+        else => null,
+    };
 }
 
 pub fn debugActiveHostLen(value: Value) ?usize {
@@ -1110,6 +1583,16 @@ fn hostDenseClearCachedIntRange(array: *HostDenseArray) void {
     array.int_range_max = 0;
 }
 
+fn hostDenseResetFindCacheState(array: *HostDenseArray) void {
+    array.find_cache_kind = .none;
+    array.find_cache_keys = null;
+    array.find_cache_slots = null;
+    array.find_cache_mask = 0;
+    array.float_bounds_known = false;
+    array.float_bounds_min = 0.0;
+    array.float_bounds_max = 0.0;
+}
+
 fn hostDenseCachedIntRange(array: *const HostDenseArray) ?HostIntRange {
     if (!array.int_range_known) return null;
     return .{
@@ -1122,8 +1605,19 @@ fn hostDenseHasFlag(array: *const HostDenseArray, flag: u8) bool {
     return (array.flags & flag) != 0;
 }
 
+fn numericPayloadManagedRefCount(payload: anytype) usize {
+    if (payload.logical_handle) |handle| {
+        return if (handle.header.owner == .managed) handle.header.ref_count else 0;
+    }
+    return if (payload.header.owner == .managed) payload.header.ref_count else 0;
+}
+
+fn numericPayloadOwner(payload: anytype) HeapOwner {
+    return if (payload.logical_handle) |handle| handle.header.owner else payload.header.owner;
+}
+
 fn hostDenseReusePriority(array: *const HostDenseArray) u8 {
-    return switch (array.header.owner) {
+    return switch (numericPayloadOwner(array)) {
         .scratch => 2,
         .managed => 1,
         .frozen => 0,
@@ -3039,7 +3533,7 @@ fn intArrayScalarResultFlags(op: BuiltinId, array_flags: u8, scalar: i64, scalar
         .add => monotonicFlags(array_flags),
         .sub => if (scalar_left) invertMonotonicFlags(array_flags) else monotonicFlags(array_flags),
         .mul => scalarMulMonotonicFlags(array_flags, scalar),
-        .minimum, .maximum, .div => 0,
+        .minimum, .maximum, .div, .pow => 0,
         else => 0,
     };
     return host_dense_flag_normalized | mono;
@@ -3049,7 +3543,7 @@ fn intArrayArrayResultFlags(op: BuiltinId, left_flags: u8, right_flags: u8) u8 {
     const mono = switch (op) {
         .add => combineAddMonotonicFlags(left_flags, right_flags),
         .sub => combineSubMonotonicFlags(left_flags, right_flags),
-        .minimum, .maximum, .mul, .div => 0,
+        .minimum, .maximum, .mul, .div, .pow => 0,
         else => 0,
     };
     return host_dense_flag_normalized | mono;
@@ -3228,6 +3722,7 @@ fn hostIntInitialResultKind(op: BuiltinId, left_kind: HostIntStorageKind, right_
     return switch (op) {
         .add, .sub, .mul, .minimum, .maximum => maxHostIntStorageKind(left_kind, right_kind),
         .iota => .int64,
+        .pow => .int64,
         .div => unreachable,
         else => unreachable,
     };
@@ -3291,9 +3786,18 @@ fn hostIntDyadRange(op: BuiltinId, left: HostIntRange, right: HostIntRange) ?Hos
             }
             break :blk hostIntRangeFromWide(min_value, max_value);
         },
+        .pow => null,
         .div => null,
         else => null,
     };
+}
+
+fn intPowLikeMlx(base: i64, exponent: i64) KError!i64 {
+    const value = std.math.pow(f64, @floatFromInt(base), @floatFromInt(exponent));
+    if (!std.math.isFinite(value)) return error.Unsupported;
+    const truncated = @trunc(value);
+    if (truncated < @as(f64, @floatFromInt(std.math.minInt(i64))) or truncated > @as(f64, @floatFromInt(std.math.maxInt(i64)))) return error.Unsupported;
+    return @intFromFloat(truncated);
 }
 
 fn hostIntDyadResultKindForRange(op: BuiltinId, left_kind: HostIntStorageKind, right_kind: HostIntStorageKind, range: HostIntRange) HostIntStorageKind {
@@ -3332,14 +3836,16 @@ const BackendArray = struct {
     array: mlx.Array,
 };
 
-const LoadedSafetensorsLookupEntry = struct {
-    symbol: Value,
-    index: usize,
+const LoadedSafetensorsStore = struct {
+    store: Value,
 };
 
-const LoadedSafetensorsStore = struct {
-    bundle: Value,
-    entries: []LoadedSafetensorsLookupEntry,
+const LoadedRelationStore = struct {
+    relation: Value,
+};
+
+const RegisteredDuckDbTableStore = struct {
+    table: Value,
 };
 
 const numeric_array_max_rank = 4;
@@ -3411,6 +3917,13 @@ pub const DebugDenseEachRightMiss = enum {
     non_vector_right,
 };
 const debug_dense_each_right_miss_count = @typeInfo(DebugDenseEachRightMiss).@"enum".fields.len;
+
+pub const DebugFastDenseAssignCloneReason = enum {
+    non_unique,
+    frozen,
+    other,
+};
+const debug_fast_dense_assign_clone_reason_count = @typeInfo(DebugFastDenseAssignCloneReason).@"enum".fields.len;
 
 const NumericRangeIota = struct {
     start: i64 = 0,
@@ -3541,7 +4054,13 @@ const Op = enum(u8) {
     load_global,
     store_global,
     load_local,
+    store_local,
+    store_local_add_local_const,
+    store_local_sub_local_const,
+    store_local_mul_local_const,
+    take_local,
     load_inline_local,
+    take_inline_local,
     load_capture,
     add_local_local,
     add_inline_local_local,
@@ -3585,6 +4104,9 @@ const Op = enum(u8) {
     sqrt_local,
     sqrt_inline_local,
     sqrt_capture,
+    call1_local_local,
+    tail_call1_local_local,
+    call1_inline_local_local,
     inline_call_add2,
     inline_call_add_global,
     inline_call_add_arg_global,
@@ -3652,6 +4174,7 @@ const Op = enum(u8) {
     grade_up,
     grade_down,
     not,
+    match,
     concat,
     count,
     take,
@@ -3683,8 +4206,15 @@ const Op = enum(u8) {
     call_global,
     call_global1,
     call_global2,
+    call_global3,
+    call_global4,
+    call_global_slots,
+    call_global_slots_store_local,
     tail_call_global1,
     tail_call_global2,
+    tail_call_global3,
+    tail_call_global4,
+    tail_call_global_slots,
     call1,
     call2,
     tail_call1,
@@ -3697,6 +4227,20 @@ const Op = enum(u8) {
 };
 
 pub const DebugOp = Op;
+
+const GlobalCallArgKind = enum(u7) {
+    local,
+    const_int,
+    local_add_const,
+    local_sub_const,
+    local_mul_const,
+};
+
+const global_call_arg_consume_bit: u8 = 0x80;
+
+fn global_call_arg_kind_byte(kind: GlobalCallArgKind, consume: bool) u8 {
+    return @intFromEnum(kind) | if (consume) global_call_arg_consume_bit else 0;
+}
 
 pub const SamplingProfileCodeKind = enum(u8) {
     none,
@@ -3821,10 +4365,12 @@ const AmendMode = enum(u8) {
 
 pub const Code = struct {
     arity: u8,
+    frame_slot_count: u8 = 0,
     bytes: []const u8,
     globals: []const u16,
     templates: []const *const LambdaTemplate,
     constants: []const Value,
+    direct_closure_mask: u8 = 0,
     profile_id: u16 = sampling_profile_no_code,
     profile_kind: SamplingProfileCodeKind = .none,
     profile_source: []const u8 = "",
@@ -3846,8 +4392,42 @@ const derived_valuegrad_bytes = &[_]u8{7};
 const inner_product_code_bytes = &[_]u8{254};
 const projection_code_bytes = &[_]u8{255};
 
+inline fn directClosureMaskBit(arity: u8) u8 {
+    return if (arity >= 8) 0 else (@as(u8, 1) << @intCast(arity));
+}
+
+fn classifyDirectClosureMask(bytes: []const u8) u8 {
+    if (bytes.len == 0) return 0;
+    const op = std.meta.intToEnum(Op, bytes[0]) catch return 0;
+
+    var mask: u8 = 0;
+    switch (op) {
+        .load_local,
+        .neg_local,
+        .sqrt_local,
+        .add_local_const,
+        .sub_local_const,
+        .mul_local_const,
+        .add_const_local,
+        .sub_const_local,
+        .mul_const_local,
+        .tail_call_global1,
+        => mask |= directClosureMaskBit(1),
+        .add_local_local,
+        .sub_local_local,
+        .mul_local_local,
+        .tail_call_global2,
+        => mask |= directClosureMaskBit(2),
+        else => {},
+    }
+    if (op == .load_local) mask |= directClosureMaskBit(2);
+    if (op == .add_local_local) mask |= directClosureMaskBit(3);
+    return mask;
+}
+
 const derived_each_code = Code{
     .arity = 0,
+    .frame_slot_count = 0,
     .bytes = derived_each_bytes,
     .globals = empty_code_globals,
     .templates = empty_code_templates,
@@ -3858,6 +4438,7 @@ const derived_each_code = Code{
 };
 const derived_fold_code = Code{
     .arity = 0,
+    .frame_slot_count = 0,
     .bytes = derived_fold_bytes,
     .globals = empty_code_globals,
     .templates = empty_code_templates,
@@ -3868,6 +4449,7 @@ const derived_fold_code = Code{
 };
 const derived_scan_code = Code{
     .arity = 0,
+    .frame_slot_count = 0,
     .bytes = derived_scan_bytes,
     .globals = empty_code_globals,
     .templates = empty_code_templates,
@@ -3878,6 +4460,7 @@ const derived_scan_code = Code{
 };
 const derived_each_right_code = Code{
     .arity = 0,
+    .frame_slot_count = 0,
     .bytes = derived_each_right_bytes,
     .globals = empty_code_globals,
     .templates = empty_code_templates,
@@ -3888,6 +4471,7 @@ const derived_each_right_code = Code{
 };
 const derived_each_left_code = Code{
     .arity = 0,
+    .frame_slot_count = 0,
     .bytes = derived_each_left_bytes,
     .globals = empty_code_globals,
     .templates = empty_code_templates,
@@ -3898,6 +4482,7 @@ const derived_each_left_code = Code{
 };
 const derived_each_prior_code = Code{
     .arity = 0,
+    .frame_slot_count = 0,
     .bytes = derived_each_prior_bytes,
     .globals = empty_code_globals,
     .templates = empty_code_templates,
@@ -3908,6 +4493,7 @@ const derived_each_prior_code = Code{
 };
 const derived_grad_code = Code{
     .arity = 0,
+    .frame_slot_count = 0,
     .bytes = derived_grad_bytes,
     .globals = empty_code_globals,
     .templates = empty_code_templates,
@@ -3918,6 +4504,7 @@ const derived_grad_code = Code{
 };
 const derived_valuegrad_code = Code{
     .arity = 0,
+    .frame_slot_count = 0,
     .bytes = derived_valuegrad_bytes,
     .globals = empty_code_globals,
     .templates = empty_code_templates,
@@ -3928,6 +4515,7 @@ const derived_valuegrad_code = Code{
 };
 const projection_code = Code{
     .arity = 0,
+    .frame_slot_count = 0,
     .bytes = projection_code_bytes,
     .globals = empty_code_globals,
     .templates = empty_code_templates,
@@ -3938,6 +4526,7 @@ const projection_code = Code{
 };
 const inner_product_code = Code{
     .arity = 0,
+    .frame_slot_count = 0,
     .bytes = inner_product_code_bytes,
     .globals = empty_code_globals,
     .templates = empty_code_templates,
@@ -3979,26 +4568,32 @@ fn closureDerivedKind(closure: *const Closure) ?DerivedVerbKind {
     };
 }
 
-fn closureIsProjection(closure: *const Closure) bool {
+fn closureMayUseDerivedApply(closure: *const Closure) bool {
     return closure.code.bytes.len == 1 and
         closure.code.globals.len == 0 and
         closure.code.templates.len == 0 and
-        closure.code.constants.len == 0 and
+        closure.code.constants.len == 0;
+}
+
+fn closureIsProjection(closure: *const Closure) bool {
+    return closureMayUseDerivedApply(closure) and
         closure.code.bytes[0] == projection_code_bytes[0];
 }
 
 fn closureIsInnerProduct(closure: *const Closure) bool {
-    return closure.code.bytes.len == 1 and
-        closure.code.globals.len == 0 and
-        closure.code.templates.len == 0 and
-        closure.code.constants.len == 0 and
+    return closureMayUseDerivedApply(closure) and
         closure.code.bytes[0] == inner_product_code_bytes[0];
+}
+
+fn closureIsCompactPlainGlobal(closure: *const Closure) bool {
+    return closure.captures.len == 0 and !closureMayUseDerivedApply(closure);
 }
 
 const ScratchCode = struct {
     instructions: InstructionBuffer = .{},
     code: Code = .{
         .arity = 0,
+        .frame_slot_count = 0,
         .bytes = &[_]u8{},
         .globals = &[_]u16{},
         .templates = &[_]*const LambdaTemplate{},
@@ -4009,6 +4604,7 @@ const ScratchCode = struct {
         self.instructions = .{};
         self.code = .{
             .arity = 0,
+            .frame_slot_count = 0,
             .bytes = &[_]u8{},
             .globals = &[_]u16{},
             .templates = &[_]*const LambdaTemplate{},
@@ -4016,26 +4612,30 @@ const ScratchCode = struct {
         };
     }
 
-    fn finalize(self: *ScratchCode, arity: u8) *Code {
+    fn finalize(self: *ScratchCode, arity: u8, frame_slot_count: u8) *Code {
         self.code = .{
             .arity = arity,
+            .frame_slot_count = frame_slot_count,
             .bytes = self.instructions.byteSlice(),
             .globals = self.instructions.globalSlice(),
             .templates = self.instructions.templateSlice(),
             .constants = self.instructions.constantSlice(),
+            .direct_closure_mask = classifyDirectClosureMask(self.instructions.byteSlice()),
         };
         return &self.code;
     }
 };
 
-fn duplicateCodeFromInstructions(allocator: std.mem.Allocator, arity: u8, instructions: *const InstructionBuffer) !*Code {
+fn duplicateCodeFromInstructions(allocator: std.mem.Allocator, arity: u8, frame_slot_count: u8, instructions: *const InstructionBuffer) !*Code {
     const code = try allocator.create(Code);
     code.* = .{
         .arity = arity,
+        .frame_slot_count = frame_slot_count,
         .bytes = try allocator.dupe(u8, instructions.byteSlice()),
         .globals = try allocator.dupe(u16, instructions.globalSlice()),
         .templates = try allocator.dupe(*const LambdaTemplate, instructions.templateSlice()),
         .constants = try allocator.dupe(Value, instructions.constantSlice()),
+        .direct_closure_mask = classifyDirectClosureMask(instructions.byteSlice()),
     };
     return code;
 }
@@ -4073,6 +4673,13 @@ const CallFrame = struct {
     captures: []const Value,
     owner: ?Value = null,
     callable_global_slot: u16 = sampling_profile_no_callable_slot,
+    result_target: CallResultTarget = .stack,
+};
+
+const CallResultTarget = union(enum) {
+    stack,
+    parent_local: u8,
+    parent_local_tail_global_slots: u8,
 };
 
 pub const DebugMakeArrayBoxedReason = enum {
@@ -4108,12 +4715,16 @@ pub const Session = struct {
     prng: Prng,
     device_preference: device.DevicePreference = .cpu,
     mlx_ctx: ?mlx.Context = null,
+    duckdb_conn: ?duckdb_runtime.Connection = null,
+    duckdb_kiwi_scan_registered: bool = false,
     global_slots: std.StringHashMap(u16),
     global_names: std.ArrayListUnmanaged([]const u8) = .{},
     debug_global_call_counts: std.ArrayListUnmanaged(usize) = .{},
     interned_strings: std.StringHashMap(*HostText),
     interned_symbols: std.StringHashMap(*HostText),
     loaded_safetensors: std.StringHashMap(LoadedSafetensorsStore),
+    loaded_relations: std.StringHashMap(LoadedRelationStore),
+    registered_duckdb_tables: std.StringHashMap(RegisteredDuckDbTableStore),
     global_values: std.ArrayListUnmanaged(Value) = .{},
     global_initialized: std.ArrayListUnmanaged(bool) = .{},
     code_cache: std.StringHashMap(*const Code),
@@ -4134,12 +4745,16 @@ pub const Session = struct {
     free_numeric_array_len: usize = 0,
     free_host_arrays: [max_pooled_objects]?*HostDenseArray = [_]?*HostDenseArray{null} ** max_pooled_objects,
     free_host_array_len: usize = 0,
+    free_host_dense_buffers: [managed_host_dense_storage_kind_count][max_pooled_objects]?ManagedHostDenseBufferEntry =
+        [_][max_pooled_objects]?ManagedHostDenseBufferEntry{[_]?ManagedHostDenseBufferEntry{null} ** max_pooled_objects} ** managed_host_dense_storage_kind_count,
+    free_host_dense_buffer_len: [managed_host_dense_storage_kind_count]usize = [_]usize{0} ** managed_host_dense_storage_kind_count,
     free_host_boxed_arrays: [max_pooled_objects]?*HostBoxedArray = [_]?*HostBoxedArray{null} ** max_pooled_objects,
     free_host_boxed_array_len: usize = 0,
     free_mlx_arrays: [max_pooled_objects]?*BackendArray = [_]?*BackendArray{null} ** max_pooled_objects,
     free_mlx_array_len: usize = 0,
     scratch_code: ScratchCode = .{},
     last_result: ?Value = null,
+    last_error_text: ?[]u8 = null,
     root_results: bool = true,
     debug_scratch_host_array_alloc_count: usize = 0,
     debug_host_realization_count: usize = 0,
@@ -4182,6 +4797,12 @@ pub const Session = struct {
     debug_each_right_fast_string_contains_miss_non_string_left_count: usize = 0,
     debug_each_right_fast_string_contains_miss_non_string_right_count: usize = 0,
     debug_grade_structural_numeric_fast_count: usize = 0,
+    debug_fast_dense_assign_attempt_count: usize = 0,
+    debug_fast_dense_assign_hit_count: usize = 0,
+    debug_fast_dense_assign_miss_count: usize = 0,
+    debug_fast_dense_assign_reuse_count: usize = 0,
+    debug_fast_dense_assign_clone_count: usize = 0,
+    debug_fast_dense_assign_clone_reason_counts: [debug_fast_dense_assign_clone_reason_count]usize = [_]usize{0} ** debug_fast_dense_assign_clone_reason_count,
     debug_host_fold_fast_count: usize = 0,
     debug_host_scan_fast_count: usize = 0,
     debug_host_fold_scan_miss_counts: [debug_host_fold_scan_miss_count]usize = [_]usize{0} ** debug_host_fold_scan_miss_count,
@@ -4226,6 +4847,7 @@ pub const Session = struct {
     attachment_touch_clock: usize = 1,
     dense_backend_override: DenseBackendOverride = .auto,
     string_perf: StringPerfCounters = .{},
+    tokenizer_hooks: ?TokenizerHooks = null,
     debug_probe_active: bool = false,
     profile_sampling_enabled: std.atomic.Value(u8) = std.atomic.Value(u8).init(0),
     profile_current_label: std.atomic.Value(u8) = std.atomic.Value(u8).init(@intFromEnum(SamplingProfileLabel.idle)),
@@ -4251,12 +4873,15 @@ pub const Session = struct {
             .interned_strings = std.StringHashMap(*HostText).init(allocator),
             .interned_symbols = std.StringHashMap(*HostText).init(allocator),
             .loaded_safetensors = std.StringHashMap(LoadedSafetensorsStore).init(allocator),
+            .loaded_relations = std.StringHashMap(LoadedRelationStore).init(allocator),
+            .registered_duckdb_tables = std.StringHashMap(RegisteredDuckDbTableStore).init(allocator),
             .code_cache = std.StringHashMap(*const Code).init(allocator),
             .dense_autodiff_cache = std.AutoHashMap(DenseAutodiffCacheKey, DenseAutodiffLowerResult).init(allocator),
         };
     }
 
     pub fn deinit(self: *Session) void {
+        self.clearLastErrorText();
         if (self.last_result) |value| self.releaseValue(value);
         self.last_result = null;
         for (self.global_values.items, self.global_initialized.items) |value, initialized| {
@@ -4266,11 +4891,25 @@ pub const Session = struct {
         // registry so bundle-owned backend arrays can unregister themselves.
         var loaded_iter = self.loaded_safetensors.iterator();
         while (loaded_iter.next()) |entry| {
-            self.releaseValue(entry.value_ptr.bundle);
-            self.allocator.free(entry.value_ptr.entries);
+            self.releaseValue(entry.value_ptr.store);
             self.allocator.free(entry.key_ptr.*);
         }
         self.loaded_safetensors.deinit();
+        var relation_iter = self.loaded_relations.iterator();
+        while (relation_iter.next()) |entry| {
+            self.releaseValue(entry.value_ptr.relation);
+            self.allocator.free(entry.key_ptr.*);
+        }
+        self.loaded_relations.deinit();
+        if (self.duckdb_conn) |*conn| conn.deinit();
+        self.duckdb_conn = null;
+        self.duckdb_kiwi_scan_registered = false;
+        var registered_table_iter = self.registered_duckdb_tables.iterator();
+        while (registered_table_iter.next()) |entry| {
+            self.releaseValue(entry.value_ptr.table);
+            self.allocator.free(entry.key_ptr.*);
+        }
+        self.registered_duckdb_tables.deinit();
         while (self.managed_numeric_registry_head) |handle| self.recycleManagedNumericArray(handle);
         self.global_values.deinit(self.allocator);
         self.global_initialized.deinit(self.allocator);
@@ -4302,6 +4941,14 @@ pub const Session = struct {
             self.free_host_array_len -= 1;
             self.allocator.destroy(self.free_host_arrays[self.free_host_array_len].?);
         }
+        for (0..managed_host_dense_storage_kind_count) |pool_idx| {
+            while (self.free_host_dense_buffer_len[pool_idx] > 0) {
+                self.free_host_dense_buffer_len[pool_idx] -= 1;
+                const entry = self.free_host_dense_buffers[pool_idx][self.free_host_dense_buffer_len[pool_idx]].?;
+                self.free_host_dense_buffers[pool_idx][self.free_host_dense_buffer_len[pool_idx]] = null;
+                self.freeManagedHostDenseBuffer(@enumFromInt(pool_idx), entry);
+            }
+        }
         while (self.free_host_boxed_array_len > 0) {
             self.free_host_boxed_array_len -= 1;
             self.allocator.destroy(self.free_host_boxed_arrays[self.free_host_boxed_array_len].?);
@@ -4312,6 +4959,33 @@ pub const Session = struct {
         }
         self.scratch_arena.deinit();
         self.arena.deinit();
+    }
+
+    pub fn lastErrorText(self: *const Session) ?[]const u8 {
+        return self.last_error_text;
+    }
+
+    pub fn clearLastErrorText(self: *Session) void {
+        if (self.last_error_text) |text| self.allocator.free(text);
+        self.last_error_text = null;
+    }
+
+    fn setOwnedLastErrorText(self: *Session, text: ?[]u8) void {
+        self.clearLastErrorText();
+        self.last_error_text = text;
+    }
+
+    fn setOwnedDuckDbErrorText(self: *Session, detail: ?[]u8) void {
+        const text = detail orelse {
+            self.clearLastErrorText();
+            return;
+        };
+        const prefixed = std.fmt.allocPrint(self.allocator, "duckdb: {s}", .{text}) catch {
+            self.setOwnedLastErrorText(text);
+            return;
+        };
+        self.allocator.free(text);
+        self.setOwnedLastErrorText(prefixed);
     }
 
     pub fn resetStringPerf(self: *Session) void {
@@ -4405,11 +5079,13 @@ pub const Session = struct {
     }
 
     pub fn evalSource(self: *Session, source: []const u8) KError!Value {
+        self.clearLastErrorText();
         const code = try self.compileCached(source);
         return try self.runCode(code, &[_]Value{});
     }
 
     pub fn evalSourceFresh(self: *Session, source: []const u8) KError!Value {
+        self.clearLastErrorText();
         var temp_arena = std.heap.ArenaAllocator.init(self.allocator);
         defer temp_arena.deinit();
 
@@ -4418,16 +5094,19 @@ pub const Session = struct {
     }
 
     pub fn evalSourceWarm(self: *Session, compile_arena: *std.heap.ArenaAllocator, source: []const u8) KError!Value {
+        self.clearLastErrorText();
         const code = try self.compileScratch(compile_arena, source);
         return try self.runCode(code, &[_]Value{});
     }
 
     pub fn evalSourceWarmEphemeral(self: *Session, compile_arena: *std.heap.ArenaAllocator, source: []const u8) KError!Value {
+        self.clearLastErrorText();
         const code = try self.compileScratch(compile_arena, source);
         return try self.runCodeMode(code, &[_]Value{}, false);
     }
 
     pub fn parseOnly(self: *Session, source: []const u8) KError!void {
+        self.clearLastErrorText();
         var temp_arena = std.heap.ArenaAllocator.init(self.allocator);
         defer temp_arena.deinit();
 
@@ -4435,6 +5114,7 @@ pub const Session = struct {
     }
 
     pub fn parseOnlyWarm(self: *Session, compile_arena: *std.heap.ArenaAllocator, source: []const u8) KError!void {
+        self.clearLastErrorText();
         _ = try self.compileScratch(compile_arena, source);
     }
 
@@ -4491,7 +5171,7 @@ pub const Session = struct {
                         owned.eval() catch |err| return mapMlxError(err);
                     }
                 },
-                .host_dense_array, .host_boxed_array, .host_string, .host_symbol, .host_string_list, .host_string_view => {},
+                .host_dense_array, .host_boxed_array, .host_string, .host_symbol, .host_string_list, .host_string_view, .host_relation, .host_keyed_store, .host_table_scalar => {},
                 else => return error.Internal,
             },
             .int, .float, .bool, .builtin, .closure => {},
@@ -4753,6 +5433,36 @@ pub const Session = struct {
         return self.debug_grade_structural_numeric_fast_count;
     }
 
+    pub fn debugFastDenseAssignAttemptCount(self: *const Session) usize {
+        if (comptime !enable_probe_instrumentation) return 0;
+        return self.debug_fast_dense_assign_attempt_count;
+    }
+
+    pub fn debugFastDenseAssignHitCount(self: *const Session) usize {
+        if (comptime !enable_probe_instrumentation) return 0;
+        return self.debug_fast_dense_assign_hit_count;
+    }
+
+    pub fn debugFastDenseAssignMissCount(self: *const Session) usize {
+        if (comptime !enable_probe_instrumentation) return 0;
+        return self.debug_fast_dense_assign_miss_count;
+    }
+
+    pub fn debugFastDenseAssignReuseCount(self: *const Session) usize {
+        if (comptime !enable_probe_instrumentation) return 0;
+        return self.debug_fast_dense_assign_reuse_count;
+    }
+
+    pub fn debugFastDenseAssignCloneCount(self: *const Session) usize {
+        if (comptime !enable_probe_instrumentation) return 0;
+        return self.debug_fast_dense_assign_clone_count;
+    }
+
+    pub fn debugFastDenseAssignCloneReasonCount(self: *const Session, reason: DebugFastDenseAssignCloneReason) usize {
+        if (comptime !enable_probe_instrumentation) return 0;
+        return self.debug_fast_dense_assign_clone_reason_counts[@intFromEnum(reason)];
+    }
+
     pub fn debugHostScanFastCount(self: *const Session) usize {
         if (comptime !enable_probe_instrumentation) return 0;
         return self.debug_host_scan_fast_count;
@@ -4959,6 +5669,10 @@ pub const Session = struct {
         };
     }
 
+    pub fn setTokenizerHooks(self: *Session, hooks: TokenizerHooks) void {
+        self.tokenizer_hooks = hooks;
+    }
+
     pub fn resetDebugStructuralExecutionCounters(self: *Session) void {
         if (comptime !enable_probe_instrumentation) return;
         self.debug_host_realization_count = 0;
@@ -5001,6 +5715,12 @@ pub const Session = struct {
         self.debug_each_right_fast_string_contains_miss_non_string_left_count = 0;
         self.debug_each_right_fast_string_contains_miss_non_string_right_count = 0;
         self.debug_grade_structural_numeric_fast_count = 0;
+        self.debug_fast_dense_assign_attempt_count = 0;
+        self.debug_fast_dense_assign_hit_count = 0;
+        self.debug_fast_dense_assign_miss_count = 0;
+        self.debug_fast_dense_assign_reuse_count = 0;
+        self.debug_fast_dense_assign_clone_count = 0;
+        self.debug_fast_dense_assign_clone_reason_counts = [_]usize{0} ** debug_fast_dense_assign_clone_reason_count;
         self.debug_host_fold_fast_count = 0;
         self.debug_host_scan_fast_count = 0;
         self.debug_host_fold_scan_miss_counts = [_]usize{0} ** debug_host_fold_scan_miss_count;
@@ -5196,6 +5916,9 @@ pub const Session = struct {
             .host_symbol => self.renderHostSymbol(value.asHostSymbol()),
             .host_string_list => self.renderHostStringList(value.asHostStringList()),
             .host_string_view => self.renderHostStringView(value.asHostStringView()),
+            .host_relation => self.renderHostRelation(value.asHostRelation()),
+            .host_keyed_store => self.renderHostKeyedStore(value.asHostKeyedStore()),
+            .host_table_scalar => self.renderHostTableScalar(valueAsHostTableScalar(value)),
             .backend_array => self.renderBackendArray(value.asBackendArray()),
             else => error.Internal,
         };
@@ -5220,6 +5943,7 @@ pub const Session = struct {
                 const mode = valueNumericMode(Value.array(@constCast(handle))) orelse return error.Type;
                 const len = numericFlatLen(value) orelse return error.Type;
                 if (handle.rank <= 1) {
+                    if (len == 0 and mode == .int) return try self.allocator.dupe(u8, "!0");
                     var out = std.ArrayList(u8).empty;
                     errdefer out.deinit(self.allocator);
                     for (0..len) |idx| {
@@ -5235,6 +5959,15 @@ pub const Session = struct {
                     const rows: usize = @intCast(handle.shape[0]);
                     const cols: usize = @intCast(handle.shape[1]);
                     if (rows * cols != len) return error.Internal;
+                    if (cols == 0 and mode == .int) {
+                        var out = std.ArrayList(u8).empty;
+                        errdefer out.deinit(self.allocator);
+                        for (0..rows) |row| {
+                            if (row != 0) try out.append(self.allocator, '\n');
+                            try out.appendSlice(self.allocator, "!0");
+                        }
+                        break :blk out.toOwnedSlice(self.allocator);
+                    }
                     var out = std.ArrayList(u8).empty;
                     errdefer out.deinit(self.allocator);
                     for (0..rows) |row| {
@@ -5263,6 +5996,19 @@ pub const Session = struct {
         const rows: usize = @intCast(handle.shape[0]);
         const cols: usize = @intCast(handle.shape[1]);
         if (rows * cols != array.len()) return error.Internal;
+
+        if (cols == 0) switch (array.storage) {
+            .int8, .int16, .int32, .int64 => {
+                var out = std.ArrayList(u8).empty;
+                errdefer out.deinit(self.allocator);
+                for (0..rows) |row| {
+                    if (row != 0) try out.append(self.allocator, '\n');
+                    try out.appendSlice(self.allocator, "!0");
+                }
+                return try out.toOwnedSlice(self.allocator);
+            },
+            else => {},
+        };
 
         var out = std.ArrayList(u8).empty;
         errdefer out.deinit(self.allocator);
@@ -5316,6 +6062,381 @@ pub const Session = struct {
         return std.fmt.allocPrint(self.allocator, "\"{s}\"", .{hostStringViewBytes(view)});
     }
 
+    fn renderHostRelation(self: *Session, relation: *const HostRelation) anyerror![]u8 {
+        return switch (relation.origin) {
+            .file => |file| std.fmt.allocPrint(
+                self.allocator,
+                "relation[{s};\"{s}\"]",
+                .{ file.source_kind.text(), file.path },
+            ),
+            .sql => |sql_info| std.fmt.allocPrint(
+                self.allocator,
+                "relation[sql;\"{s}\"]",
+                .{sql_info.text},
+            ),
+        };
+    }
+
+    fn renderHostTableScalar(self: *Session, scalar: *const HostTableScalar) anyerror![]u8 {
+        if (scalar.is_null) return try self.allocator.dupe(u8, "null");
+        return switch (scalar.kind) {
+            .boolean, .int, .float, .string => try self.renderValue(scalar.value),
+            .date => try self.renderDateCell(scalar.value.asInt()),
+            .time => try self.renderTimeCell(scalar.value.asInt()),
+            .time_ns => try self.renderTimeNsCell(scalar.value.asInt()),
+            .time_tz => try self.renderTimeTzCell(scalar.value.asInt()),
+            .timestamp => try self.renderTimestampMicrosCell(scalar.value.asInt(), null),
+            .timestamp_s => try self.renderTimestampScaledCell(scalar.value.asInt(), 1_000_000, null),
+            .timestamp_ms => try self.renderTimestampScaledCell(scalar.value.asInt(), 1_000, null),
+            .timestamp_ns => try self.renderTimestampNsCell(scalar.value.asInt(), null),
+            .timestamp_tz => try self.renderTimestampMicrosCell(scalar.value.asInt(), "Z"),
+        };
+    }
+
+    fn keyedStoreValues(store: *const HostKeyedStore) *const HostBoxedArray {
+        std.debug.assert(store.values.tag() == .array and store.values.arrayKind() == .host_boxed_array);
+        return store.values.asHostBoxedArray();
+    }
+
+    fn keyedStoreNameCount(store: *const HostKeyedStore) usize {
+        return switch (store.names.arrayKind()) {
+            .host_boxed_array => store.names.asHostBoxedArray().items.len,
+            .host_string_list => store.names.asHostStringList().len,
+            else => unreachable,
+        };
+    }
+
+    fn keyedStoreNameValue(self: *Session, store: *const HostKeyedStore, idx: usize) KError!Value {
+        return switch (store.names.arrayKind()) {
+            .host_boxed_array => blk: {
+                const items = store.names.asHostBoxedArray().items;
+                if (idx >= items.len) return error.Type;
+                break :blk try self.retainEscapedValue(items[idx]);
+            },
+            .host_string_list => try self.frozenHostString(try hostStringListItemBytes(store.names.asHostStringList(), idx)),
+            else => error.Internal,
+        };
+    }
+
+    fn keyedStoreUsesDenseValueFastPath(store: *const HostKeyedStore) bool {
+        return store.layout == .dict and store.column_metadata == null;
+    }
+
+    fn keyedStoreTableMetadata(store: *const HostKeyedStore) []const HostKeyedColumnMetadata {
+        std.debug.assert(store.layout == .table);
+        return store.column_metadata orelse unreachable;
+    }
+
+    fn keyedStoreColumnNameBytes(store: *const HostKeyedStore, column_idx: usize) []const u8 {
+        return switch (store.names.arrayKind()) {
+            .host_boxed_array => blk: {
+                const names = store.names.asHostBoxedArray().items;
+                if (column_idx >= names.len) return "";
+                break :blk symbolBytes(names[column_idx]) orelse stringBytes(names[column_idx]) orelse "";
+            },
+            .host_string_list => hostStringListItemBytes(store.names.asHostStringList(), column_idx) catch "",
+            else => "",
+        };
+    }
+
+    fn tableColumnData(store: *const HostKeyedStore, column_idx: usize) Value {
+        return keyedStoreValues(store).items[column_idx];
+    }
+
+    fn tableColumnKind(store: *const HostKeyedStore, column_idx: usize) HostTableColumnKind {
+        return keyedStoreTableMetadata(store)[column_idx].kind;
+    }
+
+    fn keyedStoreTableCellIsValid(store: *const HostKeyedStore, column_idx: usize, row: usize) bool {
+        const validity = keyedStoreTableMetadata(store)[column_idx].validity orelse return true;
+        return (numericIntAt(validity, @intCast(row)) catch 0) != 0;
+    }
+
+    fn tableColumnNameBytes(column: *const HostTableColumn) []const u8 {
+        return symbolBytes(column.name) orelse stringBytes(column.name) orelse "";
+    }
+
+    fn tableCellIsValid(column: *const HostTableColumn, row: usize) bool {
+        const validity = column.validity orelse return true;
+        return (numericIntAt(validity, @intCast(row)) catch 0) != 0;
+    }
+
+    fn nonFiniteTemporalText(self: *Session, raw: i64) ![]u8 {
+        return try self.allocator.dupe(u8, if (raw < 0) "-inf" else "inf");
+    }
+
+    fn appendIsoYear(self: *Session, out: *std.ArrayList(u8), year: i32) !void {
+        if (year < 0) {
+            try out.append(self.allocator, '-');
+            try out.writer(self.allocator).print("{d:0>4}", .{@as(u32, @intCast(-year))});
+            return;
+        }
+        try out.writer(self.allocator).print("{d:0>4}", .{@as(u32, @intCast(year))});
+    }
+
+    fn appendTrimmedFractional(
+        self: *Session,
+        out: *std.ArrayList(u8),
+        comptime width: comptime_int,
+        value: u32,
+    ) !void {
+        if (value == 0) return;
+
+        var buf: [width]u8 = undefined;
+        const fmt = comptime std.fmt.comptimePrint("{{d:0>{}}}", .{width});
+        const text = try std.fmt.bufPrint(&buf, fmt, .{value});
+
+        var end = text.len;
+        while (end > 0 and text[end - 1] == '0') : (end -= 1) {}
+        if (end == 0) return;
+
+        try out.append(self.allocator, '.');
+        try out.appendSlice(self.allocator, text[0..end]);
+    }
+
+    const DivFloorResult = struct {
+        quot: i64,
+        rem: i64,
+    };
+
+    fn divFloorI64(value: i64, denom: i64) DivFloorResult {
+        std.debug.assert(denom > 0);
+
+        var quot = @divTrunc(value, denom);
+        var rem = @rem(value, denom);
+        if (rem < 0) {
+            quot -= 1;
+            rem += denom;
+        }
+        return .{ .quot = quot, .rem = rem };
+    }
+
+    fn renderDateCell(self: *Session, raw_days: i64) anyerror![]u8 {
+        if (comptime !runtime_has_duckdb) return error.Unsupported;
+
+        const days = std.math.cast(i32, raw_days) orelse return error.Unsupported;
+        const date: duckdb_runtime.c.duckdb_date = .{ .days = days };
+        if (!duckdb_runtime.c.duckdb_is_finite_date(date)) return try self.nonFiniteTemporalText(raw_days);
+
+        const parts = duckdb_runtime.c.duckdb_from_date(date);
+        var out = std.ArrayList(u8).empty;
+        errdefer out.deinit(self.allocator);
+
+        try self.appendIsoYear(&out, parts.year);
+        try out.writer(self.allocator).print(
+            "-{d:0>2}-{d:0>2}",
+            .{ @as(u32, @intCast(parts.month)), @as(u32, @intCast(parts.day)) },
+        );
+        return try out.toOwnedSlice(self.allocator);
+    }
+
+    fn renderTimeParts(self: *Session, parts: duckdb_runtime.c.duckdb_time_struct, fractional: ?u32, comptime width: comptime_int) anyerror![]u8 {
+        var out = std.ArrayList(u8).empty;
+        errdefer out.deinit(self.allocator);
+
+        try out.writer(self.allocator).print(
+            "{d:0>2}:{d:0>2}:{d:0>2}",
+            .{
+                @as(u32, @intCast(parts.hour)),
+                @as(u32, @intCast(parts.min)),
+                @as(u32, @intCast(parts.sec)),
+            },
+        );
+        if (fractional) |value| try self.appendTrimmedFractional(&out, width, value);
+        return try out.toOwnedSlice(self.allocator);
+    }
+
+    fn renderTimeCell(self: *Session, raw_micros: i64) anyerror![]u8 {
+        if (comptime !runtime_has_duckdb) return error.Unsupported;
+
+        const parts = duckdb_runtime.c.duckdb_from_time(.{ .micros = raw_micros });
+        return try self.renderTimeParts(parts, @intCast(parts.micros), 6);
+    }
+
+    fn renderTimeNsCell(self: *Session, raw_nanos: i64) anyerror![]u8 {
+        if (comptime !runtime_has_duckdb) return error.Unsupported;
+
+        const split = divFloorI64(raw_nanos, 1_000);
+        const parts = duckdb_runtime.c.duckdb_from_time(.{ .micros = split.quot });
+        const fractional = @as(u32, @intCast(parts.micros)) * 1_000 + @as(u32, @intCast(split.rem));
+        return try self.renderTimeParts(parts, fractional, 9);
+    }
+
+    fn appendUtcOffset(self: *Session, out: *std.ArrayList(u8), raw_offset_seconds: i32) !void {
+        const sign: u8 = if (raw_offset_seconds < 0) '-' else '+';
+        const abs_seconds: u32 = @intCast(if (raw_offset_seconds < 0) -raw_offset_seconds else raw_offset_seconds);
+        const hours = abs_seconds / 3_600;
+        const minutes = (abs_seconds % 3_600) / 60;
+        const seconds = abs_seconds % 60;
+
+        try out.append(self.allocator, sign);
+        try out.writer(self.allocator).print("{d:0>2}:{d:0>2}", .{ hours, minutes });
+        if (seconds != 0) try out.writer(self.allocator).print(":{d:0>2}", .{seconds});
+    }
+
+    fn renderTimeTzCell(self: *Session, raw_bits: i64) anyerror![]u8 {
+        if (comptime !runtime_has_duckdb) return error.Unsupported;
+
+        const parts = duckdb_runtime.c.duckdb_from_time_tz(.{ .bits = @bitCast(raw_bits) });
+        var out = std.ArrayList(u8).empty;
+        errdefer out.deinit(self.allocator);
+
+        try out.writer(self.allocator).print(
+            "{d:0>2}:{d:0>2}:{d:0>2}",
+            .{
+                @as(u32, @intCast(parts.time.hour)),
+                @as(u32, @intCast(parts.time.min)),
+                @as(u32, @intCast(parts.time.sec)),
+            },
+        );
+        try self.appendTrimmedFractional(&out, 6, @intCast(parts.time.micros));
+        try self.appendUtcOffset(&out, parts.offset);
+        return try out.toOwnedSlice(self.allocator);
+    }
+
+    fn renderTimestampParts(
+        self: *Session,
+        parts: duckdb_runtime.c.duckdb_timestamp_struct,
+        fractional: ?u32,
+        comptime width: comptime_int,
+        suffix: ?[]const u8,
+    ) anyerror![]u8 {
+        var out = std.ArrayList(u8).empty;
+        errdefer out.deinit(self.allocator);
+
+        try self.appendIsoYear(&out, parts.date.year);
+        try out.writer(self.allocator).print(
+            "-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}",
+            .{
+                @as(u32, @intCast(parts.date.month)),
+                @as(u32, @intCast(parts.date.day)),
+                @as(u32, @intCast(parts.time.hour)),
+                @as(u32, @intCast(parts.time.min)),
+                @as(u32, @intCast(parts.time.sec)),
+            },
+        );
+        if (fractional) |value| try self.appendTrimmedFractional(&out, width, value);
+        if (suffix) |text| try out.appendSlice(self.allocator, text);
+        return try out.toOwnedSlice(self.allocator);
+    }
+
+    fn renderTimestampMicrosCell(self: *Session, raw_micros: i64, suffix: ?[]const u8) anyerror![]u8 {
+        if (comptime !runtime_has_duckdb) return error.Unsupported;
+
+        const ts: duckdb_runtime.c.duckdb_timestamp = .{ .micros = raw_micros };
+        if (!duckdb_runtime.c.duckdb_is_finite_timestamp(ts)) return try self.nonFiniteTemporalText(raw_micros);
+
+        const parts = duckdb_runtime.c.duckdb_from_timestamp(ts);
+        return try self.renderTimestampParts(parts, @intCast(parts.time.micros), 6, suffix);
+    }
+
+    fn renderTimestampScaledCell(
+        self: *Session,
+        raw_value: i64,
+        scale_to_micros: i64,
+        suffix: ?[]const u8,
+    ) anyerror![]u8 {
+        if (comptime !runtime_has_duckdb) return error.Unsupported;
+
+        const micros = std.math.mul(i64, raw_value, scale_to_micros) catch return error.Unsupported;
+        return try self.renderTimestampMicrosCell(micros, suffix);
+    }
+
+    fn renderTimestampNsCell(self: *Session, raw_nanos: i64, suffix: ?[]const u8) anyerror![]u8 {
+        if (comptime !runtime_has_duckdb) return error.Unsupported;
+
+        const split = divFloorI64(raw_nanos, 1_000);
+        const ts: duckdb_runtime.c.duckdb_timestamp = .{ .micros = split.quot };
+        if (!duckdb_runtime.c.duckdb_is_finite_timestamp(ts)) return try self.nonFiniteTemporalText(raw_nanos);
+
+        const parts = duckdb_runtime.c.duckdb_from_timestamp(ts);
+        const fractional = @as(u32, @intCast(parts.time.micros)) * 1_000 + @as(u32, @intCast(split.rem));
+        return try self.renderTimestampParts(parts, fractional, 9, suffix);
+    }
+
+    fn renderTableCell(self: *Session, store: *const HostKeyedStore, column_idx: usize, row: usize) anyerror![]u8 {
+        if (!keyedStoreTableCellIsValid(store, column_idx, row)) return try self.allocator.dupe(u8, "null");
+        const kind = keyedStoreTableMetadata(store)[column_idx].kind;
+        const data = tableColumnData(store, column_idx);
+        return switch (kind) {
+            .boolean => std.fmt.allocPrint(self.allocator, "{d}b", .{@intFromBool((try numericIntAt(data, @intCast(row))) != 0)}),
+            .int => std.fmt.allocPrint(self.allocator, "{d}", .{try numericIntAt(data, @intCast(row))}),
+            .float => formatFloat(self.allocator, try numericFloatAt(data, @intCast(row))),
+            .string => blk: {
+                const value = try self.hostStringListItemValue(data.asHostStringList(), row);
+                defer self.releaseValue(value);
+                break :blk try self.renderValue(value);
+            },
+            .date => try self.renderDateCell(try numericIntAt(data, @intCast(row))),
+            .time => try self.renderTimeCell(try numericIntAt(data, @intCast(row))),
+            .time_ns => try self.renderTimeNsCell(try numericIntAt(data, @intCast(row))),
+            .time_tz => try self.renderTimeTzCell(try numericIntAt(data, @intCast(row))),
+            .timestamp => try self.renderTimestampMicrosCell(try numericIntAt(data, @intCast(row)), null),
+            .timestamp_s => try self.renderTimestampScaledCell(try numericIntAt(data, @intCast(row)), 1_000_000, null),
+            .timestamp_ms => try self.renderTimestampScaledCell(try numericIntAt(data, @intCast(row)), 1_000, null),
+            .timestamp_ns => try self.renderTimestampNsCell(try numericIntAt(data, @intCast(row)), null),
+            .timestamp_tz => try self.renderTimestampMicrosCell(try numericIntAt(data, @intCast(row)), "Z"),
+        };
+    }
+
+    fn renderTableStore(self: *Session, store: *const HostKeyedStore) anyerror![]u8 {
+        std.debug.assert(store.layout == .table);
+        const column_count = keyedStoreNameCount(store);
+        var widths = try self.allocator.alloc(usize, column_count);
+        defer self.allocator.free(widths);
+
+        for (0..column_count) |idx| {
+            widths[idx] = keyedStoreColumnNameBytes(store, idx).len;
+        }
+        for (0..store.row_count) |row| {
+            for (0..column_count) |idx| {
+                const cell = try self.renderTableCell(store, idx, row);
+                defer self.allocator.free(cell);
+                widths[idx] = @max(widths[idx], cell.len);
+            }
+        }
+
+        var out = std.ArrayList(u8).empty;
+        errdefer out.deinit(self.allocator);
+
+        for (0..column_count) |idx| {
+            if (idx != 0) try out.append(self.allocator, ' ');
+            const name = keyedStoreColumnNameBytes(store, idx);
+            try out.appendSlice(self.allocator, name);
+            if (idx + 1 != column_count and widths[idx] > name.len) {
+                try out.appendNTimes(self.allocator, ' ', widths[idx] - name.len);
+            }
+        }
+
+        if (column_count != 0) {
+            try out.append(self.allocator, '\n');
+            for (widths, 0..) |width, idx| {
+                if (idx != 0) try out.append(self.allocator, ' ');
+                try out.appendNTimes(self.allocator, '-', width);
+            }
+        }
+
+        for (0..store.row_count) |row| {
+            if (column_count != 0 or row != 0) try out.append(self.allocator, '\n');
+            for (0..column_count) |idx| {
+                if (idx != 0) try out.append(self.allocator, ' ');
+                const cell = try self.renderTableCell(store, idx, row);
+                defer self.allocator.free(cell);
+                try out.appendSlice(self.allocator, cell);
+                if (idx + 1 != column_count and widths[idx] > cell.len) {
+                    try out.appendNTimes(self.allocator, ' ', widths[idx] - cell.len);
+                }
+            }
+        }
+
+        return try out.toOwnedSlice(self.allocator);
+    }
+
+    fn renderHostKeyedStore(self: *Session, store: *const HostKeyedStore) anyerror![]u8 {
+        if (store.layout == .table) return try self.renderTableStore(store);
+        return try self.allocator.dupe(u8, "dict[]");
+    }
+
     fn renderHostStringList(self: *Session, list: *const HostStringList) anyerror![]u8 {
         var out = std.ArrayList(u8).empty;
         errdefer out.deinit(self.allocator);
@@ -5347,6 +6468,11 @@ pub const Session = struct {
     }
 
     fn renderHostArray(self: *Session, array: *const HostDenseArray) anyerror![]u8 {
+        if (array.logical_len == 0) switch (array.storage) {
+            .int8, .int16, .int32, .int64 => return try self.allocator.dupe(u8, "!0"),
+            else => {},
+        };
+
         var out = std.ArrayList(u8).empty;
         errdefer out.deinit(self.allocator);
 
@@ -5396,7 +6522,16 @@ pub const Session = struct {
         var out = std.ArrayList(u8).empty;
         errdefer out.deinit(self.allocator);
 
-        if (isRenderableMatrix(array.items)) {
+        if (array.items.len == 1) {
+            try out.append(self.allocator, ',');
+            const item = array.items[0];
+            const wrap = valueNonVectorNumericShape(item) != null;
+            if (wrap) try out.append(self.allocator, '(');
+            const part = try self.renderValue(item);
+            defer self.allocator.free(part);
+            try out.appendSlice(self.allocator, part);
+            if (wrap) try out.append(self.allocator, ')');
+        } else if (isRenderableMatrix(array.items)) {
             for (array.items, 0..) |item, idx| {
                 if (idx != 0) try out.append(self.allocator, '\n');
                 const part = try self.renderValue(item);
@@ -5452,6 +6587,10 @@ pub const Session = struct {
             .value = value,
         };
         return Value.boxedInt(box);
+    }
+
+    fn enlistValue(self: *Session, value: Value) !Value {
+        return try self.createManagedHostBoxedArray(&.{value});
     }
 
     fn scratchInt(self: *Session, value: i64) !Value {
@@ -5510,6 +6649,28 @@ pub const Session = struct {
         return closure;
     }
 
+    fn allocManagedDerivedClosure(self: *Session, kind: DerivedVerbKind, base: Value) !*Closure {
+        const captures = try self.allocator.alloc(Value, 1);
+        errdefer self.allocator.free(captures);
+        captures[0] = try self.retainEscapedValue(base);
+        errdefer self.releaseValue(captures[0]);
+        return try self.allocManagedClosure(derivedCode(kind), captures);
+    }
+
+    fn adverbBaseCanStayFrozen(base: Value) bool {
+        return switch (base.tag()) {
+            .builtin => true,
+            .closure => base.asClosure().header.owner == .frozen or base.asClosure().captures.len == 0,
+            .array => base.arrayOwner() == .frozen,
+            else => false,
+        };
+    }
+
+    fn allocDerivedClosure(self: *Session, kind: DerivedVerbKind, base: Value) !*Closure {
+        if (adverbBaseCanStayFrozen(base)) return try self.allocFrozenDerivedClosure(kind, base);
+        return try self.allocManagedDerivedClosure(kind, base);
+    }
+
     fn allocFrozenInnerProductClosure(self: *Session, reduce: BuiltinId, map: BuiltinId) !*Closure {
         const captures = try self.arena.allocator().alloc(Value, 2);
         captures[0] = try self.freezeConstantValue(Value.builtin(reduce));
@@ -5537,6 +6698,75 @@ pub const Session = struct {
         return closure;
     }
 
+    fn freeManagedHostDenseBuffer(self: *Session, kind: HostDenseStorageKind, entry: ManagedHostDenseBufferEntry) void {
+        switch (kind) {
+            .bit => {
+                const ptr: [*]u64 = @ptrCast(@alignCast(entry.ptr));
+                self.allocator.free(ptr[0..entry.len]);
+            },
+            .int8 => {
+                const ptr: [*]i8 = @ptrCast(@alignCast(entry.ptr));
+                self.allocator.free(ptr[0..entry.len]);
+            },
+            .int16 => {
+                const ptr: [*]i16 = @ptrCast(@alignCast(entry.ptr));
+                self.allocator.free(ptr[0..entry.len]);
+            },
+            .int32 => {
+                const ptr: [*]i32 = @ptrCast(@alignCast(entry.ptr));
+                self.allocator.free(ptr[0..entry.len]);
+            },
+            .int64 => {
+                const ptr: [*]i64 = @ptrCast(@alignCast(entry.ptr));
+                self.allocator.free(ptr[0..entry.len]);
+            },
+            .float64 => {
+                const ptr: [*]f64 = @ptrCast(@alignCast(entry.ptr));
+                self.allocator.free(ptr[0..entry.len]);
+            },
+        }
+    }
+
+    fn takeManagedHostDenseBuffer(self: *Session, comptime T: type, comptime kind: HostDenseStorageKind, len: usize) ?[]T {
+        if (len == 0) return null;
+        const pool_idx = @intFromEnum(kind);
+        const count = self.free_host_dense_buffer_len[pool_idx];
+        if (count == 0) return null;
+
+        var idx = count;
+        while (idx > 0) {
+            idx -= 1;
+            const entry = self.free_host_dense_buffers[pool_idx][idx].?;
+            if (entry.len != len) continue;
+            const last_idx = count - 1;
+            self.free_host_dense_buffers[pool_idx][idx] = self.free_host_dense_buffers[pool_idx][last_idx];
+            self.free_host_dense_buffers[pool_idx][last_idx] = null;
+            self.free_host_dense_buffer_len[pool_idx] -= 1;
+            const ptr: [*]T = @ptrCast(@alignCast(entry.ptr));
+            return ptr[0..len];
+        }
+
+        return null;
+    }
+
+    fn recycleManagedHostDenseBuffer(self: *Session, comptime T: type, comptime kind: HostDenseStorageKind, items: []T) void {
+        if (items.len == 0) {
+            self.allocator.free(items);
+            return;
+        }
+        const pool_idx = @intFromEnum(kind);
+        const count = self.free_host_dense_buffer_len[pool_idx];
+        if (count >= max_pooled_objects) {
+            self.allocator.free(items);
+            return;
+        }
+        self.free_host_dense_buffers[pool_idx][count] = .{
+            .ptr = @ptrCast(items.ptr),
+            .len = items.len,
+        };
+        self.free_host_dense_buffer_len[pool_idx] = count + 1;
+    }
+
     fn allocHostArrayTyped(self: *Session, comptime T: type, comptime kind: HostDenseStorageKind, owner: HeapOwner, len: usize) !HostDenseAlloc(T) {
         const allocator = switch (owner) {
             .managed => self.allocator,
@@ -5550,12 +6780,16 @@ pub const Session = struct {
             self.free_host_array_len -= 1;
             break :blk self.free_host_arrays[self.free_host_array_len].?;
         } else try allocator.create(HostDenseArray);
-        const items = try allocator.alloc(T, len);
+        const items = if (owner == .managed)
+            self.takeManagedHostDenseBuffer(T, kind, len) orelse try allocator.alloc(T, len)
+        else
+            try allocator.alloc(T, len);
         array.header = HeapHeader.init(.host_dense_array, owner);
         array.logical_handle = null;
         array.logical_len = len;
         array.flags = 0;
         hostDenseClearCachedIntRange(array);
+        hostDenseResetFindCacheState(array);
         array.storage = switch (kind) {
             .bit => unreachable,
             .int8 => .{ .int8 = items },
@@ -5580,13 +6814,18 @@ pub const Session = struct {
             self.free_host_array_len -= 1;
             break :blk self.free_host_arrays[self.free_host_array_len].?;
         } else try allocator.create(HostDenseArray);
-        const words = try allocator.alloc(u64, bitWordCount(len));
+        const word_count = bitWordCount(len);
+        const words = if (owner == .managed)
+            self.takeManagedHostDenseBuffer(u64, .bit, word_count) orelse try allocator.alloc(u64, word_count)
+        else
+            try allocator.alloc(u64, word_count);
         @memset(words, 0);
         array.header = HeapHeader.init(.host_dense_array, owner);
         array.logical_handle = null;
         array.logical_len = len;
         array.flags = 0;
         hostDenseClearCachedIntRange(array);
+        hostDenseResetFindCacheState(array);
         array.storage = .{ .bit = words };
         return .{ .array = array, .words = words, .len = len };
     }
@@ -5741,9 +6980,9 @@ pub const Session = struct {
             @constCast(host)
         else
             return null;
-        switch (array.header.owner) {
+        switch (numericPayloadOwner(array)) {
             .scratch => {},
-            .managed => if (array.header.ref_count != 1) return null,
+            .managed => if (numericPayloadManagedRefCount(array) != 1) return null,
             .frozen => return null,
         }
         return switch (kind) {
@@ -5777,9 +7016,9 @@ pub const Session = struct {
         else
             return null;
         if (hostDenseNumericMode(array) != .float) return null;
-        switch (array.header.owner) {
+        switch (numericPayloadOwner(array)) {
             .scratch => {},
-            .managed => if (array.header.ref_count != 1) return null,
+            .managed => if (numericPayloadManagedRefCount(array) != 1) return null,
             .frozen => return null,
         }
         return switch (array.storage) {
@@ -5964,6 +7203,29 @@ pub const Session = struct {
         };
     }
 
+    fn moveEscapedValue(self: *Session, value: Value) !Value {
+        const canonical = try self.canonicalizeEscapedNumericValue(value);
+        return switch (canonical.raw & Value.tag_mask) {
+            Value.boxed_int_tag => switch (canonical.asBoxedInt().header.owner) {
+                .managed, .frozen => canonical,
+                .scratch => self.managedInt(canonical.asInt()),
+            },
+            Value.boxed_float_tag => switch (canonical.asBoxedFloat().header.owner) {
+                .managed, .frozen => canonical,
+                .scratch => self.managedFloat(canonical.asFloat()),
+            },
+            Value.closure_tag => switch (canonical.asClosure().header.owner) {
+                .managed, .frozen => canonical,
+                .scratch => self.promoteScratchClosure(canonical.asClosure()),
+            },
+            Value.array_tag => switch (canonical.arrayOwner()) {
+                .managed, .frozen => canonical,
+                .scratch => self.promoteScratchArray(canonical),
+            },
+            else => canonical,
+        };
+    }
+
     fn finishResult(self: *Session, value: Value) !Value {
         const canonical = try self.canonicalizeEscapedNumericValue(value);
         if (self.last_result) |rooted| self.releaseValue(rooted);
@@ -6002,8 +7264,13 @@ pub const Session = struct {
         const base = frame.base;
         const owner = frame.owner;
         self.frame_len -= 1;
-        const escaped_result = if (self.frame_len == 0) result else try self.retainEscapedValue(result);
-        defer if (self.frame_len != 0) self.releaseValue(result);
+        const escaped_result = if (self.frame_len == 0)
+            result
+        else switch (frame.result_target) {
+            .stack => try self.retainEscapedValue(result),
+            .parent_local, .parent_local_tail_global_slots => try self.moveEscapedValue(result),
+        };
+        defer if (self.frame_len != 0 and frame.result_target == .stack) self.releaseValue(result);
         self.dropStackFrom(base);
         if (owner) |owned| self.releaseValue(owned);
         if (self.frame_len == 0) {
@@ -6016,8 +7283,77 @@ pub const Session = struct {
             if (self.root_results) return try self.finishResult(result);
             return result;
         }
-        try self.push(escaped_result);
+        switch (frame.result_target) {
+            .stack => try self.push(escaped_result),
+            .parent_local => |slot| {
+                const parent_index = self.frame_len - 1;
+                const parent = &self.frames[parent_index];
+                try self.writeLocalValue(parent, slot, escaped_result);
+                if (try self.tryExecParentTailGlobalSlotsContinuation(parent_index, parent)) |final| return final;
+            },
+            .parent_local_tail_global_slots => |slot| {
+                const parent_index = self.frame_len - 1;
+                const parent = &self.frames[parent_index];
+                if (try self.execParentLocalTailGlobalSlotsContinuation(parent_index, parent, slot, escaped_result)) |final| return final;
+            },
+        }
         return null;
+    }
+
+    fn tryExecParentTailGlobalSlotsContinuation(self: *Session, frame_index: usize, frame: *CallFrame) KError!?Value {
+        if (frame.ip >= frame.code.bytes.len) return null;
+        const next_op: Op = std.meta.intToEnum(Op, frame.code.bytes[frame.ip]) catch return null;
+        if (next_op != .tail_call_global_slots) return null;
+        frame.ip += 1;
+        const slot = try readGlobalSlot(frame);
+        const argc = try readByte(frame);
+        return try self.execTailGlobalCallSlots(frame_index, frame, slot, argc);
+    }
+
+    fn execParentLocalTailGlobalSlotsContinuation(
+        self: *Session,
+        frame_index: usize,
+        frame: *CallFrame,
+        local_slot: u8,
+        value: Value,
+    ) KError!?Value {
+        if (frame.ip >= frame.code.bytes.len) {
+            try self.writeLocalValue(frame, local_slot, value);
+            return null;
+        }
+        const next_op: Op = std.meta.intToEnum(Op, frame.code.bytes[frame.ip]) catch {
+            try self.writeLocalValue(frame, local_slot, value);
+            return null;
+        };
+        if (next_op != .tail_call_global_slots) {
+            try self.writeLocalValue(frame, local_slot, value);
+            return null;
+        }
+
+        frame.ip += 1;
+        const slot = try readGlobalSlot(frame);
+        const argc = try readByte(frame);
+        const callee = try self.loadGlobalSlot(slot);
+        if (callee.tag() == .closure) {
+            const closure = callee.asClosure();
+            if (closureIsCompactPlainGlobal(closure) and closure.code.arity == argc) {
+                var sources_buf: [4]GlobalCallArgSource = undefined;
+                const sources = try readGlobalCallArgSources(frame, argc, &sources_buf);
+                try self.replaceCurrentFrameWithCompactPlainClosureFromGlobalCallSourcesWithOverride(frame_index, frame, callee, closure, slot, sources, local_slot, value);
+                return null;
+            }
+        }
+
+        try self.writeLocalValue(frame, local_slot, value);
+        return try self.execTailGlobalCallSlots(frame_index, frame, slot, argc);
+    }
+
+    fn parentLocalResultTarget(frame: *const CallFrame, slot: u8) CallResultTarget {
+        if (frame.ip < frame.code.bytes.len) {
+            const next_op = std.meta.intToEnum(Op, frame.code.bytes[frame.ip]) catch null;
+            if (next_op == .tail_call_global_slots) return .{ .parent_local_tail_global_slots = slot };
+        }
+        return .{ .parent_local = slot };
     }
 
     fn freezeZeroCaptureClosure(self: *Session, closure: *const Closure) KError!Value {
@@ -6061,6 +7397,7 @@ pub const Session = struct {
 
         stable.* = .{
             .arity = code.arity,
+            .frame_slot_count = code.frame_slot_count,
             .bytes = try arena_allocator.dupe(u8, code.bytes),
             .globals = try arena_allocator.dupe(u16, code.globals),
             .templates = templates,
@@ -6136,7 +7473,11 @@ pub const Session = struct {
                 .frozen => value,
                 .scratch, .managed => try self.frozenHostString(hostTextBytes(value.asHostString())),
             },
-            .host_string_view => try self.frozenHostString(hostStringViewBytes(value.asHostStringView())),
+            .host_string_view => switch (value.arrayKind()) {
+                .host_string_view => try self.frozenHostString(hostStringViewBytes(value.asHostStringView())),
+                .host_relation => error.Unsupported,
+                else => unreachable,
+            },
             .host_symbol => switch (value.asHostSymbol().header.owner) {
                 .frozen => value,
                 .scratch, .managed => try self.frozenHostSymbol(hostTextBytes(value.asHostSymbol())),
@@ -6449,7 +7790,7 @@ pub const Session = struct {
         _ = compile_arena.reset(.retain_capacity);
         self.scratch_code.reset();
         if (try tryCompileSimpleTopLevelInto(self, source, compile_arena.allocator(), .scratch, &self.scratch_code.instructions)) {
-            const code = self.scratch_code.finalize(0);
+            const code = self.scratch_code.finalize(0, 0);
             self.compilerAssignTopLevelProfile(code, source, .scratch);
             return code;
         }
@@ -6461,7 +7802,7 @@ pub const Session = struct {
         const compile_source = if (own_source) try code_allocator.dupe(u8, source) else source;
         var fast = InstructionBuffer{};
         if (try tryCompileSimpleTopLevelInto(self, compile_source, code_allocator, .frozen, &fast)) {
-            const code = try duplicateCodeFromInstructions(code_allocator, 0, &fast);
+            const code = try duplicateCodeFromInstructions(code_allocator, 0, 0, &fast);
             self.compilerAssignTopLevelProfile(code, compile_source, .frozen);
             return .{
                 .source = compile_source,
@@ -6476,14 +7817,17 @@ pub const Session = struct {
     }
 
     fn recycleManagedHostArray(self: *Session, array: *HostDenseArray) void {
+        if (array.find_cache_keys) |keys| self.allocator.free(keys);
+        if (array.find_cache_slots) |slots| self.allocator.free(slots);
+        hostDenseResetFindCacheState(array);
         array.logical_handle = null;
         switch (array.storage) {
-            .bit => |words| self.allocator.free(words),
-            .int8 => |items| self.allocator.free(items),
-            .int16 => |items| self.allocator.free(items),
-            .int32 => |items| self.allocator.free(items),
-            .int64 => |items| self.allocator.free(items),
-            .float64 => |items| self.allocator.free(items),
+            .bit => |words| self.recycleManagedHostDenseBuffer(u64, .bit, words),
+            .int8 => |items| self.recycleManagedHostDenseBuffer(i8, .int8, items),
+            .int16 => |items| self.recycleManagedHostDenseBuffer(i16, .int16, items),
+            .int32 => |items| self.recycleManagedHostDenseBuffer(i32, .int32, items),
+            .int64 => |items| self.recycleManagedHostDenseBuffer(i64, .int64, items),
+            .float64 => |items| self.recycleManagedHostDenseBuffer(f64, .float64, items),
         }
         if (self.free_host_array_len < self.free_host_arrays.len) {
             self.free_host_arrays[self.free_host_array_len] = array;
@@ -6502,6 +7846,20 @@ pub const Session = struct {
         } else {
             self.allocator.destroy(array);
         }
+    }
+
+    fn recycleManagedHostKeyedStore(self: *Session, store: *HostKeyedStore) void {
+        self.releaseValue(store.names);
+        self.releaseValue(store.values);
+        if (store.column_metadata) |metadata| {
+            for (metadata) |entry| {
+                if (entry.validity) |mask| self.releaseValue(mask);
+            }
+            self.allocator.free(metadata);
+        }
+        store.lookup.deinit(self.allocator);
+        if (store.owns_path) self.allocator.free(store.path);
+        self.allocator.destroy(store);
     }
 
     fn recycleManagedBackendArray(self: *Session, array: *BackendArray) void {
@@ -6692,7 +8050,6 @@ pub const Session = struct {
         std.debug.assert(handle.header.owner == .managed);
         std.debug.assert(handle.header.ref_count != 0);
         handle.header.ref_count -= 1;
-        syncNumericArrayChildren(handle);
         if (handle.header.ref_count == 0) self.recycleManagedNumericArray(handle);
     }
 
@@ -6774,11 +8131,23 @@ pub const Session = struct {
                     }
                 },
                 .host_boxed_array => {
-                    const array = @constCast(value.asHostBoxedArray());
-                    if (array.header.owner != .managed) return;
-                    std.debug.assert(array.header.ref_count != 0);
-                    array.header.ref_count -= 1;
-                    if (array.header.ref_count == 0) self.recycleManagedHostBoxedArray(array);
+                    switch (value.arrayKind()) {
+                        .host_boxed_array => {
+                            const array = @constCast(value.asHostBoxedArray());
+                            if (array.header.owner != .managed) return;
+                            std.debug.assert(array.header.ref_count != 0);
+                            array.header.ref_count -= 1;
+                            if (array.header.ref_count == 0) self.recycleManagedHostBoxedArray(array);
+                        },
+                        .host_keyed_store => {
+                            const store = @constCast(value.asHostKeyedStore());
+                            if (store.header.owner != .managed) return;
+                            std.debug.assert(store.header.ref_count != 0);
+                            store.header.ref_count -= 1;
+                            if (store.header.ref_count == 0) self.recycleManagedHostKeyedStore(store);
+                        },
+                        else => unreachable,
+                    }
                 },
                 .host_string, .host_symbol => {
                     const text = switch (value.arrayKind()) {
@@ -6795,14 +8164,38 @@ pub const Session = struct {
                     }
                 },
                 .host_string_view => {
-                    const view = @constCast(value.asHostStringView());
-                    if (view.header.owner != .managed) return;
-                    std.debug.assert(view.header.ref_count != 0);
-                    view.header.ref_count -= 1;
-                    if (view.header.ref_count == 0) {
-                        if (comptime enable_probe_instrumentation) self.debug_host_string_view_release_count += 1;
-                        self.releaseValue(Value.array(view.base));
-                        self.allocator.destroy(view);
+                    switch (value.arrayKind()) {
+                        .host_string_view => {
+                            const view = @constCast(value.asHostStringView());
+                            if (view.header.owner != .managed) return;
+                            std.debug.assert(view.header.ref_count != 0);
+                            view.header.ref_count -= 1;
+                            if (view.header.ref_count == 0) {
+                                if (comptime enable_probe_instrumentation) self.debug_host_string_view_release_count += 1;
+                                self.releaseValue(Value.array(view.base));
+                                self.allocator.destroy(view);
+                            }
+                        },
+                        .host_relation => {
+                            const relation = @constCast(value.asHostRelation());
+                            if (relation.header.owner != .managed) return;
+                            std.debug.assert(relation.header.ref_count != 0);
+                            relation.header.ref_count -= 1;
+                            if (relation.header.ref_count == 0) {
+                                destroyManagedHostRelationNoPool(self.allocator, relation);
+                            }
+                        },
+                        .host_table_scalar => {
+                            const scalar = @constCast(valueAsHostTableScalar(value));
+                            if (scalar.header.owner != .managed) return;
+                            std.debug.assert(scalar.header.ref_count != 0);
+                            scalar.header.ref_count -= 1;
+                            if (scalar.header.ref_count == 0) {
+                                self.releaseValue(scalar.value);
+                                self.allocator.destroy(scalar);
+                            }
+                        },
+                        else => unreachable,
                     }
                 },
                 .host_string_list => {
@@ -6987,6 +8380,117 @@ pub const Session = struct {
         try self.storeGlobalSlot(try self.internGlobalSlot(name), value);
     }
 
+    pub fn setGlobalHostBoxedArray(self: *Session, name: []const u8, values: []const Value) !void {
+        const value = try self.createManagedHostBoxedArray(values);
+        defer self.releaseValue(value);
+        try self.storeGlobalSlot(try self.internGlobalSlot(name), value);
+    }
+
+    pub fn createHostDictValue(
+        self: *Session,
+        store_path: []const u8,
+        keys: []const []const u8,
+        values: []const Value,
+    ) !Value {
+        const values_value = try self.makeArrayFromValues(values);
+        errdefer self.releaseValue(values_value);
+        return try self.createHostDictValueFromSequenceValue(store_path, keys, values_value);
+    }
+
+    fn keyedStoreNamesValueCount(names: Value) usize {
+        return switch (names.arrayKind()) {
+            .host_boxed_array => names.asHostBoxedArray().items.len,
+            .host_string_list => names.asHostStringList().len,
+            else => unreachable,
+        };
+    }
+
+    fn keyedStoreNamesValueBytesAt(names: Value, idx: usize) KError![]const u8 {
+        return switch (names.arrayKind()) {
+            .host_boxed_array => blk: {
+                const items = names.asHostBoxedArray().items;
+                if (idx >= items.len) return error.Type;
+                break :blk keyedLookupNameBytes(items[idx]) orelse return error.Type;
+            },
+            .host_string_list => try hostStringListItemBytes(names.asHostStringList(), idx),
+            else => error.Type,
+        };
+    }
+
+    fn createKeyedStoreLookupFromNamesValueOptions(
+        self: *Session,
+        names: Value,
+        comptime allow_duplicates: bool,
+    ) !std.StringHashMapUnmanaged(usize) {
+        var lookup: std.StringHashMapUnmanaged(usize) = .empty;
+        errdefer lookup.deinit(self.allocator);
+        const len = keyedStoreNamesValueCount(names);
+        try lookup.ensureTotalCapacity(self.allocator, @intCast(len));
+        for (0..len) |idx| {
+            const key = try keyedStoreNamesValueBytesAt(names, idx);
+            if (lookup.contains(key)) {
+                if (!allow_duplicates) return error.Name;
+                continue;
+            }
+            lookup.putAssumeCapacity(key, idx);
+        }
+        return lookup;
+    }
+
+    fn createKeyedStoreLookupFromNamesValue(self: *Session, names: Value) !std.StringHashMapUnmanaged(usize) {
+        return try self.createKeyedStoreLookupFromNamesValueOptions(names, false);
+    }
+
+    fn createHostDictValueFromSequenceValue(
+        self: *Session,
+        store_path: []const u8,
+        keys: []const []const u8,
+        values_value: Value,
+    ) !Value {
+        const value_len = derivedSequenceLen(values_value) orelse return error.Type;
+        if (keys.len != value_len) return error.Type;
+
+        const names = try self.createManagedHostStringListFromSlices(keys);
+        errdefer self.releaseValue(names);
+
+        const lookup = try self.createKeyedStoreLookupFromNamesValue(names);
+
+        const owned_path = try self.allocator.dupe(u8, store_path);
+        errdefer self.allocator.free(owned_path);
+        return try self.createManagedKeyedStore(owned_path, true, names, values_value, null, .dict, 0, lookup);
+    }
+
+    fn createHostDictValueFromDenseTextKeys(
+        self: *Session,
+        store_path: []const u8,
+        key_list: *const HostStringList,
+        values_value: Value,
+    ) !Value {
+        const value_len = derivedSequenceLen(values_value) orelse return error.Type;
+        if (key_list.len != value_len) return error.Type;
+
+        const names = try self.retainEscapedValue(Value.array(@constCast(key_list)));
+        errdefer self.releaseValue(names);
+
+        const lookup = try self.createKeyedStoreLookupFromNamesValue(names);
+
+        const owned_path = try self.allocator.dupe(u8, store_path);
+        errdefer self.allocator.free(owned_path);
+        return try self.createManagedKeyedStore(owned_path, true, names, values_value, null, .dict, 0, lookup);
+    }
+
+    pub fn setGlobalHostDict(
+        self: *Session,
+        name: []const u8,
+        store_path: []const u8,
+        keys: []const []const u8,
+        values: []const Value,
+    ) !void {
+        const value = try self.createHostDictValue(store_path, keys, values);
+        defer self.releaseValue(value);
+        try self.storeGlobalSlot(try self.internGlobalSlot(name), value);
+    }
+
     fn numericShapeSnapshotFromDims(dims: []const i32) KError!?NumericShapeSnapshot {
         if (dims.len == 0) return null;
         if (dims.len > numeric_array_max_rank) return error.Unsupported;
@@ -7164,12 +8668,48 @@ pub const Session = struct {
                     if (index >= self.stack_len) return error.Internal;
                     try self.push(self.retainValue(self.stack[index]));
                 },
+                .store_local => {
+                    const slot = try readByte(frame);
+                    try self.storeLocal(frame, slot);
+                },
+                .store_local_add_local_const => {
+                    const dst_slot = try readByte(frame);
+                    const src_slot = try readByte(frame);
+                    const rhs = try readI64(frame);
+                    const left = try self.readLocal(frame, src_slot);
+                    const result = try self.applyLocalConstOpValue(left, .add, rhs);
+                    try self.writeLocalValue(frame, dst_slot, result);
+                },
+                .store_local_sub_local_const => {
+                    const dst_slot = try readByte(frame);
+                    const src_slot = try readByte(frame);
+                    const rhs = try readI64(frame);
+                    const left = try self.readLocal(frame, src_slot);
+                    const result = try self.applyLocalConstOpValue(left, .sub, rhs);
+                    try self.writeLocalValue(frame, dst_slot, result);
+                },
+                .store_local_mul_local_const => {
+                    const dst_slot = try readByte(frame);
+                    const src_slot = try readByte(frame);
+                    const rhs = try readI64(frame);
+                    const left = try self.readLocal(frame, src_slot);
+                    const result = try self.applyLocalConstOpValue(left, .mul, rhs);
+                    try self.writeLocalValue(frame, dst_slot, result);
+                },
+                .take_local => {
+                    const slot = try readByte(frame);
+                    try self.push(try self.takeLocal(frame, slot));
+                },
                 .load_inline_local => {
                     const slot = try readByte(frame);
                     const base = self.currentInlineBase() orelse return error.Internal;
                     const index = base + slot;
                     if (index >= self.stack_len) return error.Internal;
                     try self.push(self.retainValue(self.stack[index]));
+                },
+                .take_inline_local => {
+                    const slot = try readByte(frame);
+                    try self.push(try self.takeInlineLocal(slot));
                 },
                 .load_capture => {
                     const slot = try readByte(frame);
@@ -7380,6 +8920,21 @@ pub const Session = struct {
                     const value = try self.readCapture(frame, try readByte(frame));
                     try self.push(try self.sqrtValue(value));
                 },
+                .call1_local_local => {
+                    const callee = try self.readLocal(frame, try readByte(frame));
+                    const arg0 = try self.readLocal(frame, try readByte(frame));
+                    try self.execBorrowedCall1(callee, arg0);
+                },
+                .tail_call1_local_local => {
+                    const callee = try self.readLocal(frame, try readByte(frame));
+                    const arg0 = try self.readLocal(frame, try readByte(frame));
+                    if (try self.execBorrowedTailCall1(frame_index, callee, arg0)) |final| return final;
+                },
+                .call1_inline_local_local => {
+                    const callee = try self.readInlineLocal(try readByte(frame));
+                    const arg0 = try self.readInlineLocal(try readByte(frame));
+                    try self.execBorrowedCall1(callee, arg0);
+                },
                 .inline_call_add2 => try self.execInlineCallAdd2(),
                 .inline_call_add_global => {
                     const slot = try readGlobalSlot(frame);
@@ -7497,6 +9052,7 @@ pub const Session = struct {
                     try self.push(try self.argmaxValue(value));
                 },
                 .not => try self.execBuiltinMonad(.not),
+                .match => try self.execDyad(.not),
                 .count => try self.execBuiltinMonad(.count),
                 .floor => try self.execBuiltinMonad(.floor),
                 .null_test => try self.execBuiltinMonad(.null_fill_without),
@@ -7568,6 +9124,22 @@ pub const Session = struct {
                     const slot = try readGlobalSlot(frame);
                     try self.execGlobalCall2(slot);
                 },
+                .call_global3 => {
+                    const slot = try readGlobalSlot(frame);
+                    try self.execGlobalCall3(slot);
+                },
+                .call_global4 => {
+                    const slot = try readGlobalSlot(frame);
+                    try self.execGlobalCall4(slot);
+                },
+                .call_global_slots => {
+                    const slot = try readGlobalSlot(frame);
+                    try self.execGlobalCallSlots(frame, slot, try readByte(frame));
+                },
+                .call_global_slots_store_local => {
+                    const slot = try readGlobalSlot(frame);
+                    try self.execGlobalCallSlotsStoreLocal(frame, slot, try readByte(frame));
+                },
                 .tail_call_global1 => {
                     const slot = try readGlobalSlot(frame);
                     if (try self.execTailGlobalCall1(frame_index, slot)) |final| return final;
@@ -7575,6 +9147,18 @@ pub const Session = struct {
                 .tail_call_global2 => {
                     const slot = try readGlobalSlot(frame);
                     if (try self.execTailGlobalCall2(frame_index, slot)) |final| return final;
+                },
+                .tail_call_global3 => {
+                    const slot = try readGlobalSlot(frame);
+                    if (try self.execTailGlobalCall3(frame_index, slot)) |final| return final;
+                },
+                .tail_call_global4 => {
+                    const slot = try readGlobalSlot(frame);
+                    if (try self.execTailGlobalCall4(frame_index, slot)) |final| return final;
+                },
+                .tail_call_global_slots => {
+                    const slot = try readGlobalSlot(frame);
+                    if (try self.execTailGlobalCallSlots(frame_index, frame, slot, try readByte(frame))) |final| return final;
                 },
                 .call1 => try self.execCall1(),
                 .call2 => try self.execCall2(),
@@ -7661,11 +9245,70 @@ pub const Session = struct {
         return self.stack[index];
     }
 
+    fn storeLocal(self: *Session, frame: *const CallFrame, slot: u8) KError!void {
+        if (self.stack_len == 0) return error.Internal;
+        const value = self.pop();
+        try self.writeLocalValue(frame, slot, value);
+    }
+
+    fn writeLocalValue(self: *Session, frame: *const CallFrame, slot: u8, value: Value) KError!void {
+        const index = frame.base + slot;
+        if (index >= self.stack_len) return error.Internal;
+        self.releaseCanonicalManagedNumericValue(self.stack[index]);
+        self.stack[index] = value;
+    }
+
+    fn takeLocal(self: *Session, frame: *const CallFrame, slot: u8) KError!Value {
+        const index = frame.base + slot;
+        if (index >= self.stack_len) return error.Internal;
+        const value = self.stack[index];
+        self.stack[index] = Value.fromBool(false);
+        return value;
+    }
+
     fn readInlineLocal(self: *Session, slot: u8) KError!Value {
         const base = self.currentInlineBase() orelse return error.Internal;
         const index = base + slot;
         if (index >= self.stack_len) return error.Internal;
         return self.stack[index];
+    }
+
+    fn takeInlineLocal(self: *Session, slot: u8) KError!Value {
+        const base = self.currentInlineBase() orelse return error.Internal;
+        const index = base + slot;
+        if (index >= self.stack_len) return error.Internal;
+        const value = self.stack[index];
+        self.stack[index] = Value.fromBool(false);
+        return value;
+    }
+
+    fn applyLocalConstOpValue(self: *Session, left: Value, op: BuiltinId, rhs: i64) KError!Value {
+        if (scalarIntLikeValue(left)) |lhs| {
+            switch (op) {
+                .add => {
+                    const result = @addWithOverflow(lhs, rhs);
+                    if (result[1] == 0) return try self.intValue(result[0]);
+                },
+                .sub => {
+                    const result = @subWithOverflow(lhs, rhs);
+                    if (result[1] == 0) return try self.intValue(result[0]);
+                },
+                .mul => {
+                    const result = @mulWithOverflow(lhs, rhs);
+                    if (result[1] == 0) return try self.intValue(result[0]);
+                },
+                else => return error.Unsupported,
+            }
+        }
+
+        const right = try self.intValue(rhs);
+        defer self.releaseValue(right);
+        return switch (op) {
+            .add => try self.addValues(left, right),
+            .sub => try self.subValues(left, right),
+            .mul => try self.mulValues(left, right),
+            else => error.Unsupported,
+        };
     }
 
     fn readCapture(self: *Session, frame: *const CallFrame, slot: u8) KError!Value {
@@ -7680,6 +9323,7 @@ pub const Session = struct {
     }
 
     fn retainedFrameOwner(self: *Session, value: Value) ?Value {
+        if (value.tag() == .closure and value.asClosure().captures.len == 0) return null;
         return if (isManagedValue(value)) self.retainValue(value) else null;
     }
 
@@ -7744,6 +9388,7 @@ pub const Session = struct {
         const retained_arg0 = self.retainValue(arg0);
         const base = self.frames[frame_index].base;
         const old_owner = self.frames[frame_index].owner;
+        const result_target = self.frames[frame_index].result_target;
         self.dropStackFrom(base);
         if (old_owner) |owned| self.releaseValue(owned);
         self.stack_len = base;
@@ -7755,7 +9400,9 @@ pub const Session = struct {
             .captures = closure.captures,
             .owner = retained_owner,
             .callable_global_slot = sampling_profile_no_callable_slot,
+            .result_target = result_target,
         };
+        try self.ensureFrameLocalSlots(closure.code, base);
     }
 
     fn replaceCurrentFrameWithBorrowedClosure1(self: *Session, frame_index: usize, callee: Value, closure: *const Closure, callable_slot: u16) KError!void {
@@ -7765,6 +9412,7 @@ pub const Session = struct {
         const arg0_index = self.stack_len - 1;
         const arg0 = self.stack[arg0_index];
         const old_owner = self.frames[frame_index].owner;
+        const result_target = self.frames[frame_index].result_target;
 
         var idx = self.stack_len;
         while (idx > base) {
@@ -7783,7 +9431,9 @@ pub const Session = struct {
             .captures = closure.captures,
             .owner = self.retainedFrameOwner(callee),
             .callable_global_slot = callable_slot,
+            .result_target = result_target,
         };
+        try self.ensureFrameLocalSlots(closure.code, base);
     }
 
     fn replaceCurrentFrameWithClosure2(self: *Session, frame_index: usize, owner: Value, closure: *const Closure, arg0: Value, arg1: Value) KError!void {
@@ -7792,6 +9442,7 @@ pub const Session = struct {
         const retained_arg1 = self.retainValue(arg1);
         const base = self.frames[frame_index].base;
         const old_owner = self.frames[frame_index].owner;
+        const result_target = self.frames[frame_index].result_target;
         self.dropStackFrom(base);
         if (old_owner) |owned| self.releaseValue(owned);
         self.stack_len = base;
@@ -7804,7 +9455,9 @@ pub const Session = struct {
             .captures = closure.captures,
             .owner = retained_owner,
             .callable_global_slot = sampling_profile_no_callable_slot,
+            .result_target = result_target,
         };
+        try self.ensureFrameLocalSlots(closure.code, base);
     }
 
     // Tail global calls can keep current-frame args in place and only borrow the callee.
@@ -7817,6 +9470,7 @@ pub const Session = struct {
         const arg0 = self.stack[arg0_index];
         const arg1 = self.stack[arg1_index];
         const old_owner = self.frames[frame_index].owner;
+        const result_target = self.frames[frame_index].result_target;
 
         var idx = self.stack_len;
         while (idx > base) {
@@ -7836,7 +9490,86 @@ pub const Session = struct {
             .captures = closure.captures,
             .owner = self.retainedFrameOwner(callee),
             .callable_global_slot = callable_slot,
+            .result_target = result_target,
         };
+        try self.ensureFrameLocalSlots(closure.code, base);
+    }
+
+    fn replaceCurrentFrameWithBorrowedClosure3(self: *Session, frame_index: usize, callee: Value, closure: *const Closure, callable_slot: u16) KError!void {
+        if (self.stack_len < 3) return error.Internal;
+
+        const base = self.frames[frame_index].base;
+        const arg0_index = self.stack_len - 3;
+        const arg1_index = self.stack_len - 2;
+        const arg2_index = self.stack_len - 1;
+        const arg0 = self.stack[arg0_index];
+        const arg1 = self.stack[arg1_index];
+        const arg2 = self.stack[arg2_index];
+        const old_owner = self.frames[frame_index].owner;
+        const result_target = self.frames[frame_index].result_target;
+
+        var idx = self.stack_len;
+        while (idx > base) {
+            idx -= 1;
+            if (idx == arg0_index or idx == arg1_index or idx == arg2_index) continue;
+            self.releaseValue(self.stack[idx]);
+        }
+
+        self.stack[base] = arg0;
+        self.stack[base + 1] = arg1;
+        self.stack[base + 2] = arg2;
+        self.stack_len = base + 3;
+        if (old_owner) |owned| self.releaseValue(owned);
+        self.frames[frame_index] = .{
+            .code = closure.code,
+            .ip = 0,
+            .base = base,
+            .captures = closure.captures,
+            .owner = self.retainedFrameOwner(callee),
+            .callable_global_slot = callable_slot,
+            .result_target = result_target,
+        };
+        try self.ensureFrameLocalSlots(closure.code, base);
+    }
+
+    fn replaceCurrentFrameWithBorrowedClosure4(self: *Session, frame_index: usize, callee: Value, closure: *const Closure, callable_slot: u16) KError!void {
+        if (self.stack_len < 4) return error.Internal;
+
+        const base = self.frames[frame_index].base;
+        const arg0_index = self.stack_len - 4;
+        const arg1_index = self.stack_len - 3;
+        const arg2_index = self.stack_len - 2;
+        const arg3_index = self.stack_len - 1;
+        const arg0 = self.stack[arg0_index];
+        const arg1 = self.stack[arg1_index];
+        const arg2 = self.stack[arg2_index];
+        const arg3 = self.stack[arg3_index];
+        const old_owner = self.frames[frame_index].owner;
+        const result_target = self.frames[frame_index].result_target;
+
+        var idx = self.stack_len;
+        while (idx > base) {
+            idx -= 1;
+            if (idx == arg0_index or idx == arg1_index or idx == arg2_index or idx == arg3_index) continue;
+            self.releaseValue(self.stack[idx]);
+        }
+
+        self.stack[base] = arg0;
+        self.stack[base + 1] = arg1;
+        self.stack[base + 2] = arg2;
+        self.stack[base + 3] = arg3;
+        self.stack_len = base + 4;
+        if (old_owner) |owned| self.releaseValue(owned);
+        self.frames[frame_index] = .{
+            .code = closure.code,
+            .ip = 0,
+            .base = base,
+            .captures = closure.captures,
+            .owner = self.retainedFrameOwner(callee),
+            .callable_global_slot = callable_slot,
+            .result_target = result_target,
+        };
+        try self.ensureFrameLocalSlots(closure.code, base);
     }
 
     // Tail stack calls consume the callee slot into frame ownership instead of re-retaining it.
@@ -7848,6 +9581,7 @@ pub const Session = struct {
         const arg0_index = self.stack_len - 1;
         const arg0 = self.stack[arg0_index];
         const old_owner = self.frames[frame_index].owner;
+        const result_target = self.frames[frame_index].result_target;
 
         var idx = self.stack_len;
         while (idx > base) {
@@ -7866,7 +9600,9 @@ pub const Session = struct {
             .captures = closure.captures,
             .owner = callee,
             .callable_global_slot = sampling_profile_no_callable_slot,
+            .result_target = result_target,
         };
+        try self.ensureFrameLocalSlots(closure.code, base);
     }
 
     fn replaceCurrentFrameWithConsumedClosure2(self: *Session, frame_index: usize, callee: Value, closure: *const Closure) KError!void {
@@ -7879,6 +9615,7 @@ pub const Session = struct {
         const arg0 = self.stack[arg0_index];
         const arg1 = self.stack[arg1_index];
         const old_owner = self.frames[frame_index].owner;
+        const result_target = self.frames[frame_index].result_target;
 
         var idx = self.stack_len;
         while (idx > base) {
@@ -7898,7 +9635,9 @@ pub const Session = struct {
             .captures = closure.captures,
             .owner = callee,
             .callable_global_slot = sampling_profile_no_callable_slot,
+            .result_target = result_target,
         };
+        try self.ensureFrameLocalSlots(closure.code, base);
     }
 
     inline fn directBinaryArg(arg0: Value, arg1: Value, slot: u8) ?Value {
@@ -8060,7 +9799,7 @@ pub const Session = struct {
 
     fn classifyDenseBuiltin(op: BuiltinId) ?DenseElementwiseKind {
         return switch (op) {
-            .add, .sub, .mul, .div, .minimum, .maximum, .less, .more => .{ .dyad = .{ .op = op, .swap = false } },
+            .add, .sub, .mul, .div, .pow, .minimum, .maximum, .less, .more => .{ .dyad = .{ .op = op, .swap = false } },
             else => null,
         };
     }
@@ -8075,6 +9814,7 @@ pub const Session = struct {
                     .sub => try self.subValues(left, right),
                     .mul => try self.mulValues(left, right),
                     .div => try self.divValues(left, right),
+                    .pow => try self.powValues(left, right),
                     .minimum => blk2: {
                         const mask = try self.lessValues(left, right);
                         defer self.releaseValue(mask);
@@ -8240,6 +9980,10 @@ pub const Session = struct {
         };
     }
 
+    fn isLocalReadOp(op: Op) bool {
+        return op == .load_local or op == .take_local;
+    }
+
     fn classifyDenseElementwiseClosure(closure: *const Closure) ?DenseElementwiseKind {
         if (closure.header.owner != .frozen or closure.captures.len != 0) return null;
         const bytes = closure.code.bytes;
@@ -8262,10 +10006,10 @@ pub const Session = struct {
                     .swap = left_slot == 1,
                 } };
             },
-            .load_local => {
+            .load_local, .take_local => {
                 if (bytes.len == 6) {
                     const right_load: Op = std.meta.intToEnum(Op, bytes[2]) catch return null;
-                    if (right_load != .load_local) return null;
+                    if (!isLocalReadOp(right_load)) return null;
                     const left_slot = bytes[1];
                     const right_slot = bytes[3];
                     if (!((left_slot == 0 and right_slot == 1) or (left_slot == 1 and right_slot == 0))) return null;
@@ -8542,15 +10286,50 @@ pub const Session = struct {
 
         const scale = (try self.directReadScalarValue(closure, bytes, &idx)) orelse return null;
 
-        if (idx + 7 != bytes.len) return null;
-        if (bytes[idx] != @intFromEnum(Op.load_local) or bytes[idx + 1] != 0) return null;
-        idx += 2;
-
-        const call_op: Op = std.meta.intToEnum(Op, bytes[idx]) catch return null;
-        if (call_op != .call_global1 and call_op != .tail_call_global1) return null;
-        const global_idx = bytes[idx + 1];
+        if (idx + 5 > bytes.len) return null;
+        const global_idx = blk: {
+            const next_op: Op = std.meta.intToEnum(Op, bytes[idx]) catch return null;
+            switch (next_op) {
+                .load_local => {
+                    if (bytes[idx + 1] != 0) return null;
+                    idx += 2;
+                    const call_op: Op = std.meta.intToEnum(Op, bytes[idx]) catch return null;
+                    switch (call_op) {
+                        .call_global1, .tail_call_global1 => {
+                            const global_idx = bytes[idx + 1];
+                            idx += 2;
+                            break :blk global_idx;
+                        },
+                        .call_global_slots, .tail_call_global_slots => {
+                            if (idx + 5 > bytes.len) return null;
+                            if (bytes[idx + 2] != 1) return null;
+                            const arg_kind = bytes[idx + 3] & ~global_call_arg_consume_bit;
+                            if (arg_kind != @intFromEnum(GlobalCallArgKind.local) or bytes[idx + 4] != 0) return null;
+                            const global_idx = bytes[idx + 1];
+                            idx += 5;
+                            break :blk global_idx;
+                        },
+                        else => return null,
+                    }
+                },
+                .call_global1, .tail_call_global1 => {
+                    const global_idx = bytes[idx + 1];
+                    idx += 2;
+                    break :blk global_idx;
+                },
+                .call_global_slots, .tail_call_global_slots => {
+                    if (bytes[idx + 2] != 1) return null;
+                    const arg_kind = bytes[idx + 3] & ~global_call_arg_consume_bit;
+                    if (arg_kind != @intFromEnum(GlobalCallArgKind.local) or bytes[idx + 4] != 0) return null;
+                    const global_idx = bytes[idx + 1];
+                    idx += 5;
+                    break :blk global_idx;
+                },
+                else => return null,
+            }
+        };
         if (global_idx >= closure.code.globals.len) return error.Internal;
-        idx += 2;
+        if (idx + 3 != bytes.len) return null;
 
         const mul_op: Op = std.meta.intToEnum(Op, bytes[idx]) catch return null;
         if (mul_op != .mul) return null;
@@ -8611,6 +10390,10 @@ pub const Session = struct {
         }
         if (closure.captures.len != 0) {
             if (self.debugDetailedProbeActive()) self.debug_direct_closure_miss_captures_count += 1;
+            return null;
+        }
+        if ((closure.code.direct_closure_mask & directClosureMaskBit(1)) == 0) {
+            if (self.debugDetailedProbeActive()) self.debug_direct_closure_miss_unsupported_shape_count += 1;
             return null;
         }
         const bytes = closure.code.bytes;
@@ -8690,6 +10473,10 @@ pub const Session = struct {
             if (self.debugDetailedProbeActive()) self.debug_direct_closure_miss_captures_count += 1;
             return null;
         }
+        if ((closure.code.direct_closure_mask & directClosureMaskBit(2)) == 0) {
+            if (self.debugDetailedProbeActive()) self.debug_direct_closure_miss_unsupported_shape_count += 1;
+            return null;
+        }
         const bytes = closure.code.bytes;
         if (bytes.len < 2 or bytes[bytes.len - 1] != @intFromEnum(Op.@"return")) {
             if (self.debugDetailedProbeActive()) self.debug_direct_closure_miss_unsupported_shape_count += 1;
@@ -8737,6 +10524,10 @@ pub const Session = struct {
         }
         if (closure.captures.len != 0) {
             if (self.debugDetailedProbeActive()) self.debug_direct_closure_miss_captures_count += 1;
+            return null;
+        }
+        if ((closure.code.direct_closure_mask & directClosureMaskBit(3)) == 0) {
+            if (self.debugDetailedProbeActive()) self.debug_direct_closure_miss_unsupported_shape_count += 1;
             return null;
         }
         const bytes = closure.code.bytes;
@@ -8795,6 +10586,7 @@ pub const Session = struct {
 
     fn derivedSequenceLen(value: Value) ?usize {
         if (value.tag() != .array) return null;
+        if (value.arrayKind() == .host_keyed_store) return null;
         if (valueNumericHandle(value)) |handle| {
             if (handle.rank == 0) return null;
             return @intCast(handle.shape[0]);
@@ -8809,6 +10601,7 @@ pub const Session = struct {
 
     fn derivedSequenceItemValue(self: *Session, value: Value, idx: usize) KError!Value {
         if (value.tag() != .array) return error.Type;
+        if (value.arrayKind() == .host_keyed_store) return error.Type;
         if (valueNumericHandle(value)) |handle| {
             if (handle.rank > 1) {
                 return (try numericValueScalarIndexValue(self, value, @intCast(idx))) orelse error.Type;
@@ -8963,15 +10756,21 @@ pub const Session = struct {
         return try self.applyMatmulValues(arg0, arg1);
     }
 
-    fn valueAsDotArgs(self: *Session, value: Value) KError![]const Value {
-        if (derivedSequenceLen(value)) |len| {
-            const args = try self.scratch_arena.allocator().alloc(Value, len);
-            for (0..len) |idx| args[idx] = try self.derivedSequenceItemValue(value, idx);
-            return args;
+    fn materializeSequenceItems(self: *Session, value: Value) KError![]Value {
+        var items = std.ArrayList(Value).empty;
+        errdefer {
+            for (items.items) |item| self.releaseValue(item);
+            items.deinit(self.allocator);
         }
-        const args = try self.scratch_arena.allocator().alloc(Value, 1);
-        args[0] = value;
-        return args;
+
+        if (derivedSequenceLen(value)) |len| {
+            try items.ensureTotalCapacity(self.allocator, len);
+            for (0..len) |idx| try items.append(self.allocator, try self.derivedSequenceItemValue(value, idx));
+        } else {
+            try items.append(self.allocator, try self.retainEscapedValue(value));
+        }
+
+        return try items.toOwnedSlice(self.allocator);
     }
 
     fn deepIndexValue(self: *Session, base: Value, selectors: []const Value) KError!Value {
@@ -9067,6 +10866,11 @@ pub const Session = struct {
         float_vector: []const f64,
     };
 
+    const DenseAssignTargets = union(enum) {
+        scalar: usize,
+        slice: []const usize,
+    };
+
     fn amendCloneOwner(base: Value) HeapOwner {
         std.debug.assert(base.tag() == .array);
         return switch (base.arrayOwner()) {
@@ -9123,45 +10927,102 @@ pub const Session = struct {
         };
     }
 
-    fn applyDenseAssignIntRhs(out: *HostIntResult, selectors: []const usize, rhs: DenseAssignRhs) KError!void {
-        switch (rhs) {
-            .int_scalar => |value| {
-                for (selectors) |target_idx| try out.set(target_idx, value);
+    fn denseAssignTargetsLen(targets: DenseAssignTargets) usize {
+        return switch (targets) {
+            .scalar => 1,
+            .slice => |selectors| selectors.len,
+        };
+    }
+
+    fn denseAssignIntScalarValue(rhs: DenseAssignRhs) KError!i64 {
+        return switch (rhs) {
+            .int_scalar => |value| value,
+            .float_scalar => |value| exactIntFromFloat(value) orelse return error.Unsupported,
+            .int_vector => |view| blk: {
+                std.debug.assert(hostIntArrayViewLen(view) == 1);
+                break :blk hostIntViewItem(view, 0);
             },
-            .float_scalar => |value| {
-                const int_value = exactIntFromFloat(value) orelse return error.Unsupported;
-                for (selectors) |target_idx| try out.set(target_idx, int_value);
+            .float_vector => |items| blk: {
+                std.debug.assert(items.len == 1);
+                break :blk exactIntFromFloat(items[0]) orelse return error.Unsupported;
             },
-            .int_vector => |view| {
-                std.debug.assert(hostIntArrayViewLen(view) == selectors.len);
-                for (selectors, 0..) |target_idx, idx| try out.set(target_idx, hostIntViewItem(view, idx));
+        };
+    }
+
+    fn denseAssignFloatScalarValue(rhs: DenseAssignRhs) f64 {
+        return switch (rhs) {
+            .int_scalar => |value| @as(f64, @floatFromInt(value)),
+            .float_scalar => |value| value,
+            .int_vector => |view| blk: {
+                std.debug.assert(hostIntArrayViewLen(view) == 1);
+                break :blk @as(f64, @floatFromInt(hostIntViewItem(view, 0)));
             },
-            .float_vector => |items| {
-                std.debug.assert(items.len == selectors.len);
-                for (selectors, 0..) |target_idx, idx| {
-                    const int_value = exactIntFromFloat(items[idx]) orelse return error.Unsupported;
-                    try out.set(target_idx, int_value);
-                }
+            .float_vector => |items| blk: {
+                std.debug.assert(items.len == 1);
+                break :blk items[0];
+            },
+        };
+    }
+
+    fn applyDenseAssignIntScalar(out: *HostIntResult, target_idx: usize, item_value: i64) KError!void {
+        switch (out.*) {
+            .bit => |*bits| switch (item_value) {
+                0 => bitSet(bits.words, target_idx, false),
+                1 => bitSet(bits.words, target_idx, true),
+                else => return error.Unsupported,
+            },
+            .int8 => |*items| items.items[target_idx] = std.math.cast(i8, item_value) orelse return error.Unsupported,
+            .int16 => |*items| items.items[target_idx] = std.math.cast(i16, item_value) orelse return error.Unsupported,
+            .int32 => |*items| items.items[target_idx] = std.math.cast(i32, item_value) orelse return error.Unsupported,
+            .int64 => |*items| items.items[target_idx] = item_value,
+        }
+    }
+
+    fn applyDenseAssignIntRhs(out: *HostIntResult, targets: DenseAssignTargets, rhs: DenseAssignRhs) KError!void {
+        switch (targets) {
+            .scalar => |target_idx| try applyDenseAssignIntScalar(out, target_idx, try denseAssignIntScalarValue(rhs)),
+            .slice => |selectors| switch (rhs) {
+                .int_scalar => |value| {
+                    for (selectors) |target_idx| try applyDenseAssignIntScalar(out, target_idx, value);
+                },
+                .float_scalar => |value| {
+                    const int_value = exactIntFromFloat(value) orelse return error.Unsupported;
+                    for (selectors) |target_idx| try applyDenseAssignIntScalar(out, target_idx, int_value);
+                },
+                .int_vector => |view| {
+                    std.debug.assert(hostIntArrayViewLen(view) == selectors.len);
+                    for (selectors, 0..) |target_idx, idx| try applyDenseAssignIntScalar(out, target_idx, hostIntViewItem(view, idx));
+                },
+                .float_vector => |items| {
+                    std.debug.assert(items.len == selectors.len);
+                    for (selectors, 0..) |target_idx, idx| {
+                        const int_value = exactIntFromFloat(items[idx]) orelse return error.Unsupported;
+                        try applyDenseAssignIntScalar(out, target_idx, int_value);
+                    }
+                },
             },
         }
     }
 
-    fn applyDenseAssignFloatRhs(out: []f64, selectors: []const usize, rhs: DenseAssignRhs) void {
-        switch (rhs) {
-            .int_scalar => |value| {
-                const float_value = @as(f64, @floatFromInt(value));
-                for (selectors) |target_idx| out[target_idx] = float_value;
-            },
-            .float_scalar => |value| {
-                for (selectors) |target_idx| out[target_idx] = value;
-            },
-            .int_vector => |view| {
-                std.debug.assert(hostIntArrayViewLen(view) == selectors.len);
-                for (selectors, 0..) |target_idx, idx| out[target_idx] = @as(f64, @floatFromInt(hostIntViewItem(view, idx)));
-            },
-            .float_vector => |items| {
-                std.debug.assert(items.len == selectors.len);
-                for (selectors, 0..) |target_idx, idx| out[target_idx] = items[idx];
+    fn applyDenseAssignFloatRhs(out: []f64, targets: DenseAssignTargets, rhs: DenseAssignRhs) void {
+        switch (targets) {
+            .scalar => |target_idx| out[target_idx] = denseAssignFloatScalarValue(rhs),
+            .slice => |selectors| switch (rhs) {
+                .int_scalar => |value| {
+                    const float_value = @as(f64, @floatFromInt(value));
+                    for (selectors) |target_idx| out[target_idx] = float_value;
+                },
+                .float_scalar => |value| {
+                    for (selectors) |target_idx| out[target_idx] = value;
+                },
+                .int_vector => |view| {
+                    std.debug.assert(hostIntArrayViewLen(view) == selectors.len);
+                    for (selectors, 0..) |target_idx, idx| out[target_idx] = @as(f64, @floatFromInt(hostIntViewItem(view, idx)));
+                },
+                .float_vector => |items| {
+                    std.debug.assert(items.len == selectors.len);
+                    for (selectors, 0..) |target_idx, idx| out[target_idx] = items[idx];
+                },
             },
         }
     }
@@ -9178,65 +11039,156 @@ pub const Session = struct {
         return true;
     }
 
-    fn tryFastDenseAssignAmend(self: *Session, base: Value, selectors: []const usize, rhs_source: Value) KError!?Value {
-        if (selectors.len == 0) return null;
-        if (valueNonVectorNumericShape(base) != null) return null;
+    fn recordFastDenseAssignMiss(self: *Session) void {
+        if (comptime enable_probe_instrumentation) self.debug_fast_dense_assign_miss_count += 1;
+    }
 
-        const rhs = (try self.denseAssignRhs(rhs_source, selectors.len)) orelse return null;
+    fn recordFastDenseAssignClone(self: *Session, base: Value) void {
+        if (comptime !enable_probe_instrumentation) return;
+        self.debug_fast_dense_assign_clone_count += 1;
+
+        if (mutableNumericHandle(base)) |handle| {
+            switch (handle.header.owner) {
+                .managed => {
+                    if (handle.header.ref_count != 1) {
+                        self.debug_fast_dense_assign_clone_reason_counts[@intFromEnum(DebugFastDenseAssignCloneReason.non_unique)] += 1;
+                        return;
+                    }
+                },
+                .frozen => {
+                    self.debug_fast_dense_assign_clone_reason_counts[@intFromEnum(DebugFastDenseAssignCloneReason.frozen)] += 1;
+                    return;
+                },
+                .scratch => {},
+            }
+        } else if (hostDenseIfPresent(base)) |host| {
+            switch (host.header.owner) {
+                .managed => {
+                    if (host.header.ref_count != 1) {
+                        self.debug_fast_dense_assign_clone_reason_counts[@intFromEnum(DebugFastDenseAssignCloneReason.non_unique)] += 1;
+                        return;
+                    }
+                },
+                .frozen => {
+                    self.debug_fast_dense_assign_clone_reason_counts[@intFromEnum(DebugFastDenseAssignCloneReason.frozen)] += 1;
+                    return;
+                },
+                .scratch => {},
+            }
+        }
+
+        self.debug_fast_dense_assign_clone_reason_counts[@intFromEnum(DebugFastDenseAssignCloneReason.other)] += 1;
+    }
+
+    fn tryFastDenseAssignAmendImpl(self: *Session, base: Value, targets: DenseAssignTargets, rhs_source: Value) KError!?Value {
+        const targets_len = denseAssignTargetsLen(targets);
+        if (targets_len == 0) {
+            self.recordFastDenseAssignMiss();
+            return null;
+        }
+        if (valueNonVectorNumericShape(base) != null) {
+            self.recordFastDenseAssignMiss();
+            return null;
+        }
+
+        const rhs = (try self.denseAssignRhs(rhs_source, targets_len)) orelse {
+            self.recordFastDenseAssignMiss();
+            return null;
+        };
         const base_array = try numericHostArrayValue(self, base);
 
         return switch (hostDenseNumericMode(base_array)) {
             .int => blk: {
-                const view = hostIntArrayView(base_array) orelse return null;
+                const view = hostIntArrayView(base_array) orelse {
+                    self.recordFastDenseAssignMiss();
+                    return null;
+                };
                 const kind = hostIntArrayViewKind(view);
-                if (!denseAssignRhsFitsIntKind(kind, selectors.len, rhs)) return null;
+                if (!denseAssignRhsFitsIntKind(kind, targets_len, rhs)) {
+                    self.recordFastDenseAssignMiss();
+                    return null;
+                }
 
                 var reused = false;
                 var out = if (self.tryReuseHostIntArrayResult(base, kind)) |existing| blk_out: {
-                    if (!self.prepareReusableHostDenseForMutation(base)) return null;
+                    if (!self.prepareReusableHostDenseForMutation(base)) {
+                        self.recordFastDenseAssignMiss();
+                        return null;
+                    }
                     reused = true;
                     break :blk_out existing;
                 } else blk_out: {
+                    self.recordFastDenseAssignClone(base);
                     var allocated = try self.allocOwnedHostIntResult(amendCloneOwner(base), kind, base_array.len());
                     errdefer self.releaseValue(Value.array(allocated.arrayPtr()));
                     try copyHostIntViewToResult(&allocated, view);
                     break :blk_out allocated;
                 };
-                try applyDenseAssignIntRhs(&out, selectors, rhs);
+                try applyDenseAssignIntRhs(&out, targets, rhs);
                 const host = out.arrayPtr();
                 hostDenseSetFlags(host, host_dense_flag_normalized);
                 hostDenseClearCachedIntRange(host);
                 const value = try out.value(self);
+                if (comptime enable_probe_instrumentation) {
+                    self.debug_fast_dense_assign_hit_count += 1;
+                    if (reused) self.debug_fast_dense_assign_reuse_count += 1;
+                }
                 break :blk if (reused) self.shareValue(value) else value;
             },
             .float => blk: {
                 const base_items = base_array.storage.float64;
                 var reused = false;
                 var out = if (self.tryReuseHostFloatArrayResult(base)) |existing| blk_out: {
-                    if (!self.prepareReusableHostDenseForMutation(base)) return null;
+                    if (!self.prepareReusableHostDenseForMutation(base)) {
+                        self.recordFastDenseAssignMiss();
+                        return null;
+                    }
                     reused = true;
                     break :blk_out existing;
                 } else blk_out: {
+                    self.recordFastDenseAssignClone(base);
                     const allocated = try self.allocOwnedHostFloatResult(amendCloneOwner(base), base_array.len());
                     errdefer self.releaseValue(Value.array(allocated.array));
                     @memcpy(allocated.items, base_items);
                     break :blk_out allocated;
                 };
-                applyDenseAssignFloatRhs(out.items, selectors, rhs);
+                applyDenseAssignFloatRhs(out.items, targets, rhs);
                 hostDenseSetFlags(out.array, host_dense_flag_normalized);
                 hostDenseClearCachedIntRange(out.array);
                 const value = try out.value(self);
+                if (comptime enable_probe_instrumentation) {
+                    self.debug_fast_dense_assign_hit_count += 1;
+                    if (reused) self.debug_fast_dense_assign_reuse_count += 1;
+                }
                 break :blk if (reused) self.shareValue(value) else value;
             },
         };
     }
 
+    fn tryFastDenseAssignScalarAmend(self: *Session, base: Value, target_idx: usize, rhs_source: Value) KError!?Value {
+        if (comptime enable_probe_instrumentation) self.debug_fast_dense_assign_attempt_count += 1;
+        return try self.tryFastDenseAssignAmendImpl(base, .{ .scalar = target_idx }, rhs_source);
+    }
+
+    fn tryFastDenseAssignAmend(self: *Session, base: Value, selectors: []const usize, rhs_source: Value) KError!?Value {
+        if (comptime enable_probe_instrumentation) self.debug_fast_dense_assign_attempt_count += 1;
+        return try self.tryFastDenseAssignAmendImpl(base, .{ .slice = selectors }, rhs_source);
+    }
+
     fn applyShallowAmend(self: *Session, base: Value, selector: Value, mode: ShallowAmendMode, func_or_value: Value, arg: Value) KError!Value {
         if (base.tag() != .array) return error.Type;
+        var tried_scalar_fast_assign = false;
+        if (mode == .assign) {
+            if (scalarIntLikeValue(selector)) |raw_index| {
+                tried_scalar_fast_assign = true;
+                const target_idx = try normalizeIndex(raw_index, try self.topLevelLen(base));
+                if (try self.tryFastDenseAssignScalarAmend(base, target_idx, func_or_value)) |fast| return fast;
+            }
+        }
         const selectors = try self.collectSelectorIndices(base, selector);
         defer self.allocator.free(selectors);
 
-        if (mode == .assign) {
+        if (mode == .assign and !tried_scalar_fast_assign) {
             if (try self.tryFastDenseAssignAmend(base, selectors, func_or_value)) |fast| return fast;
         }
 
@@ -9366,9 +11318,11 @@ pub const Session = struct {
     }
 
     fn applyDot(self: *Session, left: Value, right: Value) KError!Value {
+        const items = try self.materializeSequenceItems(right);
+        defer self.releaseArgs(items);
         return switch (left.tag()) {
-            .builtin, .closure => try self.applyValue(left, try self.valueAsDotArgs(right)),
-            .array => try self.deepIndexValue(left, try self.valueAsDotArgs(right)),
+            .builtin, .closure => try self.invokeValueInCurrentRun(left, items),
+            .array => try self.deepIndexValue(left, items),
             else => error.Type,
         };
     }
@@ -9413,6 +11367,7 @@ pub const Session = struct {
 
     fn applyDerivedClosure(self: *Session, closure: *const Closure, args: []const Value) KError!?Value {
         if (self.debugDetailedProbeActive()) self.debug_apply_derived_closure_count += 1;
+        if (!closureMayUseDerivedApply(closure)) return null;
         if (try self.projectionInfoFromClosure(closure)) |info| {
             return try self.applyProjectionClosure(info, args);
         }
@@ -9431,9 +11386,12 @@ pub const Session = struct {
             .div,
             .exp,
             .log,
+            .sin,
+            .cos,
             .tanh,
             .sigmoid,
             .iota,
+            .minimum,
             .maximum,
             .reverse,
             .less,
@@ -9445,13 +11403,24 @@ pub const Session = struct {
             .floor,
             .null_fill_without,
             .sort,
+            .equal,
             .stringify,
+            .bytes,
+            .utf8,
+            .char,
             .unique,
+            .tokenize,
+            .detokenize,
             .eval_string,
             .load,
+            .sql,
             .rotcacheview,
+            .layernorm,
+            .gelu,
+            .geluapprox,
+            .softmax,
             => true,
-            .minimum, .concat, .take, .drop, .equal, .reshape, .cast, .contains, .split, .join, .find, .grad, .valuegrad, .prng, .rotcache, .rotcacheupdate, .rmsnorm => false,
+            .concat, .take, .drop, .reshape, .cast, .contains, .split, .join, .find, .grad, .valuegrad, .prng, .save, .register, .rotcache, .rotcacheupdate, .rope, .ropeflat, .ropecisflat, .rmsnorm, .mlpdense, .conv2d, .convtranspose2d, .upsamplenearest2d, .groupnorm, .pow, .sdpa, .sam3boxrpb, .sdpamask, .sdpaflat => false,
         };
     }
 
@@ -9461,10 +11430,12 @@ pub const Session = struct {
             .sub,
             .mul,
             .div,
+            .pow,
             .minimum,
             .maximum,
             .less,
             .more,
+            .not,
             .concat,
             .count,
             .floor,
@@ -9477,10 +11448,12 @@ pub const Session = struct {
             .join,
             .unique,
             .load,
+            .save,
+            .register,
             .rotcache,
             .rotcacheupdate,
             => true,
-            .exp, .log, .tanh, .sigmoid, .iota, .reverse, .grade_up, .grade_down, .not, .take, .drop, .reshape, .cast, .find, .eval_string, .grad, .valuegrad, .prng, .rotcacheview, .rmsnorm => false,
+            .exp, .log, .sin, .cos, .tanh, .sigmoid, .iota, .reverse, .grade_up, .grade_down, .take, .drop, .reshape, .cast, .find, .bytes, .utf8, .char, .tokenize, .detokenize, .eval_string, .grad, .valuegrad, .prng, .sql, .rotcacheview, .rope, .ropeflat, .ropecisflat, .rmsnorm, .layernorm, .gelu, .geluapprox, .mlpdense, .conv2d, .convtranspose2d, .upsamplenearest2d, .groupnorm, .softmax, .sdpa, .sam3boxrpb, .sdpamask, .sdpaflat => false,
         };
     }
 
@@ -9494,6 +11467,36 @@ pub const Session = struct {
             },
             .array => true,
             else => false,
+        };
+    }
+
+    fn eachPriorUsesMonadicBase(base: Value) bool {
+        return switch (base.tag()) {
+            .builtin => builtinSupportsMonad(base.asBuiltin()) and !builtinSupportsDyad(base.asBuiltin()),
+            .closure => blk: {
+                const closure = base.asClosure();
+                if (closureDerivedKind(closure)) |kind| {
+                    break :blk switch (kind) {
+                        .each => closure.captures.len == 1 and eachPriorUsesMonadicBase(closure.captures[0]),
+                        .fold, .scan, .each_right, .each_left, .each_prior, .grad, .valuegrad => true,
+                    };
+                }
+                break :blk closure.code.arity == 1;
+            },
+            else => false,
+        };
+    }
+
+    fn eachPriorImplicitSeedValue(self: *Session, base: Value, vector: Value) KError!Value {
+        return switch (base.tag()) {
+            .builtin => switch (base.asBuiltin()) {
+                .add, .sub => try self.intValue(0),
+                .mul, .div => try self.intValue(1),
+                .minimum, .maximum => try self.derivedSequenceItemValue(vector, 0),
+                .concat => try self.createManagedHostBoxedArray(&.{}),
+                else => try self.floatValue(std.math.nan(f64)),
+            },
+            else => try self.derivedSequenceItemValue(vector, 0),
         };
     }
 
@@ -10728,11 +12731,9 @@ pub const Session = struct {
         return try self.createManagedArrayLikeFromValues(results.items);
     }
 
-    fn applyEachPriorDerived(self: *Session, base: Value, args: []const Value) KError!Value {
-        if (args.len != 1) return error.Arity;
-        const vector = args[0];
+    fn applyRollingEachPriorDerived(self: *Session, base: Value, seed: Value, vector: Value) KError!Value {
         const len = derivedSequenceLen(vector) orelse return error.Type;
-        if (len == 0) return try self.createManagedHostIntArray(&[_]i64{});
+        if (len == 0) return try self.createManagedHostIntArray(&.{});
 
         var results = std.ArrayList(Value).empty;
         defer {
@@ -10741,17 +12742,73 @@ pub const Session = struct {
         }
         try results.ensureTotalCapacity(self.allocator, len);
 
-        var prev = try self.derivedSequenceItemValue(vector, 0);
-        try results.append(self.allocator, self.shareValue(prev));
-        for (1..len) |idx| {
+        var prior = try self.retainEscapedValue(seed);
+        for (0..len) |idx| {
             const current = try self.derivedSequenceItemValue(vector, idx);
-            const value = try self.applyDerivedBase(base, &[_]Value{ prev, current });
-            self.releaseValue(prev);
-            prev = current;
+            errdefer self.releaseValue(current);
+            const value = try self.applyDerivedBase(base, &[_]Value{ current, prior });
+            self.releaseValue(prior);
+            prior = current;
             try results.append(self.allocator, value);
         }
-        defer self.releaseValue(prev);
+        defer self.releaseValue(prior);
         return try self.createManagedArrayLikeFromValues(results.items);
+    }
+
+    fn applyStencilEachPriorDerived(self: *Session, base: Value, left: Value, vector: Value) KError!Value {
+        const raw_window_len = scalarIntLikeValue(left) orelse return error.Type;
+        if (raw_window_len < 0) return error.Type;
+        const sequence_len = derivedSequenceLen(vector) orelse return error.Type;
+        const window_len: usize = @intCast(raw_window_len);
+        const result_len: usize = if (window_len == 0)
+            sequence_len + 1
+        else if (window_len > sequence_len)
+            0
+        else
+            sequence_len + 1 - window_len;
+
+        var results = std.ArrayList(Value).empty;
+        defer {
+            for (results.items) |value| self.releaseValue(value);
+            results.deinit(self.allocator);
+        }
+        try results.ensureTotalCapacity(self.allocator, result_len);
+
+        const count_value = try self.intValue(raw_window_len);
+        defer self.releaseValue(count_value);
+
+        for (0..result_len) |start| {
+            const start_i64 = std.math.cast(i64, start) orelse return error.Unsupported;
+            const start_value = try self.intValue(start_i64);
+            defer self.releaseValue(start_value);
+            const dropped = try self.dropValues(start_value, vector);
+            defer self.releaseValue(dropped);
+            const window = try self.takeValues(count_value, dropped);
+            const value = blk: {
+                defer self.releaseValue(window);
+                break :blk try self.applyDerivedBase(base, &[_]Value{window});
+            };
+            try results.append(self.allocator, value);
+        }
+        return try self.createManagedArrayLikeFromValues(results.items);
+    }
+
+    fn applyEachPriorDerived(self: *Session, base: Value, args: []const Value) KError!Value {
+        return switch (args.len) {
+            1 => blk: {
+                if (eachPriorUsesMonadicBase(base)) return error.Arity;
+                const sequence_len = derivedSequenceLen(args[0]) orelse return error.Type;
+                if (sequence_len == 0) return try self.createManagedHostIntArray(&.{});
+                const seed = try self.eachPriorImplicitSeedValue(base, args[0]);
+                defer self.releaseValue(seed);
+                break :blk try self.applyRollingEachPriorDerived(base, seed, args[0]);
+            },
+            2 => if (eachPriorUsesMonadicBase(base))
+                try self.applyStencilEachPriorDerived(base, args[0], args[1])
+            else
+                try self.applyRollingEachPriorDerived(base, args[0], args[1]),
+            else => error.Arity,
+        };
     }
 
     fn execCall(self: *Session, argc: u8) KError!void {
@@ -10788,18 +12845,26 @@ pub const Session = struct {
                         try self.push(result);
                         return;
                     }
+                } else if (argc == 3) {
+                    if (try self.tryApplyDirectClosure3(closure, args[0], args[1], args[2])) |result| {
+                        self.dropStackFrom(callee_index);
+                        try self.push(result);
+                        return;
+                    }
                 }
                 var i: usize = 0;
                 while (i < argc) : (i += 1) {
                     self.stack[callee_index + i] = self.stack[callee_index + 1 + i];
                 }
                 self.stack_len -= 1;
+                const owner = self.retainedFrameOwner(callee);
+                errdefer if (owner) |owned| self.releaseValue(owned);
                 try self.pushFrame(.{
                     .code = closure.code,
                     .ip = 0,
                     .base = callee_index,
                     .captures = closure.captures,
-                    .owner = callee,
+                    .owner = owner,
                     .callable_global_slot = sampling_profile_no_callable_slot,
                 });
             },
@@ -10957,6 +13022,68 @@ pub const Session = struct {
         }
     }
 
+    fn execBorrowedCall1(self: *Session, callee: Value, arg0: Value) KError!void {
+        switch (callee.tag()) {
+            .builtin => {
+                const result = try self.applyBuiltinCall(callee.asBuiltin(), &[_]Value{arg0});
+                try self.push(result);
+            },
+            .closure => {
+                const closure = callee.asClosure();
+                if (try self.applyDerivedClosure(closure, &[_]Value{arg0})) |result| {
+                    try self.push(result);
+                    return;
+                }
+                if (closure.code.arity != 1) return error.Arity;
+                if (try self.tryApplyDirectClosure1(closure, arg0)) |result| {
+                    try self.push(result);
+                    return;
+                }
+                const base = self.stack_len;
+                try self.push(self.retainValue(arg0));
+                errdefer self.dropStackFrom(base);
+                const owner = self.retainedFrameOwner(callee);
+                errdefer if (owner) |owned| self.releaseValue(owned);
+                try self.pushFrame(.{
+                    .code = closure.code,
+                    .ip = 0,
+                    .base = base,
+                    .captures = closure.captures,
+                    .owner = owner,
+                    .callable_global_slot = sampling_profile_no_callable_slot,
+                });
+            },
+            .array => try self.push(try self.applyArrayCall1(callee, arg0)),
+            else => return error.Type,
+        }
+    }
+
+    fn execBorrowedTailCall1(self: *Session, frame_index: usize, callee: Value, arg0: Value) KError!?Value {
+        switch (callee.tag()) {
+            .builtin => {
+                const result = try self.applyBuiltinCall(callee.asBuiltin(), &[_]Value{arg0});
+                return try self.finishFrame(frame_index, result);
+            },
+            .closure => {
+                const closure = callee.asClosure();
+                if (try self.applyDerivedClosure(closure, &[_]Value{arg0})) |result| {
+                    return try self.finishFrame(frame_index, result);
+                }
+                if (closure.code.arity != 1) return error.Arity;
+                if (try self.tryApplyDirectClosure1(closure, arg0)) |result| {
+                    return try self.finishFrame(frame_index, result);
+                }
+                try self.replaceCurrentFrameWithClosure1(frame_index, callee, closure, arg0);
+                return null;
+            },
+            .array => {
+                const result = try self.applyArrayCall1(callee, arg0);
+                return try self.finishFrame(frame_index, result);
+            },
+            else => return error.Type,
+        }
+    }
+
     fn execCall2(self: *Session) KError!void {
         if (self.stack_len < 3) return error.Internal;
 
@@ -11027,6 +13154,955 @@ pub const Session = struct {
         };
         self.dropStackFrom(base_index);
         try self.push(result);
+    }
+
+    fn readLocalTransfer(self: *Session, frame: *const CallFrame, slot: u8, consume: bool) KError!Value {
+        return if (consume) try self.takeLocal(frame, slot) else self.retainValue(try self.readLocal(frame, slot));
+    }
+
+    fn releaseOwnedValues(self: *Session, values: []const Value) void {
+        for (values) |value| self.releaseValue(value);
+    }
+
+    fn pushOwnedClosureArgs(
+        self: *Session,
+        callee: Value,
+        closure: *const Closure,
+        callable_slot: u16,
+        args: []const Value,
+        result_target: CallResultTarget,
+    ) KError!void {
+        const base = self.stack_len;
+        errdefer self.dropStackFrom(base);
+        for (args) |arg| try self.push(arg);
+        const owner = self.retainedFrameOwner(callee);
+        errdefer if (owner) |owned| self.releaseValue(owned);
+        try self.pushFrame(.{
+            .code = closure.code,
+            .ip = 0,
+            .base = base,
+            .captures = closure.captures,
+            .owner = owner,
+            .callable_global_slot = callable_slot,
+            .result_target = result_target,
+        });
+    }
+
+    fn readGlobalCallArgSource(frame: *CallFrame) KError!GlobalCallArgSource {
+        const encoded = try readByte(frame);
+        const consume = (encoded & global_call_arg_consume_bit) != 0;
+        const kind: GlobalCallArgKind = std.meta.intToEnum(GlobalCallArgKind, encoded & ~global_call_arg_consume_bit) catch return error.Internal;
+
+        return switch (kind) {
+            .local => .{ .local = .{
+                .slot = try readByte(frame),
+                .consume = consume,
+            } },
+            .const_int => .{ .const_int = try readI64(frame) },
+            .local_add_const, .local_sub_const, .local_mul_const => .{ .local_const_op = .{
+                .slot = try readByte(frame),
+                .consume = consume,
+                .op = switch (kind) {
+                    .local_add_const => .add,
+                    .local_sub_const => .sub,
+                    .local_mul_const => .mul,
+                    else => unreachable,
+                },
+                .const_value = try readI64(frame),
+            } },
+        };
+    }
+
+    fn readGlobalCallArgSources(frame: *CallFrame, argc: u8, out: *[4]GlobalCallArgSource) KError![]const GlobalCallArgSource {
+        if (argc == 0 or argc > out.len) return error.Internal;
+        var loaded: usize = 0;
+        while (loaded < argc) : (loaded += 1) out[loaded] = try readGlobalCallArgSource(frame);
+        return out[0..argc];
+    }
+
+    fn evalGlobalCallArgSource(self: *Session, frame: *CallFrame, source: GlobalCallArgSource) KError!Value {
+        return switch (source) {
+            .local => |value| try self.readLocalTransfer(frame, value.slot, value.consume),
+            .const_int => |value| try self.intValue(value),
+            .local_const_op => |value| blk: {
+                const left = try self.readLocalTransfer(frame, value.slot, value.consume);
+                errdefer self.releaseValue(left);
+                const result = try self.applyLocalConstOpValue(left, value.op, value.const_value);
+                self.releaseValue(left);
+                break :blk result;
+            },
+        };
+    }
+
+    fn countGlobalCallArgLocalUses(sources: []const GlobalCallArgSource, counts: *[256]u8) void {
+        @memset(counts, 0);
+        for (sources) |source| switch (source) {
+            .local => |value| counts[value.slot] +|= 1,
+            .local_const_op => |value| counts[value.slot] +|= 1,
+            .const_int => {},
+        };
+    }
+
+    fn evalTailGlobalCallArgSource(self: *Session, frame: *const CallFrame, source: GlobalCallArgSource, counts: *[256]u8) KError!Value {
+        return switch (source) {
+            .local => |value| blk: {
+                if (counts[value.slot] == 0) return error.Internal;
+                counts[value.slot] -= 1;
+                break :blk if (counts[value.slot] == 0)
+                    try self.takeLocal(frame, value.slot)
+                else
+                    self.retainValue(try self.readLocal(frame, value.slot));
+            },
+            .const_int => |value| try self.intValue(value),
+            .local_const_op => |value| blk: {
+                if (counts[value.slot] == 0) return error.Internal;
+                counts[value.slot] -= 1;
+                const left = if (counts[value.slot] == 0)
+                    try self.takeLocal(frame, value.slot)
+                else
+                    self.retainValue(try self.readLocal(frame, value.slot));
+                errdefer self.releaseValue(left);
+                const result = try self.applyLocalConstOpValue(left, value.op, value.const_value);
+                self.releaseValue(left);
+                break :blk result;
+            },
+        };
+    }
+
+    fn evalTailGlobalCallArgSourceWithOverride(
+        self: *Session,
+        frame: *const CallFrame,
+        source: GlobalCallArgSource,
+        counts: *[256]u8,
+        override_slot: u8,
+        override_value: Value,
+    ) KError!Value {
+        return switch (source) {
+            .local => |value| blk: {
+                if (counts[value.slot] == 0) return error.Internal;
+                counts[value.slot] -= 1;
+                if (value.slot == override_slot) {
+                    break :blk if (counts[value.slot] == 0)
+                        override_value
+                    else
+                        self.retainValue(override_value);
+                }
+                break :blk if (counts[value.slot] == 0)
+                    try self.takeLocal(frame, value.slot)
+                else
+                    self.retainValue(try self.readLocal(frame, value.slot));
+            },
+            .const_int => |value| try self.intValue(value),
+            .local_const_op => |value| blk: {
+                if (counts[value.slot] == 0) return error.Internal;
+                counts[value.slot] -= 1;
+                const left = if (value.slot == override_slot)
+                    if (counts[value.slot] == 0) override_value else self.retainValue(override_value)
+                else if (counts[value.slot] == 0)
+                    try self.takeLocal(frame, value.slot)
+                else
+                    self.retainValue(try self.readLocal(frame, value.slot));
+                errdefer self.releaseValue(left);
+                const result = try self.applyLocalConstOpValue(left, value.op, value.const_value);
+                self.releaseValue(left);
+                break :blk result;
+            },
+        };
+    }
+
+    fn pushCompactPlainClosureFromGlobalCallSources(
+        self: *Session,
+        frame: *CallFrame,
+        callee: Value,
+        closure: *const Closure,
+        callable_slot: u16,
+        sources: []const GlobalCallArgSource,
+        result_target: CallResultTarget,
+    ) KError!void {
+        if (closure.code.arity != sources.len) return error.Arity;
+
+        const base = self.stack_len;
+        errdefer self.dropStackFrom(base);
+        for (sources) |source| {
+            if (self.stack_len >= self.stack.len) return error.Unsupported;
+            self.stack[self.stack_len] = try self.evalGlobalCallArgSource(frame, source);
+            self.stack_len += 1;
+        }
+
+        const owner = self.retainedFrameOwner(callee);
+        errdefer if (owner) |owned| self.releaseValue(owned);
+        try self.pushFrame(.{
+            .code = closure.code,
+            .ip = 0,
+            .base = base,
+            .captures = closure.captures,
+            .owner = owner,
+            .callable_global_slot = callable_slot,
+            .result_target = result_target,
+        });
+    }
+
+    fn replaceCurrentFrameWithCompactPlainClosureFromGlobalCallSources(
+        self: *Session,
+        frame_index: usize,
+        frame: *const CallFrame,
+        callee: Value,
+        closure: *const Closure,
+        callable_slot: u16,
+        sources: []const GlobalCallArgSource,
+    ) KError!void {
+        if (closure.code.arity != sources.len) return error.Arity;
+
+        var local_uses: [256]u8 = [_]u8{0} ** 256;
+        countGlobalCallArgLocalUses(sources, &local_uses);
+
+        var args_buf: [4]Value = undefined;
+        var loaded: usize = 0;
+        errdefer self.releaseOwnedValues(args_buf[0..loaded]);
+        for (sources) |source| {
+            args_buf[loaded] = try self.evalTailGlobalCallArgSource(frame, source, &local_uses);
+            loaded += 1;
+        }
+
+        switch (sources.len) {
+            1 => try self.replaceCurrentFrameWithOwnedClosure1(frame_index, callee, closure, callable_slot, args_buf[0]),
+            2 => try self.replaceCurrentFrameWithOwnedClosure2(frame_index, callee, closure, callable_slot, args_buf[0], args_buf[1]),
+            3 => try self.replaceCurrentFrameWithOwnedClosure3(frame_index, callee, closure, callable_slot, args_buf[0], args_buf[1], args_buf[2]),
+            4 => try self.replaceCurrentFrameWithOwnedClosure4(frame_index, callee, closure, callable_slot, args_buf[0], args_buf[1], args_buf[2], args_buf[3]),
+            else => return error.Internal,
+        }
+    }
+
+    fn replaceCurrentFrameWithCompactPlainClosureFromGlobalCallSourcesWithOverride(
+        self: *Session,
+        frame_index: usize,
+        frame: *const CallFrame,
+        callee: Value,
+        closure: *const Closure,
+        callable_slot: u16,
+        sources: []const GlobalCallArgSource,
+        override_slot: u8,
+        override_value: Value,
+    ) KError!void {
+        if (closure.code.arity != sources.len) return error.Arity;
+
+        var local_uses: [256]u8 = [_]u8{0} ** 256;
+        countGlobalCallArgLocalUses(sources, &local_uses);
+
+        var args_buf: [4]Value = undefined;
+        var loaded: usize = 0;
+        errdefer self.releaseOwnedValues(args_buf[0..loaded]);
+        for (sources) |source| {
+            args_buf[loaded] = try self.evalTailGlobalCallArgSourceWithOverride(frame, source, &local_uses, override_slot, override_value);
+            loaded += 1;
+        }
+
+        switch (sources.len) {
+            1 => try self.replaceCurrentFrameWithOwnedClosure1(frame_index, callee, closure, callable_slot, args_buf[0]),
+            2 => try self.replaceCurrentFrameWithOwnedClosure2(frame_index, callee, closure, callable_slot, args_buf[0], args_buf[1]),
+            3 => try self.replaceCurrentFrameWithOwnedClosure3(frame_index, callee, closure, callable_slot, args_buf[0], args_buf[1], args_buf[2]),
+            4 => try self.replaceCurrentFrameWithOwnedClosure4(frame_index, callee, closure, callable_slot, args_buf[0], args_buf[1], args_buf[2], args_buf[3]),
+            else => return error.Internal,
+        }
+    }
+
+    fn pushPlainClosureFromGlobalCallSlots(
+        self: *Session,
+        frame: *CallFrame,
+        callee: Value,
+        closure: *const Closure,
+        callable_slot: u16,
+        argc: u8,
+    ) KError!void {
+        if (closure.code.arity != argc) return error.Arity;
+
+        const base = self.stack_len;
+        errdefer self.dropStackFrom(base);
+        switch (argc) {
+            1 => try self.push(try self.readOwnedGlobalCallArg(frame)),
+            2 => {
+                try self.push(try self.readOwnedGlobalCallArg(frame));
+                try self.push(try self.readOwnedGlobalCallArg(frame));
+            },
+            3 => {
+                try self.push(try self.readOwnedGlobalCallArg(frame));
+                try self.push(try self.readOwnedGlobalCallArg(frame));
+                try self.push(try self.readOwnedGlobalCallArg(frame));
+            },
+            4 => {
+                try self.push(try self.readOwnedGlobalCallArg(frame));
+                try self.push(try self.readOwnedGlobalCallArg(frame));
+                try self.push(try self.readOwnedGlobalCallArg(frame));
+                try self.push(try self.readOwnedGlobalCallArg(frame));
+            },
+            else => return error.Internal,
+        }
+
+        const owner = self.retainedFrameOwner(callee);
+        errdefer if (owner) |owned| self.releaseValue(owned);
+        try self.pushFrame(.{
+            .code = closure.code,
+            .ip = 0,
+            .base = base,
+            .captures = closure.captures,
+            .owner = owner,
+            .callable_global_slot = callable_slot,
+            .result_target = .stack,
+        });
+    }
+
+    fn pushPlainClosureFromGlobalCallSlotsToLocal(
+        self: *Session,
+        frame: *CallFrame,
+        callee: Value,
+        closure: *const Closure,
+        callable_slot: u16,
+        argc: u8,
+    ) KError!void {
+        if (closure.code.arity != argc) return error.Arity;
+
+        const base = self.stack_len;
+        errdefer self.dropStackFrom(base);
+        switch (argc) {
+            1 => try self.push(try self.readOwnedGlobalCallArg(frame)),
+            2 => {
+                try self.push(try self.readOwnedGlobalCallArg(frame));
+                try self.push(try self.readOwnedGlobalCallArg(frame));
+            },
+            3 => {
+                try self.push(try self.readOwnedGlobalCallArg(frame));
+                try self.push(try self.readOwnedGlobalCallArg(frame));
+                try self.push(try self.readOwnedGlobalCallArg(frame));
+            },
+            4 => {
+                try self.push(try self.readOwnedGlobalCallArg(frame));
+                try self.push(try self.readOwnedGlobalCallArg(frame));
+                try self.push(try self.readOwnedGlobalCallArg(frame));
+                try self.push(try self.readOwnedGlobalCallArg(frame));
+            },
+            else => return error.Internal,
+        }
+
+        const dst_slot = try readByte(frame);
+        const owner = self.retainedFrameOwner(callee);
+        errdefer if (owner) |owned| self.releaseValue(owned);
+        try self.pushFrame(.{
+            .code = closure.code,
+            .ip = 0,
+            .base = base,
+            .captures = closure.captures,
+            .owner = owner,
+            .callable_global_slot = callable_slot,
+            .result_target = .{ .parent_local = dst_slot },
+        });
+    }
+
+    fn pushCurrentFrameSelfClosureFromGlobalCallSlots(self: *Session, frame: *CallFrame, closure: *const Closure, argc: u8) KError!void {
+        if (closure.code.arity != argc) return error.Arity;
+
+        const base = self.stack_len;
+        errdefer self.dropStackFrom(base);
+        switch (argc) {
+            1 => try self.push(try self.readOwnedGlobalCallArg(frame)),
+            2 => {
+                try self.push(try self.readOwnedGlobalCallArg(frame));
+                try self.push(try self.readOwnedGlobalCallArg(frame));
+            },
+            3 => {
+                try self.push(try self.readOwnedGlobalCallArg(frame));
+                try self.push(try self.readOwnedGlobalCallArg(frame));
+                try self.push(try self.readOwnedGlobalCallArg(frame));
+            },
+            4 => {
+                try self.push(try self.readOwnedGlobalCallArg(frame));
+                try self.push(try self.readOwnedGlobalCallArg(frame));
+                try self.push(try self.readOwnedGlobalCallArg(frame));
+                try self.push(try self.readOwnedGlobalCallArg(frame));
+            },
+            else => return error.Internal,
+        }
+
+        const retained_owner = if (frame.owner) |owner| self.retainValue(owner) else null;
+        errdefer if (retained_owner) |owned| self.releaseValue(owned);
+        try self.pushFrame(.{
+            .code = closure.code,
+            .ip = 0,
+            .base = base,
+            .captures = closure.captures,
+            .owner = retained_owner,
+            .callable_global_slot = frame.callable_global_slot,
+            .result_target = .stack,
+        });
+    }
+
+    fn pushCurrentFrameSelfClosureFromGlobalCallSlotsToLocal(self: *Session, frame: *CallFrame, closure: *const Closure, argc: u8) KError!void {
+        if (closure.code.arity != argc) return error.Arity;
+
+        const base = self.stack_len;
+        errdefer self.dropStackFrom(base);
+        switch (argc) {
+            1 => try self.push(try self.readOwnedGlobalCallArg(frame)),
+            2 => {
+                try self.push(try self.readOwnedGlobalCallArg(frame));
+                try self.push(try self.readOwnedGlobalCallArg(frame));
+            },
+            3 => {
+                try self.push(try self.readOwnedGlobalCallArg(frame));
+                try self.push(try self.readOwnedGlobalCallArg(frame));
+                try self.push(try self.readOwnedGlobalCallArg(frame));
+            },
+            4 => {
+                try self.push(try self.readOwnedGlobalCallArg(frame));
+                try self.push(try self.readOwnedGlobalCallArg(frame));
+                try self.push(try self.readOwnedGlobalCallArg(frame));
+                try self.push(try self.readOwnedGlobalCallArg(frame));
+            },
+            else => return error.Internal,
+        }
+
+        const dst_slot = try readByte(frame);
+        const retained_owner = if (frame.owner) |owner| self.retainValue(owner) else null;
+        errdefer if (retained_owner) |owned| self.releaseValue(owned);
+        try self.pushFrame(.{
+            .code = closure.code,
+            .ip = 0,
+            .base = base,
+            .captures = closure.captures,
+            .owner = retained_owner,
+            .callable_global_slot = frame.callable_global_slot,
+            .result_target = .{ .parent_local = dst_slot },
+        });
+    }
+
+    fn replaceCurrentFrameWithOwnedClosure(
+        self: *Session,
+        frame_index: usize,
+        callee: Value,
+        closure: *const Closure,
+        callable_slot: u16,
+        args: []const Value,
+    ) KError!void {
+        const base = self.frames[frame_index].base;
+        const old_owner = self.frames[frame_index].owner;
+        const result_target = self.frames[frame_index].result_target;
+        self.dropStackFrom(base);
+        if (old_owner) |owned| self.releaseValue(owned);
+        self.stack_len = base + args.len;
+        errdefer self.dropStackFrom(base);
+        for (args, 0..) |arg, idx| self.stack[base + idx] = arg;
+        const owner = self.retainedFrameOwner(callee);
+        errdefer if (owner) |owned| self.releaseValue(owned);
+        self.frames[frame_index] = .{
+            .code = closure.code,
+            .ip = 0,
+            .base = base,
+            .captures = closure.captures,
+            .owner = owner,
+            .callable_global_slot = callable_slot,
+            .result_target = result_target,
+        };
+        try self.ensureFrameLocalSlots(closure.code, base);
+    }
+
+    fn replaceCurrentFrameWithOwnedClosure1(self: *Session, frame_index: usize, callee: Value, closure: *const Closure, callable_slot: u16, arg0: Value) KError!void {
+        const base = self.frames[frame_index].base;
+        const old_owner = self.frames[frame_index].owner;
+        const result_target = self.frames[frame_index].result_target;
+        self.dropStackFrom(base);
+        if (old_owner) |owned| self.releaseValue(owned);
+        self.stack_len = base + 1;
+        errdefer self.dropStackFrom(base);
+        self.stack[base] = arg0;
+        const owner = self.retainedFrameOwner(callee);
+        errdefer if (owner) |owned| self.releaseValue(owned);
+        self.frames[frame_index] = .{
+            .code = closure.code,
+            .ip = 0,
+            .base = base,
+            .captures = closure.captures,
+            .owner = owner,
+            .callable_global_slot = callable_slot,
+            .result_target = result_target,
+        };
+        try self.ensureFrameLocalSlots(closure.code, base);
+    }
+
+    fn replaceCurrentFrameWithOwnedClosure2(self: *Session, frame_index: usize, callee: Value, closure: *const Closure, callable_slot: u16, arg0: Value, arg1: Value) KError!void {
+        const base = self.frames[frame_index].base;
+        const old_owner = self.frames[frame_index].owner;
+        const result_target = self.frames[frame_index].result_target;
+        self.dropStackFrom(base);
+        if (old_owner) |owned| self.releaseValue(owned);
+        self.stack_len = base + 2;
+        errdefer self.dropStackFrom(base);
+        self.stack[base] = arg0;
+        self.stack[base + 1] = arg1;
+        const owner = self.retainedFrameOwner(callee);
+        errdefer if (owner) |owned| self.releaseValue(owned);
+        self.frames[frame_index] = .{
+            .code = closure.code,
+            .ip = 0,
+            .base = base,
+            .captures = closure.captures,
+            .owner = owner,
+            .callable_global_slot = callable_slot,
+            .result_target = result_target,
+        };
+        try self.ensureFrameLocalSlots(closure.code, base);
+    }
+
+    fn replaceCurrentFrameWithOwnedClosure3(self: *Session, frame_index: usize, callee: Value, closure: *const Closure, callable_slot: u16, arg0: Value, arg1: Value, arg2: Value) KError!void {
+        const base = self.frames[frame_index].base;
+        const old_owner = self.frames[frame_index].owner;
+        const result_target = self.frames[frame_index].result_target;
+        self.dropStackFrom(base);
+        if (old_owner) |owned| self.releaseValue(owned);
+        self.stack_len = base + 3;
+        errdefer self.dropStackFrom(base);
+        self.stack[base] = arg0;
+        self.stack[base + 1] = arg1;
+        self.stack[base + 2] = arg2;
+        const owner = self.retainedFrameOwner(callee);
+        errdefer if (owner) |owned| self.releaseValue(owned);
+        self.frames[frame_index] = .{
+            .code = closure.code,
+            .ip = 0,
+            .base = base,
+            .captures = closure.captures,
+            .owner = owner,
+            .callable_global_slot = callable_slot,
+            .result_target = result_target,
+        };
+        try self.ensureFrameLocalSlots(closure.code, base);
+    }
+
+    fn replaceCurrentFrameWithOwnedClosure4(self: *Session, frame_index: usize, callee: Value, closure: *const Closure, callable_slot: u16, arg0: Value, arg1: Value, arg2: Value, arg3: Value) KError!void {
+        const base = self.frames[frame_index].base;
+        const old_owner = self.frames[frame_index].owner;
+        const result_target = self.frames[frame_index].result_target;
+        self.dropStackFrom(base);
+        if (old_owner) |owned| self.releaseValue(owned);
+        self.stack_len = base + 4;
+        errdefer self.dropStackFrom(base);
+        self.stack[base] = arg0;
+        self.stack[base + 1] = arg1;
+        self.stack[base + 2] = arg2;
+        self.stack[base + 3] = arg3;
+        const owner = self.retainedFrameOwner(callee);
+        errdefer if (owner) |owned| self.releaseValue(owned);
+        self.frames[frame_index] = .{
+            .code = closure.code,
+            .ip = 0,
+            .base = base,
+            .captures = closure.captures,
+            .owner = owner,
+            .callable_global_slot = callable_slot,
+            .result_target = result_target,
+        };
+        try self.ensureFrameLocalSlots(closure.code, base);
+    }
+
+    fn replaceCurrentFrameWithOwnedPlainClosureFromGlobalCallSlots(
+        self: *Session,
+        frame_index: usize,
+        frame: *CallFrame,
+        callee: Value,
+        closure: *const Closure,
+        callable_slot: u16,
+        argc: u8,
+    ) KError!void {
+        if (closure.code.arity != argc) return error.Arity;
+
+        var args_buf: [4]Value = undefined;
+        const args = try self.readOwnedGlobalCallSlots(frame, argc, &args_buf);
+        switch (args.len) {
+            1 => try self.replaceCurrentFrameWithOwnedClosure1(frame_index, callee, closure, callable_slot, args[0]),
+            2 => try self.replaceCurrentFrameWithOwnedClosure2(frame_index, callee, closure, callable_slot, args[0], args[1]),
+            3 => try self.replaceCurrentFrameWithOwnedClosure3(frame_index, callee, closure, callable_slot, args[0], args[1], args[2]),
+            4 => try self.replaceCurrentFrameWithOwnedClosure4(frame_index, callee, closure, callable_slot, args[0], args[1], args[2], args[3]),
+            else => return error.Internal,
+        }
+    }
+
+    fn tryApplyOwnedClosureArgs(self: *Session, closure: *const Closure, args: []const Value) KError!?Value {
+        switch (args.len) {
+            1 => {
+                if (try self.applyDerivedClosure(closure, args)) |result| return result;
+                return try self.tryApplyDirectClosure1(closure, args[0]);
+            },
+            2 => {
+                if (try self.tryApplyDirectDerivedClosure2(closure, args[0], args[1])) |result| return result;
+                if (try self.applyDerivedClosure(closure, args)) |result| return result;
+                return try self.tryApplyDirectClosure2(closure, args[0], args[1]);
+            },
+            3 => {
+                if (try self.applyDerivedClosure(closure, args)) |result| return result;
+                return try self.tryApplyDirectClosure3(closure, args[0], args[1], args[2]);
+            },
+            else => return try self.applyDerivedClosure(closure, args),
+        }
+    }
+
+    fn execOwnedGlobalCallArgs(self: *Session, slot: u16, callee: Value, args: []const Value) KError!void {
+        switch (callee.tag()) {
+            .builtin => {
+                const result = try self.applyBuiltinCall(callee.asBuiltin(), args);
+                self.releaseOwnedValues(args);
+                try self.push(result);
+            },
+            .closure => {
+                const closure = callee.asClosure();
+                if (try self.tryApplyOwnedClosureArgs(closure, args)) |result| {
+                    self.releaseOwnedValues(args);
+                    try self.push(result);
+                    return;
+                }
+                if (closure.code.arity != args.len) return error.Arity;
+                try self.pushOwnedClosureArgs(callee, closure, slot, args, .stack);
+            },
+            .array => {
+                const result = try self.applyArrayCall(callee, args);
+                self.releaseOwnedValues(args);
+                try self.push(result);
+            },
+            else => return error.Type,
+        }
+    }
+
+    fn execOwnedGlobalCallArgsToLocal(self: *Session, frame: *CallFrame, dst_slot: u8, slot: u16, callee: Value, args: []const Value) KError!void {
+        switch (callee.tag()) {
+            .builtin => {
+                const result = try self.applyBuiltinCall(callee.asBuiltin(), args);
+                self.releaseOwnedValues(args);
+                try self.writeLocalValue(frame, dst_slot, result);
+            },
+            .closure => {
+                const closure = callee.asClosure();
+                if (try self.tryApplyOwnedClosureArgs(closure, args)) |result| {
+                    self.releaseOwnedValues(args);
+                    try self.writeLocalValue(frame, dst_slot, result);
+                    return;
+                }
+                if (closure.code.arity != args.len) return error.Arity;
+                try self.pushOwnedClosureArgs(callee, closure, slot, args, .{ .parent_local = dst_slot });
+            },
+            .array => {
+                const result = try self.applyArrayCall(callee, args);
+                self.releaseOwnedValues(args);
+                try self.writeLocalValue(frame, dst_slot, result);
+            },
+            else => return error.Type,
+        }
+    }
+
+    fn execOwnedTailGlobalCallArgs(self: *Session, frame_index: usize, slot: u16, callee: Value, args: []const Value) KError!?Value {
+        switch (callee.tag()) {
+            .builtin => {
+                const result = try self.applyBuiltinCall(callee.asBuiltin(), args);
+                self.releaseOwnedValues(args);
+                return try self.finishFrame(frame_index, result);
+            },
+            .closure => {
+                const closure = callee.asClosure();
+                if (try self.tryApplyOwnedClosureArgs(closure, args)) |result| {
+                    self.releaseOwnedValues(args);
+                    return try self.finishFrame(frame_index, result);
+                }
+                if (closure.code.arity != args.len) return error.Arity;
+                try self.replaceCurrentFrameWithOwnedClosure(frame_index, callee, closure, slot, args);
+                return null;
+            },
+            .array => {
+                const result = try self.applyArrayCall(callee, args);
+                self.releaseOwnedValues(args);
+                return try self.finishFrame(frame_index, result);
+            },
+            else => return error.Type,
+        }
+    }
+
+    fn currentFrameSelfClosure(frame: *const CallFrame, slot: u16, callee: Value) ?*const Closure {
+        if (frame.callable_global_slot != slot) return null;
+        if (callee.tag() != .closure) return null;
+        const closure = callee.asClosure();
+        if (closure.code != frame.code) return null;
+        if (frame.owner) |owner| {
+            if (owner.raw != callee.raw or owner.tag() != .closure) return null;
+            return closure;
+        }
+        if (frame.captures.len != 0 or closure.captures.len != 0) return null;
+        return closure;
+    }
+
+    fn pushCurrentFrameSelfClosureArgs(self: *Session, frame: *const CallFrame, closure: *const Closure, args: []const Value) KError!void {
+        if (closure.code.arity != args.len) return error.Arity;
+
+        const base = self.stack_len;
+        errdefer self.dropStackFrom(base);
+        for (args) |arg| try self.push(arg);
+
+        const retained_owner = if (frame.owner) |owner| self.retainValue(owner) else null;
+        errdefer if (retained_owner) |owned| self.releaseValue(owned);
+        try self.pushFrame(.{
+            .code = closure.code,
+            .ip = 0,
+            .base = base,
+            .captures = closure.captures,
+            .owner = retained_owner,
+            .callable_global_slot = frame.callable_global_slot,
+            .result_target = .stack,
+        });
+    }
+
+    fn pushCurrentFrameSelfClosureArgsToLocal(self: *Session, frame: *const CallFrame, closure: *const Closure, args: []const Value, dst_slot: u8) KError!void {
+        if (closure.code.arity != args.len) return error.Arity;
+
+        const base = self.stack_len;
+        errdefer self.dropStackFrom(base);
+        for (args) |arg| try self.push(arg);
+
+        const retained_owner = if (frame.owner) |owner| self.retainValue(owner) else null;
+        errdefer if (retained_owner) |owned| self.releaseValue(owned);
+        try self.pushFrame(.{
+            .code = closure.code,
+            .ip = 0,
+            .base = base,
+            .captures = closure.captures,
+            .owner = retained_owner,
+            .callable_global_slot = frame.callable_global_slot,
+            .result_target = .{ .parent_local = dst_slot },
+        });
+    }
+
+    fn replaceCurrentFrameWithSelfClosureArgs(self: *Session, frame_index: usize, closure: *const Closure, args: []const Value) KError!void {
+        const current = self.frames[frame_index];
+        if (closure.code.arity != args.len) return error.Arity;
+
+        const base = current.base;
+        self.dropStackFrom(base);
+        self.stack_len = base + args.len;
+        errdefer self.dropStackFrom(base);
+        for (args, 0..) |arg, idx| self.stack[base + idx] = arg;
+
+        self.frames[frame_index] = .{
+            .code = closure.code,
+            .ip = 0,
+            .base = base,
+            .captures = closure.captures,
+            .owner = current.owner,
+            .callable_global_slot = current.callable_global_slot,
+            .result_target = current.result_target,
+        };
+        try self.ensureFrameLocalSlots(closure.code, base);
+    }
+
+    fn readOwnedGlobalCallArg(self: *Session, frame: *CallFrame) KError!Value {
+        const encoded = try readByte(frame);
+        const consume = (encoded & global_call_arg_consume_bit) != 0;
+        const kind: GlobalCallArgKind = std.meta.intToEnum(GlobalCallArgKind, encoded & ~global_call_arg_consume_bit) catch return error.Internal;
+
+        return switch (kind) {
+            .local => try self.readLocalTransfer(frame, try readByte(frame), consume),
+            .const_int => blk: {
+                if (consume) return error.Internal;
+                break :blk try self.intValue(try readI64(frame));
+            },
+            .local_add_const, .local_sub_const, .local_mul_const => blk: {
+                const slot = try readByte(frame);
+                const rhs = try readI64(frame);
+                const left = try self.readLocalTransfer(frame, slot, consume);
+                errdefer self.releaseValue(left);
+
+                const result = try self.applyLocalConstOpValue(left, switch (kind) {
+                    .local_add_const => .add,
+                    .local_sub_const => .sub,
+                    .local_mul_const => .mul,
+                    else => unreachable,
+                }, rhs);
+                self.releaseValue(left);
+                break :blk result;
+            },
+        };
+    }
+
+    fn readOwnedGlobalCallSlots(self: *Session, frame: *CallFrame, argc: u8, out: *[4]Value) KError![]const Value {
+        if (argc == 0 or argc > out.len) return error.Internal;
+        var loaded: usize = 0;
+        errdefer self.releaseOwnedValues(out[0..loaded]);
+        while (loaded < argc) : (loaded += 1) {
+            out[loaded] = try self.readOwnedGlobalCallArg(frame);
+        }
+        return out[0..argc];
+    }
+
+    fn execGlobalCallSlots(self: *Session, frame: *CallFrame, slot: u16, argc: u8) KError!void {
+        self.noteGlobalCall(slot);
+        const callee = try self.loadGlobalSlot(slot);
+        if (callee.tag() == .closure) {
+            const closure = callee.asClosure();
+            if (closureIsCompactPlainGlobal(closure) and closure.code.arity == argc and currentFrameSelfClosure(frame, slot, callee) == null) {
+                var sources_buf: [4]GlobalCallArgSource = undefined;
+                const sources = try readGlobalCallArgSources(frame, argc, &sources_buf);
+                return try self.pushCompactPlainClosureFromGlobalCallSources(frame, callee, closure, slot, sources, .stack);
+            }
+            if (!closureMayUseDerivedApply(closure)) {
+                if (closure.code.arity == argc and (closure.code.direct_closure_mask & directClosureMaskBit(argc)) == 0) {
+                    if (currentFrameSelfClosure(frame, slot, callee)) |self_closure| {
+                        return try self.pushCurrentFrameSelfClosureFromGlobalCallSlots(frame, self_closure, argc);
+                    }
+                    return try self.pushPlainClosureFromGlobalCallSlots(frame, callee, closure, slot, argc);
+                }
+            }
+        }
+        var args_buf: [4]Value = undefined;
+        const args = try self.readOwnedGlobalCallSlots(frame, argc, &args_buf);
+        if (currentFrameSelfClosure(frame, slot, callee)) |closure| {
+            if (closure.code.arity != args.len) return error.Arity;
+            return try self.pushCurrentFrameSelfClosureArgs(frame, closure, args);
+        }
+        if (callee.tag() == .closure) {
+            const closure = callee.asClosure();
+            if (!closureMayUseDerivedApply(closure)) {
+                switch (args.len) {
+                    1 => if (try self.tryApplyDirectClosure1(closure, args[0])) |result| {
+                        self.releaseOwnedValues(args);
+                        try self.push(result);
+                        return;
+                    },
+                    2 => if (try self.tryApplyDirectClosure2(closure, args[0], args[1])) |result| {
+                        self.releaseOwnedValues(args);
+                        try self.push(result);
+                        return;
+                    },
+                    3 => if (try self.tryApplyDirectClosure3(closure, args[0], args[1], args[2])) |result| {
+                        self.releaseOwnedValues(args);
+                        try self.push(result);
+                        return;
+                    },
+                    else => {},
+                }
+                if (closure.code.arity != args.len) return error.Arity;
+                try self.pushOwnedClosureArgs(callee, closure, slot, args, .stack);
+                return;
+            }
+        }
+        return try self.execOwnedGlobalCallArgs(slot, callee, args);
+    }
+
+    fn execGlobalCallSlotsStoreLocal(self: *Session, frame: *CallFrame, slot: u16, argc: u8) KError!void {
+        self.noteGlobalCall(slot);
+        const callee = try self.loadGlobalSlot(slot);
+        if (callee.tag() == .closure) {
+            const closure = callee.asClosure();
+            if (closureIsCompactPlainGlobal(closure) and closure.code.arity == argc and currentFrameSelfClosure(frame, slot, callee) == null) {
+                var sources_buf: [4]GlobalCallArgSource = undefined;
+                const sources = try readGlobalCallArgSources(frame, argc, &sources_buf);
+                const local_slot = try readByte(frame);
+                const target = parentLocalResultTarget(frame, local_slot);
+                return try self.pushCompactPlainClosureFromGlobalCallSources(frame, callee, closure, slot, sources, target);
+            }
+            if (!closureMayUseDerivedApply(closure)) {
+                if (closure.code.arity == argc and (closure.code.direct_closure_mask & directClosureMaskBit(argc)) == 0) {
+                    if (currentFrameSelfClosure(frame, slot, callee)) |self_closure| {
+                        return try self.pushCurrentFrameSelfClosureFromGlobalCallSlotsToLocal(frame, self_closure, argc);
+                    }
+                    return try self.pushPlainClosureFromGlobalCallSlotsToLocal(frame, callee, closure, slot, argc);
+                }
+            }
+        }
+
+        var args_buf: [4]Value = undefined;
+        const args = try self.readOwnedGlobalCallSlots(frame, argc, &args_buf);
+        const local_slot = try readByte(frame);
+        if (currentFrameSelfClosure(frame, slot, callee)) |closure| {
+            if (closure.code.arity != args.len) return error.Arity;
+            return try self.pushCurrentFrameSelfClosureArgsToLocal(frame, closure, args, local_slot);
+        }
+        if (callee.tag() == .closure) {
+            const closure = callee.asClosure();
+            if (!closureMayUseDerivedApply(closure)) {
+                switch (args.len) {
+                    1 => if (try self.tryApplyDirectClosure1(closure, args[0])) |result| {
+                        self.releaseOwnedValues(args);
+                        try self.writeLocalValue(frame, local_slot, result);
+                        return;
+                    },
+                    2 => if (try self.tryApplyDirectClosure2(closure, args[0], args[1])) |result| {
+                        self.releaseOwnedValues(args);
+                        try self.writeLocalValue(frame, local_slot, result);
+                        return;
+                    },
+                    3 => if (try self.tryApplyDirectClosure3(closure, args[0], args[1], args[2])) |result| {
+                        self.releaseOwnedValues(args);
+                        try self.writeLocalValue(frame, local_slot, result);
+                        return;
+                    },
+                    else => {},
+                }
+                if (closure.code.arity != args.len) return error.Arity;
+                const target = parentLocalResultTarget(frame, local_slot);
+                try self.pushOwnedClosureArgs(callee, closure, slot, args, target);
+                return;
+            }
+        }
+        return try self.execOwnedGlobalCallArgsToLocal(frame, local_slot, slot, callee, args);
+    }
+
+    fn execTailGlobalCallSlots(self: *Session, frame_index: usize, frame: *CallFrame, slot: u16, argc: u8) KError!?Value {
+        self.noteGlobalCall(slot);
+        const callee = try self.loadGlobalSlot(slot);
+        if (callee.tag() == .closure) {
+            const closure = callee.asClosure();
+            if (closureIsCompactPlainGlobal(closure) and closure.code.arity == argc) {
+                var sources_buf: [4]GlobalCallArgSource = undefined;
+                const sources = try readGlobalCallArgSources(frame, argc, &sources_buf);
+                try self.replaceCurrentFrameWithCompactPlainClosureFromGlobalCallSources(frame_index, frame, callee, closure, slot, sources);
+                return null;
+            }
+            if (!closureMayUseDerivedApply(closure)) {
+                if (closure.code.arity == argc and (closure.code.direct_closure_mask & directClosureMaskBit(argc)) == 0) {
+                    if (currentFrameSelfClosure(frame, slot, callee) != null) {
+                        var args_buf: [4]Value = undefined;
+                        const args = try self.readOwnedGlobalCallSlots(frame, argc, &args_buf);
+                        try self.replaceCurrentFrameWithSelfClosureArgs(frame_index, currentFrameSelfClosure(frame, slot, callee).?, args);
+                        return null;
+                    }
+                    try self.replaceCurrentFrameWithOwnedPlainClosureFromGlobalCallSlots(frame_index, frame, callee, closure, slot, argc);
+                    return null;
+                }
+            }
+        }
+        var args_buf: [4]Value = undefined;
+        const args = try self.readOwnedGlobalCallSlots(frame, argc, &args_buf);
+        if (currentFrameSelfClosure(frame, slot, callee)) |closure| {
+            if (closure.code.arity != args.len) return error.Arity;
+            try self.replaceCurrentFrameWithSelfClosureArgs(frame_index, closure, args);
+            return null;
+        }
+        if (callee.tag() == .closure) {
+            const closure = callee.asClosure();
+            if (!closureMayUseDerivedApply(closure)) {
+                switch (args.len) {
+                    1 => if (try self.tryApplyDirectClosure1(closure, args[0])) |result| {
+                        self.releaseOwnedValues(args);
+                        return try self.finishFrame(frame_index, result);
+                    },
+                    2 => if (try self.tryApplyDirectClosure2(closure, args[0], args[1])) |result| {
+                        self.releaseOwnedValues(args);
+                        return try self.finishFrame(frame_index, result);
+                    },
+                    3 => if (try self.tryApplyDirectClosure3(closure, args[0], args[1], args[2])) |result| {
+                        self.releaseOwnedValues(args);
+                        return try self.finishFrame(frame_index, result);
+                    },
+                    else => {},
+                }
+                if (closure.code.arity != args.len) return error.Arity;
+                try self.replaceCurrentFrameWithOwnedClosure(frame_index, callee, closure, slot, args);
+                return null;
+            }
+        }
+        return try self.execOwnedTailGlobalCallArgs(frame_index, slot, callee, args);
     }
 
     fn execGlobalCall1(self: *Session, slot: u16) KError!void {
@@ -11188,6 +14264,164 @@ pub const Session = struct {
         }
     }
 
+    fn execGlobalCall3(self: *Session, slot: u16) KError!void {
+        if (self.stack_len < 3) return error.Internal;
+
+        self.noteGlobalCall(slot);
+        const callee = try self.loadGlobalSlot(slot);
+        const arg0_index = self.stack_len - 3;
+        const arg0 = self.stack[arg0_index];
+        const arg1 = self.stack[arg0_index + 1];
+        const arg2 = self.stack[arg0_index + 2];
+
+        switch (callee.tag()) {
+            .builtin => {
+                const result = try self.applyBuiltinCall(callee.asBuiltin(), &[_]Value{ arg0, arg1, arg2 });
+                self.dropStackFrom(arg0_index);
+                try self.push(result);
+            },
+            .closure => {
+                const closure = callee.asClosure();
+                if (try self.applyDerivedClosure(closure, &[_]Value{ arg0, arg1, arg2 })) |result| {
+                    self.dropStackFrom(arg0_index);
+                    try self.push(result);
+                    return;
+                }
+                if (closure.code.arity != 3) return error.Arity;
+                if (try self.tryApplyDirectClosure3(closure, arg0, arg1, arg2)) |result| {
+                    self.dropStackFrom(arg0_index);
+                    try self.push(result);
+                    return;
+                }
+                try self.pushFrame(.{
+                    .code = closure.code,
+                    .ip = 0,
+                    .base = arg0_index,
+                    .captures = closure.captures,
+                    .owner = self.retainedFrameOwner(callee),
+                    .callable_global_slot = slot,
+                });
+            },
+            .array => {
+                const result = try self.applyArrayCall(callee, &[_]Value{ arg0, arg1, arg2 });
+                self.dropStackFrom(arg0_index);
+                try self.push(result);
+            },
+            else => return error.Type,
+        }
+    }
+
+    fn execTailGlobalCall3(self: *Session, frame_index: usize, slot: u16) KError!?Value {
+        if (self.stack_len < 3) return error.Internal;
+
+        self.noteGlobalCall(slot);
+        const callee = try self.loadGlobalSlot(slot);
+        const arg0_index = self.stack_len - 3;
+        const arg0 = self.stack[arg0_index];
+        const arg1 = self.stack[arg0_index + 1];
+        const arg2 = self.stack[arg0_index + 2];
+
+        switch (callee.tag()) {
+            .builtin => {
+                const result = try self.applyBuiltinCall(callee.asBuiltin(), &[_]Value{ arg0, arg1, arg2 });
+                return try self.finishFrame(frame_index, result);
+            },
+            .closure => {
+                const closure = callee.asClosure();
+                if (try self.applyDerivedClosure(closure, &[_]Value{ arg0, arg1, arg2 })) |result| {
+                    return try self.finishFrame(frame_index, result);
+                }
+                if (closure.code.arity != 3) return error.Arity;
+                if (try self.tryApplyDirectClosure3(closure, arg0, arg1, arg2)) |result| {
+                    return try self.finishFrame(frame_index, result);
+                }
+                try self.replaceCurrentFrameWithBorrowedClosure3(frame_index, callee, closure, slot);
+                return null;
+            },
+            .array => {
+                const result = try self.applyArrayCall(callee, &[_]Value{ arg0, arg1, arg2 });
+                return try self.finishFrame(frame_index, result);
+            },
+            else => return error.Type,
+        }
+    }
+
+    fn execGlobalCall4(self: *Session, slot: u16) KError!void {
+        if (self.stack_len < 4) return error.Internal;
+
+        self.noteGlobalCall(slot);
+        const callee = try self.loadGlobalSlot(slot);
+        const arg0_index = self.stack_len - 4;
+        const arg0 = self.stack[arg0_index];
+        const arg1 = self.stack[arg0_index + 1];
+        const arg2 = self.stack[arg0_index + 2];
+        const arg3 = self.stack[arg0_index + 3];
+
+        switch (callee.tag()) {
+            .builtin => {
+                const result = try self.applyBuiltinCall(callee.asBuiltin(), &[_]Value{ arg0, arg1, arg2, arg3 });
+                self.dropStackFrom(arg0_index);
+                try self.push(result);
+            },
+            .closure => {
+                const closure = callee.asClosure();
+                if (try self.applyDerivedClosure(closure, &[_]Value{ arg0, arg1, arg2, arg3 })) |result| {
+                    self.dropStackFrom(arg0_index);
+                    try self.push(result);
+                    return;
+                }
+                if (closure.code.arity != 4) return error.Arity;
+                try self.pushFrame(.{
+                    .code = closure.code,
+                    .ip = 0,
+                    .base = arg0_index,
+                    .captures = closure.captures,
+                    .owner = self.retainedFrameOwner(callee),
+                    .callable_global_slot = slot,
+                });
+            },
+            .array => {
+                const result = try self.applyArrayCall(callee, &[_]Value{ arg0, arg1, arg2, arg3 });
+                self.dropStackFrom(arg0_index);
+                try self.push(result);
+            },
+            else => return error.Type,
+        }
+    }
+
+    fn execTailGlobalCall4(self: *Session, frame_index: usize, slot: u16) KError!?Value {
+        if (self.stack_len < 4) return error.Internal;
+
+        self.noteGlobalCall(slot);
+        const callee = try self.loadGlobalSlot(slot);
+        const arg0_index = self.stack_len - 4;
+        const arg0 = self.stack[arg0_index];
+        const arg1 = self.stack[arg0_index + 1];
+        const arg2 = self.stack[arg0_index + 2];
+        const arg3 = self.stack[arg0_index + 3];
+
+        switch (callee.tag()) {
+            .builtin => {
+                const result = try self.applyBuiltinCall(callee.asBuiltin(), &[_]Value{ arg0, arg1, arg2, arg3 });
+                return try self.finishFrame(frame_index, result);
+            },
+            .closure => {
+                const closure = callee.asClosure();
+                if (try self.applyDerivedClosure(closure, &[_]Value{ arg0, arg1, arg2, arg3 })) |result| {
+                    return try self.finishFrame(frame_index, result);
+                }
+                if (closure.code.arity != 4) return error.Arity;
+                try self.replaceCurrentFrameWithBorrowedClosure4(frame_index, callee, closure, slot);
+                return null;
+            },
+            .array => {
+                const result = try self.applyArrayCall(callee, &[_]Value{ arg0, arg1, arg2, arg3 });
+                return try self.finishFrame(frame_index, result);
+            },
+            else => return error.Type,
+        }
+    }
+
     fn execGlobalCall(self: *Session, slot: u16, argc: u8) KError!void {
         const total = @as(usize, argc);
         if (self.stack_len < total) return error.Internal;
@@ -11233,6 +14467,8 @@ pub const Session = struct {
         const op_start = stringPerfNow();
         const right = self.pop();
         const left = self.pop();
+        errdefer self.releaseCanonicalManagedNumericValue(left);
+        errdefer self.releaseCanonicalManagedNumericValue(right);
         const value = try self.applyDyad(op, left, right);
         self.releaseCanonicalManagedNumericValue(left);
         self.releaseCanonicalManagedNumericValue(right);
@@ -11258,6 +14494,8 @@ pub const Session = struct {
         const op_start = stringPerfNow();
         const right = self.pop();
         const left = self.pop();
+        errdefer self.releaseCanonicalManagedNumericValue(left);
+        errdefer self.releaseCanonicalManagedNumericValue(right);
         const value = if (stringBytes(left) != null and stringBytes(right) != null)
             try self.containsValues(left, right)
         else
@@ -11275,6 +14513,8 @@ pub const Session = struct {
         const op_start = stringPerfNow();
         const right = self.pop();
         const left = self.pop();
+        errdefer self.releaseCanonicalManagedNumericValue(left);
+        errdefer self.releaseCanonicalManagedNumericValue(right);
         const value = if (stringBytes(left) != null and stringBytes(right) != null)
             try self.splitValues(left, right)
         else
@@ -11292,6 +14532,8 @@ pub const Session = struct {
         const op_start = stringPerfNow();
         const right = self.pop();
         const left = self.pop();
+        errdefer self.releaseCanonicalManagedNumericValue(left);
+        errdefer self.releaseCanonicalManagedNumericValue(right);
         const direct = stringBytes(left) != null and right.tag() == .array and switch (right.arrayKind()) {
             .host_string_list, .host_dense_array => true,
             else => false,
@@ -11314,6 +14556,8 @@ pub const Session = struct {
         const left = self.pop();
         const left_release = if (valueNumericHandle(left)) |handle| Value.array(@constCast(handle)) else left;
         const right_release = if (valueNumericHandle(right)) |handle| Value.array(@constCast(handle)) else right;
+        errdefer self.releaseCanonicalManagedNumericValue(left_release);
+        errdefer self.releaseCanonicalManagedNumericValue(right_release);
         const captures = [_]Value{Value.builtin(builtin)};
         const value = try self.applyDerivedKind(kind, &captures, &[_]Value{ left, right });
         self.releaseCanonicalManagedNumericValue(left_release);
@@ -11324,6 +14568,8 @@ pub const Session = struct {
     fn execDot(self: *Session) KError!void {
         const right = self.pop();
         const left = self.pop();
+        errdefer self.releaseCanonicalManagedNumericValue(left);
+        errdefer self.releaseCanonicalManagedNumericValue(right);
         const value = try self.dotValues(left, right);
         self.releaseCanonicalManagedNumericValue(left);
         self.releaseCanonicalManagedNumericValue(right);
@@ -11438,7 +14684,7 @@ pub const Session = struct {
         const base = self.pop();
         errdefer self.releaseValue(base);
         const derived = switch (base.tag()) {
-            .builtin, .closure, .array => Value.closure(try self.allocFrozenDerivedClosure(kind, base)),
+            .builtin, .closure, .array => Value.closure(try self.allocDerivedClosure(kind, base)),
             else => return error.Type,
         };
         self.releaseValue(base);
@@ -11658,7 +14904,23 @@ pub const Session = struct {
         defer profile_scope.end();
         if (op == .prng) return try self.applyPrngBuiltin(args);
         if (op == .grad or op == .valuegrad) return try self.applyAutogradBuiltin(op, args);
+        if (op == .rope) return try self.applyRopeBuiltin(args);
+        if (op == .ropeflat) return try self.applyRopeFlatBuiltin(args);
+        if (op == .ropecisflat) return try self.applyRopeCisFlatBuiltin(args);
         if (op == .rmsnorm) return try self.applyRmsNormBuiltin(args);
+        if (op == .layernorm) return try self.applyLayerNormBuiltin(args);
+        if (op == .gelu) return try self.applyGeluBuiltin(args);
+        if (op == .geluapprox) return try self.applyGeluApproxBuiltin(args);
+        if (op == .mlpdense) return try self.applyMlpDenseBuiltin(args);
+        if (op == .conv2d) return try self.applyConv2dBuiltin(args);
+        if (op == .convtranspose2d) return try self.applyConvTranspose2dBuiltin(args);
+        if (op == .upsamplenearest2d) return try self.applyUpsampleNearest2dBuiltin(args);
+        if (op == .groupnorm) return try self.applyGroupNormBuiltin(args);
+        if (op == .softmax) return try self.applySoftmaxBuiltin(args);
+        if (op == .sdpa) return try self.applySdpaBuiltin(args);
+        if (op == .sam3boxrpb) return try self.applySam3BoxRpbBuiltin(args);
+        if (op == .sdpamask) return try self.applySdpaMaskBuiltin(args);
+        if (op == .sdpaflat) return try self.applySdpaFlatBuiltin(args);
         return switch (args.len) {
             0 => error.Arity,
             1 => self.applyMonad(op, args[0]),
@@ -11672,10 +14934,36 @@ pub const Session = struct {
         return try self.deepIndexValue(callee, args);
     }
 
+    fn applyArrayCall1Scalar(self: *Session, callee: Value, raw_index: i64) KError!Value {
+        if (callee.tag() != .array) return error.Type;
+        if (try numericValueScalarIndexValue(self, callee, raw_index)) |result| return result;
+        if (valueRangeIotaHandle(callee)) |handle| {
+            return (try numericStructuralScalarIndexValue(self, .{ .handle = handle }, raw_index)).?;
+        }
+        if (valueNumericHandle(callee)) |handle| {
+            return try self.hostDenseIndexScalar(try hostStructuralArrayForHandle(self, @constCast(handle)), raw_index);
+        }
+        return switch (callee.arrayKind()) {
+            .host_dense_array, .backend_array => try self.hostDenseIndexScalar(try numericHostArrayValue(self, callee), raw_index),
+            .host_boxed_array => try self.hostBoxedArrayIndexScalar(callee.asHostBoxedArray(), raw_index),
+            .host_string_list => try self.hostStringListItemValue(
+                callee.asHostStringList(),
+                @intCast(try normalizeIndex(raw_index, callee.asHostStringList().len)),
+            ),
+            .host_relation => error.Type,
+            .host_keyed_store => blk: {
+                const store = callee.asHostKeyedStore();
+                if (store.layout != .table) break :blk error.Type;
+                break :blk try self.tableRowDictValue(store, try normalizeIndex(raw_index, store.row_count));
+            },
+            else => error.Internal,
+        };
+    }
+
     fn applyArrayCall1(self: *Session, callee: Value, selector: Value) KError!Value {
         if (callee.tag() != .array) return error.Type;
+        if (scalarIntLikeValue(selector)) |raw_index| return try self.applyArrayCall1Scalar(callee, raw_index);
         switch (selector.tag()) {
-            .int, .bool => if (try numericValueScalarIndexValue(self, callee, scalarIntLikeValue(selector).?)) |result| return result,
             .array => if (try numericValueArithmeticSelectorSlice(callee, selector)) |slice| {
                 if (try numericValueArithmeticSliceValue(self, callee, slice)) |result| return result;
                 if (try numericValueFirstAxisArithmeticSliceValue(self, callee, slice)) |result| return result;
@@ -11694,6 +14982,20 @@ pub const Session = struct {
             .host_string_list => switch (selector.tag()) {
                 .int, .bool => try self.hostStringListItemValue(callee.asHostStringList(), @intCast(try normalizeIndex(scalarIntLikeValue(selector).?, callee.asHostStringList().len))),
                 else => error.Type,
+            },
+            .host_relation => blk: {
+                const name = keyedLookupNameBytes(selector) orelse break :blk error.Type;
+                break :blk try self.materializeRelationColumn(callee.asHostRelation(), name);
+            },
+            .host_keyed_store => blk: {
+                const store = callee.asHostKeyedStore();
+                if (keyedLookupNameBytes(selector)) |name| break :blk try self.keyedStoreLookupValue(store, name);
+                if (store.layout == .table) {
+                    if (valueHostIntStructuralView(selector)) |view| {
+                        break :blk try self.tableSelectRowsBySelector(store, view);
+                    }
+                }
+                break :blk error.Type;
             },
             else => error.Internal,
         };
@@ -11993,6 +15295,7 @@ pub const Session = struct {
     fn initSiblingSession(self: *Session) !Session {
         var sibling = try Session.initWithDevice(self.allocator, self.device_preference);
         errdefer sibling.deinit();
+        sibling.tokenizer_hooks = self.tokenizer_hooks;
         try self.cloneGlobalsInto(&sibling);
         return sibling;
     }
@@ -12202,7 +15505,7 @@ pub const Session = struct {
                     const raw_builtin = denseAutodiffReadByte(closure.code.bytes, &ip) orelse return .{ .reject = .unsupported_shape_flow };
                     const builtin: BuiltinId = @enumFromInt(raw_builtin);
                     switch (builtin) {
-                        .add, .exp, .log, .tanh, .sigmoid => {
+                        .add, .exp, .log, .sin, .cos, .tanh, .sigmoid => {
                             denseAutodiffPushStack(&stack, &stack_len, .{ .builtin = builtin }) orelse return .{ .reject = .unsupported_shape_flow };
                         },
                         else => return .{ .reject = .unsupported_builtin },
@@ -12225,12 +15528,12 @@ pub const Session = struct {
                     }
                 },
                 .make_projection => return .{ .reject = .unsupported_builtin },
-                .load_local => {
+                .load_local, .take_local => {
                     const slot = denseAutodiffReadByte(closure.code.bytes, &ip) orelse return .{ .reject = .unsupported_shape_flow };
                     if (slot != 0) return .{ .reject = .wrong_arity };
                     denseAutodiffPushStack(&stack, &stack_len, .{ .node = input }) orelse return .{ .reject = .unsupported_shape_flow };
                 },
-                .load_inline_local => {
+                .load_inline_local, .take_inline_local => {
                     const slot = denseAutodiffReadByte(closure.code.bytes, &ip) orelse return .{ .reject = .unsupported_shape_flow };
                     if (slot != 0) return .{ .reject = .wrong_arity };
                     denseAutodiffPushStack(&stack, &stack_len, .{ .node = input }) orelse return .{ .reject = .unsupported_shape_flow };
@@ -12340,7 +15643,7 @@ pub const Session = struct {
                             break :blk program.push(.{ .scan_add = node_arg }, .vector);
                         },
                         .builtin => |builtin| switch (builtin) {
-                            .exp, .log, .tanh, .sigmoid => program.push(.{ .unary_map = .{ .op = builtin, .src = node_arg } }, program.kinds[node_arg]),
+                            .exp, .log, .sin, .cos, .tanh, .sigmoid => program.push(.{ .unary_map = .{ .op = builtin, .src = node_arg } }, program.kinds[node_arg]),
                             else => return .{ .reject = .unsupported_builtin },
                         },
                         else => return .{ .reject = .unsupported_builtin },
@@ -12855,6 +16158,7 @@ pub const Session = struct {
 
     fn applyMonad(self: *Session, op: BuiltinId, value: Value) KError!Value {
         return switch (op) {
+            .pow => error.Arity,
             .add => try self.flipValue(value),
             .sub => blk: {
                 if (try self.tryScalarIntBoolMonad(.sub, value)) |result| break :blk result;
@@ -12873,10 +16177,14 @@ pub const Session = struct {
                 };
             },
             .mul => switch (value.tag()) {
-                .array => self.shareValue(value),
+                .int, .bool, .float => self.shareValue(value),
+                .array => switch (value.arrayKind()) {
+                    .host_symbol, .host_table_scalar => self.shareValue(value),
+                    else => try self.applyArrayCall1Scalar(value, 0),
+                },
                 else => error.Type,
             },
-            .exp, .log, .tanh, .sigmoid => blk: {
+            .exp, .log, .sin, .cos, .tanh, .sigmoid => blk: {
                 if (scalarIntLikeValue(value)) |int_value| break :blk try self.floatValue(applyFloatMonadOp(op, @floatFromInt(int_value)));
                 break :blk switch (value.tag()) {
                     .float => try self.floatValue(applyFloatMonadOp(op, value.asFloat())),
@@ -12885,7 +16193,7 @@ pub const Session = struct {
                 };
             },
             .iota => try self.iotaValue(value),
-            .minimum => error.Arity,
+            .minimum => try self.whereValue(value),
             .maximum => try self.reverseValue(value),
             .reverse => try self.reverseValue(value),
             .less => try self.gradeValue(value, true),
@@ -12893,30 +16201,37 @@ pub const Session = struct {
             .grade_up => try self.gradeValue(value, true),
             .grade_down => try self.gradeValue(value, false),
             .not => try self.notValue(value),
-            .concat => error.Arity,
+            .concat => try self.enlistValue(value),
             .count => try self.countValue(value),
             .take => error.Arity,
             .floor => try self.floorValue(value),
             .drop => error.Arity,
             .null_fill_without => try self.nullValue(value),
             .sort => try self.sortValue(value),
-            .equal => error.Arity,
+            .equal => try self.unitMatrixValue(value),
             .reshape => error.Arity,
             .stringify => try self.stringifyValue(value),
             .cast => error.Arity,
             .contains => error.Arity,
             .split => error.Arity,
             .join => error.Arity,
+            .bytes => try self.bytesValue(value),
+            .utf8 => try self.utf8Value(value),
+            .char => try self.charValue(value),
             .unique => if (scalarRandomCountValue(value)) |count|
                 try self.randomUniformValue(count)
             else
                 try self.uniqueValue(value),
             .find => error.Arity,
+            .tokenize => try self.tokenizeValue(value),
+            .detokenize => try self.detokenizeValue(value),
             .eval_string => try self.evalStringValue(value),
             .load => try self.loadValue(value),
+            .sql => try self.sqlValue(value),
             .rotcacheview => try self.rotcacheViewValue(value),
             .grad, .valuegrad => error.Type,
-            .prng, .rotcache, .rotcacheupdate, .rmsnorm => error.Arity,
+            .save, .register => error.Arity,
+            .prng, .rotcache, .rotcacheupdate, .rope, .ropeflat, .ropecisflat, .rmsnorm, .layernorm, .gelu, .geluapprox, .mlpdense, .conv2d, .convtranspose2d, .upsamplenearest2d, .groupnorm, .softmax, .sdpa, .sam3boxrpb, .sdpamask, .sdpaflat => error.Arity,
         };
     }
 
@@ -12931,10 +16246,637 @@ pub const Session = struct {
         {
             return try self.applyHostArrayDyad(.iota, left, right);
         }
+
+        if (left.tag() == .array and left.arrayKind() == .host_string_list) {
+            if (derivedSequenceLen(right)) |value_len| {
+                if (value_len != left.asHostStringList().len) return error.Type;
+                const values_value = try self.retainEscapedValue(right);
+                errdefer self.releaseValue(values_value);
+                return try self.createHostDictValueFromDenseTextKeys("", left.asHostStringList(), values_value);
+            }
+        }
+
+        const key_items = try self.materializeSequenceItems(left);
+        defer self.releaseArgs(key_items);
+
+        const key_names = try self.allocator.alloc([]const u8, key_items.len);
+        defer self.allocator.free(key_names);
+        for (key_items, 0..) |item, idx| {
+            key_names[idx] = keyedLookupNameBytes(item) orelse return error.Type;
+        }
+
+        if (derivedSequenceLen(right)) |value_len| {
+            if (value_len != key_items.len) return error.Type;
+            const values_value = try self.retainEscapedValue(right);
+            errdefer self.releaseValue(values_value);
+            return try self.createHostDictValueFromSequenceValue("", key_names, values_value);
+        }
+
+        const value_items = try self.materializeSequenceItems(right);
+        defer self.releaseArgs(value_items);
+        if (key_items.len != value_items.len) return error.Type;
+        return try self.createHostDictValue("", key_names, value_items);
+    }
+
+    fn boolNumericVectorValue(self: *Session, value: Value) KError!bool {
+        if (value.tag() != .array or valueNumericMode(value) != .int) return false;
+        _ = numericVectorLen(value) orelse return false;
+        return switch ((try numericHostArrayValue(self, value)).storage) {
+            .bit => true,
+            else => false,
+        };
+    }
+
+    fn valueIsTableTextAtom(value: Value) bool {
+        return value.tag() == .array and value.arrayKind() == .host_symbol;
+    }
+
+    fn valueIsTableTextItem(value: Value) bool {
+        if (value.tag() != .array) return false;
+        return switch (value.arrayKind()) {
+            .host_string, .host_symbol, .host_string_view => true,
+            else => false,
+        };
+    }
+
+    fn classifyDictTableColumn(self: *Session, value: Value) KError!DictTableColumnSpec {
+        if (value.tag() == .bool) return .{
+            .kind = .boolean,
+            .len = 1,
+            .scalar_extend = true,
+            .source = .{ .scalar_bool = value.asBool() },
+        };
+        if (value.tag() == .int) return .{
+            .kind = .int,
+            .len = 1,
+            .scalar_extend = true,
+            .source = .{ .scalar_int = value.asInt() },
+        };
+        if (value.tag() == .float) return .{
+            .kind = .float,
+            .len = 1,
+            .scalar_extend = true,
+            .source = .{ .scalar_float = value.asFloat() },
+        };
+        if (valueIsTableTextAtom(value)) return .{
+            .kind = .string,
+            .len = 1,
+            .scalar_extend = true,
+            .source = .{ .scalar_text = value },
+        };
+
+        if (value.tag() == .array and value.arrayKind() == .host_string_list) return .{
+            .kind = .string,
+            .len = value.asHostStringList().len,
+            .scalar_extend = false,
+            .source = .{ .retained = value },
+        };
+
+        if (numericVectorLen(value)) |len| {
+            return .{
+                .kind = if (try self.boolNumericVectorValue(value)) .boolean else switch (valueNumericMode(value).?) {
+                    .int => .int,
+                    .float => .float,
+                },
+                .len = len,
+                .scalar_extend = false,
+                .source = .{ .retained = value },
+            };
+        }
+
+        if (boxedArrayItems(value)) |items| {
+            if (items.len == 0) return error.Type;
+
+            var all_bool = true;
+            var all_int = true;
+            var all_float = true;
+            var all_text = true;
+            for (items) |item| {
+                if (item.tag() != .bool) all_bool = false;
+                if (scalarIntLikeValue(item) == null) all_int = false;
+                if (!(item.tag() == .float or scalarIntLikeValue(item) != null)) all_float = false;
+                if (!valueIsTableTextItem(item)) all_text = false;
+            }
+
+            if (all_bool) return .{
+                .kind = .boolean,
+                .len = items.len,
+                .scalar_extend = false,
+                .source = .{ .boxed_values = items },
+            };
+            if (all_int) return .{
+                .kind = .int,
+                .len = items.len,
+                .scalar_extend = false,
+                .source = .{ .boxed_values = items },
+            };
+            if (all_float) return .{
+                .kind = .float,
+                .len = items.len,
+                .scalar_extend = false,
+                .source = .{ .boxed_values = items },
+            };
+            if (all_text) return .{
+                .kind = .string,
+                .len = items.len,
+                .scalar_extend = false,
+                .source = .{ .boxed_values = items },
+            };
+        }
+
         return error.Type;
     }
 
+    fn dictTableRowCount(specs: []const DictTableColumnSpec) KError!usize {
+        var row_count: ?usize = null;
+        for (specs) |spec| {
+            if (spec.scalar_extend) continue;
+            if (row_count == null) {
+                row_count = spec.len;
+            } else if (row_count.? != spec.len) {
+                return error.Type;
+            }
+        }
+        return row_count orelse if (specs.len == 0) 0 else 1;
+    }
+
+    fn createManagedHostTextListFromValues(self: *Session, values: []const Value) !Value {
+        const buf = try hostStringListAllocSlice(self.allocator, values.len);
+        errdefer self.allocator.free(buf);
+        const list = hostStringListFromAlloc(buf);
+        const items = hostStringListItemsFromAlloc(buf, values.len);
+
+        var bytes_len: usize = 0;
+        var initialized: usize = 0;
+        errdefer {
+            for (items[0..initialized]) |piece| self.releaseHostStringPiece(piece);
+        }
+
+        for (values, 0..) |value, idx| {
+            const piece: HostStringPiece = switch (value.tag()) {
+                .array => switch (value.arrayKind()) {
+                    .host_string => blk: {
+                        const retained = try self.retainEscapedValue(value);
+                        break :blk .{ .owned = @constCast(retained.asHostString()) };
+                    },
+                    .host_symbol => blk: {
+                        const retained = try self.retainEscapedValue(value);
+                        break :blk .{ .owned = @constCast(retained.asHostSymbol()) };
+                    },
+                    .host_string_view => blk: {
+                        const copied = try self.managedHostString(hostStringViewBytes(value.asHostStringView()));
+                        break :blk .{ .owned = @constCast(copied.asHostString()) };
+                    },
+                    else => return error.Type,
+                },
+                else => return error.Type,
+            };
+            items[idx] = piece;
+            bytes_len = std.math.add(usize, bytes_len, hostStringPieceBytes(null, piece).len) catch return error.Unsupported;
+            initialized += 1;
+        }
+
+        list.* = .{
+            .header = HeapHeader.init(.host_string_list, .managed),
+            .len = values.len,
+            .bytes_len = bytes_len,
+            .base = null,
+            .storage = .{ .eager = items },
+        };
+        return Value.array(list);
+    }
+
+    fn buildDictTableColumn(self: *Session, name: Value, spec: DictTableColumnSpec, row_count: usize) KError!HostTableColumn {
+        const column_name = try self.retainEscapedValue(name);
+        errdefer self.releaseValue(column_name);
+
+        const data = switch (spec.source) {
+            .retained => |value| try self.retainEscapedValue(value),
+            .boxed_values => |items| switch (spec.kind) {
+                .boolean => blk: {
+                    var out = try self.allocator.alloc(bool, items.len);
+                    defer self.allocator.free(out);
+                    for (items, 0..) |item, idx| out[idx] = item.asBool();
+                    break :blk try self.createManagedHostBitArray(out);
+                },
+                .int => try self.createManagedHostIntArrayFromValues(items),
+                .float => try self.createManagedHostFloatArrayFromValues(items),
+                .string => try self.createManagedHostTextListFromValues(items),
+                else => unreachable,
+            },
+            .scalar_bool => |scalar| blk: {
+                const out = try self.allocator.alloc(bool, row_count);
+                defer self.allocator.free(out);
+                @memset(out, scalar);
+                break :blk try self.createManagedHostBitArray(out);
+            },
+            .scalar_int => |scalar| blk: {
+                const out = try self.allocator.alloc(i64, row_count);
+                defer self.allocator.free(out);
+                @memset(out, scalar);
+                break :blk try self.createManagedHostIntArray(out);
+            },
+            .scalar_float => |scalar| blk: {
+                const out = try self.allocator.alloc(f64, row_count);
+                defer self.allocator.free(out);
+                @memset(out, scalar);
+                break :blk try self.createManagedHostFloatArray(out);
+            },
+            .scalar_text => |scalar| blk: {
+                const out = try self.allocator.alloc(Value, row_count);
+                defer self.allocator.free(out);
+                for (out) |*slot| slot.* = scalar;
+                break :blk try self.createManagedHostTextListFromValues(out);
+            },
+        };
+        errdefer self.releaseValue(data);
+
+        return .{
+            .name = column_name,
+            .data = data,
+            .validity = null,
+            .kind = spec.kind,
+        };
+    }
+
+    fn keyedStoreColumnLen(value: Value) ?usize {
+        if (value.tag() == .array and value.arrayKind() == .host_string_list) return value.asHostStringList().len;
+        return numericVectorLen(value);
+    }
+
+    fn keyedStoreColumnMatchesKind(value: Value, kind: HostTableColumnKind) bool {
+        return switch (kind) {
+            .string => value.tag() == .array and value.arrayKind() == .host_string_list,
+            else => keyedStoreColumnLen(value) != null,
+        };
+    }
+
+    fn keyedStoreMetadataRowCount(store: *const HostKeyedStore, values: []const Value, metadata: []const HostKeyedColumnMetadata) KError!usize {
+        if (values.len != metadata.len or values.len != keyedStoreNameCount(store)) return error.Type;
+        var row_count: ?usize = null;
+        for (values, metadata) |value, entry| {
+            if (!keyedStoreColumnMatchesKind(value, entry.kind)) return error.Type;
+            const len = keyedStoreColumnLen(value) orelse return error.Type;
+            if (row_count == null) {
+                row_count = len;
+            } else if (row_count.? != len) {
+                return error.Type;
+            }
+            if (entry.validity) |mask| {
+                const mask_len = keyedStoreColumnLen(mask) orelse return error.Type;
+                if (mask_len != len) return error.Type;
+            }
+        }
+        return row_count orelse 0;
+    }
+
+    fn retainKeyedStoreColumnMetadataFromTable(self: *Session, columns: []const HostTableColumn) ![]HostKeyedColumnMetadata {
+        const metadata = try self.allocator.alloc(HostKeyedColumnMetadata, columns.len);
+        var initialized: usize = 0;
+        errdefer {
+            for (metadata[0..initialized]) |entry| {
+                if (entry.validity) |mask| self.releaseValue(mask);
+            }
+            self.allocator.free(metadata);
+        }
+
+        for (columns, 0..) |column, idx| {
+            metadata[idx] = .{
+                .kind = column.kind,
+                .validity = if (column.validity) |mask| try self.retainEscapedValue(mask) else null,
+            };
+            initialized += 1;
+        }
+        return metadata;
+    }
+
+    fn retainKeyedStoreColumnMetadata(self: *Session, source: []const HostKeyedColumnMetadata) ![]HostKeyedColumnMetadata {
+        const metadata = try self.allocator.alloc(HostKeyedColumnMetadata, source.len);
+        var initialized: usize = 0;
+        errdefer {
+            for (metadata[0..initialized]) |entry| {
+                if (entry.validity) |mask| self.releaseValue(mask);
+            }
+            self.allocator.free(metadata);
+        }
+
+        for (source, 0..) |entry, idx| {
+            metadata[idx] = .{
+                .kind = entry.kind,
+                .validity = if (entry.validity) |mask| try self.retainEscapedValue(mask) else null,
+            };
+            initialized += 1;
+        }
+        return metadata;
+    }
+
+    fn cloneKeyedStoreView(self: *Session, store: *const HostKeyedStore, layout: HostKeyedLayout, row_count: usize) KError!Value {
+        const owned_path = try self.allocator.dupe(u8, store.path);
+        errdefer self.allocator.free(owned_path);
+        const names = try self.retainEscapedValue(store.names);
+        errdefer self.releaseValue(names);
+        const values = try self.retainEscapedValue(store.values);
+        errdefer self.releaseValue(values);
+        const lookup = try self.createKeyedStoreLookupFromNamesValue(names);
+
+        const metadata = if (store.column_metadata) |column_metadata|
+            try self.retainKeyedStoreColumnMetadata(column_metadata)
+        else
+            null;
+        errdefer if (metadata) |items| {
+            for (items) |entry| {
+                if (entry.validity) |mask| self.releaseValue(mask);
+            }
+            self.allocator.free(items);
+        };
+
+        return try self.createManagedKeyedStore(owned_path, true, names, values, metadata, layout, row_count, lookup);
+    }
+
+    fn projectKeyedStoreNames(self: *Session, store: *const HostKeyedStore, source_indices: []const usize) KError!Value {
+        return switch (store.names.arrayKind()) {
+            .host_boxed_array => blk: {
+                const source_names = store.names.asHostBoxedArray().items;
+                const names = try self.allocator.alloc(Value, source_indices.len);
+                defer self.allocator.free(names);
+                var initialized: usize = 0;
+                errdefer {
+                    for (names[0..initialized]) |value| self.releaseValue(value);
+                }
+                for (source_indices, 0..) |source_idx, out_idx| {
+                    if (source_idx >= source_names.len) return error.Internal;
+                    names[out_idx] = try self.retainEscapedValue(source_names[source_idx]);
+                    initialized += 1;
+                }
+                break :blk try self.createManagedHostBoxedArray(names);
+            },
+            .host_string_list => blk: {
+                const names = try self.allocator.alloc([]const u8, source_indices.len);
+                defer self.allocator.free(names);
+                for (source_indices, 0..) |source_idx, out_idx| {
+                    names[out_idx] = try hostStringListItemBytes(store.names.asHostStringList(), source_idx);
+                }
+                break :blk try self.createManagedHostStringListFromSlices(names);
+            },
+            else => error.Internal,
+        };
+    }
+
+    fn projectKeyedStore(self: *Session, store: *const HostKeyedStore, source_indices: []const usize) KError!Value {
+        const projected_values = try self.allocator.alloc(Value, source_indices.len);
+        defer self.allocator.free(projected_values);
+        var initialized_values: usize = 0;
+        defer {
+            for (projected_values[0..initialized_values]) |value| self.releaseValue(value);
+        }
+
+        for (source_indices, 0..) |source_idx, out_idx| {
+            if (source_idx >= keyedStoreNameCount(store)) return error.Internal;
+            projected_values[out_idx] = try self.keyedStoreValueAt(store, source_idx);
+            initialized_values += 1;
+        }
+
+        const names = try self.projectKeyedStoreNames(store, source_indices);
+        errdefer self.releaseValue(names);
+        const lookup = try self.createKeyedStoreLookupFromNamesValueOptions(names, true);
+        const values = if (keyedStoreUsesDenseValueFastPath(store))
+            try self.makeArrayFromValues(projected_values)
+        else
+            try self.createManagedHostBoxedArray(projected_values);
+        errdefer self.releaseValue(values);
+
+        const metadata = if (store.column_metadata) |source_metadata| blk: {
+            const projected_metadata = try self.allocator.alloc(HostKeyedColumnMetadata, source_indices.len);
+            var initialized: usize = 0;
+            errdefer {
+                for (projected_metadata[0..initialized]) |entry| {
+                    if (entry.validity) |mask| self.releaseValue(mask);
+                }
+                self.allocator.free(projected_metadata);
+            }
+
+            for (source_indices, 0..) |source_idx, out_idx| {
+                if (source_idx >= source_metadata.len) return error.Internal;
+                const source_entry = source_metadata[source_idx];
+                projected_metadata[out_idx] = .{
+                    .kind = source_entry.kind,
+                    .validity = if (source_entry.validity) |mask| try self.retainEscapedValue(mask) else null,
+                };
+                initialized += 1;
+            }
+            break :blk projected_metadata;
+        } else null;
+        errdefer if (metadata) |items| {
+            for (items) |entry| {
+                if (entry.validity) |mask| self.releaseValue(mask);
+            }
+            self.allocator.free(items);
+        };
+
+        const owned_path = try self.allocator.dupe(u8, store.path);
+        errdefer self.allocator.free(owned_path);
+        return try self.createManagedKeyedStore(
+            owned_path,
+            true,
+            names,
+            values,
+            metadata,
+            store.layout,
+            if (store.layout == .table) store.row_count else 0,
+            lookup,
+        );
+    }
+
+    fn reverseTableStore(self: *Session, store: *const HostKeyedStore) KError!Value {
+        if (store.values.tag() != .array or store.values.arrayKind() != .host_boxed_array) return error.Internal;
+        const source_values = store.values.asHostBoxedArray().items;
+        if (source_values.len != keyedStoreNameCount(store)) return error.Internal;
+        const source_metadata = store.column_metadata orelse return error.Internal;
+        if (source_metadata.len != source_values.len) return error.Internal;
+
+        const reversed_values = try self.allocator.alloc(Value, source_values.len);
+        defer self.allocator.free(reversed_values);
+        var initialized_values: usize = 0;
+        defer {
+            for (reversed_values[0..initialized_values]) |value| self.releaseValue(value);
+        }
+
+        for (source_values, 0..) |value, idx| {
+            reversed_values[idx] = try self.reverseValue(value);
+            initialized_values += 1;
+        }
+
+        const names = try self.retainEscapedValue(store.names);
+        errdefer self.releaseValue(names);
+        const values = try self.createManagedHostBoxedArray(reversed_values);
+        errdefer self.releaseValue(values);
+        const lookup = try self.createKeyedStoreLookupFromNamesValue(names);
+
+        const metadata = try self.allocator.alloc(HostKeyedColumnMetadata, source_metadata.len);
+        var initialized_metadata: usize = 0;
+        errdefer {
+            for (metadata[0..initialized_metadata]) |entry| {
+                if (entry.validity) |mask| self.releaseValue(mask);
+            }
+            self.allocator.free(metadata);
+        }
+
+        for (source_metadata, 0..) |entry, idx| {
+            metadata[idx] = .{
+                .kind = entry.kind,
+                .validity = if (entry.validity) |mask| try self.reverseValue(mask) else null,
+            };
+            initialized_metadata += 1;
+        }
+
+        const owned_path = try self.allocator.dupe(u8, store.path);
+        errdefer self.allocator.free(owned_path);
+        return try self.createManagedKeyedStore(
+            owned_path,
+            true,
+            names,
+            values,
+            metadata,
+            .table,
+            store.row_count,
+            lookup,
+        );
+    }
+
+    fn reverseKeyedStore(self: *Session, store: *const HostKeyedStore) KError!Value {
+        return switch (store.layout) {
+            .dict => blk: {
+                const key_count = keyedStoreNameCount(store);
+                const source_indices = try self.allocator.alloc(usize, key_count);
+                defer self.allocator.free(source_indices);
+
+                var idx = key_count;
+                var out_idx: usize = 0;
+                while (idx > 0) {
+                    idx -= 1;
+                    source_indices[out_idx] = idx;
+                    out_idx += 1;
+                }
+                break :blk try self.projectKeyedStore(store, source_indices);
+            },
+            .table => try self.reverseTableStore(store),
+        };
+    }
+
+    fn keyedDictTakeValue(self: *Session, raw_count: i64, store: *const HostKeyedStore) KError!Value {
+        std.debug.assert(store.layout == .dict);
+        const count: usize = @intCast(@abs(raw_count));
+        if (count == 0) return try self.projectKeyedStore(store, &.{});
+        const len = keyedStoreNameCount(store);
+        if (len == 0) return error.Type;
+
+        const source_indices = try self.allocator.alloc(usize, count);
+        defer self.allocator.free(source_indices);
+
+        if (raw_count >= 0) {
+            for (0..count) |idx| source_indices[idx] = idx % len;
+        } else {
+            const pad = if (count > len) count - len else 0;
+            for (0..pad) |idx| source_indices[idx] = if (len == 0) 0 else len - 1;
+            const start = if (count >= len) 0 else len - count;
+            for (start..len, pad..) |idx, out_idx| source_indices[out_idx] = idx;
+        }
+
+        return try self.projectKeyedStore(store, source_indices);
+    }
+
+    fn keyedDictDropValue(self: *Session, raw_count: i64, store: *const HostKeyedStore) KError!Value {
+        std.debug.assert(store.layout == .dict);
+        const len = keyedStoreNameCount(store);
+        const drop_count: usize = if (raw_count >= 0)
+            @min(@as(usize, @intCast(raw_count)), len)
+        else
+            len - @min(@as(usize, @intCast(-raw_count)), len);
+        const start: usize = if (raw_count >= 0) drop_count else 0;
+        const end: usize = if (raw_count >= 0) len else drop_count;
+
+        const source_indices = try self.allocator.alloc(usize, end - start);
+        defer self.allocator.free(source_indices);
+        for (start..end, 0..) |idx, out_idx| source_indices[out_idx] = idx;
+        return try self.projectKeyedStore(store, source_indices);
+    }
+
+    fn tryProjectKeyedStoreByKeys(self: *Session, left: Value, right: Value) KError!?Value {
+        if (right.tag() != .array or right.arrayKind() != .host_keyed_store) return null;
+        if (left.tag() != .array) return null;
+        _ = derivedSequenceLen(left) orelse return null;
+
+        const store = right.asHostKeyedStore();
+        const key_items = try self.materializeSequenceItems(left);
+        defer self.releaseArgs(key_items);
+
+        const source_indices = try self.allocator.alloc(usize, key_items.len);
+        defer self.allocator.free(source_indices);
+
+        for (key_items, 0..) |item, idx| {
+            const name = keyedLookupNameBytes(item) orelse return null;
+            source_indices[idx] = store.lookup.get(name) orelse return error.Name;
+        }
+
+        return try self.projectKeyedStore(store, source_indices);
+    }
+
+    fn tableFromKeyedStoreMetadata(self: *Session, store: *const HostKeyedStore, values: []const Value, metadata: []const HostKeyedColumnMetadata) KError!Value {
+        const row_count = try keyedStoreMetadataRowCount(store, values, metadata);
+        return try self.cloneKeyedStoreView(store, .table, row_count);
+    }
+
+    fn tableFromDictValue(self: *Session, store: *const HostKeyedStore) KError!Value {
+        const key_count = keyedStoreNameCount(store);
+        const values = try self.allocator.alloc(Value, key_count);
+        defer self.allocator.free(values);
+        var initialized_values: usize = 0;
+        defer {
+            for (values[0..initialized_values]) |value| self.releaseValue(value);
+        }
+        for (0..key_count) |idx| {
+            values[idx] = try self.keyedStoreValueAt(store, idx);
+            initialized_values += 1;
+        }
+        if (store.column_metadata) |metadata| {
+            return try self.tableFromKeyedStoreMetadata(store, values, metadata);
+        }
+        const specs = try self.allocator.alloc(DictTableColumnSpec, values.len);
+        defer self.allocator.free(specs);
+
+        for (values, 0..) |value, idx| specs[idx] = try self.classifyDictTableColumn(value);
+        const row_count = try dictTableRowCount(specs);
+
+        const columns = try self.allocator.alloc(HostTableColumn, values.len);
+        var built_columns: usize = 0;
+        errdefer {
+            for (columns[0..built_columns]) |column| {
+                self.releaseValue(column.name);
+                self.releaseValue(column.data);
+                if (column.validity) |mask| self.releaseValue(mask);
+            }
+            self.allocator.free(columns);
+        }
+
+        for (values, 0..) |_, idx| {
+            const name = try self.keyedStoreNameValue(store, idx);
+            errdefer self.releaseValue(name);
+            columns[idx] = try self.buildDictTableColumn(name, specs[idx], row_count);
+            self.releaseValue(name);
+            built_columns += 1;
+        }
+
+        return try self.createManagedHostTable(row_count, columns);
+    }
+
     fn flipValue(self: *Session, value: Value) KError!Value {
+        if (value.tag() == .array and value.arrayKind() == .host_keyed_store) {
+            const store = value.asHostKeyedStore();
+            return switch (store.layout) {
+                .dict => try self.tableFromDictValue(store),
+                .table => try self.cloneKeyedStoreView(store, .dict, 0),
+            };
+        }
         if (valueNumericMode(value) != null and valueNumericMatrixShape(value) != null) {
             return try newTransposeViewValue(self, value);
         }
@@ -12995,29 +16937,39 @@ pub const Session = struct {
         };
     }
 
-fn scalarIntLikeValue(value: Value) ?i64 {
-    return switch (value.raw & Value.tag_mask) {
-        Value.int_tag => @as(i64, @bitCast(value.raw)) >> Value.tag_bits,
-        Value.boxed_int_tag => value.asBoxedInt().value,
-        Value.bool_tag => @intFromBool(value.asBool()),
-        else => null,
-    };
-}
+    fn tableScalarValue(value: Value) ?*const HostTableScalar {
+        if (value.tag() != .array or value.arrayKind() != .host_table_scalar) return null;
+        return valueAsHostTableScalar(value);
+    }
 
-fn tryScalarIntBoolDyad(self: *Session, op: BuiltinId, left: Value, right: Value) KError!?Value {
-    const left_value = scalarIntLikeValue(left) orelse return null;
-    const right_value = scalarIntLikeValue(right) orelse return null;
-    return switch (op) {
-        .add => try self.addIntValue(left_value, right_value),
-        .sub => try self.subIntValue(left_value, right_value),
-        .mul => try self.mulIntValue(left_value, right_value),
-        .div => try self.floatValue(@as(f64, @floatFromInt(left_value)) / @as(f64, @floatFromInt(right_value))),
-        .iota => try self.intValue(bangIntOp(left_value, right_value)),
-        .minimum => try self.intValue(@min(left_value, right_value)),
-        .maximum => try self.intValue(@max(left_value, right_value)),
-        .less => Value.fromBool(left_value < right_value),
-        .more => Value.fromBool(left_value > right_value),
-        else => return error.Unsupported,
+    fn scalarIntLikeValue(value: Value) ?i64 {
+        if (tableScalarValue(value)) |scalar| {
+            if (scalar.is_null) return null;
+            return scalarIntLikeValue(scalar.value);
+        }
+        return switch (value.raw & Value.tag_mask) {
+            Value.int_tag => @as(i64, @bitCast(value.raw)) >> Value.tag_bits,
+            Value.boxed_int_tag => value.asBoxedInt().value,
+            Value.bool_tag => @intFromBool(value.asBool()),
+            else => null,
+        };
+    }
+
+    fn tryScalarIntBoolDyad(self: *Session, op: BuiltinId, left: Value, right: Value) KError!?Value {
+        const left_value = scalarIntLikeValue(left) orelse return null;
+        const right_value = scalarIntLikeValue(right) orelse return null;
+        return switch (op) {
+            .add => try self.addIntValue(left_value, right_value),
+            .sub => try self.subIntValue(left_value, right_value),
+            .mul => try self.mulIntValue(left_value, right_value),
+            .div => try self.floatValue(@as(f64, @floatFromInt(left_value)) / @as(f64, @floatFromInt(right_value))),
+            .pow => try self.intValue(try intPowLikeMlx(left_value, right_value)),
+            .iota => try self.intValue(bangIntOp(left_value, right_value)),
+            .minimum => try self.intValue(@min(left_value, right_value)),
+            .maximum => try self.intValue(@max(left_value, right_value)),
+            .less => Value.fromBool(left_value < right_value),
+            .more => Value.fromBool(left_value > right_value),
+            else => return error.Unsupported,
         };
     }
 
@@ -13060,35 +17012,484 @@ fn tryScalarIntBoolDyad(self: *Session, op: BuiltinId, left: Value, right: Value
         return stringBytes(value);
     }
 
-    fn loadTensorNameBytes(value: Value) ?[]const u8 {
+    fn keyedLookupNameBytes(value: Value) ?[]const u8 {
         return symbolBytes(value) orelse stringBytes(value);
     }
 
-    fn loadedSafetensorsTensorValue(self: *Session, store: *const LoadedSafetensorsStore, index: usize) KError!Value {
-        const bundle = store.bundle.asHostBoxedArray();
-        if (bundle.len() != 2) return error.Internal;
-        const values = bundle.items[1];
-        if (values.tag() != .array or values.arrayKind() != .host_boxed_array) return error.Internal;
-        const items = values.asHostBoxedArray();
-        if (index >= items.len()) return error.Internal;
-        return self.shareValue(items.items[index]);
+    fn keyedStoreValueAt(self: *Session, store: *const HostKeyedStore, index: usize) KError!Value {
+        const len = derivedSequenceLen(store.values) orelse return error.Internal;
+        if (index >= len) return error.Internal;
+        return try self.derivedSequenceItemValue(store.values, index);
+    }
+
+    fn keyedStoreLookupValue(self: *Session, store: *const HostKeyedStore, name: []const u8) KError!Value {
+        if (store.lookup.get(name)) |idx| return try self.keyedStoreValueAt(store, idx);
+        return error.Name;
+    }
+
+    fn tableNullScalarValue(self: *Session, kind: HostTableColumnKind) KError!Value {
+        return try self.createManagedHostTableScalar(kind, Value.fromBool(false), true);
+    }
+
+    fn tableCellScalarValue(self: *Session, store: *const HostKeyedStore, column_idx: usize, row: usize) KError!Value {
+        std.debug.assert(store.layout == .table);
+        const kind = keyedStoreTableMetadata(store)[column_idx].kind;
+        if (!keyedStoreTableCellIsValid(store, column_idx, row)) return try self.tableNullScalarValue(kind);
+
+        const data = tableColumnData(store, column_idx);
+        return switch (kind) {
+            .boolean => Value.fromBool((try numericIntAt(data, @intCast(row))) != 0),
+            .int => try self.intValue(try numericIntAt(data, @intCast(row))),
+            .float => try self.floatValue(try numericFloatAt(data, @intCast(row))),
+            .string => try self.hostStringListItemValue(data.asHostStringList(), row),
+            .date,
+            .time,
+            .time_ns,
+            .time_tz,
+            .timestamp,
+            .timestamp_s,
+            .timestamp_ms,
+            .timestamp_ns,
+            .timestamp_tz,
+            => try self.createManagedHostTableScalar(kind, try self.intValue(try numericIntAt(data, @intCast(row))), false),
+        };
+    }
+
+    fn tableRowDictValue(self: *Session, store: *const HostKeyedStore, row: usize) KError!Value {
+        std.debug.assert(store.layout == .table);
+        const key_count = keyedStoreNameCount(store);
+        const keys = try self.allocator.alloc([]const u8, key_count);
+        defer self.allocator.free(keys);
+        const values = try self.allocator.alloc(Value, key_count);
+        defer self.allocator.free(values);
+        var initialized: usize = 0;
+        defer {
+            for (values[0..initialized]) |value| self.releaseValue(value);
+        }
+
+        for (0..key_count) |idx| {
+            keys[idx] = keyedStoreColumnNameBytes(store, idx);
+            values[idx] = try self.tableCellScalarValue(store, idx, row);
+            initialized += 1;
+        }
+
+        const result = try self.createHostDictValue("", keys, values);
+        return result;
+    }
+
+    fn tableRowIndicesFromSelector(self: *Session, selector: HostIntDenseView, row_count: usize) KError![]usize {
+        var row_indices = std.ArrayList(usize).empty;
+        errdefer row_indices.deinit(self.allocator);
+
+        switch (selector) {
+            .dense => |dense| switch (dense) {
+                .bit => |bits| {
+                    if (bits.len != row_count) return error.Type;
+                    try row_indices.ensureTotalCapacity(self.allocator, bits.len);
+                    for (0..bits.len) |idx| {
+                        if (!bitGet(bits.words, idx)) continue;
+                        try row_indices.append(self.allocator, idx);
+                    }
+                },
+                else => {
+                    const len = hostIntArrayViewLen(dense);
+                    try row_indices.ensureTotalCapacity(self.allocator, len);
+                    for (0..len) |idx| {
+                        try row_indices.append(self.allocator, try normalizeIndex(hostIntViewItem(dense, idx), row_count));
+                    }
+                },
+            },
+            else => {
+                const len = hostIntDenseViewLen(selector);
+                try row_indices.ensureTotalCapacity(self.allocator, len);
+                for (0..len) |idx| {
+                    try row_indices.append(self.allocator, try normalizeIndex(try hostIntDenseViewItem(selector, idx), row_count));
+                }
+            },
+        }
+
+        return try row_indices.toOwnedSlice(self.allocator);
+    }
+
+    fn tableSelectValidityRows(self: *Session, validity: Value, row_indices: []const usize) KError!Value {
+        const out = try self.allocator.alloc(bool, row_indices.len);
+        defer self.allocator.free(out);
+        for (row_indices, 0..) |row, idx| out[idx] = (try numericIntAt(validity, @intCast(row))) != 0;
+        return try self.createManagedHostBitArray(out);
+    }
+
+    fn tableSelectStringRows(self: *Session, list: *const HostStringList, row_indices: []const usize) KError!Value {
+        const values = try self.allocator.alloc(Value, row_indices.len);
+        defer self.allocator.free(values);
+        var initialized: usize = 0;
+        defer {
+            for (values[0..initialized]) |value| self.releaseValue(value);
+        }
+
+        for (row_indices, 0..) |row, idx| {
+            values[idx] = try self.hostStringListItemValue(list, row);
+            initialized += 1;
+        }
+        return try self.createManagedHostTextListFromValues(values);
+    }
+
+    fn tableSelectColumnRows(self: *Session, store: *const HostKeyedStore, column_idx: usize, row_indices: []const usize) KError!Value {
+        std.debug.assert(store.layout == .table);
+        const kind = keyedStoreTableMetadata(store)[column_idx].kind;
+        const data = tableColumnData(store, column_idx);
+        return switch (kind) {
+            .boolean => blk: {
+                const out = try self.allocator.alloc(bool, row_indices.len);
+                defer self.allocator.free(out);
+                for (row_indices, 0..) |row, idx| out[idx] = (try numericIntAt(data, @intCast(row))) != 0;
+                break :blk try self.createManagedHostBitArray(out);
+            },
+            .float => blk: {
+                const out = try self.allocator.alloc(f64, row_indices.len);
+                defer self.allocator.free(out);
+                for (row_indices, 0..) |row, idx| out[idx] = try numericFloatAt(data, @intCast(row));
+                break :blk try self.createManagedHostFloatArray(out);
+            },
+            .string => try self.tableSelectStringRows(data.asHostStringList(), row_indices),
+            .int,
+            .date,
+            .time,
+            .time_ns,
+            .time_tz,
+            .timestamp,
+            .timestamp_s,
+            .timestamp_ms,
+            .timestamp_ns,
+            .timestamp_tz,
+            => blk: {
+                const out = try self.allocator.alloc(i64, row_indices.len);
+                defer self.allocator.free(out);
+                for (row_indices, 0..) |row, idx| out[idx] = try numericIntAt(data, @intCast(row));
+                break :blk try self.createManagedHostIntArray(out);
+            },
+        };
+    }
+
+    fn tableSelectRows(self: *Session, store: *const HostKeyedStore, row_indices: []const usize) KError!Value {
+        std.debug.assert(store.layout == .table);
+        const metadata = keyedStoreTableMetadata(store);
+        const column_count = keyedStoreNameCount(store);
+        const columns = try self.allocator.alloc(HostTableColumn, column_count);
+        var built_columns: usize = 0;
+        errdefer {
+            for (columns[0..built_columns]) |column| {
+                self.releaseValue(column.name);
+                self.releaseValue(column.data);
+                if (column.validity) |mask| self.releaseValue(mask);
+            }
+            self.allocator.free(columns);
+        }
+
+        for (0..column_count) |idx| {
+            const name = try self.keyedStoreNameValue(store, idx);
+            errdefer self.releaseValue(name);
+            columns[idx] = .{
+                .name = try self.retainEscapedValue(name),
+                .data = try self.tableSelectColumnRows(store, idx, row_indices),
+                .validity = if (metadata[idx].validity) |mask| try self.tableSelectValidityRows(mask, row_indices) else null,
+                .kind = metadata[idx].kind,
+            };
+            self.releaseValue(name);
+            built_columns += 1;
+        }
+
+        return try self.createManagedHostTable(row_indices.len, columns);
+    }
+
+    fn tableSelectRowsBySelector(self: *Session, store: *const HostKeyedStore, selector: HostIntDenseView) KError!Value {
+        const row_indices = try self.tableRowIndicesFromSelector(selector, store.row_count);
+        defer self.allocator.free(row_indices);
+        return try self.tableSelectRows(store, row_indices);
+    }
+
+    fn tableTakeValue(self: *Session, raw_count: i64, store: *const HostKeyedStore) KError!Value {
+        std.debug.assert(store.layout == .table);
+        const count: usize = @intCast(@abs(raw_count));
+        if (count == 0) return try self.tableSelectRows(store, &.{});
+        if (store.row_count == 0) return error.Type;
+
+        var row_indices = std.ArrayList(usize).empty;
+        defer row_indices.deinit(self.allocator);
+        try row_indices.ensureTotalCapacity(self.allocator, count);
+
+        if (raw_count >= 0) {
+            for (0..count) |idx| try row_indices.append(self.allocator, idx % store.row_count);
+        } else {
+            const pad = if (count > store.row_count) count - store.row_count else 0;
+            for (0..pad) |_| try row_indices.append(self.allocator, 0);
+            const start = if (count >= store.row_count) 0 else store.row_count - count;
+            for (start..store.row_count) |idx| try row_indices.append(self.allocator, idx);
+        }
+
+        return try self.tableSelectRows(store, row_indices.items);
+    }
+
+    fn tableDropValue(self: *Session, raw_count: i64, store: *const HostKeyedStore) KError!Value {
+        std.debug.assert(store.layout == .table);
+        const drop_count: usize = if (raw_count >= 0)
+            @min(@as(usize, @intCast(raw_count)), store.row_count)
+        else
+            store.row_count - @min(@as(usize, @intCast(-raw_count)), store.row_count);
+        const start: usize = if (raw_count >= 0) drop_count else 0;
+        const end: usize = if (raw_count >= 0) store.row_count else drop_count;
+
+        var row_indices = std.ArrayList(usize).empty;
+        defer row_indices.deinit(self.allocator);
+        try row_indices.ensureTotalCapacity(self.allocator, end - start);
+        for (start..end) |idx| try row_indices.append(self.allocator, idx);
+        return try self.tableSelectRows(store, row_indices.items);
+    }
+
+    fn concatTableValidity(self: *Session, left: ?Value, right: ?Value, left_rows: usize, right_rows: usize) KError!?Value {
+        if (left == null and right == null) return null;
+
+        const out = try self.allocator.alloc(bool, left_rows + right_rows);
+        defer self.allocator.free(out);
+        for (0..left_rows) |idx| {
+            out[idx] = if (left) |mask| (try numericIntAt(mask, @intCast(idx))) != 0 else true;
+        }
+        for (0..right_rows) |idx| {
+            out[left_rows + idx] = if (right) |mask| (try numericIntAt(mask, @intCast(idx))) != 0 else true;
+        }
+        return try self.createManagedHostBitArray(out);
+    }
+
+    fn concatTableStringColumns(self: *Session, left: *const HostStringList, right: *const HostStringList) KError!Value {
+        const values = try self.allocator.alloc(Value, left.len + right.len);
+        defer self.allocator.free(values);
+        var initialized: usize = 0;
+        defer {
+            for (values[0..initialized]) |value| self.releaseValue(value);
+        }
+
+        for (0..left.len) |idx| {
+            values[initialized] = try self.hostStringListItemValue(left, idx);
+            initialized += 1;
+        }
+        for (0..right.len) |idx| {
+            values[initialized] = try self.hostStringListItemValue(right, idx);
+            initialized += 1;
+        }
+        return try self.createManagedHostTextListFromValues(values);
+    }
+
+    fn concatTableColumnData(self: *Session, kind: HostTableColumnKind, left: Value, right: Value, left_rows: usize, right_rows: usize) KError!Value {
+        return switch (kind) {
+            .boolean => blk: {
+                const out = try self.allocator.alloc(bool, left_rows + right_rows);
+                defer self.allocator.free(out);
+                for (0..left_rows) |idx| out[idx] = (try numericIntAt(left, @intCast(idx))) != 0;
+                for (0..right_rows) |idx| out[left_rows + idx] = (try numericIntAt(right, @intCast(idx))) != 0;
+                break :blk try self.createManagedHostBitArray(out);
+            },
+            .float => blk: {
+                const out = try self.allocator.alloc(f64, left_rows + right_rows);
+                defer self.allocator.free(out);
+                for (0..left_rows) |idx| out[idx] = try numericFloatAt(left, @intCast(idx));
+                for (0..right_rows) |idx| out[left_rows + idx] = try numericFloatAt(right, @intCast(idx));
+                break :blk try self.createManagedHostFloatArray(out);
+            },
+            .string => try self.concatTableStringColumns(left.asHostStringList(), right.asHostStringList()),
+            .int,
+            .date,
+            .time,
+            .time_ns,
+            .time_tz,
+            .timestamp,
+            .timestamp_s,
+            .timestamp_ms,
+            .timestamp_ns,
+            .timestamp_tz,
+            => blk: {
+                const out = try self.allocator.alloc(i64, left_rows + right_rows);
+                defer self.allocator.free(out);
+                for (0..left_rows) |idx| out[idx] = try numericIntAt(left, @intCast(idx));
+                for (0..right_rows) |idx| out[left_rows + idx] = try numericIntAt(right, @intCast(idx));
+                break :blk try self.createManagedHostIntArray(out);
+            },
+        };
+    }
+
+    fn concatTableValues(self: *Session, left: *const HostKeyedStore, right: *const HostKeyedStore) KError!Value {
+        if (left.layout != .table or right.layout != .table) return error.Type;
+        const column_count = keyedStoreNameCount(left);
+        if (column_count != keyedStoreNameCount(right)) return error.Type;
+
+        const left_metadata = keyedStoreTableMetadata(left);
+        const right_metadata = keyedStoreTableMetadata(right);
+        for (0..column_count) |idx| {
+            if (!std.mem.eql(u8, keyedStoreColumnNameBytes(left, idx), keyedStoreColumnNameBytes(right, idx))) return error.Type;
+            if (left_metadata[idx].kind != right_metadata[idx].kind) return error.Type;
+        }
+
+        const columns = try self.allocator.alloc(HostTableColumn, column_count);
+        var built_columns: usize = 0;
+        errdefer {
+            for (columns[0..built_columns]) |column| {
+                self.releaseValue(column.name);
+                self.releaseValue(column.data);
+                if (column.validity) |mask| self.releaseValue(mask);
+            }
+            self.allocator.free(columns);
+        }
+
+        for (0..column_count) |idx| {
+            const name = try self.keyedStoreNameValue(left, idx);
+            errdefer self.releaseValue(name);
+            columns[idx] = .{
+                .name = try self.retainEscapedValue(name),
+                .data = try self.concatTableColumnData(
+                    left_metadata[idx].kind,
+                    tableColumnData(left, idx),
+                    tableColumnData(right, idx),
+                    left.row_count,
+                    right.row_count,
+                ),
+                .validity = try self.concatTableValidity(left_metadata[idx].validity, right_metadata[idx].validity, left.row_count, right.row_count),
+                .kind = left_metadata[idx].kind,
+            };
+            self.releaseValue(name);
+            built_columns += 1;
+        }
+
+        return try self.createManagedHostTable(left.row_count + right.row_count, columns);
+    }
+
+    const KeyedMergeSource = struct {
+        store: *const HostKeyedStore,
+        source_idx: usize,
+        key: []const u8,
+    };
+
+    fn concatKeyedDictValues(self: *Session, left: *const HostKeyedStore, right: *const HostKeyedStore) KError!Value {
+        if (left.layout != .dict or right.layout != .dict) return error.Type;
+
+        const left_count = keyedStoreNameCount(left);
+        const right_count = keyedStoreNameCount(right);
+        const merged = try self.allocator.alloc(KeyedMergeSource, left_count + right_count);
+        defer self.allocator.free(merged);
+        var merged_len: usize = 0;
+
+        for (0..left_count) |idx| {
+            const key = keyedStoreColumnNameBytes(left, idx);
+            merged[merged_len] = .{
+                .store = if (right.lookup.get(key) != null) right else left,
+                .source_idx = right.lookup.get(key) orelse idx,
+                .key = key,
+            };
+            merged_len += 1;
+        }
+        for (0..right_count) |idx| {
+            const key = keyedStoreColumnNameBytes(right, idx);
+            if (left.lookup.get(key) != null) continue;
+            merged[merged_len] = .{
+                .store = right,
+                .source_idx = idx,
+                .key = key,
+            };
+            merged_len += 1;
+        }
+
+        const name_bytes = try self.allocator.alloc([]const u8, merged_len);
+        defer self.allocator.free(name_bytes);
+        const merged_values = try self.allocator.alloc(Value, merged_len);
+        defer self.allocator.free(merged_values);
+        var initialized_values: usize = 0;
+        defer {
+            for (merged_values[0..initialized_values]) |value| self.releaseValue(value);
+        }
+
+        for (merged[0..merged_len], 0..) |source, out_idx| {
+            name_bytes[out_idx] = source.key;
+            merged_values[out_idx] = try self.keyedStoreValueAt(source.store, source.source_idx);
+            initialized_values += 1;
+        }
+
+        const names = try self.createManagedHostStringListFromSlices(name_bytes);
+        errdefer self.releaseValue(names);
+        const lookup = try self.createKeyedStoreLookupFromNamesValue(names);
+        const values = if (keyedStoreUsesDenseValueFastPath(left) and keyedStoreUsesDenseValueFastPath(right))
+            try self.makeArrayFromValues(merged_values)
+        else
+            try self.createManagedHostBoxedArray(merged_values);
+        errdefer self.releaseValue(values);
+
+        const metadata = blk: {
+            const left_metadata = left.column_metadata;
+            const right_metadata = right.column_metadata;
+            for (merged[0..merged_len]) |source| {
+                const source_metadata = source.store.column_metadata orelse break :blk null;
+                if (source.source_idx >= source_metadata.len) return error.Internal;
+            }
+
+            const out = try self.allocator.alloc(HostKeyedColumnMetadata, merged_len);
+            var initialized: usize = 0;
+            errdefer {
+                for (out[0..initialized]) |entry| {
+                    if (entry.validity) |mask| self.releaseValue(mask);
+                }
+                self.allocator.free(out);
+            }
+
+            _ = left_metadata;
+            _ = right_metadata;
+            for (merged[0..merged_len], 0..) |source, out_idx| {
+                const source_metadata = source.store.column_metadata orelse return error.Internal;
+                const source_entry = source_metadata[source.source_idx];
+                out[out_idx] = .{
+                    .kind = source_entry.kind,
+                    .validity = if (source_entry.validity) |mask| try self.retainEscapedValue(mask) else null,
+                };
+                initialized += 1;
+            }
+            break :blk out;
+        };
+        errdefer if (metadata) |items| {
+            for (items) |entry| {
+                if (entry.validity) |mask| self.releaseValue(mask);
+            }
+            self.allocator.free(items);
+        };
+
+        const owned_path = try self.allocator.dupe(u8, "");
+        errdefer self.allocator.free(owned_path);
+        return try self.createManagedKeyedStore(
+            owned_path,
+            true,
+            names,
+            values,
+            metadata,
+            .dict,
+            0,
+            lookup,
+        );
     }
 
     fn ensureLoadedSafetensors(self: *Session, path: []const u8) KError!*LoadedSafetensorsStore {
         if (comptime !runtime_has_mlx) return error.Unsupported;
         if (!std.mem.endsWith(u8, path, ".safetensors")) return error.Unsupported;
-        if (self.loaded_safetensors.getPtr(path)) |store| return store;
+        const resolved_path = try self.resolveLoadPath(path);
+        errdefer self.allocator.free(resolved_path);
+        if (self.loaded_safetensors.getPtr(resolved_path)) |store| {
+            self.allocator.free(resolved_path);
+            return store;
+        }
+
+        var parsed = safetensors.parseFileHeader(self.allocator, resolved_path) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return mapSafetensorsError(err),
+        };
+        defer parsed.deinit(self.allocator);
 
         const ctx = try self.backendContext();
-        const named = mlx.loadSafetensors(self.allocator, ctx.*, path) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => return mapMlxError(err),
-        };
-        defer mlx.deinitNamedArrays(self.allocator, named);
-
-        const names = try self.allocator.alloc(Value, named.len);
-        defer self.allocator.free(names);
-        const tensors = try self.allocator.alloc(Value, named.len);
+        const name_bytes = try self.allocator.alloc([]const u8, parsed.entries.len);
+        defer self.allocator.free(name_bytes);
+        const tensors = try self.allocator.alloc(Value, parsed.entries.len);
         defer self.allocator.free(tensors);
 
         var initialized_tensor_count: usize = 0;
@@ -13096,63 +17497,855 @@ fn tryScalarIntBoolDyad(self: *Session, op: BuiltinId, left: Value, right: Value
             for (tensors[0..initialized_tensor_count]) |value| self.releaseValue(value);
         }
 
-        for (named, 0..) |*entry, idx| {
-            names[idx] = try self.frozenHostSymbol(entry.name);
-            tensors[idx] = try self.wrapManagedBackendArray(entry.array);
-            entry.array = mlx.Array.empty();
+        for (parsed.entries, 0..) |entry, idx| {
+            name_bytes[idx] = entry.name;
+            const array = mlx.loadSafetensorTensor(
+                self.allocator,
+                ctx.*,
+                resolved_path,
+                entry.shape,
+                safetensorMlxDtype(entry.dtype),
+                entry.absolute_offset,
+            ) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return mapMlxError(err),
+            };
+            tensors[idx] = try self.wrapManagedBackendArray(array);
             initialized_tensor_count += 1;
         }
 
-        const names_box = try self.createManagedHostBoxedArray(names);
-        errdefer self.releaseValue(names_box);
-        const tensors_box = try self.createManagedHostBoxedArray(tensors);
-        errdefer self.releaseValue(tensors_box);
+        const names = try self.createManagedHostStringListFromSlices(name_bytes);
+        errdefer self.releaseValue(names);
+        const values_box = try self.createManagedHostBoxedArray(tensors);
+        errdefer self.releaseValue(values_box);
         for (tensors[0..initialized_tensor_count]) |value| self.releaseValue(value);
         initialized_tensor_count = 0;
+        const lookup = try self.createKeyedStoreLookupFromNamesValue(names);
 
-        const bundle = try self.createManagedHostBoxedArray(&[_]Value{ names_box, tensors_box });
-        errdefer self.releaseValue(bundle);
-        self.releaseValue(names_box);
-        self.releaseValue(tensors_box);
+        const store_value = try self.createManagedKeyedStore(resolved_path, false, names, values_box, null, .dict, 0, lookup);
+        errdefer self.releaseValue(store_value);
 
-        const entries = try self.allocator.alloc(LoadedSafetensorsLookupEntry, names.len);
-        errdefer self.allocator.free(entries);
-        for (entries, 0..) |*entry, idx| {
-            entry.* = .{
-                .symbol = names[idx],
-                .index = idx,
+        try self.loaded_safetensors.put(resolved_path, .{
+            .store = store_value,
+        });
+        return self.loaded_safetensors.getPtr(resolved_path).?;
+    }
+
+    fn ensureLoadedRelation(self: *Session, path: []const u8) KError!*LoadedRelationStore {
+        if (comptime !runtime_has_duckdb) return error.Unsupported;
+        const resolved_path = try self.resolveLoadPath(path);
+        errdefer self.allocator.free(resolved_path);
+        const source_kind = duckdb_runtime.SourceKind.detect(resolved_path) orelse return error.Unsupported;
+        if (self.loaded_relations.getPtr(resolved_path)) |store| {
+            self.allocator.free(resolved_path);
+            return store;
+        }
+
+        const relation = try self.createManagedFileRelation(source_kind, resolved_path);
+        errdefer self.releaseValue(relation);
+
+        try self.loaded_relations.put(resolved_path, .{
+            .relation = relation,
+        });
+        return self.loaded_relations.getPtr(resolved_path).?;
+    }
+
+    fn resolveLoadPath(self: *Session, path: []const u8) KError![]u8 {
+        if (comptime zig_builtin.target.os.tag == .freestanding or zig_builtin.target.cpu.arch == .wasm32) {
+            return self.allocator.dupe(u8, path);
+        }
+        return std.fs.realpathAlloc(self.allocator, path) catch |err| switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => error.Type,
+        };
+    }
+
+    fn duckdbConnection(self: *Session) KError!*duckdb_runtime.Connection {
+        if (comptime !runtime_has_duckdb) return error.Unsupported;
+        if (self.duckdb_conn == null) {
+            var diagnostic: ?[]u8 = null;
+            self.duckdb_conn = duckdb_runtime.Connection.initWithDiagnostic(self.allocator, null, &diagnostic) catch |err| {
+                self.setOwnedDuckDbErrorText(diagnostic);
+                return mapDuckDbError(err);
             };
         }
+        return &self.duckdb_conn.?;
+    }
 
-        const owned_path = try self.allocator.dupe(u8, path);
-        errdefer self.allocator.free(owned_path);
+    fn ensureDuckDbKiwiTableScan(self: *Session, conn: *duckdb_runtime.Connection) KError!void {
+        if (comptime !runtime_has_duckdb) return error.Unsupported;
+        if (self.duckdb_kiwi_scan_registered) return;
+        try DuckDbKiwiTableScan.ensureRegistered(self, conn);
+        self.duckdb_kiwi_scan_registered = true;
+    }
+
+    fn prepareDuckDbStatement(self: *Session, conn: *duckdb_runtime.Connection, sql: []const u8) KError!duckdb_runtime.PreparedStatement {
+        var diagnostic: ?[]u8 = null;
+        const prepared = duckdb_runtime.PreparedStatement.initWithDiagnostic(conn, sql, &diagnostic) catch |err| {
+            self.setOwnedDuckDbErrorText(diagnostic);
+            return mapDuckDbError(err);
+        };
+        return prepared;
+    }
+
+    fn executeDuckDbPrepared(self: *Session, prepared: *duckdb_runtime.PreparedStatement) KError!void {
+        var diagnostic: ?[]u8 = null;
+        prepared.executeWithDiagnostic(&diagnostic) catch |err| {
+            self.setOwnedDuckDbErrorText(diagnostic);
+            return mapDuckDbError(err);
+        };
+    }
+
+    fn executeDuckDbPreparedResult(self: *Session, prepared: *duckdb_runtime.PreparedStatement) KError!duckdb_runtime.QueryResult {
+        var diagnostic: ?[]u8 = null;
+        const result = prepared.executeResultWithDiagnostic(&diagnostic) catch |err| {
+            self.setOwnedDuckDbErrorText(diagnostic);
+            return mapDuckDbError(err);
+        };
+        return result;
+    }
+
+    fn queryDuckDbPreparedSingleCount(self: *Session, prepared: *duckdb_runtime.PreparedStatement) KError!usize {
+        var diagnostic: ?[]u8 = null;
+        const count = prepared.querySingleCountWithDiagnostic(&diagnostic) catch |err| {
+            self.setOwnedDuckDbErrorText(diagnostic);
+            return mapDuckDbError(err);
+        };
+        return count;
+    }
+
+    fn countDuckDbFileRows(self: *Session, conn: *duckdb_runtime.Connection, source_kind: duckdb_runtime.SourceKind, path: []const u8) KError!usize {
+        var diagnostic: ?[]u8 = null;
+        const count = conn.countFileRowsWithDiagnostic(source_kind, path, &diagnostic) catch |err| {
+            self.setOwnedDuckDbErrorText(diagnostic);
+            return mapDuckDbError(err);
+        };
+        return count;
+    }
+
+    fn closeDuckDbAppender(self: *Session, appender: *duckdb_runtime.Appender) KError!void {
+        var diagnostic: ?[]u8 = null;
+        appender.closeWithDiagnostic(&diagnostic) catch |err| {
+            self.setOwnedDuckDbErrorText(diagnostic);
+            return mapDuckDbError(err);
+        };
+    }
+
+    fn executeDuckDbSql(self: *Session, conn: *duckdb_runtime.Connection, sql: []const u8) KError!void {
+        var prepared = try self.prepareDuckDbStatement(conn, sql);
+        defer prepared.deinit();
+        try self.executeDuckDbPrepared(&prepared);
+    }
+
+    fn trimSqlText(text: []const u8) []const u8 {
+        var start: usize = 0;
+        var end = text.len;
+        while (start < end and std.ascii.isWhitespace(text[start])) : (start += 1) {}
+        while (end > start and std.ascii.isWhitespace(text[end - 1])) : (end -= 1) {}
+        while (end > start and text[end - 1] == ';') {
+            end -= 1;
+            while (end > start and std.ascii.isWhitespace(text[end - 1])) : (end -= 1) {}
+        }
+        return text[start..end];
+    }
+
+    fn sqlQueryBytes(value: Value) ?[]const u8 {
+        return stringBytes(value);
+    }
+
+    fn registrationNameBytes(value: Value) ?[]const u8 {
+        return symbolBytes(value) orelse stringBytes(value);
+    }
+
+    fn normalizedSqlParameterName(raw: []const u8) ?[]const u8 {
+        if (raw.len == 0) return null;
+        const trimmed = switch (raw[0]) {
+            '$', ':', '@' => raw[1..],
+            else => raw,
+        };
+        if (trimmed.len == 0) return null;
+        if (std.ascii.isDigit(trimmed[0])) return null;
+        return trimmed;
+    }
+
+    fn loadGlobalNamedValue(self: *Session, name: []const u8) KError!Value {
+        const slot = self.global_slots.get(name) orelse return error.Name;
+        return try self.loadGlobalSlot(slot);
+    }
+
+    fn retainSqlParameterValue(self: *Session, value: Value) KError!Value {
+        return switch (value.tag()) {
+            .int, .bool, .float => try self.retainEscapedValue(value),
+            .array => if (stringBytes(value) != null or symbolBytes(value) != null)
+                try self.retainEscapedValue(value)
+            else
+                error.Type,
+            else => error.Type,
+        };
+    }
+
+    fn freeCapturedRelationParams(self: *Session, params: []HostRelationParam) void {
+        for (params) |param| {
+            self.allocator.free(param.name);
+            self.releaseValue(param.value);
+        }
+        self.allocator.free(params);
+    }
+
+    fn findRelationParamValue(params: []const HostRelationParam, name: []const u8) ?Value {
+        for (params) |param| {
+            if (std.mem.eql(u8, param.name, name)) return param.value;
+        }
+        return null;
+    }
+
+    fn capturePreparedSqlParams(self: *Session, prepared: *duckdb_runtime.PreparedStatement) KError![]HostRelationParam {
+        var params = std.ArrayList(HostRelationParam).empty;
         errdefer {
-            self.releaseValue(bundle);
-            self.allocator.free(entries);
+            for (params.items) |param| {
+                self.allocator.free(param.name);
+                self.releaseValue(param.value);
+            }
+            params.deinit(self.allocator);
         }
 
-        try self.loaded_safetensors.put(owned_path, .{
-            .bundle = bundle,
-            .entries = entries,
+        for (0..prepared.paramCount()) |idx| {
+            const raw_name = prepared.parameterName(self.allocator, idx) catch |err| return mapDuckDbError(err);
+            defer self.allocator.free(raw_name);
+            const name = normalizedSqlParameterName(raw_name) orelse return error.Unsupported;
+            if (findRelationParamValue(params.items, name) != null) continue;
+
+            {
+                const global_value = try self.loadGlobalNamedValue(name);
+                const retained = try self.retainSqlParameterValue(global_value);
+                errdefer self.releaseValue(retained);
+
+                const owned_name = try self.allocator.dupe(u8, name);
+                errdefer self.allocator.free(owned_name);
+
+                try params.append(self.allocator, .{
+                    .name = owned_name,
+                    .value = retained,
+                });
+            }
+        }
+
+        return try params.toOwnedSlice(self.allocator);
+    }
+
+    fn bindPreparedSqlScalar(prepared: *duckdb_runtime.PreparedStatement, index: usize, value: Value) KError!void {
+        switch (value.tag()) {
+            .bool => prepared.bindBoolean(index, value.asBool()) catch |err| return mapDuckDbError(err),
+            .int => prepared.bindInt64(index, value.asInt()) catch |err| return mapDuckDbError(err),
+            .float => prepared.bindDouble(index, value.asFloat()) catch |err| return mapDuckDbError(err),
+            .array => if (stringBytes(value)) |text| {
+                prepared.bindVarchar(index, text) catch |err| return mapDuckDbError(err);
+            } else if (symbolBytes(value)) |text| {
+                prepared.bindVarchar(index, text) catch |err| return mapDuckDbError(err);
+            } else {
+                return error.Type;
+            },
+            else => return error.Type,
+        }
+    }
+
+    fn bindPreparedRelationParams(self: *Session, prepared: *duckdb_runtime.PreparedStatement, params: []const HostRelationParam) KError!void {
+        for (0..prepared.paramCount()) |idx| {
+            const raw_name = prepared.parameterName(self.allocator, idx) catch |err| return mapDuckDbError(err);
+            defer self.allocator.free(raw_name);
+            const name = normalizedSqlParameterName(raw_name) orelse return error.Unsupported;
+            const value = findRelationParamValue(params, name) orelse return error.Name;
+            try bindPreparedSqlScalar(prepared, idx, value);
+        }
+    }
+
+    fn relationRegistrationSql(self: *Session, name: []const u8, relation: *const HostRelation) KError![]u8 {
+        const ident = duckdb_runtime.sqlIdentifier(self.allocator, name) catch |err| return mapDuckDbError(err);
+        defer self.allocator.free(ident);
+
+        return switch (relation.origin) {
+            .file => |file| blk: {
+                const quoted_path = duckdb_runtime.sqlStringLiteral(self.allocator, file.path) catch |err| return mapDuckDbError(err);
+                defer self.allocator.free(quoted_path);
+                const source_sql = switch (file.source_kind) {
+                    .csv => try std.fmt.allocPrint(self.allocator, "read_csv_auto({s})", .{quoted_path}),
+                    .parquet => try std.fmt.allocPrint(self.allocator, "read_parquet({s})", .{quoted_path}),
+                };
+                defer self.allocator.free(source_sql);
+                break :blk try std.fmt.allocPrint(
+                    self.allocator,
+                    "create or replace temp view {s} as select * from {s}",
+                    .{ ident, source_sql },
+                );
+            },
+            .sql => |sql_info| try std.fmt.allocPrint(
+                self.allocator,
+                "create or replace temp view {s} as {s}",
+                .{ ident, sql_info.text },
+            ),
+        };
+    }
+
+    fn dropRegisteredObjectIfExists(self: *Session, conn: *duckdb_runtime.Connection, name: []const u8) KError!void {
+        const ident = duckdb_runtime.sqlIdentifier(self.allocator, name) catch |err| return mapDuckDbError(err);
+        defer self.allocator.free(ident);
+
+        const drop_view = try std.fmt.allocPrint(self.allocator, "drop view if exists {s}", .{ident});
+        defer self.allocator.free(drop_view);
+        try self.executeDuckDbSql(conn, drop_view);
+
+        const drop_table = try std.fmt.allocPrint(self.allocator, "drop table if exists {s}", .{ident});
+        defer self.allocator.free(drop_table);
+        try self.executeDuckDbSql(conn, drop_table);
+    }
+
+    fn registerRelationNamed(self: *Session, conn: *duckdb_runtime.Connection, name: []const u8, relation_value: Value) KError!Value {
+        const relation = relation_value.asHostRelation();
+        switch (relation.origin) {
+            .file => {},
+            .sql => |sql_info| if (sql_info.params.len != 0) return error.Unsupported,
+        }
+        try self.dropRegisteredObjectIfExists(conn, name);
+        const registration_sql = try self.relationRegistrationSql(name, relation);
+        defer self.allocator.free(registration_sql);
+
+        try self.executeDuckDbSql(conn, registration_sql);
+        self.forgetRegisteredDuckDbTable(name);
+        return self.shareValue(relation_value);
+    }
+
+    fn tableRegistrationTypeSql(kind: HostTableColumnKind) []const u8 {
+        return switch (kind) {
+            .boolean => "BOOLEAN",
+            .int => "BIGINT",
+            .float => "DOUBLE",
+            .string => "VARCHAR",
+            .date => "DATE",
+            .time => "TIME",
+            .time_ns => "TIME_NS",
+            .time_tz => "TIMETZ",
+            .timestamp => "TIMESTAMP",
+            .timestamp_s => "TIMESTAMP_S",
+            .timestamp_ms => "TIMESTAMP_MS",
+            .timestamp_ns => "TIMESTAMP_NS",
+            .timestamp_tz => "TIMESTAMPTZ",
+        };
+    }
+
+    fn tableRegistrationSql(self: *Session, name: []const u8, table: *const HostKeyedStore) KError![]u8 {
+        std.debug.assert(table.layout == .table);
+        const ident = duckdb_runtime.sqlIdentifier(self.allocator, name) catch |err| return mapDuckDbError(err);
+        defer self.allocator.free(ident);
+
+        var out = std.ArrayList(u8).empty;
+        errdefer out.deinit(self.allocator);
+
+        try out.writer(self.allocator).print("create temp table {s} (", .{ident});
+        const metadata = keyedStoreTableMetadata(table);
+        for (0..keyedStoreNameCount(table)) |idx| {
+            if (idx != 0) try out.appendSlice(self.allocator, ", ");
+            const column_ident = duckdb_runtime.sqlIdentifier(self.allocator, keyedStoreColumnNameBytes(table, idx)) catch |err| return mapDuckDbError(err);
+            defer self.allocator.free(column_ident);
+            try out.writer(self.allocator).print("{s} {s}", .{ column_ident, tableRegistrationTypeSql(metadata[idx].kind) });
+        }
+        try out.append(self.allocator, ')');
+        return try out.toOwnedSlice(self.allocator);
+    }
+
+    fn appendTableCellToDuckDbAppender(
+        self: *Session,
+        appender: *duckdb_runtime.Appender,
+        table: *const HostKeyedStore,
+        column_idx: usize,
+        row: usize,
+    ) KError!void {
+        std.debug.assert(table.layout == .table);
+        if (!keyedStoreTableCellIsValid(table, column_idx, row)) {
+            appender.appendNull() catch |err| return mapDuckDbError(err);
+            return;
+        }
+
+        const kind = keyedStoreTableMetadata(table)[column_idx].kind;
+        const data = tableColumnData(table, column_idx);
+        switch (kind) {
+            .boolean => appender.appendBool((try numericIntAt(data, @intCast(row))) != 0) catch |err| return mapDuckDbError(err),
+            .int => appender.appendInt64(try numericIntAt(data, @intCast(row))) catch |err| return mapDuckDbError(err),
+            .float => appender.appendDouble(try numericFloatAt(data, @intCast(row))) catch |err| return mapDuckDbError(err),
+            .string => {
+                const value = try self.hostStringListItemValue(data.asHostStringList(), row);
+                defer self.releaseValue(value);
+                const text = symbolBytes(value) orelse stringBytes(value) orelse return error.Internal;
+                appender.appendVarchar(text) catch |err| return mapDuckDbError(err);
+            },
+            .date => {
+                const days = std.math.cast(i32, try numericIntAt(data, @intCast(row))) orelse return error.Unsupported;
+                appender.appendDate(days) catch |err| return mapDuckDbError(err);
+            },
+            .time => appender.appendTime(try numericIntAt(data, @intCast(row))) catch |err| return mapDuckDbError(err),
+            .time_ns => appender.appendTimeNs(try numericIntAt(data, @intCast(row))) catch |err| return mapDuckDbError(err),
+            .time_tz => appender.appendTimeTz(try numericIntAt(data, @intCast(row))) catch |err| return mapDuckDbError(err),
+            .timestamp => appender.appendTimestamp(try numericIntAt(data, @intCast(row))) catch |err| return mapDuckDbError(err),
+            .timestamp_s => appender.appendTimestampS(try numericIntAt(data, @intCast(row))) catch |err| return mapDuckDbError(err),
+            .timestamp_ms => appender.appendTimestampMs(try numericIntAt(data, @intCast(row))) catch |err| return mapDuckDbError(err),
+            .timestamp_ns => appender.appendTimestampNs(try numericIntAt(data, @intCast(row))) catch |err| return mapDuckDbError(err),
+            .timestamp_tz => appender.appendTimestampTz(try numericIntAt(data, @intCast(row))) catch |err| return mapDuckDbError(err),
+        }
+    }
+
+    fn registerTableNamedEager(self: *Session, conn: *duckdb_runtime.Connection, name: []const u8, table_value: Value) KError!Value {
+        const table = table_value.asHostKeyedStore();
+        if (table.layout != .table) return error.Type;
+        try self.dropRegisteredObjectIfExists(conn, name);
+
+        const registration_sql = try self.tableRegistrationSql(name, table);
+        defer self.allocator.free(registration_sql);
+        try self.executeDuckDbSql(conn, registration_sql);
+
+        var appender = duckdb_runtime.Appender.init(conn, name) catch |err| return mapDuckDbError(err);
+        defer appender.deinit();
+
+        for (0..table.row_count) |row| {
+            for (0..keyedStoreNameCount(table)) |column_idx| try self.appendTableCellToDuckDbAppender(&appender, table, column_idx, row);
+            appender.endRow() catch |err| return mapDuckDbError(err);
+        }
+
+        try self.closeDuckDbAppender(&appender);
+        return self.shareValue(table_value);
+    }
+
+    fn forgetRegisteredDuckDbTable(self: *Session, name: []const u8) void {
+        const removed = self.registered_duckdb_tables.fetchRemove(name) orelse return;
+        self.releaseValue(removed.value.table);
+        self.allocator.free(removed.key);
+    }
+
+    fn rememberRegisteredDuckDbTable(self: *Session, name: []const u8, table_value: Value) KError!void {
+        const retained = try self.retainEscapedValue(table_value);
+        errdefer self.releaseValue(retained);
+
+        if (self.registered_duckdb_tables.getPtr(name)) |entry| {
+            self.releaseValue(entry.table);
+            entry.table = retained;
+            return;
+        }
+
+        const owned_name = try self.allocator.dupe(u8, name);
+        errdefer self.allocator.free(owned_name);
+
+        try self.registered_duckdb_tables.put(owned_name, .{
+            .table = retained,
         });
-        return self.loaded_safetensors.getPtr(owned_path).?;
+    }
+
+    fn tableScanRegistrationSql(self: *Session, name: []const u8) KError![]u8 {
+        const ident = duckdb_runtime.sqlIdentifier(self.allocator, name) catch |err| return mapDuckDbError(err);
+        defer self.allocator.free(ident);
+
+        const quoted_name = duckdb_runtime.sqlStringLiteral(self.allocator, name) catch |err| return mapDuckDbError(err);
+        defer self.allocator.free(quoted_name);
+
+        return try std.fmt.allocPrint(
+            self.allocator,
+            "create or replace temp view {s} as select * from kiwi_scan({s})",
+            .{ ident, quoted_name },
+        );
+    }
+
+    fn registerTableNamedLazy(self: *Session, conn: *duckdb_runtime.Connection, name: []const u8, table_value: Value) KError!Value {
+        try self.ensureDuckDbKiwiTableScan(conn);
+        try self.rememberRegisteredDuckDbTable(name, table_value);
+        try self.dropRegisteredObjectIfExists(conn, name);
+
+        const registration_sql = try self.tableScanRegistrationSql(name);
+        defer self.allocator.free(registration_sql);
+        try self.executeDuckDbSql(conn, registration_sql);
+        return self.shareValue(table_value);
+    }
+
+    fn registerValue(self: *Session, name_value: Value, registered_value: Value) KError!Value {
+        const name = registrationNameBytes(name_value) orelse return error.Type;
+        if (name.len == 0) return error.Type;
+        if (registered_value.tag() != .array) return error.Type;
+
+        const conn = try self.duckdbConnection();
+        return switch (registered_value.arrayKind()) {
+            .host_relation => try self.registerRelationNamed(conn, name, registered_value),
+            .host_keyed_store => if (registered_value.asHostKeyedStore().layout == .table)
+                try self.registerTableNamedLazy(conn, name, registered_value)
+            else
+                error.Type,
+            else => error.Type,
+        };
+    }
+
+    fn saveValue(self: *Session, path_value: Value, saved_value: Value) KError!Value {
+        if (comptime !runtime_has_mlx) return error.Unsupported;
+
+        const path = loadPathBytes(path_value) orelse return error.Type;
+        if (!std.ascii.eqlIgnoreCase(std.fs.path.extension(path), ".safetensors")) return error.Unsupported;
+
+        var names = std.ArrayList([]const u8).empty;
+        defer names.deinit(self.allocator);
+        var arrays = std.ArrayList(mlx.Array).empty;
+        defer {
+            for (arrays.items) |*array| array.deinit();
+            arrays.deinit(self.allocator);
+        }
+
+        if (saved_value.tag() == .array and saved_value.arrayKind() == .host_keyed_store) {
+            const store = saved_value.asHostKeyedStore();
+            if (store.layout != .dict) return error.Type;
+
+            const count = keyedStoreNameCount(store);
+            try names.ensureTotalCapacity(self.allocator, count);
+            try arrays.ensureTotalCapacity(self.allocator, count);
+            for (0..count) |idx| {
+                const name = try keyedStoreNamesValueBytesAt(store.names, idx);
+                const item = try self.keyedStoreValueAt(store, idx);
+                defer self.releaseValue(item);
+                _ = valueNumericMode(item) orelse return error.Type;
+                names.appendAssumeCapacity(name);
+                arrays.appendAssumeCapacity(try self.materializeBackendArray(item));
+            }
+        } else {
+            _ = valueNumericMode(saved_value) orelse return error.Type;
+            try names.append(self.allocator, "value");
+            try arrays.append(self.allocator, try self.materializeBackendArray(saved_value));
+        }
+
+        mlx.saveSafetensors(self.allocator, path, names.items, arrays.items) catch |err| return mapMlxError(err);
+        return self.shareValue(saved_value);
+    }
+
+    fn sqlValue(self: *Session, value: Value) KError!Value {
+        const sql_text = sqlQueryBytes(value) orelse return error.Type;
+        const trimmed = trimSqlText(sql_text);
+        if (trimmed.len == 0) return error.Parse;
+
+        const conn = try self.duckdbConnection();
+        var prepared = try self.prepareDuckDbStatement(conn, trimmed);
+        defer prepared.deinit();
+
+        const params = try self.capturePreparedSqlParams(&prepared);
+        errdefer self.freeCapturedRelationParams(params);
+
+        try self.bindPreparedRelationParams(&prepared, params);
+        return try self.createManagedSqlRelation(trimmed, params);
+    }
+
+    fn relationRowCount(self: *Session, relation: *HostRelation) KError!usize {
+        if (relation.cached_row_count_known) return relation.cached_row_count;
+        const conn = try self.duckdbConnection();
+
+        relation.cached_row_count = switch (relation.origin) {
+            .file => |file| try self.countDuckDbFileRows(conn, file.source_kind, file.path),
+            .sql => |sql_info| blk: {
+                const wrapped = try std.fmt.allocPrint(
+                    self.allocator,
+                    "select count(*) as n from ({s}) as kiwi_relation",
+                    .{sql_info.text},
+                );
+                defer self.allocator.free(wrapped);
+
+                var prepared = try self.prepareDuckDbStatement(conn, wrapped);
+                defer prepared.deinit();
+                try self.bindPreparedRelationParams(&prepared, sql_info.params);
+                break :blk try self.queryDuckDbPreparedSingleCount(&prepared);
+            },
+        };
+        relation.cached_row_count_known = true;
+        return relation.cached_row_count;
+    }
+
+    fn tableColumnKindFromDuckDbType(type_id: duckdb_runtime.TypeId) KError!HostTableColumnKind {
+        if (comptime !build_options.runtime_has_duckdb) return error.Unsupported;
+        return switch (type_id) {
+            .boolean => .boolean,
+            .tinyint, .smallint, .integer, .bigint, .utinyint, .usmallint, .uinteger, .ubigint => .int,
+            .float, .double => .float,
+            .varchar => .string,
+            .date => .date,
+            .time => .time,
+            .time_ns => .time_ns,
+            .time_tz => .time_tz,
+            .timestamp => .timestamp,
+            .timestamp_s => .timestamp_s,
+            .timestamp_ms => .timestamp_ms,
+            .timestamp_ns => .timestamp_ns,
+            .timestamp_tz => .timestamp_tz,
+            else => error.Unsupported,
+        };
+    }
+
+    fn deinitTableColumnBuilder(self: *Session, builder: *TableColumnBuilder) void {
+        switch (builder.kind) {
+            .boolean => builder.bool_values.deinit(self.allocator),
+            .int, .date, .time, .time_ns, .time_tz, .timestamp, .timestamp_s, .timestamp_ms, .timestamp_ns, .timestamp_tz => builder.int_values.deinit(self.allocator),
+            .float => builder.float_values.deinit(self.allocator),
+            .string => {
+                for (builder.string_values.items) |item| self.allocator.free(item);
+                builder.string_values.deinit(self.allocator);
+            },
+        }
+        builder.validity.deinit(self.allocator);
+    }
+
+    fn appendTableColumnBuilderRow(
+        self: *Session,
+        builder: *TableColumnBuilder,
+        chunk: *const duckdb_runtime.DataChunk,
+        column_idx: usize,
+        row_idx: usize,
+    ) KError!void {
+        if (comptime !runtime_has_duckdb) return error.Unsupported;
+        const valid = chunk.rowIsValid(column_idx, row_idx);
+        try builder.validity.append(self.allocator, valid);
+        if (!valid) builder.saw_null = true;
+
+        switch (builder.kind) {
+            .boolean => try builder.bool_values.append(
+                self.allocator,
+                if (valid)
+                    chunk.rowBool(column_idx, row_idx) catch |err| return mapDuckDbError(err)
+                else
+                    false,
+            ),
+            .int => try builder.int_values.append(
+                self.allocator,
+                if (valid)
+                    chunk.rowInt(column_idx, row_idx, builder.source_type) catch |err| return mapDuckDbError(err)
+                else
+                    0,
+            ),
+            .date, .time, .time_ns, .time_tz, .timestamp, .timestamp_s, .timestamp_ms, .timestamp_ns, .timestamp_tz => try builder.int_values.append(
+                self.allocator,
+                if (valid)
+                    chunk.rowTemporalInt(column_idx, row_idx, builder.source_type) catch |err| return mapDuckDbError(err)
+                else
+                    0,
+            ),
+            .float => try builder.float_values.append(
+                self.allocator,
+                if (valid)
+                    chunk.rowFloat(column_idx, row_idx, builder.source_type) catch |err| return mapDuckDbError(err)
+                else
+                    0,
+            ),
+            .string => try builder.string_values.append(
+                self.allocator,
+                if (valid)
+                    chunk.rowString(self.allocator, column_idx, row_idx) catch |err| return mapDuckDbError(err)
+                else
+                    try self.allocator.dupe(u8, ""),
+            ),
+        }
+    }
+
+    fn finalizeTableColumnBuilder(self: *Session, builder: *TableColumnBuilder) KError!HostTableColumn {
+        const data = switch (builder.kind) {
+            .boolean => try self.createManagedHostBitArray(builder.bool_values.items),
+            .int, .date, .time, .time_ns, .time_tz, .timestamp, .timestamp_s, .timestamp_ms, .timestamp_ns, .timestamp_tz => try self.createManagedHostIntArray(builder.int_values.items),
+            .float => try self.createManagedHostFloatArray(builder.float_values.items),
+            .string => try self.createManagedHostStringListFromSlices(builder.string_values.items),
+        };
+        errdefer self.releaseValue(data);
+
+        const validity = if (builder.saw_null)
+            try self.createManagedHostBitArray(builder.validity.items)
+        else
+            null;
+        errdefer if (validity) |mask| self.releaseValue(mask);
+
+        return .{
+            .name = builder.name,
+            .data = data,
+            .validity = validity,
+            .kind = builder.kind,
+        };
+    }
+
+    fn materializeQueryResultTable(self: *Session, result: *duckdb_runtime.QueryResult) KError!Value {
+        const column_count = result.columnCount();
+        const builders = try self.allocator.alloc(TableColumnBuilder, column_count);
+        defer self.allocator.free(builders);
+
+        var initialized_builders: usize = 0;
+        errdefer {
+            for (0..initialized_builders) |idx| self.deinitTableColumnBuilder(&builders[idx]);
+        }
+
+        for (0..column_count) |idx| {
+            const name_bytes = result.columnName(idx) catch |err| return mapDuckDbError(err);
+            defer self.allocator.free(name_bytes);
+            const type_id = result.columnTypeId(idx) catch |err| return mapDuckDbError(err);
+            builders[idx] = .{
+                .name = try self.frozenHostSymbol(name_bytes),
+                .source_type = type_id,
+                .kind = try tableColumnKindFromDuckDbType(type_id),
+            };
+            initialized_builders += 1;
+        }
+
+        var row_count: usize = 0;
+        while (true) {
+            var chunk = result.fetchChunk() orelse break;
+            defer chunk.deinit();
+
+            row_count += chunk.rowCount();
+            for (0..chunk.rowCount()) |row_idx| {
+                for (0..column_count) |column_idx| {
+                    try self.appendTableColumnBuilderRow(&builders[column_idx], &chunk, column_idx, row_idx);
+                }
+            }
+        }
+
+        const columns = try self.allocator.alloc(HostTableColumn, column_count);
+        var built_columns: usize = 0;
+        errdefer {
+            for (0..built_columns) |idx| {
+                self.releaseValue(columns[idx].name);
+                self.releaseValue(columns[idx].data);
+                if (columns[idx].validity) |mask| self.releaseValue(mask);
+            }
+            self.allocator.free(columns);
+        }
+
+        for (0..column_count) |idx| {
+            columns[idx] = try self.finalizeTableColumnBuilder(&builders[idx]);
+            built_columns += 1;
+            self.deinitTableColumnBuilder(&builders[idx]);
+        }
+        initialized_builders = 0;
+
+        return try self.createManagedHostTable(row_count, columns);
+    }
+
+    fn materializeQueryResultColumn(self: *Session, result: *duckdb_runtime.QueryResult) KError!Value {
+        if (result.columnCount() != 1) return error.Internal;
+
+        const name_bytes = result.columnName(0) catch |err| return mapDuckDbError(err);
+        defer self.allocator.free(name_bytes);
+        const type_id = result.columnTypeId(0) catch |err| return mapDuckDbError(err);
+
+        var builder: TableColumnBuilder = .{
+            .name = try self.frozenHostSymbol(name_bytes),
+            .source_type = type_id,
+            .kind = try tableColumnKindFromDuckDbType(type_id),
+        };
+        defer self.deinitTableColumnBuilder(&builder);
+
+        while (true) {
+            var chunk = result.fetchChunk() orelse break;
+            defer chunk.deinit();
+
+            for (0..chunk.rowCount()) |row_idx| {
+                try self.appendTableColumnBuilderRow(&builder, &chunk, 0, row_idx);
+            }
+        }
+
+        const column = try self.finalizeTableColumnBuilder(&builder);
+        self.releaseValue(column.name);
+        if (column.validity) |mask| self.releaseValue(mask);
+        return column.data;
+    }
+
+    fn relationTakeSql(self: *Session, relation: *const HostRelation, count: usize) KError![]u8 {
+        return switch (relation.origin) {
+            .file => |file| blk: {
+                const quoted_path = duckdb_runtime.sqlStringLiteral(self.allocator, file.path) catch |err| return mapDuckDbError(err);
+                defer self.allocator.free(quoted_path);
+                const source_sql = switch (file.source_kind) {
+                    .csv => try std.fmt.allocPrint(self.allocator, "read_csv_auto({s})", .{quoted_path}),
+                    .parquet => try std.fmt.allocPrint(self.allocator, "read_parquet({s})", .{quoted_path}),
+                };
+                defer self.allocator.free(source_sql);
+                break :blk try std.fmt.allocPrint(
+                    self.allocator,
+                    "select * from {s} limit {d}",
+                    .{ source_sql, count },
+                );
+            },
+            .sql => |sql_info| try std.fmt.allocPrint(
+                self.allocator,
+                "select * from ({s}) as kiwi_relation limit {d}",
+                .{ sql_info.text, count },
+            ),
+        };
+    }
+
+    fn relationColumnSql(self: *Session, relation: *const HostRelation, name: []const u8) KError![]u8 {
+        const ident = duckdb_runtime.sqlIdentifier(self.allocator, name) catch |err| return mapDuckDbError(err);
+        defer self.allocator.free(ident);
+
+        return switch (relation.origin) {
+            .file => |file| blk: {
+                const quoted_path = duckdb_runtime.sqlStringLiteral(self.allocator, file.path) catch |err| return mapDuckDbError(err);
+                defer self.allocator.free(quoted_path);
+                const source_sql = switch (file.source_kind) {
+                    .csv => try std.fmt.allocPrint(self.allocator, "read_csv_auto({s})", .{quoted_path}),
+                    .parquet => try std.fmt.allocPrint(self.allocator, "read_parquet({s})", .{quoted_path}),
+                };
+                defer self.allocator.free(source_sql);
+                break :blk try std.fmt.allocPrint(
+                    self.allocator,
+                    "select {s} from {s}",
+                    .{ ident, source_sql },
+                );
+            },
+            .sql => |sql_info| try std.fmt.allocPrint(
+                self.allocator,
+                "select {s} from ({s}) as kiwi_relation",
+                .{ ident, sql_info.text },
+            ),
+        };
+    }
+
+    fn materializeRelationTake(self: *Session, raw_count: i64, relation: *const HostRelation) KError!Value {
+        if (raw_count < 0) return error.Unsupported;
+        const count: usize = @intCast(raw_count);
+        const sql = try self.relationTakeSql(relation, count);
+        defer self.allocator.free(sql);
+
+        const conn = try self.duckdbConnection();
+        var prepared = try self.prepareDuckDbStatement(conn, sql);
+        defer prepared.deinit();
+
+        switch (relation.origin) {
+            .file => {},
+            .sql => |sql_info| try self.bindPreparedRelationParams(&prepared, sql_info.params),
+        }
+
+        var result = try self.executeDuckDbPreparedResult(&prepared);
+        defer result.deinit();
+        return try self.materializeQueryResultTable(&result);
+    }
+
+    fn materializeRelationColumn(self: *Session, relation: *const HostRelation, name: []const u8) KError!Value {
+        const sql = try self.relationColumnSql(relation, name);
+        defer self.allocator.free(sql);
+
+        const conn = try self.duckdbConnection();
+        var prepared = try self.prepareDuckDbStatement(conn, sql);
+        defer prepared.deinit();
+
+        switch (relation.origin) {
+            .file => {},
+            .sql => |sql_info| try self.bindPreparedRelationParams(&prepared, sql_info.params),
+        }
+
+        var result = try self.executeDuckDbPreparedResult(&prepared);
+        defer result.deinit();
+        return try self.materializeQueryResultColumn(&result);
     }
 
     fn loadValue(self: *Session, value: Value) KError!Value {
         const path = loadPathBytes(value) orelse return error.Type;
-        const store = try self.ensureLoadedSafetensors(path);
-        return self.shareValue(store.bundle);
-    }
-
-    fn loadTensorValue(self: *Session, path_value: Value, name_value: Value) KError!Value {
-        const path = loadPathBytes(path_value) orelse return error.Type;
-        const name = loadTensorNameBytes(name_value) orelse return error.Type;
-        const store = try self.ensureLoadedSafetensors(path);
-        for (store.entries) |entry| {
-            const symbol = symbolBytes(entry.symbol) orelse return error.Internal;
-            if (std.mem.eql(u8, symbol, name)) return try self.loadedSafetensorsTensorValue(store, entry.index);
+        if (duckdb_runtime.SourceKind.detect(path) != null) {
+            const store = try self.ensureLoadedRelation(path);
+            return self.shareValue(store.relation);
         }
-        return error.Name;
+        const store = try self.ensureLoadedSafetensors(path);
+        return self.shareValue(store.store);
     }
 
     fn scalarRandomCountValue(value: Value) ?i64 {
@@ -13175,6 +18368,51 @@ fn tryScalarIntBoolDyad(self: *Session, op: BuiltinId, left: Value, right: Value
             self.string_perf.contains_helper_ns += @intCast(stringPerfNow() - helper_start);
         }
         return result;
+    }
+
+    fn bytesValue(self: *Session, value: Value) KError!Value {
+        const src_info = stringSourceInfo(value) orelse return error.Type;
+        const src = src_info.bytes();
+
+        var parts = std.ArrayList(HostStringPiece).empty;
+        defer parts.deinit(self.allocator);
+        try parts.ensureTotalCapacity(self.allocator, src.len);
+        for (0..src.len) |idx| {
+            try parts.append(self.allocator, .{
+                .view = .{
+                    .start = src_info.span.start + idx,
+                    .len = 1,
+                },
+            });
+        }
+        return try self.createManagedHostStringListPieces(src_info.base, parts.items);
+    }
+
+    fn utf8Value(self: *Session, value: Value) KError!Value {
+        const src_info = stringSourceInfo(value) orelse return error.Type;
+        const src = src_info.bytes();
+        const view = std.unicode.Utf8View.init(src) catch return error.Type;
+        var it = view.iterator();
+
+        var parts = std.ArrayList(HostStringPiece).empty;
+        defer parts.deinit(self.allocator);
+        while (it.nextCodepointSlice()) |slice| {
+            const rel_start = @intFromPtr(slice.ptr) - @intFromPtr(src.ptr);
+            try parts.append(self.allocator, .{
+                .view = .{
+                    .start = src_info.span.start + rel_start,
+                    .len = slice.len,
+                },
+            });
+        }
+        return try self.createManagedHostStringListPieces(src_info.base, parts.items);
+    }
+
+    fn charValue(self: *Session, value: Value) KError!Value {
+        const int_value = scalarIntLikeValue(value) orelse return error.Type;
+        if (int_value < 0 or int_value > 255) return error.Type;
+        const bytes = [_]u8{@intCast(int_value)};
+        return try self.managedHostString(&bytes);
     }
 
     fn splitValues(self: *Session, left: Value, right: Value) KError!Value {
@@ -13241,6 +18479,34 @@ fn tryScalarIntBoolDyad(self: *Session, op: BuiltinId, left: Value, right: Value
         return result;
     }
 
+    fn valueIsTextSequence(value: Value) bool {
+        if (stringBytes(value) != null) return true;
+        return value.tag() == .array and value.arrayKind() == .host_string_list;
+    }
+
+    fn appendTextSequenceItems(self: *Session, out: *std.ArrayList(Value), value: Value) KError!void {
+        if (stringBytes(value) != null) {
+            try out.append(self.allocator, try self.retainEscapedValue(value));
+            return;
+        }
+        if (value.tag() != .array or value.arrayKind() != .host_string_list) return error.Type;
+
+        const list = value.asHostStringList();
+        for (0..list.len) |idx| try out.append(self.allocator, try self.hostStringListItemValue(list, idx));
+    }
+
+    fn concatTextSequenceValues(self: *Session, left: Value, right: Value) KError!Value {
+        var values = std.ArrayList(Value).empty;
+        defer values.deinit(self.allocator);
+        defer {
+            for (values.items) |item| self.releaseValue(item);
+        }
+
+        try self.appendTextSequenceItems(&values, left);
+        try self.appendTextSequenceItems(&values, right);
+        return try self.createManagedHostTextListFromValues(values.items);
+    }
+
     fn joinValues(self: *Session, left: Value, right: Value) KError!Value {
         const helper_start = stringPerfNow();
         const sep = stringBytes(left) orelse return error.Type;
@@ -13269,6 +18535,35 @@ fn tryScalarIntBoolDyad(self: *Session, op: BuiltinId, left: Value, right: Value
             },
             else => return error.Type,
         }
+    }
+
+    fn tokenizeValue(self: *Session, value: Value) KError!Value {
+        const hooks = self.tokenizer_hooks orelse return error.Unsupported;
+        const text = stringBytes(value) orelse return error.Type;
+        const ids = hooks.tokenize_fn(hooks.context, self.allocator, text) catch |err| return mapTokenizerHookError(err);
+        defer self.allocator.free(ids);
+        return try self.createManagedHostIntArray(ids);
+    }
+
+    fn detokenizeIds(self: *Session, value: Value) KError![]i64 {
+        const items = try self.materializeSequenceItems(value);
+        defer self.releaseArgs(items);
+
+        const out = try self.allocator.alloc(i64, items.len);
+        errdefer self.allocator.free(out);
+        for (items, 0..) |item, idx| {
+            out[idx] = scalarIntLikeValue(item) orelse return error.Type;
+        }
+        return out;
+    }
+
+    fn detokenizeValue(self: *Session, value: Value) KError!Value {
+        const hooks = self.tokenizer_hooks orelse return error.Unsupported;
+        const ids = try self.detokenizeIds(value);
+        defer self.allocator.free(ids);
+        const text = hooks.detokenize_fn(hooks.context, self.allocator, ids) catch |err| return mapTokenizerHookError(err);
+        defer self.allocator.free(text);
+        return try self.managedHostString(text);
     }
 
     fn isJoinableStringSequence(value: Value) bool {
@@ -13578,6 +18873,7 @@ fn tryScalarIntBoolDyad(self: *Session, op: BuiltinId, left: Value, right: Value
             .sub => self.subValues(left, right),
             .mul => self.mulValues(left, right),
             .div => self.divValues(left, right),
+            .pow => self.powValues(left, right),
             .iota => self.bangValues(left, right),
             .minimum => self.minimumValues(left, right),
             .maximum => self.maximumValues(left, right),
@@ -13587,13 +18883,16 @@ fn tryScalarIntBoolDyad(self: *Session, op: BuiltinId, left: Value, right: Value
             .null_fill_without => self.fillWithoutValues(left, right),
             .less => self.lessValues(left, right),
             .more => self.moreValues(left, right),
+            .not => self.matchValues(left, right),
             .equal => self.equalValues(left, right),
             .reshape => self.reshapeValues(left, right),
             .cast => self.castValues(left, right),
             .contains => self.containsValues(left, right),
             .split => self.splitValues(left, right),
             .join => self.joinValues(left, right),
-            .load => self.loadTensorValue(left, right),
+            .load => error.Arity,
+            .save => self.saveValue(left, right),
+            .register => self.registerValue(left, right),
             .rotcache => self.rotcacheInitValue(left, right),
             .rotcacheupdate => self.rotcacheUpdateValue(left, right),
             .find => if (scalarRandomCountValue(left)) |count|
@@ -13601,12 +18900,32 @@ fn tryScalarIntBoolDyad(self: *Session, op: BuiltinId, left: Value, right: Value
             else
                 self.findValues(left, right),
             .prng => error.Arity,
+            .rope => error.Arity,
+            .ropeflat => error.Arity,
+            .ropecisflat => error.Arity,
             .rmsnorm => error.Arity,
+            .layernorm => error.Arity,
+            .gelu => error.Arity,
+            .geluapprox => error.Arity,
+            .mlpdense => error.Arity,
+            .conv2d => error.Arity,
+            .convtranspose2d => error.Arity,
+            .upsamplenearest2d => error.Arity,
+            .groupnorm => error.Arity,
+            .softmax => error.Arity,
+            .sdpa => error.Arity,
+            .sam3boxrpb => error.Arity,
+            .sdpamask => error.Arity,
+            .sdpaflat => error.Arity,
             else => error.Arity,
         };
     }
 
     fn boolLikeValue(value: Value) ?bool {
+        if (tableScalarValue(value)) |scalar| {
+            if (scalar.is_null) return null;
+            return boolLikeValue(scalar.value);
+        }
         return switch (value.tag()) {
             .bool => value.asBool(),
             .int => value.asInt() != 0,
@@ -13616,6 +18935,10 @@ fn tryScalarIntBoolDyad(self: *Session, op: BuiltinId, left: Value, right: Value
     }
 
     fn scalarNumericFloatValue(value: Value) ?f64 {
+        if (tableScalarValue(value)) |scalar| {
+            if (scalar.is_null) return null;
+            return scalarNumericFloatValue(scalar.value);
+        }
         return switch (value.tag()) {
             .int => @floatFromInt(value.asInt()),
             .bool => @floatFromInt(@intFromBool(value.asBool())),
@@ -13624,9 +18947,169 @@ fn tryScalarIntBoolDyad(self: *Session, op: BuiltinId, left: Value, right: Value
         };
     }
 
+    fn applyRopeBuiltin(self: *Session, args: []const Value) KError!Value {
+        if (args.len != 4) return error.Arity;
+        if (comptime !runtime_has_mlx or !mlx.supports_full_ops) return error.Unsupported;
+
+        _ = valueNumericMode(args[0]) orelse return error.Type;
+        const dims_i64 = scalarIntLikeValue(args[1]) orelse return error.Type;
+        const offset_i64 = scalarIntLikeValue(args[3]) orelse return error.Type;
+        if (dims_i64 <= 0 or @mod(dims_i64, 2) != 0) return error.Type;
+
+        const dims: i32 = std.math.cast(i32, dims_i64) orelse return error.Unsupported;
+        const offset: i32 = std.math.cast(i32, offset_i64) orelse return error.Unsupported;
+
+        var x = try self.materializeBackendArray(args[0]);
+        defer x.deinit();
+        if (x.ndim() < 3) return error.Type;
+        if (dims > x.shape()[x.ndim() - 1]) return error.Type;
+
+        const ctx = try self.backendContext();
+        const out = if (scalarNumericFloatValue(args[2])) |base|
+            mlx.Array.rope(ctx.*, x, dims, @floatCast(base), offset) catch |err| return mapMlxError(err)
+        else blk: {
+            _ = valueNumericMode(args[2]) orelse return error.Type;
+            var freqs = try self.materializeBackendArray(args[2]);
+            defer freqs.deinit();
+            if (freqs.ndim() != 1 or freqs.shape()[0] != @divExact(dims, 2)) return error.Type;
+            break :blk mlx.Array.ropeFreqs(ctx.*, x, dims, freqs, offset) catch |err| return mapMlxError(err);
+        };
+        return try self.wrapManagedBackendArray(out);
+    }
+
+    fn applyRopeFlatBuiltin(self: *Session, args: []const Value) KError!Value {
+        if (args.len != 5) return error.Arity;
+        if (comptime !runtime_has_mlx or !mlx.supports_full_ops) return error.Unsupported;
+
+        _ = valueNumericMode(args[0]) orelse return error.Type;
+        const heads_i64 = scalarIntLikeValue(args[1]) orelse return error.Type;
+        const dims_i64 = scalarIntLikeValue(args[2]) orelse return error.Type;
+        const offset_i64 = scalarIntLikeValue(args[4]) orelse return error.Type;
+        if (heads_i64 <= 0 or dims_i64 <= 0 or @mod(dims_i64, 2) != 0) return error.Type;
+
+        const heads: i32 = std.math.cast(i32, heads_i64) orelse return error.Unsupported;
+        const dims: i32 = std.math.cast(i32, dims_i64) orelse return error.Unsupported;
+        const offset: i32 = std.math.cast(i32, offset_i64) orelse return error.Unsupported;
+
+        var x = try self.materializeBackendArray(args[0]);
+        defer x.deinit();
+        if (x.ndim() != 2) return error.Type;
+        if (@mod(x.shape()[0], heads) != 0) return error.Type;
+
+        const tokens = @divExact(x.shape()[0], heads);
+        const width = x.shape()[1];
+        if (dims > width) return error.Type;
+
+        const ctx = try self.backendContext();
+        const shape = [_]i32{ 1, tokens, heads, width };
+        var x4 = mlx.Array.reshape(ctx.*, x, &shape) catch |err| return mapMlxError(err);
+        defer x4.deinit();
+        var x_native_view = mlx.Array.swapAxes(ctx.*, x4, 1, 2) catch |err| return mapMlxError(err);
+        defer x_native_view.deinit();
+        // MLX fast::rope matches the explicit 4-D path when the head-major input is
+        // materialized first. Passing the swapped view directly can scramble multi-head
+        // flat inputs at nonzero offsets.
+        var x_native = mlx.Array.copy(ctx.*, x_native_view) catch |err| return mapMlxError(err);
+        defer x_native.deinit();
+        var out_native = if (scalarNumericFloatValue(args[3])) |base|
+            mlx.Array.rope(ctx.*, x_native, dims, @floatCast(base), offset) catch |err| return mapMlxError(err)
+        else blk: {
+            _ = valueNumericMode(args[3]) orelse return error.Type;
+            var freqs = try self.materializeBackendArray(args[3]);
+            defer freqs.deinit();
+            if (freqs.ndim() != 1 or freqs.shape()[0] != @divExact(dims, 2)) return error.Type;
+            break :blk mlx.Array.ropeFreqs(ctx.*, x_native, dims, freqs, offset) catch |err| return mapMlxError(err);
+        };
+        defer out_native.deinit();
+        var out4_view = mlx.Array.swapAxes(ctx.*, out_native, 1, 2) catch |err| return mapMlxError(err);
+        defer out4_view.deinit();
+        // Reshaping a swapped view can preserve the pre-swap physical layout instead of
+        // the logical token-major order we need for flat head rows. Force a copy first.
+        var out4 = mlx.Array.copy(ctx.*, out4_view) catch |err| return mapMlxError(err);
+        defer out4.deinit();
+        const out_shape = [_]i32{ tokens * heads, width };
+        const out = mlx.Array.reshape(ctx.*, out4, &out_shape) catch |err| return mapMlxError(err);
+        return try self.wrapManagedBackendArray(out);
+    }
+
+    fn applyRopeCisFlatBuiltin(self: *Session, args: []const Value) KError!Value {
+        if (args.len != 3) return error.Arity;
+        if (comptime !runtime_has_mlx or !mlx.supports_full_ops) return error.Unsupported;
+
+        _ = valueNumericMode(args[0]) orelse return error.Type;
+        _ = valueNumericMode(args[1]) orelse return error.Type;
+        _ = valueNumericMode(args[2]) orelse return error.Type;
+
+        var x = try self.materializeBackendArray(args[0]);
+        defer x.deinit();
+        var rr = try self.materializeBackendArray(args[1]);
+        defer rr.deinit();
+        var ri = try self.materializeBackendArray(args[2]);
+        defer ri.deinit();
+
+        if (x.ndim() != 2 or rr.ndim() != 2 or ri.ndim() != 2) return error.Type;
+        if (rr.shape()[0] != ri.shape()[0] or rr.shape()[1] != ri.shape()[1]) return error.Type;
+        if (x.shape()[0] != rr.shape()[0]) return error.Type;
+
+        const rows = x.shape()[0];
+        const pair_cols = rr.shape()[1];
+        const rotated_cols = pair_cols * 2;
+        if (rotated_cols > x.shape()[1]) return error.Type;
+
+        const ctx = try self.backendContext();
+        const even_start = [_]i32{ 0, 0 };
+        const even_stop = [_]i32{ rows, rotated_cols };
+        const odd_start = [_]i32{ 0, 1 };
+        const odd_stop = [_]i32{ rows, rotated_cols };
+        const strides = [_]i32{ 1, 2 };
+
+        var even = mlx.Array.slice(ctx.*, x, &even_start, &even_stop, &strides) catch |err| return mapMlxError(err);
+        defer even.deinit();
+        var odd = mlx.Array.slice(ctx.*, x, &odd_start, &odd_stop, &strides) catch |err| return mapMlxError(err);
+        defer odd.deinit();
+
+        var even_rr = mlx.Array.mul(ctx.*, even, rr) catch |err| return mapMlxError(err);
+        defer even_rr.deinit();
+        var odd_ri = mlx.Array.mul(ctx.*, odd, ri) catch |err| return mapMlxError(err);
+        defer odd_ri.deinit();
+        var re = mlx.Array.sub(ctx.*, even_rr, odd_ri) catch |err| return mapMlxError(err);
+        defer re.deinit();
+
+        var even_ri = mlx.Array.mul(ctx.*, even, ri) catch |err| return mapMlxError(err);
+        defer even_ri.deinit();
+        var odd_rr = mlx.Array.mul(ctx.*, odd, rr) catch |err| return mapMlxError(err);
+        defer odd_rr.deinit();
+        var im = mlx.Array.add(ctx.*, even_ri, odd_rr) catch |err| return mapMlxError(err);
+        defer im.deinit();
+
+        if (rotated_cols == x.shape()[1]) {
+            const pieces = [_]mlx.Array{ re, im };
+            var stacked = mlx.Array.stack(ctx.*, &pieces) catch |err| return mapMlxError(err);
+            defer stacked.deinit();
+            var swapped0 = mlx.Array.swapAxes(ctx.*, stacked, 0, 1) catch |err| return mapMlxError(err);
+            defer swapped0.deinit();
+            var swapped = mlx.Array.swapAxes(ctx.*, swapped0, 1, 2) catch |err| return mapMlxError(err);
+            defer swapped.deinit();
+            // As with ropeflat, reshaping a swapped view can preserve the old
+            // physical layout, so force a concrete copy before flattening.
+            var concrete = mlx.Array.copy(ctx.*, swapped) catch |err| return mapMlxError(err);
+            defer concrete.deinit();
+            const out_shape = [_]i32{ rows, rotated_cols };
+            const out = mlx.Array.reshape(ctx.*, concrete, &out_shape) catch |err| return mapMlxError(err);
+            return try self.wrapManagedBackendArray(out);
+        }
+
+        var out0 = mlx.Array.copy(ctx.*, x) catch |err| return mapMlxError(err);
+        defer out0.deinit();
+        var out1 = mlx.Array.sliceUpdate(ctx.*, out0, re, &even_start, &even_stop, &strides) catch |err| return mapMlxError(err);
+        defer out1.deinit();
+        const out = mlx.Array.sliceUpdate(ctx.*, out1, im, &odd_start, &odd_stop, &strides) catch |err| return mapMlxError(err);
+        return try self.wrapManagedBackendArray(out);
+    }
+
     fn applyRmsNormBuiltin(self: *Session, args: []const Value) KError!Value {
         if (args.len != 3) return error.Arity;
-        if (comptime !runtime_has_mlx) return error.Unsupported;
+        if (comptime !runtime_has_mlx or !mlx.supports_full_ops) return error.Unsupported;
 
         const eps = scalarNumericFloatValue(args[2]) orelse return error.Type;
         _ = valueNumericMode(args[0]) orelse return error.Type;
@@ -13646,6 +19129,447 @@ fn tryScalarIntBoolDyad(self: *Session, op: BuiltinId, left: Value, right: Value
         return try self.wrapManagedBackendArray(out);
     }
 
+    fn applyLayerNormBuiltin(self: *Session, args: []const Value) KError!Value {
+        if (args.len != 4) return error.Arity;
+        if (comptime !runtime_has_mlx or !mlx.supports_full_ops) return error.Unsupported;
+
+        const eps = scalarNumericFloatValue(args[3]) orelse return error.Type;
+        _ = valueNumericMode(args[0]) orelse return error.Type;
+        _ = valueNumericMode(args[1]) orelse return error.Type;
+        _ = valueNumericMode(args[2]) orelse return error.Type;
+
+        var x = try self.materializeBackendArray(args[0]);
+        defer x.deinit();
+        var w = try self.materializeBackendArray(args[1]);
+        defer w.deinit();
+        var b = try self.materializeBackendArray(args[2]);
+        defer b.deinit();
+
+        if (x.ndim() == 0) return error.Type;
+        if (w.ndim() != 1 or b.ndim() != 1) return error.Type;
+        const width = x.shape()[x.ndim() - 1];
+        if (w.shape()[0] != width or b.shape()[0] != width) return error.Type;
+
+        const ctx = try self.backendContext();
+        const out = mlx.Array.layerNorm(ctx.*, x, w, b, @floatCast(eps)) catch |err| return mapMlxError(err);
+        return try self.wrapManagedBackendArray(out);
+    }
+
+    fn applyGeluBuiltin(self: *Session, args: []const Value) KError!Value {
+        if (args.len != 1) return error.Arity;
+        if (comptime !runtime_has_mlx or !mlx.supports_full_ops) return error.Unsupported;
+
+        _ = valueNumericMode(args[0]) orelse return error.Type;
+
+        var x = try self.materializeBackendArray(args[0]);
+        defer x.deinit();
+        if (x.ndim() == 0) return error.Type;
+
+        const ctx = try self.backendContext();
+        const out = mlx.Array.gelu(ctx.*, x) catch |err| return mapMlxError(err);
+        return try self.wrapManagedBackendArray(out);
+    }
+
+    fn applySoftmaxBuiltin(self: *Session, args: []const Value) KError!Value {
+        if (args.len != 1) return error.Arity;
+        if (comptime !runtime_has_mlx or !mlx.supports_full_ops) return error.Unsupported;
+
+        _ = valueNumericMode(args[0]) orelse return error.Type;
+
+        var x = try self.materializeBackendArray(args[0]);
+        defer x.deinit();
+        if (x.ndim() == 0) return error.Type;
+
+        const ctx = try self.backendContext();
+        const out = mlx.Array.softmaxLastAxis(ctx.*, x, false) catch |err| return mapMlxError(err);
+        return try self.wrapManagedBackendArray(out);
+    }
+
+    fn applyConv2dBuiltin(self: *Session, args: []const Value) KError!Value {
+        if (args.len != 6 and args.len != 7) return error.Arity;
+        if (comptime !runtime_has_mlx or !mlx.supports_full_ops) return error.Unsupported;
+
+        const stride_h_i64 = scalarIntLikeValue(args[2]) orelse return error.Type;
+        const stride_w_i64 = scalarIntLikeValue(args[3]) orelse return error.Type;
+        const padding_h_i64 = scalarIntLikeValue(args[4]) orelse return error.Type;
+        const padding_w_i64 = scalarIntLikeValue(args[5]) orelse return error.Type;
+        if (stride_h_i64 <= 0 or stride_w_i64 <= 0 or padding_h_i64 < 0 or padding_w_i64 < 0) return error.Type;
+
+        _ = valueNumericMode(args[0]) orelse return error.Type;
+        _ = valueNumericMode(args[1]) orelse return error.Type;
+
+        const stride_h: i32 = std.math.cast(i32, stride_h_i64) orelse return error.Unsupported;
+        const stride_w: i32 = std.math.cast(i32, stride_w_i64) orelse return error.Unsupported;
+        const padding_h: i32 = std.math.cast(i32, padding_h_i64) orelse return error.Unsupported;
+        const padding_w: i32 = std.math.cast(i32, padding_w_i64) orelse return error.Unsupported;
+
+        var input = try self.materializeBackendArray(args[0]);
+        defer input.deinit();
+        var weight = try self.materializeBackendArray(args[1]);
+        defer weight.deinit();
+
+        if (input.ndim() != 4 or weight.ndim() != 4) return error.Type;
+        if (weight.shape()[3] != input.shape()[3]) return error.Type;
+
+        const ctx = try self.backendContext();
+        // MLX conv kernels are sensitive to some upstream structural/materialized
+        // hybrids coming out of larger graph fragments. A concrete copy keeps the
+        // conv path aligned with the standalone probe behavior.
+        var input_concrete = mlx.Array.copy(ctx.*, input) catch |err| return mapMlxError(err);
+        defer input_concrete.deinit();
+        const out = if (args.len == 7) blk: {
+            _ = valueNumericMode(args[6]) orelse return error.Type;
+            var bias = try self.materializeBackendArray(args[6]);
+            defer bias.deinit();
+            if (bias.ndim() != 1 or bias.shape()[0] != weight.shape()[0]) return error.Type;
+            break :blk mlx.Array.conv2dBias(ctx.*, input_concrete, weight, bias, stride_h, stride_w, padding_h, padding_w) catch |err| return mapMlxError(err);
+        } else mlx.Array.conv2d(ctx.*, input_concrete, weight, stride_h, stride_w, padding_h, padding_w) catch |err| return mapMlxError(err);
+        return try self.wrapManagedBackendArray(out);
+    }
+
+    fn applyConvTranspose2dBuiltin(self: *Session, args: []const Value) KError!Value {
+        if (args.len != 6 and args.len != 7) return error.Arity;
+        if (comptime !runtime_has_mlx or !mlx.supports_full_ops) return error.Unsupported;
+
+        const stride_h_i64 = scalarIntLikeValue(args[2]) orelse return error.Type;
+        const stride_w_i64 = scalarIntLikeValue(args[3]) orelse return error.Type;
+        const padding_h_i64 = scalarIntLikeValue(args[4]) orelse return error.Type;
+        const padding_w_i64 = scalarIntLikeValue(args[5]) orelse return error.Type;
+        if (stride_h_i64 <= 0 or stride_w_i64 <= 0 or padding_h_i64 < 0 or padding_w_i64 < 0) return error.Type;
+
+        _ = valueNumericMode(args[0]) orelse return error.Type;
+        _ = valueNumericMode(args[1]) orelse return error.Type;
+
+        const stride_h: i32 = std.math.cast(i32, stride_h_i64) orelse return error.Unsupported;
+        const stride_w: i32 = std.math.cast(i32, stride_w_i64) orelse return error.Unsupported;
+        const padding_h: i32 = std.math.cast(i32, padding_h_i64) orelse return error.Unsupported;
+        const padding_w: i32 = std.math.cast(i32, padding_w_i64) orelse return error.Unsupported;
+
+        var input = try self.materializeBackendArray(args[0]);
+        defer input.deinit();
+        var weight = try self.materializeBackendArray(args[1]);
+        defer weight.deinit();
+
+        if (input.ndim() != 4 or weight.ndim() != 4) return error.Type;
+        if (weight.shape()[3] != input.shape()[3]) return error.Type;
+
+        const ctx = try self.backendContext();
+        // As above for conv2d, force a concrete tensor before dispatch so the
+        // transpose-conv path matches the validated standalone probes.
+        var input_concrete = mlx.Array.copy(ctx.*, input) catch |err| return mapMlxError(err);
+        defer input_concrete.deinit();
+        const out = if (args.len == 7) blk: {
+            _ = valueNumericMode(args[6]) orelse return error.Type;
+            var bias = try self.materializeBackendArray(args[6]);
+            defer bias.deinit();
+            if (bias.ndim() != 1 or bias.shape()[0] != weight.shape()[0]) return error.Type;
+            break :blk mlx.Array.convTranspose2dBias(ctx.*, input_concrete, weight, bias, stride_h, stride_w, padding_h, padding_w) catch |err| return mapMlxError(err);
+        } else mlx.Array.convTranspose2d(ctx.*, input_concrete, weight, stride_h, stride_w, padding_h, padding_w) catch |err| return mapMlxError(err);
+        return try self.wrapManagedBackendArray(out);
+    }
+
+    fn applyUpsampleNearest2dBuiltin(self: *Session, args: []const Value) KError!Value {
+        if (args.len != 3) return error.Arity;
+        if (comptime !runtime_has_mlx or !mlx.supports_full_ops) return error.Unsupported;
+
+        const scale_h_i64 = scalarIntLikeValue(args[1]) orelse return error.Type;
+        const scale_w_i64 = scalarIntLikeValue(args[2]) orelse return error.Type;
+        if (scale_h_i64 <= 0 or scale_w_i64 <= 0) return error.Type;
+        _ = valueNumericMode(args[0]) orelse return error.Type;
+
+        const scale_h: i32 = std.math.cast(i32, scale_h_i64) orelse return error.Unsupported;
+        const scale_w: i32 = std.math.cast(i32, scale_w_i64) orelse return error.Unsupported;
+
+        var input = try self.materializeBackendArray(args[0]);
+        defer input.deinit();
+        if (input.ndim() != 4) return error.Type;
+
+        const ctx = try self.backendContext();
+        const out = mlx.Array.upsampleNearest2d(ctx.*, input, scale_h, scale_w) catch |err| return mapMlxError(err);
+        return try self.wrapManagedBackendArray(out);
+    }
+
+    fn applyGroupNormBuiltin(self: *Session, args: []const Value) KError!Value {
+        if (args.len != 5) return error.Arity;
+        if (comptime !runtime_has_mlx or !mlx.supports_full_ops) return error.Unsupported;
+
+        const groups_i64 = scalarIntLikeValue(args[1]) orelse return error.Type;
+        const eps = scalarNumericFloatValue(args[4]) orelse return error.Type;
+        if (groups_i64 <= 0) return error.Type;
+        _ = valueNumericMode(args[0]) orelse return error.Type;
+        _ = valueNumericMode(args[2]) orelse return error.Type;
+        _ = valueNumericMode(args[3]) orelse return error.Type;
+
+        const groups: i32 = std.math.cast(i32, groups_i64) orelse return error.Unsupported;
+
+        var input = try self.materializeBackendArray(args[0]);
+        defer input.deinit();
+        var weight = try self.materializeBackendArray(args[2]);
+        defer weight.deinit();
+        var bias = try self.materializeBackendArray(args[3]);
+        defer bias.deinit();
+
+        if (input.ndim() != 4) return error.Type;
+        if (weight.ndim() != 1 or bias.ndim() != 1) return error.Type;
+        if (weight.shape()[0] != input.shape()[3] or bias.shape()[0] != input.shape()[3]) return error.Type;
+        if (@mod(input.shape()[3], groups) != 0) return error.Type;
+
+        const ctx = try self.backendContext();
+        const out = mlx.Array.groupNorm(ctx.*, input, groups, weight, bias, @floatCast(eps)) catch |err| return mapMlxError(err);
+        return try self.wrapManagedBackendArray(out);
+    }
+
+    fn applySdpaBuiltin(self: *Session, args: []const Value) KError!Value {
+        if (args.len != 5) return error.Arity;
+        if (comptime !runtime_has_mlx or !mlx.supports_full_ops) return error.Unsupported;
+
+        const scale = scalarNumericFloatValue(args[3]) orelse return error.Type;
+        const mode = castTagBytes(args[4]) orelse return error.Type;
+        _ = valueNumericMode(args[0]) orelse return error.Type;
+        _ = valueNumericMode(args[1]) orelse return error.Type;
+        _ = valueNumericMode(args[2]) orelse return error.Type;
+
+        var q = try self.materializeBackendArray(args[0]);
+        defer q.deinit();
+        var k = try self.materializeBackendArray(args[1]);
+        defer k.deinit();
+        var v = try self.materializeBackendArray(args[2]);
+        defer v.deinit();
+
+        if (q.ndim() != 4 or k.ndim() != 4 or v.ndim() != 4) return error.Type;
+        if (q.shape()[0] != k.shape()[0] or q.shape()[0] != v.shape()[0]) return error.Type;
+        if (k.shape()[2] != v.shape()[2]) return error.Type;
+        if (q.shape()[3] != k.shape()[3] or k.shape()[3] != v.shape()[3]) return error.Type;
+
+        const ctx = try self.backendContext();
+        var q_native = mlx.Array.swapAxes(ctx.*, q, 1, 2) catch |err| return mapMlxError(err);
+        defer q_native.deinit();
+        var k_native = mlx.Array.swapAxes(ctx.*, k, 1, 2) catch |err| return mapMlxError(err);
+        defer k_native.deinit();
+        var v_native = mlx.Array.swapAxes(ctx.*, v, 1, 2) catch |err| return mapMlxError(err);
+        defer v_native.deinit();
+
+        var out_native = if (std.mem.eql(u8, mode, "causal"))
+            mlx.Array.sdpaCausal(ctx.*, q_native, k_native, v_native, @floatCast(scale)) catch |err| return mapMlxError(err)
+        else if (mode.len == 0 or std.mem.eql(u8, mode, "none"))
+            mlx.Array.sdpaNone(ctx.*, q_native, k_native, v_native, @floatCast(scale)) catch |err| return mapMlxError(err)
+        else
+            return error.Unsupported;
+        defer out_native.deinit();
+        const out = mlx.Array.swapAxes(ctx.*, out_native, 1, 2) catch |err| return mapMlxError(err);
+        return try self.wrapManagedBackendArray(out);
+    }
+
+    fn applySam3BoxRpbBuiltin(self: *Session, args: []const Value) KError!Value {
+        if (args.len != 11) return error.Arity;
+        if (comptime !runtime_has_mlx or !mlx.supports_full_ops) return error.Unsupported;
+
+        const height_i64 = scalarIntLikeValue(args[9]) orelse return error.Type;
+        const width_i64 = scalarIntLikeValue(args[10]) orelse return error.Type;
+        if (height_i64 <= 0 or width_i64 <= 0) return error.Type;
+        const height: i32 = std.math.cast(i32, height_i64) orelse return error.Unsupported;
+        const width: i32 = std.math.cast(i32, width_i64) orelse return error.Unsupported;
+
+        inline for (0..9) |idx| {
+            _ = valueNumericMode(args[idx]) orelse return error.Type;
+        }
+
+        var reference_boxes = try self.materializeBackendArray(args[0]);
+        defer reference_boxes.deinit();
+        var xw0 = try self.materializeBackendArray(args[1]);
+        defer xw0.deinit();
+        var xb0 = try self.materializeBackendArray(args[2]);
+        defer xb0.deinit();
+        var xw1 = try self.materializeBackendArray(args[3]);
+        defer xw1.deinit();
+        var xb1 = try self.materializeBackendArray(args[4]);
+        defer xb1.deinit();
+        var yw0 = try self.materializeBackendArray(args[5]);
+        defer yw0.deinit();
+        var yb0 = try self.materializeBackendArray(args[6]);
+        defer yb0.deinit();
+        var yw1 = try self.materializeBackendArray(args[7]);
+        defer yw1.deinit();
+        var yb1 = try self.materializeBackendArray(args[8]);
+        defer yb1.deinit();
+
+        if (reference_boxes.ndim() != 2 or reference_boxes.shape()[1] != 4) return error.Type;
+        if (xw0.ndim() != 2 or xw0.shape()[1] != 2) return error.Type;
+        if (xb0.ndim() != 1 or xb0.shape()[0] != xw0.shape()[0]) return error.Type;
+        if (xw1.ndim() != 2 or xw1.shape()[1] != xw0.shape()[0]) return error.Type;
+        if (xb1.ndim() != 1 or xb1.shape()[0] != xw1.shape()[0]) return error.Type;
+        if (yw0.ndim() != 2 or yw0.shape()[1] != 2) return error.Type;
+        if (yb0.ndim() != 1 or yb0.shape()[0] != yw0.shape()[0]) return error.Type;
+        if (yw1.ndim() != 2 or yw1.shape()[1] != yw0.shape()[0]) return error.Type;
+        if (yb1.ndim() != 1 or yb1.shape()[0] != yw1.shape()[0]) return error.Type;
+        if (xw1.shape()[0] != yw1.shape()[0]) return error.Type;
+
+        const ctx = try self.backendContext();
+        const out = mlx.Array.sam3BoxRpbLog(
+            ctx.*,
+            reference_boxes,
+            xw0,
+            xb0,
+            xw1,
+            xb1,
+            yw0,
+            yb0,
+            yw1,
+            yb1,
+            height,
+            width,
+        ) catch |err| return mapMlxError(err);
+        return try self.wrapManagedBackendArray(out);
+    }
+
+    fn applySdpaMaskBuiltin(self: *Session, args: []const Value) KError!Value {
+        if (args.len != 5) return error.Arity;
+        if (comptime !runtime_has_mlx or !mlx.supports_full_ops) return error.Unsupported;
+
+        const scale = scalarNumericFloatValue(args[4]) orelse return error.Type;
+        _ = valueNumericMode(args[0]) orelse return error.Type;
+        _ = valueNumericMode(args[1]) orelse return error.Type;
+        _ = valueNumericMode(args[2]) orelse return error.Type;
+        _ = valueNumericMode(args[3]) orelse return error.Type;
+
+        var q = try self.materializeBackendArray(args[0]);
+        defer q.deinit();
+        var k = try self.materializeBackendArray(args[1]);
+        defer k.deinit();
+        var v = try self.materializeBackendArray(args[2]);
+        defer v.deinit();
+        var mask = try self.materializeBackendArray(args[3]);
+        defer mask.deinit();
+
+        if (q.ndim() != 4 or k.ndim() != 4 or v.ndim() != 4) return error.Type;
+        if (mask.ndim() < 2 or mask.ndim() > 4) return error.Type;
+        if (q.shape()[0] != k.shape()[0] or q.shape()[0] != v.shape()[0]) return error.Type;
+        if (k.shape()[2] != v.shape()[2]) return error.Type;
+        if (q.shape()[3] != k.shape()[3] or k.shape()[3] != v.shape()[3]) return error.Type;
+
+        const ctx = try self.backendContext();
+        var q_native = mlx.Array.swapAxes(ctx.*, q, 1, 2) catch |err| return mapMlxError(err);
+        defer q_native.deinit();
+        var k_native = mlx.Array.swapAxes(ctx.*, k, 1, 2) catch |err| return mapMlxError(err);
+        defer k_native.deinit();
+        var v_native = mlx.Array.swapAxes(ctx.*, v, 1, 2) catch |err| return mapMlxError(err);
+        defer v_native.deinit();
+
+        var out_native = mlx.Array.sdpaMasked(ctx.*, q_native, k_native, v_native, mask, @floatCast(scale)) catch |err| return mapMlxError(err);
+        defer out_native.deinit();
+        const out = mlx.Array.swapAxes(ctx.*, out_native, 1, 2) catch |err| return mapMlxError(err);
+        return try self.wrapManagedBackendArray(out);
+    }
+
+    fn applySdpaFlatBuiltin(self: *Session, args: []const Value) KError!Value {
+        if (args.len != 6) return error.Arity;
+        if (comptime !runtime_has_mlx or !mlx.supports_full_ops) return error.Unsupported;
+
+        const heads_i64 = scalarIntLikeValue(args[3]) orelse return error.Type;
+        const scale = scalarNumericFloatValue(args[4]) orelse return error.Type;
+        const mode = castTagBytes(args[5]) orelse return error.Type;
+        if (heads_i64 <= 0) return error.Type;
+        const heads: i32 = std.math.cast(i32, heads_i64) orelse return error.Unsupported;
+
+        _ = valueNumericMode(args[0]) orelse return error.Type;
+        _ = valueNumericMode(args[1]) orelse return error.Type;
+        _ = valueNumericMode(args[2]) orelse return error.Type;
+
+        var q = try self.materializeBackendArray(args[0]);
+        defer q.deinit();
+        var k = try self.materializeBackendArray(args[1]);
+        defer k.deinit();
+        var v = try self.materializeBackendArray(args[2]);
+        defer v.deinit();
+
+        if (q.ndim() != 2 or k.ndim() != 2 or v.ndim() != 2) return error.Type;
+        if (q.shape()[1] != k.shape()[1] or k.shape()[1] != v.shape()[1]) return error.Type;
+        if (@mod(q.shape()[0], heads) != 0) return error.Type;
+        const tokens = @divExact(q.shape()[0], heads);
+        const ctx = try self.backendContext();
+        const d = q.shape()[1];
+        const q_shape = [_]i32{ 1, tokens, heads, d };
+        const kv_rows = k.shape()[0];
+        const vv_rows = v.shape()[0];
+        if (kv_rows != vv_rows) return error.Type;
+
+        const kv_shape = if (kv_rows == tokens)
+            [_]i32{ 1, tokens, 1, d }
+        else if (kv_rows == q.shape()[0])
+            [_]i32{ 1, tokens, heads, d }
+        else
+            return error.Type;
+
+        var q4 = mlx.Array.reshape(ctx.*, q, &q_shape) catch |err| return mapMlxError(err);
+        defer q4.deinit();
+        var k4 = mlx.Array.reshape(ctx.*, k, &kv_shape) catch |err| return mapMlxError(err);
+        defer k4.deinit();
+        var v4 = mlx.Array.reshape(ctx.*, v, &kv_shape) catch |err| return mapMlxError(err);
+        defer v4.deinit();
+
+        var q_native = mlx.Array.swapAxes(ctx.*, q4, 1, 2) catch |err| return mapMlxError(err);
+        defer q_native.deinit();
+        var k_native = mlx.Array.swapAxes(ctx.*, k4, 1, 2) catch |err| return mapMlxError(err);
+        defer k_native.deinit();
+        var v_native = mlx.Array.swapAxes(ctx.*, v4, 1, 2) catch |err| return mapMlxError(err);
+        defer v_native.deinit();
+
+        var out_native = if (std.mem.eql(u8, mode, "causal"))
+            mlx.Array.sdpaCausal(ctx.*, q_native, k_native, v_native, @floatCast(scale)) catch |err| return mapMlxError(err)
+        else if (mode.len == 0 or std.mem.eql(u8, mode, "none"))
+            mlx.Array.sdpaNone(ctx.*, q_native, k_native, v_native, @floatCast(scale)) catch |err| return mapMlxError(err)
+        else
+            return error.Unsupported;
+        defer out_native.deinit();
+
+        var out4 = mlx.Array.swapAxes(ctx.*, out_native, 1, 2) catch |err| return mapMlxError(err);
+        defer out4.deinit();
+        const out_shape = [_]i32{ tokens * heads, d };
+        const out = mlx.Array.reshape(ctx.*, out4, &out_shape) catch |err| return mapMlxError(err);
+        return try self.wrapManagedBackendArray(out);
+    }
+
+    fn applyGeluApproxBuiltin(self: *Session, args: []const Value) KError!Value {
+        if (args.len != 1) return error.Arity;
+        if (comptime !runtime_has_mlx or !mlx.supports_full_ops) return error.Unsupported;
+
+        _ = valueNumericMode(args[0]) orelse return error.Type;
+
+        var x = try self.materializeBackendArray(args[0]);
+        defer x.deinit();
+        if (x.ndim() == 0) return error.Type;
+
+        const ctx = try self.backendContext();
+        const out = mlx.Array.geluApprox(ctx.*, x) catch |err| return mapMlxError(err);
+        return try self.wrapManagedBackendArray(out);
+    }
+
+    fn applyMlpDenseBuiltin(self: *Session, args: []const Value) KError!Value {
+        if (args.len != 4) return error.Arity;
+        if (comptime !runtime_has_mlx or !mlx.supports_full_ops) return error.Unsupported;
+
+        for (args) |arg| _ = valueNumericMode(arg) orelse return error.Type;
+
+        var x = try self.materializeBackendArray(args[0]);
+        defer x.deinit();
+        var gate_w = try self.materializeBackendArray(args[1]);
+        defer gate_w.deinit();
+        var up_w = try self.materializeBackendArray(args[2]);
+        defer up_w.deinit();
+        var down_w = try self.materializeBackendArray(args[3]);
+        defer down_w.deinit();
+
+        if (x.ndim() == 0 or gate_w.ndim() != 2 or up_w.ndim() != 2 or down_w.ndim() != 2) return error.Type;
+        if (x.shape()[x.ndim() - 1] != gate_w.shape()[0]) return error.Type;
+        if (x.shape()[x.ndim() - 1] != up_w.shape()[0]) return error.Type;
+        if (gate_w.shape()[1] != up_w.shape()[1]) return error.Type;
+        if (down_w.shape()[0] != gate_w.shape()[1]) return error.Type;
+
+        const ctx = try self.backendContext();
+        const out = mlx.Array.mlpDense(ctx.*, x, gate_w, up_w, down_w) catch |err| return mapMlxError(err);
+        return try self.wrapManagedBackendArray(out);
+    }
+
     fn stringBytes(value: Value) ?[]const u8 {
         return if (stringSourceInfo(value)) |source| source.bytes() else null;
     }
@@ -13653,6 +19577,114 @@ fn tryScalarIntBoolDyad(self: *Session, op: BuiltinId, left: Value, right: Value
     fn symbolBytes(value: Value) ?[]const u8 {
         if (value.tag() != .array or value.arrayKind() != .host_symbol) return null;
         return hostTextBytes(value.asHostSymbol());
+    }
+
+    fn floatMatchEqual(left: f64, right: f64) bool {
+        if (std.math.isNan(left) and std.math.isNan(right)) return true;
+        return left == right;
+    }
+
+    fn valueMatchEqual(self: *Session, left: Value, right: Value) KError!bool {
+        if (tableScalarValue(left)) |scalar| {
+            if (scalar.is_null) return tableScalarValue(right) != null and valueAsHostTableScalar(right).is_null and scalar.kind == valueAsHostTableScalar(right).kind;
+            return try self.valueMatchEqual(scalar.value, right);
+        }
+        if (tableScalarValue(right)) |scalar| {
+            if (scalar.is_null) return false;
+            return try self.valueMatchEqual(left, scalar.value);
+        }
+
+        if (left.tag() != right.tag()) {
+            const lhs = scalarIntLikeValue(left) orelse return false;
+            const rhs = scalarIntLikeValue(right) orelse return false;
+            return lhs == rhs;
+        }
+
+        return switch (left.tag()) {
+            .int => left.asInt() == right.asInt(),
+            .float => floatMatchEqual(left.asFloat(), right.asFloat()),
+            .bool => left.asBool() == right.asBool(),
+            .builtin => left.asBuiltin() == right.asBuiltin(),
+            .closure => left.asClosure() == right.asClosure(),
+            .array => switch (left.arrayKind()) {
+                .host_table_scalar => blk: {
+                    if (right.arrayKind() != .host_table_scalar) break :blk false;
+                    const lhs = valueAsHostTableScalar(left);
+                    const rhs = valueAsHostTableScalar(right);
+                    if (lhs.kind != rhs.kind or lhs.is_null != rhs.is_null) break :blk false;
+                    if (lhs.is_null) break :blk true;
+                    break :blk try self.valueMatchEqual(lhs.value, rhs.value);
+                },
+                .host_string, .host_string_view => if (stringBytes(right)) |right_text|
+                    std.mem.eql(u8, stringBytes(left).?, right_text)
+                else
+                    false,
+                .host_symbol => right.arrayKind() == .host_symbol and std.mem.eql(u8, hostTextBytes(left.asHostSymbol()), hostTextBytes(right.asHostSymbol())),
+                .host_boxed_array => blk: {
+                    if (right.arrayKind() != .host_boxed_array) break :blk false;
+                    const left_items = left.asHostBoxedArray().items;
+                    const right_items = right.asHostBoxedArray().items;
+                    if (left_items.len != right_items.len) break :blk false;
+                    for (left_items, right_items) |left_item, right_item| {
+                        if (!try self.valueMatchEqual(left_item, right_item)) break :blk false;
+                    }
+                    break :blk true;
+                },
+                .host_string_list => blk: {
+                    if (right.arrayKind() != .host_string_list) break :blk false;
+                    const left_list = left.asHostStringList();
+                    const right_list = right.asHostStringList();
+                    if (left_list.len != right_list.len) break :blk false;
+                    for (0..left_list.len) |idx| {
+                        const left_item = try self.hostStringListItemValue(left_list, idx);
+                        const right_item = try self.hostStringListItemValue(right_list, idx);
+                        if (!try self.valueMatchEqual(left_item, right_item)) break :blk false;
+                    }
+                    break :blk true;
+                },
+                .host_dense_array, .backend_array, .numeric_array => blk: {
+                    switch (right.arrayKind()) {
+                        .host_dense_array, .backend_array, .numeric_array => {},
+                        else => break :blk false,
+                    }
+                    const lhs = try numericHostArrayValue(self, left);
+                    const rhs = try numericHostArrayValue(self, right);
+                    if (lhs.len() != rhs.len()) break :blk false;
+                    var lhs_dims_buf: [numeric_array_max_rank]i32 = [_]i32{0} ** numeric_array_max_rank;
+                    var rhs_dims_buf: [numeric_array_max_rank]i32 = [_]i32{0} ** numeric_array_max_rank;
+                    if (!std.mem.eql(i32, hostDenseShapeDims(lhs, &lhs_dims_buf), hostDenseShapeDims(rhs, &rhs_dims_buf))) break :blk false;
+                    for (0..lhs.len()) |idx| {
+                        const left_item = try self.hostDenseIndexScalar(lhs, @intCast(idx));
+                        const right_item = try self.hostDenseIndexScalar(rhs, @intCast(idx));
+                        if (!try self.valueMatchEqual(left_item, right_item)) break :blk false;
+                    }
+                    break :blk true;
+                },
+                .host_keyed_store => blk: {
+                    if (right.arrayKind() != .host_keyed_store) break :blk false;
+                    const lhs = left.asHostKeyedStore();
+                    const rhs = right.asHostKeyedStore();
+                    if (lhs.layout != rhs.layout or lhs.row_count != rhs.row_count) break :blk false;
+                    const count = keyedStoreNameCount(lhs);
+                    if (count != keyedStoreNameCount(rhs)) break :blk false;
+                    for (0..count) |idx| {
+                        const left_name = try self.keyedStoreNameValue(lhs, idx);
+                        const right_name = try self.keyedStoreNameValue(rhs, idx);
+                        if (!try self.valueMatchEqual(left_name, right_name)) break :blk false;
+                        const left_value = try self.keyedStoreValueAt(lhs, idx);
+                        const right_value = try self.keyedStoreValueAt(rhs, idx);
+                        if (!try self.valueMatchEqual(left_value, right_value)) break :blk false;
+                    }
+                    break :blk true;
+                },
+                .host_relation => false,
+                else => false,
+            },
+        };
+    }
+
+    fn matchValues(self: *Session, left: Value, right: Value) KError!Value {
+        return Value.fromBool(try self.valueMatchEqual(left, right));
     }
 
     fn valueStructuralEqual(self: *Session, left: Value, right: Value) KError!bool {
@@ -13686,6 +19718,14 @@ fn tryScalarIntBoolDyad(self: *Session, op: BuiltinId, left: Value, right: Value
             .builtin => left.asBuiltin() == right.asBuiltin(),
             .closure => left.asClosure() == right.asClosure(),
             .array => switch (left.arrayKind()) {
+                .host_table_scalar => blk: {
+                    if (right.arrayKind() != .host_table_scalar) break :blk false;
+                    const lhs = valueAsHostTableScalar(left);
+                    const rhs = valueAsHostTableScalar(right);
+                    if (lhs.kind != rhs.kind or lhs.is_null != rhs.is_null) break :blk false;
+                    if (lhs.is_null) break :blk true;
+                    break :blk try self.valueStructuralEqual(lhs.value, rhs.value);
+                },
                 .host_string, .host_string_view => if (stringBytes(right)) |right_text|
                     std.mem.eql(u8, stringBytes(left).?, right_text)
                 else
@@ -14021,7 +20061,7 @@ fn tryScalarIntBoolDyad(self: *Session, op: BuiltinId, left: Value, right: Value
     }
 
     fn rotcacheWantsBackend(value: Value) bool {
-        if (!runtime_has_mlx) return false;
+        if (!runtime_has_mlx or !mlx.supports_full_ops) return false;
         if (isBackendArrayValue(value) or hasBackendRealization(value)) return true;
         const handle = valueNumericHandle(value) orelse return false;
         return handle.preferred == .mlx;
@@ -14035,6 +20075,7 @@ fn tryScalarIntBoolDyad(self: *Session, op: BuiltinId, left: Value, right: Value
     }
 
     fn sliceBackendAxis0Value(self: *Session, value: Value, start: usize, count: usize) KError!Value {
+        if (comptime !runtime_has_mlx) return error.Unsupported;
         const handle = shapedNumericHandle(value) orelse return error.Type;
         if (handle.rank == 0) return error.Type;
 
@@ -14060,6 +20101,7 @@ fn tryScalarIntBoolDyad(self: *Session, op: BuiltinId, left: Value, right: Value
     }
 
     fn zeroBackendAxis0LikeValue(self: *Session, value: Value, rows: usize) KError!Value {
+        if (comptime !runtime_has_mlx) return error.Unsupported;
         const handle = shapedNumericHandle(value) orelse return error.Type;
         if (handle.rank == 0) return error.Type;
 
@@ -14074,6 +20116,7 @@ fn tryScalarIntBoolDyad(self: *Session, op: BuiltinId, left: Value, right: Value
     }
 
     fn sliceUpdateBackendAxis0Value(self: *Session, value: Value, start: usize, update: Value) KError!Value {
+        if (comptime !runtime_has_mlx or !mlx.supports_full_ops) return error.Unsupported;
         const value_handle = shapedNumericHandle(value) orelse return error.Type;
         if (value_handle.rank == 0) return error.Type;
         try rotcachePayloadMatches(value, update);
@@ -14105,6 +20148,7 @@ fn tryScalarIntBoolDyad(self: *Session, op: BuiltinId, left: Value, right: Value
     }
 
     fn concatBackendAxis0Values(self: *Session, left: Value, right: Value) KError!Value {
+        if (comptime !runtime_has_mlx) return error.Unsupported;
         var arrays = [_]mlx.Array{
             try self.materializeBackendArray(left),
             try self.materializeBackendArray(right),
@@ -14151,6 +20195,7 @@ fn tryScalarIntBoolDyad(self: *Session, op: BuiltinId, left: Value, right: Value
     }
 
     fn rotcacheInitBackendValue(self: *Session, left: Value, max_size: usize, max_i64: i64) KError!Value {
+        if (comptime !runtime_has_mlx or !mlx.supports_full_ops) return error.Unsupported;
         const payload = try self.rotcacheTailValue(left, max_size);
         defer self.releaseValue(payload);
         const payload_rows = try rotcachePayloadRows(payload);
@@ -14175,6 +20220,7 @@ fn tryScalarIntBoolDyad(self: *Session, op: BuiltinId, left: Value, right: Value
     }
 
     fn rotcacheViewBackendValue(self: *Session, payload: Value, max_size: usize, offset: usize) KError!Value {
+        if (comptime !runtime_has_mlx or !mlx.supports_full_ops) return error.Unsupported;
         const used = @min(offset, max_size);
         if (used == 0) return try self.sliceBackendAxis0Value(payload, 0, 0);
         if (offset < max_size) return try self.sliceBackendAxis0Value(payload, 0, used);
@@ -14190,6 +20236,7 @@ fn tryScalarIntBoolDyad(self: *Session, op: BuiltinId, left: Value, right: Value
     }
 
     fn rotcacheUpdateBackendValue(self: *Session, state: RotCacheState, right: Value) KError!Value {
+        if (comptime !runtime_has_mlx or !mlx.supports_full_ops) return error.Unsupported;
         const right_rows = try rotcachePayloadRows(right);
         if (right_rows == 0) return try self.rotcacheViewBackendValue(state.payload, state.max_size, state.offset);
 
@@ -14403,6 +20450,1588 @@ fn tryScalarIntBoolDyad(self: *Session, op: BuiltinId, left: Value, right: Value
         return try numericIntAt(left, left_idx) == try numericIntAt(right, right_idx);
     }
 
+    fn lowerBoundAscFloat(items: []const f64, query: f64) usize {
+        var low: usize = 0;
+        var high: usize = items.len;
+        while (low < high) {
+            const mid = low + (high - low) / 2;
+            if (items[mid] < query) {
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+        return low;
+    }
+
+    fn lowerBoundDscFloat(items: []const f64, query: f64) usize {
+        var low: usize = 0;
+        var high: usize = items.len;
+        while (low < high) {
+            const mid = low + (high - low) / 2;
+            if (items[mid] > query) {
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+        return low;
+    }
+
+    fn fillSortedAscFloatDenseMonotoneQueries(left_items: []const f64, right_items: []const f64, out: []i64, miss_index: usize) KError!void {
+        const miss_i64 = std.math.cast(i64, miss_index) orelse return error.Unsupported;
+        if (right_items.len == 0) return;
+
+        const first = left_items[0];
+        const last = left_items[left_items.len - 1];
+        const first_query = right_items[0];
+        if (first_query != first_query or first_query > last) {
+            @memset(out, miss_i64);
+            return;
+        }
+
+        var left_idx: usize = 0;
+        var query_idx: usize = 0;
+        while (query_idx < right_items.len) : (query_idx += 1) {
+            const query = right_items[query_idx];
+            if (query != query) {
+                out[query_idx] = miss_i64;
+                continue;
+            }
+            if (query < first) {
+                out[query_idx] = miss_i64;
+                continue;
+            }
+            if (query > last) {
+                @memset(out[query_idx..], miss_i64);
+                return;
+            }
+            while (left_idx < left_items.len and left_items[left_idx] < query) : (left_idx += 1) {}
+            out[query_idx] = if (left_idx < left_items.len and left_items[left_idx] == query)
+                std.math.cast(i64, left_idx) orelse return error.Unsupported
+            else
+                miss_i64;
+        }
+    }
+
+    fn fillSortedDscFloatDenseMonotoneQueries(left_items: []const f64, right_items: []const f64, out: []i64, miss_index: usize) KError!void {
+        const miss_i64 = std.math.cast(i64, miss_index) orelse return error.Unsupported;
+        if (right_items.len == 0) return;
+
+        const first = left_items[0];
+        const last = left_items[left_items.len - 1];
+        const first_query = right_items[0];
+        if (first_query != first_query or first_query < last) {
+            @memset(out, miss_i64);
+            return;
+        }
+
+        var left_idx: usize = 0;
+        var query_idx: usize = 0;
+        while (query_idx < right_items.len) : (query_idx += 1) {
+            const query = right_items[query_idx];
+            if (query != query) {
+                out[query_idx] = miss_i64;
+                continue;
+            }
+            if (query > first) {
+                out[query_idx] = miss_i64;
+                continue;
+            }
+            if (query < last) {
+                @memset(out[query_idx..], miss_i64);
+                return;
+            }
+            while (left_idx < left_items.len and left_items[left_idx] > query) : (left_idx += 1) {}
+            out[query_idx] = if (left_idx < left_items.len and left_items[left_idx] == query)
+                std.math.cast(i64, left_idx) orelse return error.Unsupported
+            else
+                miss_i64;
+        }
+    }
+
+    fn lowerBoundAscInt(view: HostIntDenseView, query: i64) KError!usize {
+        var low: usize = 0;
+        var high: usize = hostIntDenseViewLen(view);
+        while (low < high) {
+            const mid = low + (high - low) / 2;
+            if (try hostIntDenseViewItem(view, mid) < query) {
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+        return low;
+    }
+
+    fn lowerBoundDscInt(view: HostIntDenseView, query: i64) KError!usize {
+        var low: usize = 0;
+        var high: usize = hostIntDenseViewLen(view);
+        while (low < high) {
+            const mid = low + (high - low) / 2;
+            if (try hostIntDenseViewItem(view, mid) > query) {
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+        return low;
+    }
+
+    fn hostFloatDenseValueFlags(value: Value, view: HostFloatDenseView) u8 {
+        return switch (view) {
+            .dense => switch (value.arrayKind()) {
+                .host_dense_array => value.asHostDenseArray().flags,
+                .numeric_array => blk: {
+                    const handle = value.asNumericArray();
+                    if (numericHostAttachment(handle)) |array| break :blk array.flags;
+                    break :blk 0;
+                },
+                .backend_array => blk: {
+                    const handle = valueNumericHandle(value) orelse break :blk 0;
+                    if (numericHostAttachment(handle)) |array| break :blk array.flags;
+                    break :blk 0;
+                },
+                else => 0,
+            },
+            else => 0,
+        };
+    }
+
+    fn findFirstEqualDenseFloatSlice(items: []const f64, query: f64) ?usize {
+        const lane_count = dense_host_simd_bytes / @sizeOf(f64);
+        const Vec = @Vector(lane_count, f64);
+        const query_vec: Vec = @splat(query);
+
+        var idx: usize = 0;
+        const vector_limit = items.len - (items.len % lane_count);
+        while (idx < vector_limit) : (idx += lane_count) {
+            const chunk: Vec = items[idx..][0..lane_count].*;
+            const matches = chunk == query_vec;
+            if (@reduce(.Or, matches)) {
+                inline for (0..lane_count) |lane| {
+                    if (matches[lane]) return idx + lane;
+                }
+            }
+        }
+        while (idx < items.len) : (idx += 1) {
+            if (items[idx] == query) return idx;
+        }
+        return null;
+    }
+
+    fn findFirstEqualDenseIntSlice(comptime T: type, items: []const T, query: T) ?usize {
+        const lane_count = dense_host_simd_bytes / @sizeOf(T);
+        const Vec = @Vector(lane_count, T);
+        const query_vec: Vec = @splat(query);
+
+        var idx: usize = 0;
+        const vector_limit = items.len - (items.len % lane_count);
+        while (idx < vector_limit) : (idx += lane_count) {
+            const chunk: Vec = items[idx..][0..lane_count].*;
+            const matches = chunk == query_vec;
+            if (@reduce(.Or, matches)) {
+                inline for (0..lane_count) |lane| {
+                    if (matches[lane]) return idx + lane;
+                }
+            }
+        }
+        while (idx < items.len) : (idx += 1) {
+            if (items[idx] == query) return idx;
+        }
+        return null;
+    }
+
+    fn findFirstEqualBitSlice(items: HostBitSlice, query: bool) ?usize {
+        for (items.words, 0..) |_, word_idx| {
+            const active_mask = if (word_idx + 1 == items.words.len) bitTailMask(items.len) else std.math.maxInt(u64);
+            const word = items.words[word_idx] & active_mask;
+            const matches = if (query) word else (~word) & active_mask;
+            if (matches != 0) {
+                return word_idx * host_bit_word_bits + @as(usize, @intCast(@ctz(matches)));
+            }
+        }
+        return null;
+    }
+
+    fn findFirstEqualDenseIntView(view: HostIntArrayView, query: i64) ?usize {
+        return switch (view) {
+            .bit => |items| switch (query) {
+                0 => findFirstEqualBitSlice(items, false),
+                1 => findFirstEqualBitSlice(items, true),
+                else => null,
+            },
+            .int8 => |items| findFirstEqualDenseIntSlice(i8, items, std.math.cast(i8, query) orelse return null),
+            .int16 => |items| findFirstEqualDenseIntSlice(i16, items, std.math.cast(i16, query) orelse return null),
+            .int32 => |items| findFirstEqualDenseIntSlice(i32, items, std.math.cast(i32, query) orelse return null),
+            .int64 => |items| findFirstEqualDenseIntSlice(i64, items, query),
+        };
+    }
+
+    fn tryFastHostFloatVectorFindScalar(left: Value, view: HostFloatDenseView, query: f64, miss_index: usize) ?usize {
+        const items = switch (view) {
+            .dense => |dense_items| dense_items,
+            else => return null,
+        };
+        if (items.len == 0) return miss_index;
+        if (query != query) return miss_index;
+
+        const mono = monotonicFlags(hostFloatDenseValueFlags(left, view));
+        if (mono != 0) {
+            const first = items[0];
+            const last = items[items.len - 1];
+            if (first == first and last == last) {
+                if ((mono & host_dense_flag_asc) != 0) {
+                    if (query < first or query > last) return miss_index;
+                    const idx = lowerBoundAscFloat(items, query);
+                    if (idx < items.len and items[idx] == query) return idx;
+                    return miss_index;
+                }
+                if ((mono & host_dense_flag_dsc) != 0) {
+                    if (query < last or query > first) return miss_index;
+                    const idx = lowerBoundDscFloat(items, query);
+                    if (idx < items.len and items[idx] == query) return idx;
+                    return miss_index;
+                }
+            }
+        }
+        return findFirstEqualDenseFloatSlice(items, query) orelse miss_index;
+    }
+
+    fn tryFastHostIntVectorFindScalar(left: Value, view: HostIntDenseView, query: i64, miss_index: usize) KError!?usize {
+        switch (view) {
+            .range_iota => |items| {
+                const len = hostRangeIotaViewLen(items);
+                if (len == 0) return miss_index;
+                const start = items.handle.range_iota.start;
+                const step = items.handle.range_iota.step;
+                if (step == 0) return if (query == start) 0 else miss_index;
+
+                const delta = query - start;
+                const step_abs = if (step < 0) -step else step;
+                if (@mod(delta, step_abs) != 0) return miss_index;
+                const idx_i64 = @divTrunc(delta, step);
+                if (idx_i64 < 0) return miss_index;
+                const idx = std.math.cast(usize, idx_i64) orelse return miss_index;
+                return if (idx < len) idx else miss_index;
+            },
+            .dense => |items| {
+                const mono = monotonicFlags(hostIntDenseValueFlags(left, view));
+                if (mono != 0 and std.meta.activeTag(items) != .bit) {
+                    const len = hostIntDenseViewLen(view);
+                    if (len == 0) return miss_index;
+                    const bounds = hostIntDenseValueRange(left, view);
+                    if (query < bounds.min or query > bounds.max) return miss_index;
+
+                    if ((mono & host_dense_flag_asc) != 0) {
+                        const idx = try lowerBoundAscInt(view, query);
+                        if (idx < len and (try hostIntDenseViewItem(view, idx)) == query) return idx;
+                        return miss_index;
+                    }
+                    if ((mono & host_dense_flag_dsc) != 0) {
+                        const idx = try lowerBoundDscInt(view, query);
+                        if (idx < len and (try hostIntDenseViewItem(view, idx)) == query) return idx;
+                        return miss_index;
+                    }
+                }
+                return findFirstEqualDenseIntView(items, query) orelse miss_index;
+            },
+            else => return null,
+        }
+    }
+
+    fn tryFastHostNumericVectorFindScalarIndex(self: *Session, left: Value, right: Value, miss_index: usize) KError!?usize {
+        const right_mode = valueNumericMode(right) orelse return null;
+        const left_view = hostDenseView(self, left) catch return null;
+        return switch (left_view) {
+            .float_array => |items| tryFastHostFloatVectorFindScalar(left, items, try numericFloatAt(right, 0), miss_index),
+            .int_array => |items| blk: {
+                const query = switch (right_mode) {
+                    .int => try numericIntAt(right, 0),
+                    .float => exactIntFromFloat(try numericFloatAt(right, 0)) orelse break :blk miss_index,
+                };
+                break :blk try tryFastHostIntVectorFindScalar(left, items, query, miss_index);
+            },
+            else => null,
+        };
+    }
+
+    const find_bulk_num_bruteforce_threshold: usize = 255;
+    const find_int_small_range_max_span: usize = 1 << 16;
+
+    fn preferBruteForceNumericFind(left_len: usize, query_len: usize) bool {
+        const left_u128: u128 = left_len;
+        const query_u128: u128 = query_len;
+        const threshold_u128: u128 = find_bulk_num_bruteforce_threshold;
+        return 2 * left_u128 < threshold_u128 or
+            2 * query_u128 < threshold_u128 or
+            left_u128 * query_u128 <= threshold_u128 * threshold_u128;
+    }
+
+    fn floatFindHashKey(value: f64) ?u64 {
+        if (value != value) return null;
+        const normalized = if (value == 0.0) @as(f64, 0.0) else value;
+        return @as(u64, @bitCast(normalized));
+    }
+
+    fn intFindHashKey(value: i64) u64 {
+        return @as(u64, @bitCast(value));
+    }
+
+    fn denseFindLookupHash(key: u64) u64 {
+        var mixed = key +% 0x9e3779b97f4a7c15;
+        mixed = (mixed ^ (mixed >> 30)) *% 0xbf58476d1ce4e5b9;
+        mixed = (mixed ^ (mixed >> 27)) *% 0x94d049bb133111eb;
+        return mixed ^ (mixed >> 31);
+    }
+
+    fn denseFindLookupCapacity(item_count: usize) ?usize {
+        var capacity: usize = 8;
+        const target = blk: {
+            if (item_count <= 4) break :blk @as(usize, 8);
+            break :blk std.math.mul(usize, item_count, 2) catch return null;
+        };
+        while (capacity < target) {
+            if (capacity > std.math.maxInt(usize) / 2) return null;
+            capacity *= 2;
+        }
+        return capacity;
+    }
+
+    fn denseFindLookupSlotIndex(mask: usize, key: u64) usize {
+        return @as(usize, @intCast(denseFindLookupHash(key) & mask));
+    }
+
+    fn denseFindLookupInsert(keys: []u64, slots: []usize, mask: usize, key: u64, idx: usize) void {
+        var slot = denseFindLookupSlotIndex(mask, key);
+        while (true) {
+            if (slots[slot] == 0) {
+                keys[slot] = key;
+                slots[slot] = idx + 1;
+                return;
+            }
+            if (keys[slot] == key) return;
+            slot = (slot + 1) & mask;
+        }
+    }
+
+    fn denseFindLookupGet(keys: []const u64, slots: []const usize, mask: usize, key: u64) ?usize {
+        var slot = denseFindLookupSlotIndex(mask, key);
+        while (true) {
+            const found = slots[slot];
+            if (found == 0) return null;
+            if (keys[slot] == key) return found - 1;
+            slot = (slot + 1) & mask;
+        }
+    }
+
+    const DenseFindLookup = struct {
+        allocator: std.mem.Allocator,
+        keys: []u64,
+        slots: []usize,
+        mask: usize,
+
+        fn init(allocator: std.mem.Allocator, item_count: usize) !DenseFindLookup {
+            const capacity = denseFindLookupCapacity(item_count) orelse return error.Unsupported;
+            const keys = try allocator.alloc(u64, capacity);
+            errdefer allocator.free(keys);
+            const slots = try allocator.alloc(usize, capacity);
+            errdefer allocator.free(slots);
+            @memset(slots, 0);
+            return .{
+                .allocator = allocator,
+                .keys = keys,
+                .slots = slots,
+                .mask = capacity - 1,
+            };
+        }
+
+        fn deinit(self: *DenseFindLookup) void {
+            self.allocator.free(self.keys);
+            self.allocator.free(self.slots);
+        }
+
+        fn insertFirst(self: *DenseFindLookup, key: u64, idx: usize) void {
+            denseFindLookupInsert(self.keys, self.slots, self.mask, key, idx);
+        }
+
+        fn get(self: *const DenseFindLookup, key: u64) ?usize {
+            return denseFindLookupGet(self.keys, self.slots, self.mask, key);
+        }
+
+        fn slotIndex(self: *const DenseFindLookup, key: u64) usize {
+            return denseFindLookupSlotIndex(self.mask, key);
+        }
+    };
+
+    pub const DebugFloatFindLookupFlavor = enum {
+        dense,
+        generic,
+    };
+
+    pub const DebugFloatFindLookup = union(DebugFloatFindLookupFlavor) {
+        dense: DenseFindLookup,
+        generic: std.AutoHashMap(u64, usize),
+
+        pub fn deinit(self: *DebugFloatFindLookup) void {
+            switch (self.*) {
+                .dense => |*lookup| lookup.deinit(),
+                .generic => |*lookup| lookup.deinit(),
+            }
+        }
+
+        pub fn probe(self: *const DebugFloatFindLookup, right_items: []const f64, out: []i64, miss_index: usize) KError!void {
+            const miss_i64 = std.math.cast(i64, miss_index) orelse return error.Unsupported;
+            switch (self.*) {
+                .dense => |*lookup| {
+                    for (right_items, 0..) |query, query_idx| {
+                        if (floatFindHashKey(query)) |key| {
+                            out[query_idx] = if (lookup.get(key)) |found_idx|
+                                std.math.cast(i64, found_idx) orelse return error.Unsupported
+                            else
+                                miss_i64;
+                        } else {
+                            out[query_idx] = miss_i64;
+                        }
+                    }
+                },
+                .generic => |*lookup| {
+                    for (right_items, 0..) |query, query_idx| {
+                        if (floatFindHashKey(query)) |key| {
+                            out[query_idx] = if (lookup.get(key)) |found_idx|
+                                std.math.cast(i64, found_idx) orelse return error.Unsupported
+                            else
+                                miss_i64;
+                        } else {
+                            out[query_idx] = miss_i64;
+                        }
+                    }
+                },
+            }
+        }
+    };
+
+    fn managedHostDenseArrayForFindCache(value: Value) ?*HostDenseArray {
+        if (value.tag() != .array) return null;
+        const array: *const HostDenseArray = if (valueNumericHandle(value)) |handle|
+            numericHostAttachment(handle) orelse return null
+        else switch (value.arrayKind()) {
+            .host_dense_array => value.asHostDenseArray(),
+            else => return null,
+        };
+        return if (numericPayloadOwner(array) == .managed) @constCast(array) else null;
+    }
+
+    fn ensureManagedHostFloatFindCache(self: *Session, array: *HostDenseArray, items: []const f64) KError!bool {
+        if (numericPayloadOwner(array) != .managed) return false;
+        if (array.find_cache_kind == .float and array.find_cache_keys != null and array.find_cache_slots != null) return true;
+
+        if (array.find_cache_keys) |keys| self.allocator.free(keys);
+        if (array.find_cache_slots) |slots| self.allocator.free(slots);
+        hostDenseResetFindCacheState(array);
+
+        const capacity = denseFindLookupCapacity(items.len) orelse return error.Unsupported;
+        const keys = try self.allocator.alloc(u64, capacity);
+        errdefer self.allocator.free(keys);
+        const slots = try self.allocator.alloc(usize, capacity);
+        errdefer self.allocator.free(slots);
+        @memset(slots, 0);
+
+        var bounds_known = false;
+        var min_value: f64 = 0.0;
+        var max_value: f64 = 0.0;
+        for (items, 0..) |item, idx| {
+            if (item == item) {
+                if (!bounds_known) {
+                    min_value = item;
+                    max_value = item;
+                    bounds_known = true;
+                } else {
+                    if (item < min_value) min_value = item;
+                    if (item > max_value) max_value = item;
+                }
+            }
+            const key = floatFindHashKey(item) orelse continue;
+            denseFindLookupInsert(keys, slots, capacity - 1, key, idx);
+        }
+
+        array.find_cache_kind = .float;
+        array.find_cache_keys = keys;
+        array.find_cache_slots = slots;
+        array.find_cache_mask = capacity - 1;
+        array.float_bounds_known = bounds_known;
+        array.float_bounds_min = min_value;
+        array.float_bounds_max = max_value;
+        return true;
+    }
+
+    fn ensureManagedHostIntFindCache(self: *Session, array: *HostDenseArray) KError!bool {
+        if (numericPayloadOwner(array) != .managed) return false;
+        if (array.find_cache_kind == .int and array.find_cache_keys != null and array.find_cache_slots != null) return true;
+
+        if (array.find_cache_keys) |keys| self.allocator.free(keys);
+        if (array.find_cache_slots) |slots| self.allocator.free(slots);
+        hostDenseResetFindCacheState(array);
+
+        const item_count = array.len();
+        const capacity = denseFindLookupCapacity(item_count) orelse return error.Unsupported;
+        const keys = try self.allocator.alloc(u64, capacity);
+        errdefer self.allocator.free(keys);
+        const slots = try self.allocator.alloc(usize, capacity);
+        errdefer self.allocator.free(slots);
+        @memset(slots, 0);
+
+        switch (array.storage) {
+            .bit => |items| {
+                for (0..array.logical_len) |idx| {
+                    denseFindLookupInsert(keys, slots, capacity - 1, intFindHashKey(@intFromBool(bitGet(items, idx))), idx);
+                }
+            },
+            .int8 => |items| for (items, 0..) |item, idx| denseFindLookupInsert(keys, slots, capacity - 1, intFindHashKey(item), idx),
+            .int16 => |items| for (items, 0..) |item, idx| denseFindLookupInsert(keys, slots, capacity - 1, intFindHashKey(item), idx),
+            .int32 => |items| for (items, 0..) |item, idx| denseFindLookupInsert(keys, slots, capacity - 1, intFindHashKey(item), idx),
+            .int64 => |items| for (items, 0..) |item, idx| denseFindLookupInsert(keys, slots, capacity - 1, intFindHashKey(item), idx),
+            .float64 => return false,
+        }
+
+        array.find_cache_kind = .int;
+        array.find_cache_keys = keys;
+        array.find_cache_slots = slots;
+        array.find_cache_mask = capacity - 1;
+        return true;
+    }
+
+    fn buildGenericFloatFindLookup(self: *Session, left_items: []const f64) KError!std.AutoHashMap(u64, usize) {
+        var lookup = std.AutoHashMap(u64, usize).init(self.allocator);
+        errdefer lookup.deinit();
+        try lookup.ensureTotalCapacity(std.math.cast(u32, left_items.len) orelse return error.Unsupported);
+        for (left_items, 0..) |item, idx| {
+            const key = floatFindHashKey(item) orelse continue;
+            if (lookup.get(key) == null) try lookup.put(key, idx);
+        }
+        return lookup;
+    }
+
+    pub fn debugBuildFloatFindLookup(self: *Session, flavor: DebugFloatFindLookupFlavor, left_items: []const f64) KError!DebugFloatFindLookup {
+        return switch (flavor) {
+            .dense => blk: {
+                var lookup = try DenseFindLookup.init(self.allocator, left_items.len);
+                errdefer lookup.deinit();
+                for (left_items, 0..) |item, idx| {
+                    const key = floatFindHashKey(item) orelse continue;
+                    lookup.insertFirst(key, idx);
+                }
+                break :blk .{ .dense = lookup };
+            },
+            .generic => .{ .generic = try self.buildGenericFloatFindLookup(left_items) },
+        };
+    }
+
+    pub fn debugRunFloatFindLookupBuildProbe(
+        self: *Session,
+        flavor: DebugFloatFindLookupFlavor,
+        left_items: []const f64,
+        right_items: []const f64,
+        out: []i64,
+        miss_index: usize,
+    ) KError!void {
+        switch (flavor) {
+            .dense => try fillFloatFindDenseHashedFloatQueries(self, out, null, left_items, right_items, miss_index),
+            .generic => {
+                var lookup = try self.buildGenericFloatFindLookup(left_items);
+                defer lookup.deinit();
+                const miss_i64 = std.math.cast(i64, miss_index) orelse return error.Unsupported;
+                for (right_items, 0..) |query, query_idx| {
+                    if (floatFindHashKey(query)) |key| {
+                        out[query_idx] = if (lookup.get(key)) |found_idx|
+                            std.math.cast(i64, found_idx) orelse return error.Unsupported
+                        else
+                            miss_i64;
+                    } else {
+                        out[query_idx] = miss_i64;
+                    }
+                }
+            },
+        }
+    }
+
+    fn fillFloatFindDenseHashedFloatQueries(
+        self: *Session,
+        out: []i64,
+        left_array: ?*HostDenseArray,
+        left_items: []const f64,
+        right_items: []const f64,
+        miss_index: usize,
+    ) KError!void {
+        if (left_array) |array| {
+            if (try self.ensureManagedHostFloatFindCache(array, left_items)) {
+                const miss_i64 = std.math.cast(i64, miss_index) orelse return error.Unsupported;
+                if (!array.float_bounds_known) {
+                    @memset(out, miss_i64);
+                    return;
+                }
+                var all_outside = true;
+                for (right_items) |query| {
+                    if (query == query and query >= array.float_bounds_min and query <= array.float_bounds_max) {
+                        all_outside = false;
+                        break;
+                    }
+                }
+                if (all_outside) {
+                    @memset(out, miss_i64);
+                    return;
+                }
+                const keys = array.find_cache_keys.?;
+                const slots = array.find_cache_slots.?;
+                for (right_items, 0..) |query, query_idx| {
+                    if (floatFindHashKey(query)) |key| {
+                        out[query_idx] = if (denseFindLookupGet(keys, slots, array.find_cache_mask, key)) |found_idx|
+                            std.math.cast(i64, found_idx) orelse return error.Unsupported
+                        else
+                            miss_i64;
+                    } else {
+                        out[query_idx] = miss_i64;
+                    }
+                }
+                return;
+            }
+        }
+
+        const miss_i64 = std.math.cast(i64, miss_index) orelse return error.Unsupported;
+        if (tryFillFloatDenseAllMissByBounds(out, left_items, right_items, miss_i64)) return;
+
+        var lookup = try DenseFindLookup.init(self.allocator, left_items.len);
+        defer lookup.deinit();
+        for (left_items, 0..) |item, idx| {
+            const key = floatFindHashKey(item) orelse continue;
+            lookup.insertFirst(key, idx);
+        }
+
+        for (right_items, 0..) |query, query_idx| {
+            if (floatFindHashKey(query)) |key| {
+                out[query_idx] = if (lookup.get(key)) |found_idx|
+                    std.math.cast(i64, found_idx) orelse return error.Unsupported
+                else
+                    miss_i64;
+            } else {
+                out[query_idx] = miss_i64;
+            }
+        }
+    }
+
+    fn tryFillFloatDenseAllMissByBounds(
+        out: []i64,
+        left_items: []const f64,
+        right_items: []const f64,
+        miss_i64: i64,
+    ) bool {
+        var have_left = false;
+        var min_value: f64 = 0.0;
+        var max_value: f64 = 0.0;
+        for (left_items) |item| {
+            if (item != item) continue;
+            if (!have_left) {
+                min_value = item;
+                max_value = item;
+                have_left = true;
+                continue;
+            }
+            if (item < min_value) min_value = item;
+            if (item > max_value) max_value = item;
+        }
+        if (!have_left) {
+            @memset(out, miss_i64);
+            return true;
+        }
+
+        for (right_items) |query| {
+            if (query == query and query >= min_value and query <= max_value) return false;
+        }
+
+        @memset(out, miss_i64);
+        return true;
+    }
+
+    fn fillFloatFindDenseHashedIntQueries(
+        self: *Session,
+        out: []i64,
+        left_array: ?*HostDenseArray,
+        left_items: []const f64,
+        right_items: HostIntArrayView,
+        miss_index: usize,
+    ) KError!void {
+        if (left_array) |array| {
+            if (try self.ensureManagedHostFloatFindCache(array, left_items)) {
+                const miss_i64 = std.math.cast(i64, miss_index) orelse return error.Unsupported;
+                const keys = array.find_cache_keys.?;
+                const slots = array.find_cache_slots.?;
+                switch (right_items) {
+                    .bit => |items| {
+                        for (0..items.len) |query_idx| {
+                            const query = @as(f64, @floatFromInt(@intFromBool(bitGet(items.words, query_idx))));
+                            const key = floatFindHashKey(query) orelse unreachable;
+                            out[query_idx] = if (denseFindLookupGet(keys, slots, array.find_cache_mask, key)) |found_idx|
+                                std.math.cast(i64, found_idx) orelse return error.Unsupported
+                            else
+                                miss_i64;
+                        }
+                    },
+                    .int8 => |items| {
+                        for (items, 0..) |query, query_idx| {
+                            const key = floatFindHashKey(@as(f64, @floatFromInt(query))) orelse unreachable;
+                            out[query_idx] = if (denseFindLookupGet(keys, slots, array.find_cache_mask, key)) |found_idx|
+                                std.math.cast(i64, found_idx) orelse return error.Unsupported
+                            else
+                                miss_i64;
+                        }
+                    },
+                    .int16 => |items| {
+                        for (items, 0..) |query, query_idx| {
+                            const key = floatFindHashKey(@as(f64, @floatFromInt(query))) orelse unreachable;
+                            out[query_idx] = if (denseFindLookupGet(keys, slots, array.find_cache_mask, key)) |found_idx|
+                                std.math.cast(i64, found_idx) orelse return error.Unsupported
+                            else
+                                miss_i64;
+                        }
+                    },
+                    .int32 => |items| {
+                        for (items, 0..) |query, query_idx| {
+                            const key = floatFindHashKey(@as(f64, @floatFromInt(query))) orelse unreachable;
+                            out[query_idx] = if (denseFindLookupGet(keys, slots, array.find_cache_mask, key)) |found_idx|
+                                std.math.cast(i64, found_idx) orelse return error.Unsupported
+                            else
+                                miss_i64;
+                        }
+                    },
+                    .int64 => |items| {
+                        for (items, 0..) |query, query_idx| {
+                            const key = floatFindHashKey(@as(f64, @floatFromInt(query))) orelse unreachable;
+                            out[query_idx] = if (denseFindLookupGet(keys, slots, array.find_cache_mask, key)) |found_idx|
+                                std.math.cast(i64, found_idx) orelse return error.Unsupported
+                            else
+                                miss_i64;
+                        }
+                    },
+                }
+                return;
+            }
+        }
+
+        var lookup = try DenseFindLookup.init(self.allocator, left_items.len);
+        defer lookup.deinit();
+        for (left_items, 0..) |item, idx| {
+            const key = floatFindHashKey(item) orelse continue;
+            lookup.insertFirst(key, idx);
+        }
+
+        const miss_i64 = std.math.cast(i64, miss_index) orelse return error.Unsupported;
+        switch (right_items) {
+            .bit => |items| {
+                for (0..items.len) |query_idx| {
+                    const query = @as(f64, @floatFromInt(@intFromBool(bitGet(items.words, query_idx))));
+                    const key = floatFindHashKey(query) orelse unreachable;
+                    out[query_idx] = if (lookup.get(key)) |found_idx|
+                        std.math.cast(i64, found_idx) orelse return error.Unsupported
+                    else
+                        miss_i64;
+                }
+            },
+            .int8 => |items| {
+                for (items, 0..) |query, query_idx| {
+                    const key = floatFindHashKey(@as(f64, @floatFromInt(query))) orelse unreachable;
+                    out[query_idx] = if (lookup.get(key)) |found_idx|
+                        std.math.cast(i64, found_idx) orelse return error.Unsupported
+                    else
+                        miss_i64;
+                }
+            },
+            .int16 => |items| {
+                for (items, 0..) |query, query_idx| {
+                    const key = floatFindHashKey(@as(f64, @floatFromInt(query))) orelse unreachable;
+                    out[query_idx] = if (lookup.get(key)) |found_idx|
+                        std.math.cast(i64, found_idx) orelse return error.Unsupported
+                    else
+                        miss_i64;
+                }
+            },
+            .int32 => |items| {
+                for (items, 0..) |query, query_idx| {
+                    const key = floatFindHashKey(@as(f64, @floatFromInt(query))) orelse unreachable;
+                    out[query_idx] = if (lookup.get(key)) |found_idx|
+                        std.math.cast(i64, found_idx) orelse return error.Unsupported
+                    else
+                        miss_i64;
+                }
+            },
+            .int64 => |items| {
+                for (items, 0..) |query, query_idx| {
+                    const key = floatFindHashKey(@as(f64, @floatFromInt(query))) orelse unreachable;
+                    out[query_idx] = if (lookup.get(key)) |found_idx|
+                        std.math.cast(i64, found_idx) orelse return error.Unsupported
+                    else
+                        miss_i64;
+                }
+            },
+        }
+    }
+
+    fn fillIntFindDenseHashedIntQueries(
+        self: *Session,
+        out: []i64,
+        left_array: ?*HostDenseArray,
+        left_items: HostIntArrayView,
+        right_items: HostIntArrayView,
+        miss_index: usize,
+    ) KError!void {
+        if (left_array) |array| {
+            if (try self.ensureManagedHostIntFindCache(array)) {
+                const miss_i64 = std.math.cast(i64, miss_index) orelse return error.Unsupported;
+                const keys = array.find_cache_keys.?;
+                const slots = array.find_cache_slots.?;
+                switch (right_items) {
+                    .bit => |items| {
+                        for (0..items.len) |query_idx| {
+                            out[query_idx] = if (denseFindLookupGet(keys, slots, array.find_cache_mask, intFindHashKey(@intFromBool(bitGet(items.words, query_idx))))) |found_idx|
+                                std.math.cast(i64, found_idx) orelse return error.Unsupported
+                            else
+                                miss_i64;
+                        }
+                    },
+                    .int8 => |items| {
+                        for (items, 0..) |query, query_idx| {
+                            out[query_idx] = if (denseFindLookupGet(keys, slots, array.find_cache_mask, intFindHashKey(query))) |found_idx|
+                                std.math.cast(i64, found_idx) orelse return error.Unsupported
+                            else
+                                miss_i64;
+                        }
+                    },
+                    .int16 => |items| {
+                        for (items, 0..) |query, query_idx| {
+                            out[query_idx] = if (denseFindLookupGet(keys, slots, array.find_cache_mask, intFindHashKey(query))) |found_idx|
+                                std.math.cast(i64, found_idx) orelse return error.Unsupported
+                            else
+                                miss_i64;
+                        }
+                    },
+                    .int32 => |items| {
+                        for (items, 0..) |query, query_idx| {
+                            out[query_idx] = if (denseFindLookupGet(keys, slots, array.find_cache_mask, intFindHashKey(query))) |found_idx|
+                                std.math.cast(i64, found_idx) orelse return error.Unsupported
+                            else
+                                miss_i64;
+                        }
+                    },
+                    .int64 => |items| {
+                        for (items, 0..) |query, query_idx| {
+                            out[query_idx] = if (denseFindLookupGet(keys, slots, array.find_cache_mask, intFindHashKey(query))) |found_idx|
+                                std.math.cast(i64, found_idx) orelse return error.Unsupported
+                            else
+                                miss_i64;
+                        }
+                    },
+                }
+                return;
+            }
+        }
+
+        const left_len = hostIntArrayViewLen(left_items);
+        var lookup = try DenseFindLookup.init(self.allocator, left_len);
+        defer lookup.deinit();
+        switch (left_items) {
+            .bit => |items| {
+                for (0..items.len) |idx| lookup.insertFirst(intFindHashKey(@intFromBool(bitGet(items.words, idx))), idx);
+            },
+            .int8 => |items| for (items, 0..) |item, idx| lookup.insertFirst(intFindHashKey(item), idx),
+            .int16 => |items| for (items, 0..) |item, idx| lookup.insertFirst(intFindHashKey(item), idx),
+            .int32 => |items| for (items, 0..) |item, idx| lookup.insertFirst(intFindHashKey(item), idx),
+            .int64 => |items| for (items, 0..) |item, idx| lookup.insertFirst(intFindHashKey(item), idx),
+        }
+
+        const miss_i64 = std.math.cast(i64, miss_index) orelse return error.Unsupported;
+        switch (right_items) {
+            .bit => |items| {
+                for (0..items.len) |query_idx| {
+                    out[query_idx] = if (lookup.get(intFindHashKey(@intFromBool(bitGet(items.words, query_idx))))) |found_idx|
+                        std.math.cast(i64, found_idx) orelse return error.Unsupported
+                    else
+                        miss_i64;
+                }
+            },
+            .int8 => |items| {
+                for (items, 0..) |query, query_idx| {
+                    out[query_idx] = if (lookup.get(intFindHashKey(query))) |found_idx|
+                        std.math.cast(i64, found_idx) orelse return error.Unsupported
+                    else
+                        miss_i64;
+                }
+            },
+            .int16 => |items| {
+                for (items, 0..) |query, query_idx| {
+                    out[query_idx] = if (lookup.get(intFindHashKey(query))) |found_idx|
+                        std.math.cast(i64, found_idx) orelse return error.Unsupported
+                    else
+                        miss_i64;
+                }
+            },
+            .int32 => |items| {
+                for (items, 0..) |query, query_idx| {
+                    out[query_idx] = if (lookup.get(intFindHashKey(query))) |found_idx|
+                        std.math.cast(i64, found_idx) orelse return error.Unsupported
+                    else
+                        miss_i64;
+                }
+            },
+            .int64 => |items| {
+                for (items, 0..) |query, query_idx| {
+                    out[query_idx] = if (lookup.get(intFindHashKey(query))) |found_idx|
+                        std.math.cast(i64, found_idx) orelse return error.Unsupported
+                    else
+                        miss_i64;
+                }
+            },
+        }
+    }
+
+    fn fillIntFindDenseHashedFloatQueries(
+        self: *Session,
+        out: []i64,
+        left_array: ?*HostDenseArray,
+        left_items: HostIntArrayView,
+        right_items: []const f64,
+        miss_index: usize,
+    ) KError!void {
+        if (left_array) |array| {
+            if (try self.ensureManagedHostIntFindCache(array)) {
+                const miss_i64 = std.math.cast(i64, miss_index) orelse return error.Unsupported;
+                const keys = array.find_cache_keys.?;
+                const slots = array.find_cache_slots.?;
+                for (right_items, 0..) |query, query_idx| {
+                    const query_int = exactIntFromFloat(query);
+                    out[query_idx] = if (query_int) |value|
+                        if (denseFindLookupGet(keys, slots, array.find_cache_mask, intFindHashKey(value))) |found_idx|
+                            std.math.cast(i64, found_idx) orelse return error.Unsupported
+                        else
+                            miss_i64
+                    else
+                        miss_i64;
+                }
+                return;
+            }
+        }
+
+        const left_len = hostIntArrayViewLen(left_items);
+        var lookup = try DenseFindLookup.init(self.allocator, left_len);
+        defer lookup.deinit();
+        switch (left_items) {
+            .bit => |items| {
+                for (0..items.len) |idx| lookup.insertFirst(intFindHashKey(@intFromBool(bitGet(items.words, idx))), idx);
+            },
+            .int8 => |items| for (items, 0..) |item, idx| lookup.insertFirst(intFindHashKey(item), idx),
+            .int16 => |items| for (items, 0..) |item, idx| lookup.insertFirst(intFindHashKey(item), idx),
+            .int32 => |items| for (items, 0..) |item, idx| lookup.insertFirst(intFindHashKey(item), idx),
+            .int64 => |items| for (items, 0..) |item, idx| lookup.insertFirst(intFindHashKey(item), idx),
+        }
+
+        const miss_i64 = std.math.cast(i64, miss_index) orelse return error.Unsupported;
+        for (right_items, 0..) |query, query_idx| {
+            const query_int = exactIntFromFloat(query);
+            out[query_idx] = if (query_int) |value|
+                if (lookup.get(intFindHashKey(value))) |found_idx|
+                    std.math.cast(i64, found_idx) orelse return error.Unsupported
+                else
+                    miss_i64
+            else
+                miss_i64;
+        }
+    }
+
+    fn fillFloatFindBruteForceFloatQueries(
+        out: []i64,
+        left_items: HostFloatDenseView,
+        right_items: HostFloatDenseView,
+        miss_index: usize,
+    ) KError!void {
+        const left_len = hostFloatDenseViewLen(left_items);
+        const miss_i64 = std.math.cast(i64, miss_index) orelse return error.Unsupported;
+        for (0..out.len) |query_idx| {
+            const query = try hostFloatDenseViewItem(right_items, query_idx);
+            if (query != query) {
+                out[query_idx] = miss_i64;
+                continue;
+            }
+            var found_idx = miss_i64;
+            for (0..left_len) |idx| {
+                if ((try hostFloatDenseViewItem(left_items, idx)) == query) {
+                    found_idx = std.math.cast(i64, idx) orelse return error.Unsupported;
+                    break;
+                }
+            }
+            out[query_idx] = found_idx;
+        }
+    }
+
+    fn fillFloatFindBruteForceIntQueries(
+        out: []i64,
+        left_items: HostFloatDenseView,
+        right_items: HostIntDenseView,
+        miss_index: usize,
+    ) KError!void {
+        const left_len = hostFloatDenseViewLen(left_items);
+        const miss_i64 = std.math.cast(i64, miss_index) orelse return error.Unsupported;
+        for (0..out.len) |query_idx| {
+            const query = @as(f64, @floatFromInt(try hostIntDenseViewItem(right_items, query_idx)));
+            var found_idx = miss_i64;
+            for (0..left_len) |idx| {
+                if ((try hostFloatDenseViewItem(left_items, idx)) == query) {
+                    found_idx = std.math.cast(i64, idx) orelse return error.Unsupported;
+                    break;
+                }
+            }
+            out[query_idx] = found_idx;
+        }
+    }
+
+    fn tryFillFloatFindSortedFloatQueries(
+        left: Value,
+        left_items: HostFloatDenseView,
+        right_items: HostFloatDenseView,
+        out: []i64,
+        miss_index: usize,
+    ) KError!bool {
+        const dense_items = switch (left_items) {
+            .dense => |items| items,
+            else => return false,
+        };
+        const mono = monotonicFlags(hostFloatDenseValueFlags(left, left_items));
+        if (mono == 0) return false;
+        const miss_i64 = std.math.cast(i64, miss_index) orelse return error.Unsupported;
+        if (dense_items.len == 0) {
+            @memset(out, miss_i64);
+            return true;
+        }
+
+        const first = dense_items[0];
+        const last = dense_items[dense_items.len - 1];
+        const has_valid_bounds = first == first and last == last;
+
+        if (has_valid_bounds and right_items == .dense) {
+            const query_flags = analyzeFloatSlice(right_items.dense).flags;
+            const query_mono = monotonicFlags(query_flags);
+            if ((mono & host_dense_flag_asc) != 0 and (query_mono & host_dense_flag_asc) != 0) {
+                try fillSortedAscFloatDenseMonotoneQueries(dense_items, right_items.dense, out, miss_index);
+                return true;
+            }
+            if ((mono & host_dense_flag_dsc) != 0 and (query_mono & host_dense_flag_dsc) != 0) {
+                try fillSortedDscFloatDenseMonotoneQueries(dense_items, right_items.dense, out, miss_index);
+                return true;
+            }
+        }
+
+        for (0..out.len) |query_idx| {
+            const query = try hostFloatDenseViewItem(right_items, query_idx);
+            if (query != query or !has_valid_bounds) {
+                out[query_idx] = miss_i64;
+                continue;
+            }
+            if ((mono & host_dense_flag_asc) != 0) {
+                if (query < first or query > last) {
+                    out[query_idx] = miss_i64;
+                    continue;
+                }
+                const idx = lowerBoundAscFloat(dense_items, query);
+                out[query_idx] = if (idx < dense_items.len and dense_items[idx] == query)
+                    std.math.cast(i64, idx) orelse return error.Unsupported
+                else
+                    miss_i64;
+                continue;
+            }
+            if ((mono & host_dense_flag_dsc) != 0) {
+                if (query < last or query > first) {
+                    out[query_idx] = miss_i64;
+                    continue;
+                }
+                const idx = lowerBoundDscFloat(dense_items, query);
+                out[query_idx] = if (idx < dense_items.len and dense_items[idx] == query)
+                    std.math.cast(i64, idx) orelse return error.Unsupported
+                else
+                    miss_i64;
+                continue;
+            }
+            out[query_idx] = miss_i64;
+        }
+        return true;
+    }
+
+    fn tryFillFloatFindSortedIntQueries(
+        left: Value,
+        left_items: HostFloatDenseView,
+        right_items: HostIntDenseView,
+        out: []i64,
+        miss_index: usize,
+    ) KError!bool {
+        const dense_items = switch (left_items) {
+            .dense => |items| items,
+            else => return false,
+        };
+        const mono = monotonicFlags(hostFloatDenseValueFlags(left, left_items));
+        if (mono == 0) return false;
+        const miss_i64 = std.math.cast(i64, miss_index) orelse return error.Unsupported;
+        if (dense_items.len == 0) {
+            @memset(out, miss_i64);
+            return true;
+        }
+
+        const first = dense_items[0];
+        const last = dense_items[dense_items.len - 1];
+        const has_valid_bounds = first == first and last == last;
+        for (0..out.len) |query_idx| {
+            const query = @as(f64, @floatFromInt(try hostIntDenseViewItem(right_items, query_idx)));
+            if (!has_valid_bounds) {
+                out[query_idx] = miss_i64;
+                continue;
+            }
+            if ((mono & host_dense_flag_asc) != 0) {
+                if (query < first or query > last) {
+                    out[query_idx] = miss_i64;
+                    continue;
+                }
+                const idx = lowerBoundAscFloat(dense_items, query);
+                out[query_idx] = if (idx < dense_items.len and dense_items[idx] == query)
+                    std.math.cast(i64, idx) orelse return error.Unsupported
+                else
+                    miss_i64;
+                continue;
+            }
+            if ((mono & host_dense_flag_dsc) != 0) {
+                if (query < last or query > first) {
+                    out[query_idx] = miss_i64;
+                    continue;
+                }
+                const idx = lowerBoundDscFloat(dense_items, query);
+                out[query_idx] = if (idx < dense_items.len and dense_items[idx] == query)
+                    std.math.cast(i64, idx) orelse return error.Unsupported
+                else
+                    miss_i64;
+                continue;
+            }
+            out[query_idx] = miss_i64;
+        }
+        return true;
+    }
+
+    fn fillFloatFindHashedFloatQueries(
+        self: *Session,
+        out: []i64,
+        left_array: ?*HostDenseArray,
+        left_items: HostFloatDenseView,
+        right_items: HostFloatDenseView,
+        miss_index: usize,
+    ) KError!void {
+        if (left_items == .dense and right_items == .dense) {
+            return fillFloatFindDenseHashedFloatQueries(self, out, left_array, left_items.dense, right_items.dense, miss_index);
+        }
+        var lookup = std.AutoHashMap(u64, usize).init(self.allocator);
+        defer lookup.deinit();
+        try lookup.ensureTotalCapacity(std.math.cast(u32, hostFloatDenseViewLen(left_items)) orelse return error.Unsupported);
+        for (0..hostFloatDenseViewLen(left_items)) |idx| {
+            const key = floatFindHashKey(try hostFloatDenseViewItem(left_items, idx)) orelse continue;
+            if (lookup.get(key) == null) try lookup.put(key, idx);
+        }
+
+        const miss_i64 = std.math.cast(i64, miss_index) orelse return error.Unsupported;
+        for (0..out.len) |query_idx| {
+            const query = try hostFloatDenseViewItem(right_items, query_idx);
+            if (floatFindHashKey(query)) |key| {
+                out[query_idx] = if (lookup.get(key)) |found_idx|
+                    std.math.cast(i64, found_idx) orelse return error.Unsupported
+                else
+                    miss_i64;
+            } else {
+                out[query_idx] = miss_i64;
+            }
+        }
+    }
+
+    fn fillFloatFindHashedIntQueries(
+        self: *Session,
+        out: []i64,
+        left_array: ?*HostDenseArray,
+        left_items: HostFloatDenseView,
+        right_items: HostIntDenseView,
+        miss_index: usize,
+    ) KError!void {
+        if (left_items == .dense and right_items == .dense) {
+            return fillFloatFindDenseHashedIntQueries(self, out, left_array, left_items.dense, right_items.dense, miss_index);
+        }
+        var lookup = std.AutoHashMap(u64, usize).init(self.allocator);
+        defer lookup.deinit();
+        try lookup.ensureTotalCapacity(std.math.cast(u32, hostFloatDenseViewLen(left_items)) orelse return error.Unsupported);
+        for (0..hostFloatDenseViewLen(left_items)) |idx| {
+            const key = floatFindHashKey(try hostFloatDenseViewItem(left_items, idx)) orelse continue;
+            if (lookup.get(key) == null) try lookup.put(key, idx);
+        }
+
+        const miss_i64 = std.math.cast(i64, miss_index) orelse return error.Unsupported;
+        for (0..out.len) |query_idx| {
+            const query = @as(f64, @floatFromInt(try hostIntDenseViewItem(right_items, query_idx)));
+            const key = floatFindHashKey(query) orelse unreachable;
+            out[query_idx] = if (lookup.get(key)) |found_idx|
+                std.math.cast(i64, found_idx) orelse return error.Unsupported
+            else
+                miss_i64;
+        }
+    }
+
+    fn fillIntFindBruteForceIntQueries(
+        out: []i64,
+        left_items: HostIntDenseView,
+        right_items: HostIntDenseView,
+        miss_index: usize,
+    ) KError!void {
+        const left_len = hostIntDenseViewLen(left_items);
+        const miss_i64 = std.math.cast(i64, miss_index) orelse return error.Unsupported;
+        for (0..out.len) |query_idx| {
+            const query = try hostIntDenseViewItem(right_items, query_idx);
+            var found_idx = miss_i64;
+            for (0..left_len) |idx| {
+                if ((try hostIntDenseViewItem(left_items, idx)) == query) {
+                    found_idx = std.math.cast(i64, idx) orelse return error.Unsupported;
+                    break;
+                }
+            }
+            out[query_idx] = found_idx;
+        }
+    }
+
+    fn fillIntFindBruteForceFloatQueries(
+        out: []i64,
+        left_items: HostIntDenseView,
+        right_items: HostFloatDenseView,
+        miss_index: usize,
+    ) KError!void {
+        const left_len = hostIntDenseViewLen(left_items);
+        const miss_i64 = std.math.cast(i64, miss_index) orelse return error.Unsupported;
+        for (0..out.len) |query_idx| {
+            const query = exactIntFromFloat(try hostFloatDenseViewItem(right_items, query_idx));
+            if (query == null) {
+                out[query_idx] = miss_i64;
+                continue;
+            }
+            var found_idx = miss_i64;
+            for (0..left_len) |idx| {
+                if ((try hostIntDenseViewItem(left_items, idx)) == query.?) {
+                    found_idx = std.math.cast(i64, idx) orelse return error.Unsupported;
+                    break;
+                }
+            }
+            out[query_idx] = found_idx;
+        }
+    }
+
+    fn tryFillIntFindSortedIntQueries(
+        left: Value,
+        left_items: HostIntDenseView,
+        right_items: HostIntDenseView,
+        out: []i64,
+        miss_index: usize,
+    ) KError!bool {
+        const mono = monotonicFlags(hostIntDenseValueFlags(left, left_items));
+        if (mono == 0) return false;
+        const miss_i64 = std.math.cast(i64, miss_index) orelse return error.Unsupported;
+        const len = hostIntDenseViewLen(left_items);
+        if (len == 0) {
+            @memset(out, miss_i64);
+            return true;
+        }
+        const bounds = hostIntDenseValueRange(left, left_items);
+        for (0..out.len) |query_idx| {
+            const query = try hostIntDenseViewItem(right_items, query_idx);
+            if (query < bounds.min or query > bounds.max) {
+                out[query_idx] = miss_i64;
+                continue;
+            }
+            if ((mono & host_dense_flag_asc) != 0) {
+                const idx = try lowerBoundAscInt(left_items, query);
+                out[query_idx] = if (idx < len and (try hostIntDenseViewItem(left_items, idx)) == query)
+                    std.math.cast(i64, idx) orelse return error.Unsupported
+                else
+                    miss_i64;
+                continue;
+            }
+            if ((mono & host_dense_flag_dsc) != 0) {
+                const idx = try lowerBoundDscInt(left_items, query);
+                out[query_idx] = if (idx < len and (try hostIntDenseViewItem(left_items, idx)) == query)
+                    std.math.cast(i64, idx) orelse return error.Unsupported
+                else
+                    miss_i64;
+                continue;
+            }
+            out[query_idx] = miss_i64;
+        }
+        return true;
+    }
+
+    fn tryFillIntFindSortedFloatQueries(
+        left: Value,
+        left_items: HostIntDenseView,
+        right_items: HostFloatDenseView,
+        out: []i64,
+        miss_index: usize,
+    ) KError!bool {
+        const mono = monotonicFlags(hostIntDenseValueFlags(left, left_items));
+        if (mono == 0) return false;
+        const miss_i64 = std.math.cast(i64, miss_index) orelse return error.Unsupported;
+        const len = hostIntDenseViewLen(left_items);
+        if (len == 0) {
+            @memset(out, miss_i64);
+            return true;
+        }
+        const bounds = hostIntDenseValueRange(left, left_items);
+        for (0..out.len) |query_idx| {
+            const query = exactIntFromFloat(try hostFloatDenseViewItem(right_items, query_idx));
+            if (query == null or query.? < bounds.min or query.? > bounds.max) {
+                out[query_idx] = miss_i64;
+                continue;
+            }
+            if ((mono & host_dense_flag_asc) != 0) {
+                const idx = try lowerBoundAscInt(left_items, query.?);
+                out[query_idx] = if (idx < len and (try hostIntDenseViewItem(left_items, idx)) == query.?)
+                    std.math.cast(i64, idx) orelse return error.Unsupported
+                else
+                    miss_i64;
+                continue;
+            }
+            if ((mono & host_dense_flag_dsc) != 0) {
+                const idx = try lowerBoundDscInt(left_items, query.?);
+                out[query_idx] = if (idx < len and (try hostIntDenseViewItem(left_items, idx)) == query.?)
+                    std.math.cast(i64, idx) orelse return error.Unsupported
+                else
+                    miss_i64;
+                continue;
+            }
+            out[query_idx] = miss_i64;
+        }
+        return true;
+    }
+
+    fn tryFillIntFindSmallRangeIntQueries(
+        self: *Session,
+        left: Value,
+        left_items: HostIntDenseView,
+        right_items: HostIntDenseView,
+        out: []i64,
+        miss_index: usize,
+    ) KError!bool {
+        const left_len = hostIntDenseViewLen(left_items);
+        if (left_len == 0) return false;
+        const range = hostIntDenseValueRange(left, left_items);
+        const span_i128 = @as(i128, range.max) - @as(i128, range.min) + 1;
+        if (span_i128 <= 0) return false;
+        const span = std.math.cast(usize, span_i128) orelse return false;
+        if (span > find_int_small_range_max_span) return false;
+        const work_budget: u128 = 4 * (@as(u128, left_len) + @as(u128, out.len)) + 16;
+        if (@as(u128, span) > work_budget) return false;
+
+        const table = try self.allocator.alloc(i64, span);
+        defer self.allocator.free(table);
+        const miss_i64 = std.math.cast(i64, miss_index) orelse return error.Unsupported;
+        @memset(table, miss_i64);
+
+        for (0..left_len) |idx| {
+            const value = try hostIntDenseViewItem(left_items, idx);
+            const slot = @as(usize, @intCast(value - range.min));
+            if (table[slot] == miss_i64) table[slot] = std.math.cast(i64, idx) orelse return error.Unsupported;
+        }
+        for (0..out.len) |query_idx| {
+            const query = try hostIntDenseViewItem(right_items, query_idx);
+            out[query_idx] = if (query < range.min or query > range.max)
+                miss_i64
+            else
+                table[@as(usize, @intCast(query - range.min))];
+        }
+        return true;
+    }
+
+    fn tryFillIntFindSmallRangeFloatQueries(
+        self: *Session,
+        left: Value,
+        left_items: HostIntDenseView,
+        right_items: HostFloatDenseView,
+        out: []i64,
+        miss_index: usize,
+    ) KError!bool {
+        const left_len = hostIntDenseViewLen(left_items);
+        if (left_len == 0) return false;
+        const range = hostIntDenseValueRange(left, left_items);
+        const span_i128 = @as(i128, range.max) - @as(i128, range.min) + 1;
+        if (span_i128 <= 0) return false;
+        const span = std.math.cast(usize, span_i128) orelse return false;
+        if (span > find_int_small_range_max_span) return false;
+        const work_budget: u128 = 4 * (@as(u128, left_len) + @as(u128, out.len)) + 16;
+        if (@as(u128, span) > work_budget) return false;
+
+        const table = try self.allocator.alloc(i64, span);
+        defer self.allocator.free(table);
+        const miss_i64 = std.math.cast(i64, miss_index) orelse return error.Unsupported;
+        @memset(table, miss_i64);
+
+        for (0..left_len) |idx| {
+            const value = try hostIntDenseViewItem(left_items, idx);
+            const slot = @as(usize, @intCast(value - range.min));
+            if (table[slot] == miss_i64) table[slot] = std.math.cast(i64, idx) orelse return error.Unsupported;
+        }
+        for (0..out.len) |query_idx| {
+            const query = exactIntFromFloat(try hostFloatDenseViewItem(right_items, query_idx));
+            out[query_idx] = if (query == null or query.? < range.min or query.? > range.max)
+                miss_i64
+            else
+                table[@as(usize, @intCast(query.? - range.min))];
+        }
+        return true;
+    }
+
+    fn fillIntFindHashedIntQueries(
+        self: *Session,
+        out: []i64,
+        left_array: ?*HostDenseArray,
+        left_items: HostIntDenseView,
+        right_items: HostIntDenseView,
+        miss_index: usize,
+    ) KError!void {
+        if (left_items == .dense and right_items == .dense) {
+            return fillIntFindDenseHashedIntQueries(self, out, left_array, left_items.dense, right_items.dense, miss_index);
+        }
+        var lookup = std.AutoHashMap(i64, usize).init(self.allocator);
+        defer lookup.deinit();
+        try lookup.ensureTotalCapacity(std.math.cast(u32, hostIntDenseViewLen(left_items)) orelse return error.Unsupported);
+        for (0..hostIntDenseViewLen(left_items)) |idx| {
+            const key = try hostIntDenseViewItem(left_items, idx);
+            if (lookup.get(key) == null) try lookup.put(key, idx);
+        }
+
+        const miss_i64 = std.math.cast(i64, miss_index) orelse return error.Unsupported;
+        for (0..out.len) |query_idx| {
+            const query = try hostIntDenseViewItem(right_items, query_idx);
+            out[query_idx] = if (lookup.get(query)) |found_idx|
+                std.math.cast(i64, found_idx) orelse return error.Unsupported
+            else
+                miss_i64;
+        }
+    }
+
+    fn fillIntFindHashedFloatQueries(
+        self: *Session,
+        out: []i64,
+        left_array: ?*HostDenseArray,
+        left_items: HostIntDenseView,
+        right_items: HostFloatDenseView,
+        miss_index: usize,
+    ) KError!void {
+        if (left_items == .dense and right_items == .dense) {
+            return fillIntFindDenseHashedFloatQueries(self, out, left_array, left_items.dense, right_items.dense, miss_index);
+        }
+        var lookup = std.AutoHashMap(i64, usize).init(self.allocator);
+        defer lookup.deinit();
+        try lookup.ensureTotalCapacity(std.math.cast(u32, hostIntDenseViewLen(left_items)) orelse return error.Unsupported);
+        for (0..hostIntDenseViewLen(left_items)) |idx| {
+            const key = try hostIntDenseViewItem(left_items, idx);
+            if (lookup.get(key) == null) try lookup.put(key, idx);
+        }
+
+        const miss_i64 = std.math.cast(i64, miss_index) orelse return error.Unsupported;
+        for (0..out.len) |query_idx| {
+            const query = exactIntFromFloat(try hostFloatDenseViewItem(right_items, query_idx));
+            out[query_idx] = if (query) |query_int|
+                if (lookup.get(query_int)) |found_idx|
+                    std.math.cast(i64, found_idx) orelse return error.Unsupported
+                else
+                    miss_i64
+            else
+                miss_i64;
+        }
+    }
+
+    fn tryFastHostNumericVectorFindMultiValue(self: *Session, left: Value, right: Value, miss_index: usize) KError!?Value {
+        const left_view = hostDenseView(self, left) catch return null;
+        const right_view = hostDenseView(self, right) catch return null;
+        const left_array = managedHostDenseArrayForFindCache(left);
+        const out_len = numericRowQueryLen(right) orelse return null;
+        if (out_len <= 1) return null;
+
+        var out = try self.allocManagedHostIntResult(.int64, out_len);
+        const out_items = switch (out) {
+            .int64 => |result| result.items,
+            else => unreachable,
+        };
+
+        switch (left_view) {
+            .float_array => |left_items| switch (right_view) {
+                .float_array => |right_items| {
+                    if (try tryFillFloatFindSortedFloatQueries(left, left_items, right_items, out_items, miss_index)) {
+                        return try self.finishManagedHostInt64MultiFindResult(&out, out_items);
+                    }
+                    if (preferBruteForceNumericFind(hostFloatDenseViewLen(left_items), out_len)) {
+                        try fillFloatFindBruteForceFloatQueries(out_items, left_items, right_items, miss_index);
+                    } else {
+                        try fillFloatFindHashedFloatQueries(self, out_items, left_array, left_items, right_items, miss_index);
+                    }
+                    return try self.finishManagedHostInt64MultiFindResult(&out, out_items);
+                },
+                .int_array => |right_items| {
+                    if (try tryFillFloatFindSortedIntQueries(left, left_items, right_items, out_items, miss_index)) {
+                        return try self.finishManagedHostInt64MultiFindResult(&out, out_items);
+                    }
+                    if (preferBruteForceNumericFind(hostFloatDenseViewLen(left_items), out_len)) {
+                        try fillFloatFindBruteForceIntQueries(out_items, left_items, right_items, miss_index);
+                    } else {
+                        try fillFloatFindHashedIntQueries(self, out_items, left_array, left_items, right_items, miss_index);
+                    }
+                    return try self.finishManagedHostInt64MultiFindResult(&out, out_items);
+                },
+                else => return null,
+            },
+            .int_array => |left_items| switch (right_view) {
+                .int_array => |right_items| {
+                    if (try tryFillIntFindSortedIntQueries(left, left_items, right_items, out_items, miss_index)) {
+                        return try self.finishManagedHostInt64MultiFindResult(&out, out_items);
+                    }
+                    if (try tryFillIntFindSmallRangeIntQueries(self, left, left_items, right_items, out_items, miss_index)) {
+                        return try self.finishManagedHostInt64MultiFindResult(&out, out_items);
+                    }
+                    if (preferBruteForceNumericFind(hostIntDenseViewLen(left_items), out_len)) {
+                        try fillIntFindBruteForceIntQueries(out_items, left_items, right_items, miss_index);
+                    } else {
+                        try fillIntFindHashedIntQueries(self, out_items, left_array, left_items, right_items, miss_index);
+                    }
+                    return try self.finishManagedHostInt64MultiFindResult(&out, out_items);
+                },
+                .float_array => |right_items| {
+                    if (try tryFillIntFindSortedFloatQueries(left, left_items, right_items, out_items, miss_index)) {
+                        return try self.finishManagedHostInt64MultiFindResult(&out, out_items);
+                    }
+                    if (try tryFillIntFindSmallRangeFloatQueries(self, left, left_items, right_items, out_items, miss_index)) {
+                        return try self.finishManagedHostInt64MultiFindResult(&out, out_items);
+                    }
+                    if (preferBruteForceNumericFind(hostIntDenseViewLen(left_items), out_len)) {
+                        try fillIntFindBruteForceFloatQueries(out_items, left_items, right_items, miss_index);
+                    } else {
+                        try fillIntFindHashedFloatQueries(self, out_items, left_array, left_items, right_items, miss_index);
+                    }
+                    return try self.finishManagedHostInt64MultiFindResult(&out, out_items);
+                },
+                else => return null,
+            },
+            else => return null,
+        }
+    }
+
+    fn finishManagedHostInt64MultiFindResult(self: *Session, out: *HostIntResult, out_items: []const i64) !Value {
+        const analysis = analyzeIntSlice(out_items);
+        hostDenseSetFlags(out.arrayPtr(), analysis.flags);
+        hostDenseSetCachedIntRange(out.arrayPtr(), analysis.range);
+        return try out.value(self);
+    }
+
     fn findNumericMatrixRowValue(self: *Session, left: Value, right: Value, shape: NumericMatrixShape) KError!?Value {
         const query_len = numericRowQueryLen(right) orelse return null;
         if (query_len != shape.cols) return error.Type;
@@ -14455,6 +22084,7 @@ fn tryScalarIntBoolDyad(self: *Session, op: BuiltinId, left: Value, right: Value
             .backendContext = Session.backendContext,
             .mapMlxError = mapMlxError,
             .intValue = Session.intValue,
+            .wrapManagedBackendArray = Session.wrapManagedBackendArray,
             .numeric_array_max_rank = numeric_array_max_rank,
         }, self, left, right);
     }
@@ -14534,14 +22164,70 @@ fn tryScalarIntBoolDyad(self: *Session, op: BuiltinId, left: Value, right: Value
         }
     }
 
+    const dense_backend_find_multi_host_len_cpu: usize = 131_072;
+    const dense_backend_find_multi_host_len_gpu: usize = 65_536;
+    const dense_backend_find_multi_host_query_len: usize = 256;
+
+    fn valueHasHostDenseRealization(value: Value) bool {
+        if (valueNumericHandle(value)) |handle| return numericHasHostAttachment(handle);
+        return value.tag() == .array and value.arraySubkind() == .host_dense_array;
+    }
+
+    fn backendResidentNumericVectorFindPrefersHost(
+        self: *Session,
+        left: Value,
+        right: Value,
+        left_len: usize,
+        query_len: usize,
+    ) bool {
+        if (query_len <= 1 or query_len > dense_backend_find_multi_host_query_len) return false;
+
+        const left_facts = denseValuePlanFacts(left);
+        const right_facts = denseValuePlanFacts(right);
+        if (!(left_facts.has_backend_residency or right_facts.has_backend_residency)) return false;
+
+        const left_host_limit = if (self.device_preference == .gpu)
+            dense_backend_find_multi_host_len_gpu
+        else
+            dense_backend_find_multi_host_len_cpu;
+
+        if (valueHasHostDenseRealization(left)) return true;
+        return left_len <= left_host_limit;
+    }
+
     fn findNumericVectorValue(self: *Session, left: Value, right: Value) KError!?Value {
         if (valueNumericMode(left) == null or valueNumericMatrixShape(left) != null) return null;
         const left_len = numericFlatLen(left) orelse return null;
         const query_len = numericRowQueryLen(right) orelse return null;
-        if (query_len != 1) return error.Type;
-        if (try self.tryFastBackendNumericVectorFindValue(left, right)) |result| return result;
+        if (!backendResidentNumericVectorFindPrefersHost(self, left, right, left_len, query_len)) {
+            if (try self.tryFastBackendNumericVectorFindValue(left, right)) |result| return result;
+        }
         if (valueNumericHandle(left)) |handle| _ = try tryEnsureHostRealizationForHandle(self, @constCast(handle));
         if (valueNumericHandle(right)) |handle| _ = try tryEnsureHostRealizationForHandle(self, @constCast(handle));
+        if (query_len == 1) {
+            if (try self.tryFastHostNumericVectorFindScalarIndex(left, right, left_len)) |idx| {
+                return try self.intValue(@intCast(idx));
+            }
+        }
+        if (query_len != 1) {
+            if (try self.tryFastHostNumericVectorFindMultiValue(left, right, left_len)) |result| {
+                return result;
+            }
+            var out = std.ArrayList(i64).empty;
+            defer out.deinit(self.allocator);
+            try out.ensureTotalCapacity(self.allocator, query_len);
+            for (0..query_len) |query_idx| {
+                var found_idx: usize = left_len;
+                for (0..left_len) |idx| {
+                    if (try numericValuesEqualAt(left, idx, right, query_idx)) {
+                        found_idx = idx;
+                        break;
+                    }
+                }
+                try out.append(self.allocator, @intCast(found_idx));
+            }
+            return try self.createManagedHostIntArray(out.items);
+        }
         for (0..left_len) |idx| {
             if (try numericValuesEqualAt(left, idx, right, 0)) return try self.intValue(@intCast(idx));
         }
@@ -14553,6 +22239,11 @@ fn tryScalarIntBoolDyad(self: *Session, op: BuiltinId, left: Value, right: Value
             if (try self.findNumericMatrixRowValue(left, right, shape)) |result| return result;
         }
         if (try self.findNumericVectorValue(left, right)) |result| return result;
+        if (left.tag() == .array and left.arrayKind() == .host_keyed_store) {
+            const store = left.asHostKeyedStore();
+            const key = keyedLookupNameBytes(right) orelse return error.Type;
+            return try self.intValue(@intCast(store.lookup.get(key) orelse keyedStoreNameCount(store)));
+        }
         if (boxedArrayItems(left)) |items| {
             if (symbolBytes(right) != null) {
                 for (items, 0..) |item, idx| {
@@ -14574,6 +22265,12 @@ fn tryScalarIntBoolDyad(self: *Session, op: BuiltinId, left: Value, right: Value
                 break :blk switch (value.arrayKind()) {
                     .host_dense_array => try self.intValue(@intCast(value.asHostDenseArray().len())),
                     .host_boxed_array => try self.intValue(@intCast(value.asHostBoxedArray().len())),
+                    .host_string_list => try self.intValue(@intCast(value.asHostStringList().len)),
+                    .host_relation => try self.intValue(@intCast(try self.relationRowCount(@constCast(value.asHostRelation())))),
+                    .host_keyed_store => blk2: {
+                        const store = value.asHostKeyedStore();
+                        break :blk2 try self.intValue(@intCast(if (store.layout == .table) store.row_count else keyedStoreNameCount(store)));
+                    },
                     .backend_array => try self.intValue(@intCast(value.asBackendArray().array.shape()[0])),
                     else => error.Internal,
                 };
@@ -14626,19 +22323,142 @@ fn tryScalarIntBoolDyad(self: *Session, op: BuiltinId, left: Value, right: Value
         };
     }
 
+    fn iotaBitVectorValue(self: *Session, array: *const HostDenseArray) KError!Value {
+        var out = std.ArrayList(i64).empty;
+        defer out.deinit(self.allocator);
+
+        try out.ensureTotalCapacity(self.allocator, array.len());
+        for (0..array.len()) |idx| {
+            if (bitGet(array.storage.bit, idx)) try out.append(self.allocator, @intCast(idx));
+        }
+        return try self.createManagedHostIntArray(out.items);
+    }
+
+    fn iotaIntVectorValue(self: *Session, array: *const HostDenseArray) KError!Value {
+        const view = hostIntArrayView(array) orelse return error.Type;
+        const rank = hostIntArrayViewLen(view);
+
+        var cols: usize = 1;
+        for (0..rank) |idx| {
+            const count_i64 = hostIntViewItem(view, idx);
+            if (count_i64 < 0) return error.Type;
+            const count: usize = @intCast(count_i64);
+            cols = std.math.mul(usize, cols, count) catch return error.Unsupported;
+        }
+
+        if (cols == 0) {
+            const empty = try self.createManagedHostIntArray(&.{});
+            return try self.setNumericMatrixShapeOnValue(empty, rank, 0);
+        }
+
+        var out = std.ArrayList(i64).empty;
+        defer out.deinit(self.allocator);
+        try out.ensureTotalCapacity(self.allocator, std.math.mul(usize, rank, cols) catch return error.Unsupported);
+
+        var stride = cols;
+        for (0..rank) |axis| {
+            const count: usize = @intCast(hostIntViewItem(view, axis));
+            stride = @divExact(stride, count);
+            for (0..cols) |idx| {
+                const digit = @as(i64, @intCast((idx / stride) % count));
+                try out.append(self.allocator, digit);
+            }
+        }
+
+        const value = try self.createManagedHostIntArray(out.items);
+        return try self.setNumericMatrixShapeOnValue(value, rank, cols);
+    }
+
+    fn whereScalarCountValue(self: *Session, count_value: i64) KError!Value {
+        if (count_value < 0) return error.Type;
+        const count: usize = @intCast(count_value);
+        var out = std.ArrayList(i64).empty;
+        defer out.deinit(self.allocator);
+        try out.ensureTotalCapacity(self.allocator, count);
+        for (0..count) |_| try out.append(self.allocator, 0);
+        return try self.createManagedHostIntArray(out.items);
+    }
+
+    fn whereBitVectorValue(self: *Session, array: *const HostDenseArray) KError!Value {
+        var out = std.ArrayList(i64).empty;
+        defer out.deinit(self.allocator);
+
+        try out.ensureTotalCapacity(self.allocator, array.len());
+        for (0..array.len()) |idx| {
+            if (bitGet(array.storage.bit, idx)) try out.append(self.allocator, @intCast(idx));
+        }
+        return try self.createManagedHostIntArray(out.items);
+    }
+
+    fn whereIntVectorValue(self: *Session, array: *const HostDenseArray) KError!Value {
+        const view = hostIntArrayView(array) orelse return error.Type;
+
+        var total: usize = 0;
+        for (0..hostIntArrayViewLen(view)) |idx| {
+            const count_i64 = hostIntViewItem(view, idx);
+            if (count_i64 < 0) return error.Type;
+            const count: usize = @intCast(count_i64);
+            total = std.math.add(usize, total, count) catch return error.Unsupported;
+        }
+
+        var out = std.ArrayList(i64).empty;
+        defer out.deinit(self.allocator);
+        try out.ensureTotalCapacity(self.allocator, total);
+
+        for (0..hostIntArrayViewLen(view)) |idx| {
+            const count: usize = @intCast(hostIntViewItem(view, idx));
+            for (0..count) |_| try out.append(self.allocator, @intCast(idx));
+        }
+        return try self.createManagedHostIntArray(out.items);
+    }
+
+    fn whereValue(self: *Session, value: Value) KError!Value {
+        if (scalarIntLikeValue(value)) |count_value| return try self.whereScalarCountValue(count_value);
+        if (valueNumericMode(value) != null and valueNumericMatrixShape(value) == null) {
+            const array = try numericHostArrayValue(self, value);
+            return switch (array.storage) {
+                .bit => try self.whereBitVectorValue(array),
+                .int8, .int16, .int32, .int64 => try self.whereIntVectorValue(array),
+                else => error.Type,
+            };
+        }
+        return error.Type;
+    }
+
+    fn unitMatrixValue(self: *Session, value: Value) KError!Value {
+        const count_i64 = scalarIntLikeValue(value) orelse return error.Type;
+        if (count_i64 < 0) return error.Type;
+        const count: usize = @intCast(count_i64);
+        const len = std.math.mul(usize, count, count) catch return error.Unsupported;
+
+        var out = std.ArrayList(i64).empty;
+        defer out.deinit(self.allocator);
+        try out.ensureTotalCapacity(self.allocator, len);
+
+        for (0..count) |row| {
+            for (0..count) |col| try out.append(self.allocator, if (row == col) 1 else 0);
+        }
+
+        const matrix = try self.createManagedHostIntArray(out.items);
+        return try self.setNumericMatrixShapeOnValue(matrix, count, count);
+    }
+
     fn iotaValue(self: *Session, value: Value) KError!Value {
         if (scalarIntLikeValue(value)) |count_value| {
             if (count_value < 0) return error.Type;
             const count: usize = @intCast(count_value);
             return try newRangeIotaValue(self, .managed, count);
         }
-        if (valueHostIntStructuralView(value)) |view| {
-            var out = std.ArrayList(i64).empty;
-            defer out.deinit(self.allocator);
-            for (0..hostIntDenseViewLen(view)) |idx| {
-                if (try hostIntDenseViewItem(view, idx) != 0) try out.append(self.allocator, @intCast(idx));
-            }
-            return try self.createManagedHostIntArray(out.items);
+        if (value.tag() == .array and value.arrayKind() == .host_keyed_store) {
+            return self.shareValue(value.asHostKeyedStore().names);
+        }
+        if (valueNumericMode(value) != null and valueNumericMatrixShape(value) == null) {
+            const array = try numericHostArrayValue(self, value);
+            return switch (array.storage) {
+                .bit => try self.iotaBitVectorValue(array),
+                .int8, .int16, .int32, .int64 => try self.iotaIntVectorValue(array),
+                else => error.Type,
+            };
         }
         return error.Type;
     }
@@ -14648,6 +22468,7 @@ fn tryScalarIntBoolDyad(self: *Session, op: BuiltinId, left: Value, right: Value
             .host_string => return try self.reverseHostString(value.asHostString()),
             .host_string_view => return try self.reverseStringBytes(hostStringViewBytes(value.asHostStringView())),
             .host_string_list => return try self.reverseHostStringList(value.asHostStringList()),
+            .host_keyed_store => return try self.reverseKeyedStore(value.asHostKeyedStore()),
             else => {},
         };
         if (valueVectorRangeIotaHandle(value)) |handle| {
@@ -14828,6 +22649,7 @@ fn tryScalarIntBoolDyad(self: *Session, op: BuiltinId, left: Value, right: Value
     }
 
     fn scalarNullLikeValue(value: Value) bool {
+        if (tableScalarValue(value)) |scalar| return scalar.is_null;
         return switch (value.tag()) {
             .int, .float, .bool, .builtin, .closure => false,
             .array => switch (value.arrayKind()) {
@@ -14839,7 +22661,10 @@ fn tryScalarIntBoolDyad(self: *Session, op: BuiltinId, left: Value, right: Value
 
     fn valueIsAtomicForFillWithout(value: Value) bool {
         return switch (value.tag()) {
-            .array => value.arrayKind() == .host_symbol,
+            .array => switch (value.arrayKind()) {
+                .host_symbol, .host_table_scalar => true,
+                else => false,
+            },
             else => true,
         };
     }
@@ -14859,6 +22684,7 @@ fn tryScalarIntBoolDyad(self: *Session, op: BuiltinId, left: Value, right: Value
 
     fn nullValue(self: *Session, value: Value) KError!Value {
         if (scalarNullLikeValue(value)) return Value.fromBool(true);
+        if (tableScalarValue(value)) |scalar| return Value.fromBool(scalar.is_null);
         if (value.tag() != .array) return Value.fromBool(false);
 
         if (stringBytes(value)) |text| {
@@ -15272,6 +23098,22 @@ fn tryScalarIntBoolDyad(self: *Session, op: BuiltinId, left: Value, right: Value
     }
 
     fn concatValues(self: *Session, left: Value, right: Value) KError!Value {
+        if (valueIsTextSequence(left) and valueIsTextSequence(right)) {
+            return try self.concatTextSequenceValues(left, right);
+        }
+        if (left.tag() == .array and right.tag() == .array and
+            left.arrayKind() == .host_keyed_store and right.arrayKind() == .host_keyed_store)
+        {
+            const left_store = left.asHostKeyedStore();
+            const right_store = right.asHostKeyedStore();
+            if (left_store.layout == .dict and right_store.layout == .dict) {
+                return try self.concatKeyedDictValues(left_store, right_store);
+            }
+            if (left_store.layout == .table and right_store.layout == .table) {
+                return try self.concatTableValues(left_store, right_store);
+            }
+            return error.Type;
+        }
         if (try concatNumericMatrixShape(self, left, right)) |shape| {
             if (try concatNumericMatrixValue(self, left, right, shape)) |result| return result;
             var values = std.ArrayList(Value).empty;
@@ -15302,6 +23144,11 @@ fn tryScalarIntBoolDyad(self: *Session, op: BuiltinId, left: Value, right: Value
             }
             return;
         }
+        if (value.arraySubkind() == .host_boxed_array) {
+            const array = value.asHostBoxedArray();
+            for (array.items[0..array.len()]) |item| try values.append(self.allocator, item);
+            return;
+        }
         if (valueHostIntStructuralView(value)) |view| {
             for (0..hostIntDenseViewLen(view)) |idx| try values.append(self.allocator, try self.intValue(try hostIntDenseViewItem(view, idx)));
             return;
@@ -15321,10 +23168,27 @@ fn tryScalarIntBoolDyad(self: *Session, op: BuiltinId, left: Value, right: Value
         if (try shapeVectorSnapshotValue(left)) |shape| {
             return try self.reshapeToSnapshotValue(shape, right);
         }
+        if (try self.tryProjectKeyedStoreByKeys(left, right)) |projected| return projected;
         const raw_count = scalarIntLikeValue(left) orelse return error.Type;
+        if (right.tag() == .array and right.arrayKind() == .host_string_list) {
+            return try self.takeHostStringList(raw_count, right.asHostStringList());
+        }
         if (right.tag() != .array) {
             if (right.tag() != .int and right.tag() != .bool and right.tag() != .float) return error.Type;
             return try self.takeScalarValue(raw_count, right);
+        }
+        if (right.arrayKind() == .host_keyed_store) {
+            const store = right.asHostKeyedStore();
+            return switch (store.layout) {
+                .dict => try self.keyedDictTakeValue(raw_count, store),
+                .table => try self.tableTakeValue(raw_count, store),
+            };
+        }
+        if (right.arrayKind() == .host_relation) {
+            return try self.materializeRelationTake(raw_count, right.asHostRelation());
+        }
+        if (right.arraySubkind() == .host_boxed_array) {
+            return try self.takeHostBoxedArray(raw_count, right.asHostBoxedArray());
         }
         if (valueNumericMatrixView(right)) |matrix| {
             const count: usize = @intCast(@abs(raw_count));
@@ -15575,8 +23439,67 @@ fn tryScalarIntBoolDyad(self: *Session, op: BuiltinId, left: Value, right: Value
         };
     }
 
+    fn takeHostBoxedArray(self: *Session, raw_count: i64, array: *const HostBoxedArray) KError!Value {
+        const count: usize = @intCast(@abs(raw_count));
+        if (count == 0) return try self.createManagedHostBoxedArray(&.{});
+        if (array.len() == 0) return error.Type;
+
+        var out = std.ArrayList(Value).empty;
+        defer out.deinit(self.allocator);
+        try out.ensureTotalCapacity(self.allocator, count);
+
+        if (raw_count >= 0) {
+            for (0..count) |idx| try out.append(self.allocator, array.items[idx % array.len()]);
+        } else {
+            const pad = if (count > array.len()) count - array.len() else 0;
+            const first = array.items[0];
+            for (0..pad) |_| try out.append(self.allocator, first);
+            const start = if (count >= array.len()) 0 else array.len() - count;
+            for (start..array.len()) |idx| try out.append(self.allocator, array.items[idx]);
+        }
+        return try self.createManagedHostBoxedArray(out.items);
+    }
+
+    fn takeHostStringList(self: *Session, raw_count: i64, list: *const HostStringList) KError!Value {
+        const count: usize = @intCast(@abs(raw_count));
+        if (count == 0) return try self.createManagedHostTextListFromValues(&.{});
+        if (list.len == 0) return error.Type;
+
+        var out = std.ArrayList(Value).empty;
+        defer out.deinit(self.allocator);
+        defer {
+            for (out.items) |item| self.releaseValue(item);
+        }
+        try out.ensureTotalCapacity(self.allocator, count);
+
+        if (raw_count >= 0) {
+            for (0..count) |idx| try out.append(self.allocator, try self.hostStringListItemValue(list, idx % list.len));
+        } else {
+            const pad = if (count > list.len) count - list.len else 0;
+            const first = try self.hostStringListItemValue(list, 0);
+            defer self.releaseValue(first);
+            for (0..pad) |_| try out.append(self.allocator, try self.retainEscapedValue(first));
+            const start = if (count >= list.len) 0 else list.len - count;
+            for (start..list.len) |idx| try out.append(self.allocator, try self.hostStringListItemValue(list, idx));
+        }
+        return try self.createManagedHostTextListFromValues(out.items);
+    }
+
     fn dropValues(self: *Session, left: Value, right: Value) KError!Value {
         const raw_count = scalarIntLikeValue(left) orelse return error.Type;
+        if (right.tag() == .array and right.arrayKind() == .host_string_list) {
+            return try self.dropHostStringList(raw_count, right.asHostStringList());
+        }
+        if (right.tag() == .array and right.arrayKind() == .host_keyed_store) {
+            const store = right.asHostKeyedStore();
+            return switch (store.layout) {
+                .dict => try self.keyedDictDropValue(raw_count, store),
+                .table => try self.tableDropValue(raw_count, store),
+            };
+        }
+        if (right.tag() == .array and right.arraySubkind() == .host_boxed_array) {
+            return try self.dropHostBoxedArray(raw_count, right.asHostBoxedArray());
+        }
         if (valueNumericMatrixView(right)) |matrix| {
             const drop_count: usize = if (raw_count >= 0)
                 @min(@as(usize, @intCast(raw_count)), matrix.shape.rows)
@@ -15655,6 +23578,35 @@ fn tryScalarIntBoolDyad(self: *Session, op: BuiltinId, left: Value, right: Value
         };
     }
 
+    fn dropHostBoxedArray(self: *Session, raw_count: i64, array: *const HostBoxedArray) KError!Value {
+        const len = array.len();
+        const drop_count: usize = if (raw_count >= 0)
+            @min(@as(usize, @intCast(raw_count)), len)
+        else
+            len - @min(@as(usize, @intCast(-raw_count)), len);
+        const start: usize = if (raw_count >= 0) drop_count else 0;
+        const end: usize = if (raw_count >= 0) len else drop_count;
+        return try self.createManagedHostBoxedArray(array.items[start..end]);
+    }
+
+    fn dropHostStringList(self: *Session, raw_count: i64, list: *const HostStringList) KError!Value {
+        const drop_count: usize = if (raw_count >= 0)
+            @min(@as(usize, @intCast(raw_count)), list.len)
+        else
+            list.len - @min(@as(usize, @intCast(-raw_count)), list.len);
+        const start: usize = if (raw_count >= 0) drop_count else 0;
+        const end: usize = if (raw_count >= 0) list.len else drop_count;
+
+        var out = std.ArrayList(Value).empty;
+        defer out.deinit(self.allocator);
+        defer {
+            for (out.items) |item| self.releaseValue(item);
+        }
+        try out.ensureTotalCapacity(self.allocator, end - start);
+        for (start..end) |idx| try out.append(self.allocator, try self.hostStringListItemValue(list, idx));
+        return try self.createManagedHostTextListFromValues(out.items);
+    }
+
     fn reshapeValues(self: *Session, left: Value, right: Value) KError!Value {
         const row_len_value = scalarIntLikeValue(left) orelse return error.Type;
         if (row_len_value <= 0) return error.Type;
@@ -15728,19 +23680,21 @@ fn tryScalarIntBoolDyad(self: *Session, op: BuiltinId, left: Value, right: Value
         if (try self.promoteRenderableNumericDyadOperands(left, right)) |operands| {
             return try self.equalValues(operands.left, operands.right);
         }
-        if (left.tag() != .array and right.tag() != .array) {
+        const left_table_scalar = tableScalarValue(left) != null;
+        const right_table_scalar = tableScalarValue(right) != null;
+        if ((left.tag() != .array and right.tag() != .array) or left_table_scalar or right_table_scalar) {
             if (left.tag() == .float or right.tag() == .float) {
                 const lhs = switch (left.tag()) {
                     .float => left.asFloat(),
                     .int => @as(f64, @floatFromInt(left.asInt())),
                     .bool => @as(f64, @floatFromInt(@intFromBool(left.asBool()))),
-                    else => return error.Type,
+                    else => scalarNumericFloatValue(left) orelse return error.Type,
                 };
                 const rhs = switch (right.tag()) {
                     .float => right.asFloat(),
                     .int => @as(f64, @floatFromInt(right.asInt())),
                     .bool => @as(f64, @floatFromInt(@intFromBool(right.asBool()))),
-                    else => return error.Type,
+                    else => scalarNumericFloatValue(right) orelse return error.Type,
                 };
                 return Value.fromBool(lhs == rhs);
             }
@@ -15781,10 +23735,26 @@ fn tryScalarIntBoolDyad(self: *Session, op: BuiltinId, left: Value, right: Value
         });
     }
 
+    fn tryFastHostBitCompare(self: *Session, op: BuiltinId, left: Value, right: Value, shape: ?NumericShapeSnapshot) KError!?Value {
+        const left_bits = valueNumericBitSlice(left) orelse return null;
+        const right_bits = valueNumericBitSlice(right) orelse return null;
+        if (left_bits.len != right_bits.len) return error.Type;
+
+        if (enable_packed_bit_simd) {
+            var out = try self.allocManagedHostIntResult(.bit, left_bits.len);
+            fillBitWordsBinary(out.bit.words, op, left_bits.words, right_bits.words);
+            bitClearUnusedTail(out.bit.words, out.bit.len);
+            const result = try out.value(self);
+            return try applyNonVectorNumericShapeToValue(self, result, shape);
+        }
+        return null;
+    }
+
     fn compareNumericArrayValues(self: *Session, op: BuiltinId, left: Value, right: Value) KError!Value {
         if (planCompareMaskBackend(self, op, left, right) == .mlx) return try self.applyBackendArrayDyad(op, left, right);
-        const len = try arrayResultLen(left, right);
         const shape = try nonVectorNumericShapeForDyad(left, right);
+        if (try self.tryFastHostBitCompare(op, left, right, shape)) |result| return result;
+        const len = try arrayResultLen(left, right);
         const rowwise = rowwiseMatrixVectorDyad(left, right);
         var out = std.ArrayList(bool).empty;
         defer out.deinit(self.allocator);
@@ -16100,8 +24070,9 @@ fn tryScalarIntBoolDyad(self: *Session, op: BuiltinId, left: Value, right: Value
     fn equalArrayValues(self: *Session, left: Value, right: Value) KError!Value {
         if (valueNumericMode(left) != null and valueNumericMode(right) != null) {
             if (planCompareMaskBackend(self, .equal, left, right) == .mlx) return try self.applyBackendArrayDyad(.equal, left, right);
-            const len = try arrayResultLen(left, right);
             const shape = try nonVectorNumericShapeForDyad(left, right);
+            if (try self.tryFastHostBitCompare(.equal, left, right, shape)) |result| return result;
+            const len = try arrayResultLen(left, right);
             const rowwise = rowwiseMatrixVectorDyad(left, right);
             var out = std.ArrayList(bool).empty;
             defer out.deinit(self.allocator);
@@ -16238,6 +24209,22 @@ fn tryScalarIntBoolDyad(self: *Session, op: BuiltinId, left: Value, right: Value
             else => return error.Type,
         };
         return try self.floatValue(left_float / right_float);
+    }
+
+    fn powValues(self: *Session, left: Value, right: Value) KError!Value {
+        if (try self.promoteRenderableNumericDyadOperands(left, right)) |operands| {
+            return try self.powValues(operands.left, operands.right);
+        }
+        if (hasArrayOperand(left, right) and canApplyNumericDyad(left, right)) return try self.applyNumericDyad(.pow, left, right);
+        if (shouldUseGenericArrayDyad(left, right)) return try self.applyGenericArrayDyad(.pow, left, right);
+        if (scalarIntLikeValue(left)) |left_int| {
+            if (scalarIntLikeValue(right)) |right_int| {
+                return try self.intValue(try intPowLikeMlx(left_int, right_int));
+            }
+        }
+        const left_float = scalarNumericFloatValue(left) orelse return error.Type;
+        const right_float = scalarNumericFloatValue(right) orelse return error.Type;
+        return try self.floatValue(std.math.pow(f64, left_float, right_float));
     }
 
     const MatmulShape = struct {
@@ -16667,7 +24654,7 @@ fn tryScalarIntBoolDyad(self: *Session, op: BuiltinId, left: Value, right: Value
                     fillFloatUnaryIntDenseView(plan.output.items, op, items);
                     break :blk try self.finishHostFloatOutput(plan, 0);
                 },
-                .exp, .log, .tanh, .sigmoid => blk: {
+                .exp, .log, .sin, .cos, .tanh, .sigmoid => blk: {
                     const plan = try self.planHostFloatUnaryOutput(source_value, hostIntDenseViewLen(items), false);
                     fillFloatUnaryIntDenseView(plan.output.items, op, items);
                     break :blk try self.finishHostFloatOutput(plan, 0);
@@ -16686,7 +24673,7 @@ fn tryScalarIntBoolDyad(self: *Session, op: BuiltinId, left: Value, right: Value
                     fillFloatUnaryDenseView(plan.output.items, op, items);
                     break :blk try self.finishHostFloatOutput(plan, 0);
                 },
-                .exp, .log, .tanh, .sigmoid => blk: {
+                .exp, .log, .sin, .cos, .tanh, .sigmoid => blk: {
                     const plan = try self.planHostFloatUnaryOutput(source_value, hostFloatDenseViewLen(items), false);
                     fillFloatUnaryDenseView(plan.output.items, op, items);
                     break :blk try self.finishHostFloatOutput(plan, 0);
@@ -16747,6 +24734,7 @@ fn tryScalarIntBoolDyad(self: *Session, op: BuiltinId, left: Value, right: Value
                 .sub => try self.subValues(lhs, rhs),
                 .mul => try self.mulValues(lhs, rhs),
                 .div => try self.divValues(lhs, rhs),
+                .pow => try self.powValues(lhs, rhs),
                 .minimum => try self.minimumValues(lhs, rhs),
                 .maximum => try self.maximumValues(lhs, rhs),
                 .less => try self.lessValues(lhs, rhs),
@@ -16799,7 +24787,7 @@ fn tryScalarIntBoolDyad(self: *Session, op: BuiltinId, left: Value, right: Value
                 },
             },
             .mul => self.shareValue(hostDenseSourceValue(array)),
-            .div, .exp, .log, .tanh, .sigmoid => switch (array.storage) {
+            .div, .exp, .log, .sin, .cos, .tanh, .sigmoid => switch (array.storage) {
                 .bit => |words| blk: {
                     const plan = try self.planHostFloatUnaryOutput(hostDenseSourceValue(array), array.logical_len, false);
                     fillFloatUnaryBitArray(plan.output.items, op, .{ .words = words, .len = array.logical_len });
@@ -16877,6 +24865,7 @@ fn tryScalarIntBoolDyad(self: *Session, op: BuiltinId, left: Value, right: Value
                 .add => try checkedIntOp(.add, lhs, rhs),
                 .sub => try checkedIntOp(.sub, lhs, rhs),
                 .mul => try checkedIntOp(.mul, lhs, rhs),
+                .pow => try checkedIntOp(.pow, lhs, rhs),
                 .minimum => @min(lhs, rhs),
                 .maximum => @max(lhs, rhs),
                 else => return error.Type,
@@ -16901,6 +24890,7 @@ fn tryScalarIntBoolDyad(self: *Session, op: BuiltinId, left: Value, right: Value
                 .sub => lhs - rhs,
                 .mul => lhs * rhs,
                 .div => lhs / rhs,
+                .pow => std.math.pow(f64, lhs, rhs),
                 .minimum => @min(lhs, rhs),
                 .maximum => @max(lhs, rhs),
                 else => return error.Type,
@@ -17362,10 +25352,22 @@ fn tryScalarIntBoolDyad(self: *Session, op: BuiltinId, left: Value, right: Value
         self.stack_len += 1;
     }
 
+    fn ensureFrameLocalSlots(self: *Session, code: *const Code, base: usize) KError!void {
+        const slot_count: u8 = if (code.frame_slot_count == 0 and code.arity != 0) code.arity else code.frame_slot_count;
+        if (slot_count < code.arity) return error.Internal;
+        const required_len = base + slot_count;
+        if (required_len > self.stack.len) return error.Unsupported;
+        while (self.stack_len < required_len) {
+            self.stack[self.stack_len] = Value.fromBool(false);
+            self.stack_len += 1;
+        }
+    }
+
     inline fn pushFrame(self: *Session, frame: CallFrame) KError!void {
         if (self.frame_len >= self.frames.len) return error.Unsupported;
         self.frames[self.frame_len] = frame;
         self.frame_len += 1;
+        try self.ensureFrameLocalSlots(frame.code, frame.base);
     }
 
     fn createManagedHostIntArray(self: *Session, items: []const i64) !Value {
@@ -17575,6 +25577,114 @@ fn tryScalarIntBoolDyad(self: *Session, op: BuiltinId, left: Value, right: Value
         return Value.array(array);
     }
 
+    fn createManagedHostTableScalar(self: *Session, kind: HostTableColumnKind, value: Value, is_null: bool) !Value {
+        const scalar = try self.allocator.create(HostTableScalar);
+        errdefer self.allocator.destroy(scalar);
+        scalar.* = .{
+            .header = HeapHeader.init(.host_table_scalar, .managed),
+            .kind = kind,
+            .value = try self.retainEscapedValue(value),
+            .is_null = is_null,
+        };
+        return Value.array(scalar);
+    }
+
+    fn createManagedFileRelation(self: *Session, source_kind: duckdb_runtime.SourceKind, path: []const u8) !Value {
+        const relation = try self.allocator.create(HostRelation);
+        errdefer self.allocator.destroy(relation);
+        const owned_path = try self.allocator.dupe(u8, path);
+        errdefer self.allocator.free(owned_path);
+        relation.* = .{
+            .header = HeapHeader.init(.host_relation, .managed),
+            .origin = .{ .file = .{
+                .source_kind = source_kind,
+                .path = owned_path,
+            } },
+        };
+        return Value.array(relation);
+    }
+
+    fn createManagedHostTable(self: *Session, row_count: usize, columns: []HostTableColumn) !Value {
+        const name_values = try self.allocator.alloc(Value, columns.len);
+        defer self.allocator.free(name_values);
+        const data_values = try self.allocator.alloc(Value, columns.len);
+        defer self.allocator.free(data_values);
+
+        for (columns, 0..) |column, idx| {
+            name_values[idx] = column.name;
+            data_values[idx] = column.data;
+        }
+
+        const names = try self.createManagedHostBoxedArray(name_values);
+        errdefer self.releaseValue(names);
+        const values = try self.createManagedHostBoxedArray(data_values);
+        errdefer self.releaseValue(values);
+        const lookup = try self.createKeyedStoreLookupFromNamesValue(names);
+
+        const metadata = try self.retainKeyedStoreColumnMetadataFromTable(columns);
+        errdefer {
+            for (metadata) |entry| {
+                if (entry.validity) |mask| self.releaseValue(mask);
+            }
+            self.allocator.free(metadata);
+        }
+
+        defer {
+            for (columns) |column| {
+                self.releaseValue(column.name);
+                self.releaseValue(column.data);
+                if (column.validity) |mask| self.releaseValue(mask);
+            }
+            self.allocator.free(columns);
+        }
+
+        const owned_path = try self.allocator.dupe(u8, "");
+        errdefer self.allocator.free(owned_path);
+        return try self.createManagedKeyedStore(owned_path, true, names, values, metadata, .table, row_count, lookup);
+    }
+
+    fn createManagedKeyedStore(
+        self: *Session,
+        path: []const u8,
+        owns_path: bool,
+        names: Value,
+        values: Value,
+        column_metadata: ?[]HostKeyedColumnMetadata,
+        layout: HostKeyedLayout,
+        row_count: usize,
+        lookup: std.StringHashMapUnmanaged(usize),
+    ) !Value {
+        const store = try self.allocator.create(HostKeyedStore);
+        errdefer self.allocator.destroy(store);
+        store.* = .{
+            .header = HeapHeader.init(.host_keyed_store, .managed),
+            .layout = layout,
+            .row_count = row_count,
+            .path = path,
+            .owns_path = owns_path,
+            .names = names,
+            .values = values,
+            .column_metadata = column_metadata,
+            .lookup = lookup,
+        };
+        return Value.array(store);
+    }
+
+    fn createManagedSqlRelation(self: *Session, sql_text: []const u8, params: []HostRelationParam) !Value {
+        const relation = try self.allocator.create(HostRelation);
+        errdefer self.allocator.destroy(relation);
+        const owned_sql = try self.allocator.dupe(u8, sql_text);
+        errdefer self.allocator.free(owned_sql);
+        relation.* = .{
+            .header = HeapHeader.init(.host_relation, .managed),
+            .origin = .{ .sql = .{
+                .text = owned_sql,
+                .params = params,
+            } },
+        };
+        return Value.array(relation);
+    }
+
     fn createManagedHostStringList(self: *Session, values: []const Value) !Value {
         const buf = try hostStringListAllocSlice(self.allocator, values.len);
         errdefer self.allocator.free(buf);
@@ -17780,6 +25890,22 @@ const HostFloatResult = struct {
     }
 };
 
+const DictTableColumnSource = union(enum) {
+    scalar_bool: bool,
+    scalar_int: i64,
+    scalar_float: f64,
+    scalar_text: Value,
+    retained: Value,
+    boxed_values: []const Value,
+};
+
+const DictTableColumnSpec = struct {
+    kind: HostTableColumnKind,
+    len: usize,
+    scalar_extend: bool,
+    source: DictTableColumnSource,
+};
+
 fn hostIntResultSet(result: *HostIntResult, idx: usize, item_value: i64) KError!void {
     return result.set(idx, item_value);
 }
@@ -17830,12 +25956,72 @@ const HostArrayNormalizationPlan = union(enum) {
 };
 
 fn copyHostIntViewToResult(out: *HostIntResult, view: HostIntArrayView) KError!void {
-    switch (view) {
-        .bit => |items| for (0..items.len) |idx| try out.set(idx, @intFromBool(bitGet(items.words, idx))),
-        .int8 => |items| for (items, 0..) |item, idx| try out.set(idx, item),
-        .int16 => |items| for (items, 0..) |item, idx| try out.set(idx, item),
-        .int32 => |items| for (items, 0..) |item, idx| try out.set(idx, item),
-        .int64 => |items| for (items, 0..) |item, idx| try out.set(idx, item),
+    switch (out.*) {
+        .bit => |*result| switch (view) {
+            .bit => |items| {
+                std.debug.assert(result.words.len == items.words.len);
+                @memcpy(result.words, items.words);
+            },
+            else => switch (view) {
+                .bit => unreachable,
+                .int8 => |items| for (items, 0..) |item, idx| try out.set(idx, item),
+                .int16 => |items| for (items, 0..) |item, idx| try out.set(idx, item),
+                .int32 => |items| for (items, 0..) |item, idx| try out.set(idx, item),
+                .int64 => |items| for (items, 0..) |item, idx| try out.set(idx, item),
+            },
+        },
+        .int8 => |*result| switch (view) {
+            .int8 => |items| {
+                std.debug.assert(result.items.len == items.len);
+                @memcpy(result.items, items);
+            },
+            else => switch (view) {
+                .bit => |items| for (0..items.len) |idx| try out.set(idx, @intFromBool(bitGet(items.words, idx))),
+                .int8 => unreachable,
+                .int16 => |items| for (items, 0..) |item, idx| try out.set(idx, item),
+                .int32 => |items| for (items, 0..) |item, idx| try out.set(idx, item),
+                .int64 => |items| for (items, 0..) |item, idx| try out.set(idx, item),
+            },
+        },
+        .int16 => |*result| switch (view) {
+            .int16 => |items| {
+                std.debug.assert(result.items.len == items.len);
+                @memcpy(result.items, items);
+            },
+            else => switch (view) {
+                .bit => |items| for (0..items.len) |idx| try out.set(idx, @intFromBool(bitGet(items.words, idx))),
+                .int8 => |items| for (items, 0..) |item, idx| try out.set(idx, item),
+                .int16 => unreachable,
+                .int32 => |items| for (items, 0..) |item, idx| try out.set(idx, item),
+                .int64 => |items| for (items, 0..) |item, idx| try out.set(idx, item),
+            },
+        },
+        .int32 => |*result| switch (view) {
+            .int32 => |items| {
+                std.debug.assert(result.items.len == items.len);
+                @memcpy(result.items, items);
+            },
+            else => switch (view) {
+                .bit => |items| for (0..items.len) |idx| try out.set(idx, @intFromBool(bitGet(items.words, idx))),
+                .int8 => |items| for (items, 0..) |item, idx| try out.set(idx, item),
+                .int16 => |items| for (items, 0..) |item, idx| try out.set(idx, item),
+                .int32 => unreachable,
+                .int64 => |items| for (items, 0..) |item, idx| try out.set(idx, item),
+            },
+        },
+        .int64 => |*result| switch (view) {
+            .int64 => |items| {
+                std.debug.assert(result.items.len == items.len);
+                @memcpy(result.items, items);
+            },
+            else => switch (view) {
+                .bit => |items| for (0..items.len) |idx| try out.set(idx, @intFromBool(bitGet(items.words, idx))),
+                .int8 => |items| for (items, 0..) |item, idx| try out.set(idx, item),
+                .int16 => |items| for (items, 0..) |item, idx| try out.set(idx, item),
+                .int32 => |items| for (items, 0..) |item, idx| try out.set(idx, item),
+                .int64 => unreachable,
+            },
+        },
     }
 }
 
@@ -18832,6 +27018,655 @@ fn hostStorageCopyIntSlice(array: *const HostDenseArray) []const i64 {
     };
 }
 
+const DuckDbKiwiTableScan = if (runtime_has_duckdb) struct {
+    const callback_allocator = std.heap.c_allocator;
+
+    const BindData = struct {
+        table: *const HostKeyedStore,
+    };
+
+    const InitData = struct {
+        projected_columns: []usize,
+        next_row: std.atomic.Value(usize),
+    };
+
+    fn cTypeForColumnKind(kind: HostTableColumnKind) duckdb_runtime.c.duckdb_type {
+        return @as(duckdb_runtime.c.duckdb_type, switch (kind) {
+            .boolean => duckdb_runtime.c.DUCKDB_TYPE_BOOLEAN,
+            .int => duckdb_runtime.c.DUCKDB_TYPE_BIGINT,
+            .float => duckdb_runtime.c.DUCKDB_TYPE_DOUBLE,
+            .string => duckdb_runtime.c.DUCKDB_TYPE_VARCHAR,
+            .date => duckdb_runtime.c.DUCKDB_TYPE_DATE,
+            .time => duckdb_runtime.c.DUCKDB_TYPE_TIME,
+            .time_ns => duckdb_runtime.c.DUCKDB_TYPE_TIME_NS,
+            .time_tz => duckdb_runtime.c.DUCKDB_TYPE_TIME_TZ,
+            .timestamp => duckdb_runtime.c.DUCKDB_TYPE_TIMESTAMP,
+            .timestamp_s => duckdb_runtime.c.DUCKDB_TYPE_TIMESTAMP_S,
+            .timestamp_ms => duckdb_runtime.c.DUCKDB_TYPE_TIMESTAMP_MS,
+            .timestamp_ns => duckdb_runtime.c.DUCKDB_TYPE_TIMESTAMP_NS,
+            .timestamp_tz => duckdb_runtime.c.DUCKDB_TYPE_TIMESTAMP_TZ,
+        });
+    }
+
+    fn logicalTypeForColumnKind(kind: HostTableColumnKind) duckdb_runtime.c.duckdb_logical_type {
+        return duckdb_runtime.c.duckdb_create_logical_type(cTypeForColumnKind(kind));
+    }
+
+    fn bindDataDestroy(raw: ?*anyopaque) callconv(.c) void {
+        const ptr = raw orelse return;
+        const bind_data: *BindData = @ptrCast(@alignCast(ptr));
+        callback_allocator.destroy(bind_data);
+    }
+
+    fn initDataDestroy(raw: ?*anyopaque) callconv(.c) void {
+        const ptr = raw orelse return;
+        const init_data: *InitData = @ptrCast(@alignCast(ptr));
+        callback_allocator.free(init_data.projected_columns);
+        callback_allocator.destroy(init_data);
+    }
+
+    fn bindSetError(info: duckdb_runtime.c.duckdb_bind_info, message: [*:0]const u8) void {
+        duckdb_runtime.c.duckdb_bind_set_error(info, message);
+    }
+
+    fn initSetError(info: duckdb_runtime.c.duckdb_init_info, message: [*:0]const u8) void {
+        duckdb_runtime.c.duckdb_init_set_error(info, message);
+    }
+
+    fn functionSetError(info: duckdb_runtime.c.duckdb_function_info, message: [*:0]const u8) void {
+        duckdb_runtime.c.duckdb_function_set_error(info, message);
+    }
+
+    fn lookupRegisteredTable(session: *Session, name: []const u8) ?*const HostKeyedStore {
+        const entry = session.registered_duckdb_tables.getPtr(name) orelse return null;
+        if (entry.table.arrayKind() != .host_keyed_store) return null;
+        const store = entry.table.asHostKeyedStore();
+        return if (store.layout == .table) store else null;
+    }
+
+    fn bind(info: duckdb_runtime.c.duckdb_bind_info) callconv(.c) void {
+        const extra = duckdb_runtime.c.duckdb_bind_get_extra_info(info) orelse {
+            bindSetError(info, "kiwi_scan missing session");
+            return;
+        };
+        const session: *Session = @ptrCast(@alignCast(extra));
+
+        if (duckdb_runtime.c.duckdb_bind_get_parameter_count(info) != 1) {
+            bindSetError(info, "kiwi_scan expects exactly one table-name argument");
+            return;
+        }
+
+        var name_value = duckdb_runtime.c.duckdb_bind_get_parameter(info, 0);
+        defer duckdb_runtime.c.duckdb_destroy_value(&name_value);
+
+        const raw_name = duckdb_runtime.c.duckdb_get_varchar(name_value);
+        defer if (raw_name != null) duckdb_runtime.c.duckdb_free(raw_name);
+        if (raw_name == null) {
+            bindSetError(info, "kiwi_scan requires a non-null table name");
+            return;
+        }
+
+        const table = lookupRegisteredTable(session, std.mem.span(raw_name)) orelse {
+            bindSetError(info, "unknown kiwi registered table");
+            return;
+        };
+
+        const metadata = Session.keyedStoreTableMetadata(table);
+        for (0..Session.keyedStoreNameCount(table)) |column_idx| {
+            var logical_type = logicalTypeForColumnKind(metadata[column_idx].kind);
+            if (logical_type == null) {
+                bindSetError(info, "failed to build kiwi_scan column type");
+                return;
+            }
+            defer duckdb_runtime.c.duckdb_destroy_logical_type(&logical_type);
+
+            const column_name = callback_allocator.dupeZ(u8, Session.keyedStoreColumnNameBytes(table, column_idx)) catch {
+                bindSetError(info, "failed to allocate kiwi_scan column name");
+                return;
+            };
+            defer callback_allocator.free(column_name);
+
+            duckdb_runtime.c.duckdb_bind_add_result_column(info, column_name.ptr, logical_type);
+        }
+
+        duckdb_runtime.c.duckdb_bind_set_cardinality(info, @intCast(table.row_count), true);
+
+        const bind_data = callback_allocator.create(BindData) catch {
+            bindSetError(info, "failed to allocate kiwi_scan bind state");
+            return;
+        };
+        bind_data.* = .{ .table = table };
+        duckdb_runtime.c.duckdb_bind_set_bind_data(info, bind_data, bindDataDestroy);
+    }
+
+    fn init(info: duckdb_runtime.c.duckdb_init_info) callconv(.c) void {
+        const bind_raw = duckdb_runtime.c.duckdb_init_get_bind_data(info) orelse {
+            initSetError(info, "kiwi_scan missing bind state");
+            return;
+        };
+        const bind_data: *const BindData = @ptrCast(@alignCast(bind_raw));
+
+        const projected_count: usize = @intCast(duckdb_runtime.c.duckdb_init_get_column_count(info));
+        const projected_columns = callback_allocator.alloc(usize, projected_count) catch {
+            initSetError(info, "failed to allocate kiwi_scan projection state");
+            return;
+        };
+        errdefer callback_allocator.free(projected_columns);
+
+        for (0..projected_count) |idx| {
+            const column_idx: usize = @intCast(duckdb_runtime.c.duckdb_init_get_column_index(info, @intCast(idx)));
+            if (column_idx >= Session.keyedStoreNameCount(bind_data.table)) {
+                initSetError(info, "kiwi_scan projection index out of range");
+                return;
+            }
+            projected_columns[idx] = column_idx;
+        }
+
+        const init_data = callback_allocator.create(InitData) catch {
+            initSetError(info, "failed to allocate kiwi_scan scan state");
+            return;
+        };
+        init_data.* = .{
+            .projected_columns = projected_columns,
+            .next_row = std.atomic.Value(usize).init(0),
+        };
+        duckdb_runtime.c.duckdb_init_set_init_data(info, init_data, initDataDestroy);
+    }
+
+    fn markInvalid(vector: duckdb_runtime.c.duckdb_vector, row: usize, validity_ptr: *?[*]u64) !void {
+        const validity = validity_ptr.* orelse blk: {
+            duckdb_runtime.c.duckdb_vector_ensure_validity_writable(vector);
+            const raw = duckdb_runtime.c.duckdb_vector_get_validity(vector);
+            if (raw == null) return error.Unsupported;
+            const casted: [*]u64 = @ptrCast(raw);
+            validity_ptr.* = casted;
+            break :blk casted;
+        };
+        duckdb_runtime.c.duckdb_validity_set_row_invalid(validity, @intCast(row));
+    }
+
+    fn columnValidityBits(table: *const HostKeyedStore, column_idx: usize) ?HostBitSlice {
+        const validity = Session.keyedStoreTableMetadata(table)[column_idx].validity orelse return null;
+        const array = hostDenseIfPresent(validity) orelse return null;
+        return switch (hostIntArrayView(array) orelse return null) {
+            .bit => |bits| bits,
+            else => null,
+        };
+    }
+
+    fn columnIntView(table: *const HostKeyedStore, column_idx: usize) ?HostIntArrayView {
+        const array = hostDenseIfPresent(Session.tableColumnData(table, column_idx)) orelse return null;
+        return hostIntArrayView(array);
+    }
+
+    fn columnFloatSlice(table: *const HostKeyedStore, column_idx: usize) ?[]const f64 {
+        const array = hostDenseIfPresent(Session.tableColumnData(table, column_idx)) orelse return null;
+        return switch (array.storage) {
+            .float64 => |items| items,
+            else => null,
+        };
+    }
+
+    fn rowValid(validity_bits: ?HostBitSlice, src_row: usize) bool {
+        const bits = validity_bits orelse return true;
+        return bitGet(bits.words, src_row);
+    }
+
+    fn mapIntIdentity(raw: i64) KError!i64 {
+        return raw;
+    }
+
+    fn mapBool(raw: i64) KError!bool {
+        return raw != 0;
+    }
+
+    fn mapDate(raw: i64) KError!duckdb_runtime.c.duckdb_date {
+        const days = std.math.cast(i32, raw) orelse return error.Unsupported;
+        return .{ .days = days };
+    }
+
+    fn mapTime(raw: i64) KError!duckdb_runtime.c.duckdb_time {
+        return .{ .micros = raw };
+    }
+
+    fn mapTimeNs(raw: i64) KError!duckdb_runtime.c.duckdb_time_ns {
+        return .{ .nanos = raw };
+    }
+
+    fn mapTimeTz(raw: i64) KError!duckdb_runtime.c.duckdb_time_tz {
+        return .{ .bits = @bitCast(raw) };
+    }
+
+    fn mapTimestamp(raw: i64) KError!duckdb_runtime.c.duckdb_timestamp {
+        return .{ .micros = raw };
+    }
+
+    fn mapTimestampS(raw: i64) KError!duckdb_runtime.c.duckdb_timestamp_s {
+        return .{ .seconds = raw };
+    }
+
+    fn mapTimestampMs(raw: i64) KError!duckdb_runtime.c.duckdb_timestamp_ms {
+        return .{ .millis = raw };
+    }
+
+    fn mapTimestampNs(raw: i64) KError!duckdb_runtime.c.duckdb_timestamp_ns {
+        return .{ .nanos = raw };
+    }
+
+    fn writeMappedIntViewRows(
+        comptime OutT: type,
+        out: [*]OutT,
+        view: HostIntArrayView,
+        validity_bits: ?HostBitSlice,
+        vector: duckdb_runtime.c.duckdb_vector,
+        start_row: usize,
+        row_count: usize,
+        comptime mapValue: fn (i64) KError!OutT,
+    ) !void {
+        var validity: ?[*]u64 = null;
+
+        switch (view) {
+            .bit => |items| {
+                for (0..row_count) |row| {
+                    const src_row = start_row + row;
+                    if (validity_bits != null and !bitGet(validity_bits.?.words, src_row)) {
+                        try markInvalid(vector, row, &validity);
+                        continue;
+                    }
+                    out[row] = try mapValue(@intFromBool(bitGet(items.words, src_row)));
+                }
+            },
+            .int8 => |items| {
+                for (0..row_count) |row| {
+                    const src_row = start_row + row;
+                    if (validity_bits != null and !bitGet(validity_bits.?.words, src_row)) {
+                        try markInvalid(vector, row, &validity);
+                        continue;
+                    }
+                    out[row] = try mapValue(items[src_row]);
+                }
+            },
+            .int16 => |items| {
+                for (0..row_count) |row| {
+                    const src_row = start_row + row;
+                    if (validity_bits != null and !bitGet(validity_bits.?.words, src_row)) {
+                        try markInvalid(vector, row, &validity);
+                        continue;
+                    }
+                    out[row] = try mapValue(items[src_row]);
+                }
+            },
+            .int32 => |items| {
+                for (0..row_count) |row| {
+                    const src_row = start_row + row;
+                    if (validity_bits != null and !bitGet(validity_bits.?.words, src_row)) {
+                        try markInvalid(vector, row, &validity);
+                        continue;
+                    }
+                    out[row] = try mapValue(items[src_row]);
+                }
+            },
+            .int64 => |items| {
+                for (0..row_count) |row| {
+                    const src_row = start_row + row;
+                    if (validity_bits != null and !bitGet(validity_bits.?.words, src_row)) {
+                        try markInvalid(vector, row, &validity);
+                        continue;
+                    }
+                    out[row] = try mapValue(items[src_row]);
+                }
+            },
+        }
+    }
+
+    fn writeFloatSliceRows(
+        out: [*]f64,
+        items: []const f64,
+        validity_bits: ?HostBitSlice,
+        vector: duckdb_runtime.c.duckdb_vector,
+        start_row: usize,
+        row_count: usize,
+    ) !void {
+        if (validity_bits == null) {
+            @memcpy(out[0..row_count], items[start_row .. start_row + row_count]);
+            return;
+        }
+
+        var validity: ?[*]u64 = null;
+        for (0..row_count) |row| {
+            const src_row = start_row + row;
+            if (!rowValid(validity_bits, src_row)) {
+                try markInvalid(vector, row, &validity);
+                continue;
+            }
+            out[row] = items[src_row];
+        }
+    }
+
+    fn writeColumnRows(
+        table: *const HostKeyedStore,
+        column_idx: usize,
+        vector: duckdb_runtime.c.duckdb_vector,
+        start_row: usize,
+        row_count: usize,
+    ) !void {
+        const validity_bits = columnValidityBits(table, column_idx);
+        const kind = Session.keyedStoreTableMetadata(table)[column_idx].kind;
+        const data_value = Session.tableColumnData(table, column_idx);
+
+        switch (kind) {
+            .boolean => if (columnIntView(table, column_idx)) |view| {
+                const data = duckdb_runtime.c.duckdb_vector_get_data(vector) orelse return error.DuckDbUnexpectedResult;
+                const out: [*]bool = @ptrCast(@alignCast(data));
+                try writeMappedIntViewRows(bool, out, view, validity_bits, vector, start_row, row_count, mapBool);
+                return;
+            },
+            .int => if (columnIntView(table, column_idx)) |view| {
+                const data = duckdb_runtime.c.duckdb_vector_get_data(vector) orelse return error.DuckDbUnexpectedResult;
+                const out: [*]i64 = @ptrCast(@alignCast(data));
+                try writeMappedIntViewRows(i64, out, view, validity_bits, vector, start_row, row_count, mapIntIdentity);
+                return;
+            },
+            .float => if (columnFloatSlice(table, column_idx)) |items| {
+                const data = duckdb_runtime.c.duckdb_vector_get_data(vector) orelse return error.DuckDbUnexpectedResult;
+                const out: [*]f64 = @ptrCast(@alignCast(data));
+                try writeFloatSliceRows(out, items, validity_bits, vector, start_row, row_count);
+                return;
+            },
+            .string => {
+                const list = data_value.asHostStringList();
+                var validity: ?[*]u64 = null;
+                for (0..row_count) |row| {
+                    const src_row = start_row + row;
+                    if (!rowValid(validity_bits, src_row)) {
+                        try markInvalid(vector, row, &validity);
+                        continue;
+                    }
+                    const bytes = try hostStringListItemBytes(list, src_row);
+                    duckdb_runtime.c.duckdb_unsafe_vector_assign_string_element_len(vector, @intCast(row), bytes.ptr, @intCast(bytes.len));
+                }
+                return;
+            },
+            .date => if (columnIntView(table, column_idx)) |view| {
+                const data = duckdb_runtime.c.duckdb_vector_get_data(vector) orelse return error.DuckDbUnexpectedResult;
+                const out: [*]duckdb_runtime.c.duckdb_date = @ptrCast(@alignCast(data));
+                try writeMappedIntViewRows(duckdb_runtime.c.duckdb_date, out, view, validity_bits, vector, start_row, row_count, mapDate);
+                return;
+            },
+            .time => if (columnIntView(table, column_idx)) |view| {
+                const data = duckdb_runtime.c.duckdb_vector_get_data(vector) orelse return error.DuckDbUnexpectedResult;
+                const out: [*]duckdb_runtime.c.duckdb_time = @ptrCast(@alignCast(data));
+                try writeMappedIntViewRows(duckdb_runtime.c.duckdb_time, out, view, validity_bits, vector, start_row, row_count, mapTime);
+                return;
+            },
+            .time_ns => if (columnIntView(table, column_idx)) |view| {
+                const data = duckdb_runtime.c.duckdb_vector_get_data(vector) orelse return error.DuckDbUnexpectedResult;
+                const out: [*]duckdb_runtime.c.duckdb_time_ns = @ptrCast(@alignCast(data));
+                try writeMappedIntViewRows(duckdb_runtime.c.duckdb_time_ns, out, view, validity_bits, vector, start_row, row_count, mapTimeNs);
+                return;
+            },
+            .time_tz => if (columnIntView(table, column_idx)) |view| {
+                const data = duckdb_runtime.c.duckdb_vector_get_data(vector) orelse return error.DuckDbUnexpectedResult;
+                const out: [*]duckdb_runtime.c.duckdb_time_tz = @ptrCast(@alignCast(data));
+                try writeMappedIntViewRows(duckdb_runtime.c.duckdb_time_tz, out, view, validity_bits, vector, start_row, row_count, mapTimeTz);
+                return;
+            },
+            .timestamp => if (columnIntView(table, column_idx)) |view| {
+                const data = duckdb_runtime.c.duckdb_vector_get_data(vector) orelse return error.DuckDbUnexpectedResult;
+                const out: [*]duckdb_runtime.c.duckdb_timestamp = @ptrCast(@alignCast(data));
+                try writeMappedIntViewRows(duckdb_runtime.c.duckdb_timestamp, out, view, validity_bits, vector, start_row, row_count, mapTimestamp);
+                return;
+            },
+            .timestamp_s => if (columnIntView(table, column_idx)) |view| {
+                const data = duckdb_runtime.c.duckdb_vector_get_data(vector) orelse return error.DuckDbUnexpectedResult;
+                const out: [*]duckdb_runtime.c.duckdb_timestamp_s = @ptrCast(@alignCast(data));
+                try writeMappedIntViewRows(duckdb_runtime.c.duckdb_timestamp_s, out, view, validity_bits, vector, start_row, row_count, mapTimestampS);
+                return;
+            },
+            .timestamp_ms => if (columnIntView(table, column_idx)) |view| {
+                const data = duckdb_runtime.c.duckdb_vector_get_data(vector) orelse return error.DuckDbUnexpectedResult;
+                const out: [*]duckdb_runtime.c.duckdb_timestamp_ms = @ptrCast(@alignCast(data));
+                try writeMappedIntViewRows(duckdb_runtime.c.duckdb_timestamp_ms, out, view, validity_bits, vector, start_row, row_count, mapTimestampMs);
+                return;
+            },
+            .timestamp_ns => if (columnIntView(table, column_idx)) |view| {
+                const data = duckdb_runtime.c.duckdb_vector_get_data(vector) orelse return error.DuckDbUnexpectedResult;
+                const out: [*]duckdb_runtime.c.duckdb_timestamp_ns = @ptrCast(@alignCast(data));
+                try writeMappedIntViewRows(duckdb_runtime.c.duckdb_timestamp_ns, out, view, validity_bits, vector, start_row, row_count, mapTimestampNs);
+                return;
+            },
+            .timestamp_tz => if (columnIntView(table, column_idx)) |view| {
+                const data = duckdb_runtime.c.duckdb_vector_get_data(vector) orelse return error.DuckDbUnexpectedResult;
+                const out: [*]duckdb_runtime.c.duckdb_timestamp = @ptrCast(@alignCast(data));
+                try writeMappedIntViewRows(duckdb_runtime.c.duckdb_timestamp, out, view, validity_bits, vector, start_row, row_count, mapTimestamp);
+                return;
+            },
+        }
+
+        var validity: ?[*]u64 = null;
+
+        switch (kind) {
+            .boolean => {
+                const data = duckdb_runtime.c.duckdb_vector_get_data(vector) orelse return error.DuckDbUnexpectedResult;
+                const out: [*]bool = @ptrCast(@alignCast(data));
+                for (0..row_count) |row| {
+                    const src_row = start_row + row;
+                    if (!Session.keyedStoreTableCellIsValid(table, column_idx, src_row)) {
+                        try markInvalid(vector, row, &validity);
+                        continue;
+                    }
+                    out[row] = (try numericIntAt(data_value, src_row)) != 0;
+                }
+            },
+            .int => {
+                const data = duckdb_runtime.c.duckdb_vector_get_data(vector) orelse return error.DuckDbUnexpectedResult;
+                const out: [*]i64 = @ptrCast(@alignCast(data));
+                for (0..row_count) |row| {
+                    const src_row = start_row + row;
+                    if (!Session.keyedStoreTableCellIsValid(table, column_idx, src_row)) {
+                        try markInvalid(vector, row, &validity);
+                        continue;
+                    }
+                    out[row] = try numericIntAt(data_value, src_row);
+                }
+            },
+            .float => {
+                const data = duckdb_runtime.c.duckdb_vector_get_data(vector) orelse return error.DuckDbUnexpectedResult;
+                const out: [*]f64 = @ptrCast(@alignCast(data));
+                for (0..row_count) |row| {
+                    const src_row = start_row + row;
+                    if (!Session.keyedStoreTableCellIsValid(table, column_idx, src_row)) {
+                        try markInvalid(vector, row, &validity);
+                        continue;
+                    }
+                    out[row] = try numericFloatAt(data_value, src_row);
+                }
+            },
+            .string => {
+                const list = data_value.asHostStringList();
+                for (0..row_count) |row| {
+                    const src_row = start_row + row;
+                    if (!Session.keyedStoreTableCellIsValid(table, column_idx, src_row)) {
+                        try markInvalid(vector, row, &validity);
+                        continue;
+                    }
+                    const bytes = try hostStringListItemBytes(list, src_row);
+                    duckdb_runtime.c.duckdb_vector_assign_string_element_len(vector, @intCast(row), bytes.ptr, @intCast(bytes.len));
+                }
+            },
+            .date => {
+                const data = duckdb_runtime.c.duckdb_vector_get_data(vector) orelse return error.DuckDbUnexpectedResult;
+                const out: [*]duckdb_runtime.c.duckdb_date = @ptrCast(@alignCast(data));
+                for (0..row_count) |row| {
+                    const src_row = start_row + row;
+                    if (!Session.keyedStoreTableCellIsValid(table, column_idx, src_row)) {
+                        try markInvalid(vector, row, &validity);
+                        continue;
+                    }
+                    const days = std.math.cast(i32, try numericIntAt(data_value, src_row)) orelse return error.Unsupported;
+                    out[row] = .{ .days = days };
+                }
+            },
+            .time => {
+                const data = duckdb_runtime.c.duckdb_vector_get_data(vector) orelse return error.DuckDbUnexpectedResult;
+                const out: [*]duckdb_runtime.c.duckdb_time = @ptrCast(@alignCast(data));
+                for (0..row_count) |row| {
+                    const src_row = start_row + row;
+                    if (!Session.keyedStoreTableCellIsValid(table, column_idx, src_row)) {
+                        try markInvalid(vector, row, &validity);
+                        continue;
+                    }
+                    out[row] = .{ .micros = try numericIntAt(data_value, src_row) };
+                }
+            },
+            .time_ns => {
+                const data = duckdb_runtime.c.duckdb_vector_get_data(vector) orelse return error.DuckDbUnexpectedResult;
+                const out: [*]duckdb_runtime.c.duckdb_time_ns = @ptrCast(@alignCast(data));
+                for (0..row_count) |row| {
+                    const src_row = start_row + row;
+                    if (!Session.keyedStoreTableCellIsValid(table, column_idx, src_row)) {
+                        try markInvalid(vector, row, &validity);
+                        continue;
+                    }
+                    out[row] = .{ .nanos = try numericIntAt(data_value, src_row) };
+                }
+            },
+            .time_tz => {
+                const data = duckdb_runtime.c.duckdb_vector_get_data(vector) orelse return error.DuckDbUnexpectedResult;
+                const out: [*]duckdb_runtime.c.duckdb_time_tz = @ptrCast(@alignCast(data));
+                for (0..row_count) |row| {
+                    const src_row = start_row + row;
+                    if (!Session.keyedStoreTableCellIsValid(table, column_idx, src_row)) {
+                        try markInvalid(vector, row, &validity);
+                        continue;
+                    }
+                    out[row] = .{ .bits = @bitCast(try numericIntAt(data_value, src_row)) };
+                }
+            },
+            .timestamp => {
+                const data = duckdb_runtime.c.duckdb_vector_get_data(vector) orelse return error.DuckDbUnexpectedResult;
+                const out: [*]duckdb_runtime.c.duckdb_timestamp = @ptrCast(@alignCast(data));
+                for (0..row_count) |row| {
+                    const src_row = start_row + row;
+                    if (!Session.keyedStoreTableCellIsValid(table, column_idx, src_row)) {
+                        try markInvalid(vector, row, &validity);
+                        continue;
+                    }
+                    out[row] = .{ .micros = try numericIntAt(data_value, src_row) };
+                }
+            },
+            .timestamp_s => {
+                const data = duckdb_runtime.c.duckdb_vector_get_data(vector) orelse return error.DuckDbUnexpectedResult;
+                const out: [*]duckdb_runtime.c.duckdb_timestamp_s = @ptrCast(@alignCast(data));
+                for (0..row_count) |row| {
+                    const src_row = start_row + row;
+                    if (!Session.keyedStoreTableCellIsValid(table, column_idx, src_row)) {
+                        try markInvalid(vector, row, &validity);
+                        continue;
+                    }
+                    out[row] = .{ .seconds = try numericIntAt(data_value, src_row) };
+                }
+            },
+            .timestamp_ms => {
+                const data = duckdb_runtime.c.duckdb_vector_get_data(vector) orelse return error.DuckDbUnexpectedResult;
+                const out: [*]duckdb_runtime.c.duckdb_timestamp_ms = @ptrCast(@alignCast(data));
+                for (0..row_count) |row| {
+                    const src_row = start_row + row;
+                    if (!Session.keyedStoreTableCellIsValid(table, column_idx, src_row)) {
+                        try markInvalid(vector, row, &validity);
+                        continue;
+                    }
+                    out[row] = .{ .millis = try numericIntAt(data_value, src_row) };
+                }
+            },
+            .timestamp_ns => {
+                const data = duckdb_runtime.c.duckdb_vector_get_data(vector) orelse return error.DuckDbUnexpectedResult;
+                const out: [*]duckdb_runtime.c.duckdb_timestamp_ns = @ptrCast(@alignCast(data));
+                for (0..row_count) |row| {
+                    const src_row = start_row + row;
+                    if (!Session.keyedStoreTableCellIsValid(table, column_idx, src_row)) {
+                        try markInvalid(vector, row, &validity);
+                        continue;
+                    }
+                    out[row] = .{ .nanos = try numericIntAt(data_value, src_row) };
+                }
+            },
+            .timestamp_tz => {
+                const data = duckdb_runtime.c.duckdb_vector_get_data(vector) orelse return error.DuckDbUnexpectedResult;
+                const out: [*]duckdb_runtime.c.duckdb_timestamp = @ptrCast(@alignCast(data));
+                for (0..row_count) |row| {
+                    const src_row = start_row + row;
+                    if (!Session.keyedStoreTableCellIsValid(table, column_idx, src_row)) {
+                        try markInvalid(vector, row, &validity);
+                        continue;
+                    }
+                    out[row] = .{ .micros = try numericIntAt(data_value, src_row) };
+                }
+            },
+        }
+    }
+
+    fn scan(info: duckdb_runtime.c.duckdb_function_info, output: duckdb_runtime.c.duckdb_data_chunk) callconv(.c) void {
+        const bind_raw = duckdb_runtime.c.duckdb_function_get_bind_data(info) orelse {
+            functionSetError(info, "kiwi_scan missing bind state");
+            return;
+        };
+        const init_raw = duckdb_runtime.c.duckdb_function_get_init_data(info) orelse {
+            functionSetError(info, "kiwi_scan missing scan state");
+            return;
+        };
+
+        const bind_data: *const BindData = @ptrCast(@alignCast(bind_raw));
+        const init_data: *InitData = @ptrCast(@alignCast(init_raw));
+        const table = bind_data.table;
+
+        duckdb_runtime.c.duckdb_data_chunk_reset(output);
+
+        const chunk_capacity: usize = @intCast(duckdb_runtime.c.duckdb_vector_size());
+        const start_row = init_data.next_row.fetchAdd(chunk_capacity, .monotonic);
+        if (start_row >= table.row_count) {
+            duckdb_runtime.c.duckdb_data_chunk_set_size(output, 0);
+            return;
+        }
+
+        const row_count = @min(chunk_capacity, table.row_count - start_row);
+        for (init_data.projected_columns, 0..) |column_idx, out_idx| {
+            const vector = duckdb_runtime.c.duckdb_data_chunk_get_vector(output, @intCast(out_idx));
+            writeColumnRows(table, column_idx, vector, start_row, row_count) catch {
+                functionSetError(info, "kiwi_scan failed while producing a result chunk");
+                duckdb_runtime.c.duckdb_data_chunk_set_size(output, 0);
+                return;
+            };
+        }
+        duckdb_runtime.c.duckdb_data_chunk_set_size(output, @intCast(row_count));
+    }
+
+    fn ensureRegistered(session: *Session, conn: *duckdb_runtime.Connection) KError!void {
+        var table_function = duckdb_runtime.c.duckdb_create_table_function();
+        if (table_function == null) return error.Unsupported;
+        defer duckdb_runtime.c.duckdb_destroy_table_function(&table_function);
+
+        duckdb_runtime.c.duckdb_table_function_set_name(table_function, "kiwi_scan");
+
+        var varchar_type = duckdb_runtime.c.duckdb_create_logical_type(
+            @as(duckdb_runtime.c.duckdb_type, duckdb_runtime.c.DUCKDB_TYPE_VARCHAR),
+        );
+        if (varchar_type == null) return error.Unsupported;
+        defer duckdb_runtime.c.duckdb_destroy_logical_type(&varchar_type);
+
+        duckdb_runtime.c.duckdb_table_function_add_parameter(table_function, varchar_type);
+        duckdb_runtime.c.duckdb_table_function_set_extra_info(table_function, session, null);
+        duckdb_runtime.c.duckdb_table_function_set_bind(table_function, bind);
+        duckdb_runtime.c.duckdb_table_function_set_init(table_function, init);
+        duckdb_runtime.c.duckdb_table_function_set_function(table_function, scan);
+        duckdb_runtime.c.duckdb_table_function_supports_projection_pushdown(table_function, true);
+
+        if (duckdb_runtime.c.duckdb_register_table_function(conn.conn, table_function) == duckdb_runtime.c.DuckDBError) {
+            return error.Unsupported;
+        }
+    }
+} else struct {};
+
 fn destroyManagedHostArrayNoPool(allocator: std.mem.Allocator, array: *HostDenseArray) void {
     array.logical_handle = null;
     switch (array.storage) {
@@ -18849,6 +27684,35 @@ fn destroyManagedHostBoxedArrayNoPool(allocator: std.mem.Allocator, array: *Host
     for (array.items) |item| releaseHeapValue(allocator, item);
     allocator.free(array.items);
     allocator.destroy(array);
+}
+
+fn destroyManagedHostRelationNoPool(allocator: std.mem.Allocator, relation: *HostRelation) void {
+    switch (relation.origin) {
+        .file => |file| allocator.free(file.path),
+        .sql => |sql_info| {
+            for (sql_info.params) |param| {
+                allocator.free(param.name);
+                releaseHeapValue(allocator, param.value);
+            }
+            allocator.free(sql_info.params);
+            allocator.free(sql_info.text);
+        },
+    }
+    allocator.destroy(relation);
+}
+
+fn destroyManagedHostKeyedStoreNoPool(allocator: std.mem.Allocator, store: *HostKeyedStore) void {
+    releaseHeapValue(allocator, store.names);
+    releaseHeapValue(allocator, store.values);
+    if (store.column_metadata) |metadata| {
+        for (metadata) |entry| {
+            if (entry.validity) |mask| releaseHeapValue(allocator, mask);
+        }
+        allocator.free(metadata);
+    }
+    store.lookup.deinit(allocator);
+    if (store.owns_path) allocator.free(store.path);
+    allocator.destroy(store);
 }
 
 fn destroyManagedBackendArrayNoPool(allocator: std.mem.Allocator, array: *BackendArray) void {
@@ -18871,7 +27735,6 @@ fn releaseManagedNumericHandleNoPool(allocator: std.mem.Allocator, handle: *Nume
     std.debug.assert(handle.header.owner == .managed);
     std.debug.assert(handle.header.ref_count != 0);
     handle.header.ref_count -= 1;
-    syncNumericArrayChildren(handle);
     if (handle.header.ref_count == 0) {
         if (handle.flat_slice) |slice| releaseHeapValue(allocator, slice.source);
         if (handle.flat_concat) |concat| {
@@ -18919,14 +27782,12 @@ fn retainHeapValue(value: Value) void {
                     const handle = @constCast(value.asNumericArray());
                     if (handle.header.owner == .managed) {
                         handle.header.ref_count += 1;
-                        syncNumericArrayChildren(handle);
                     }
                 },
                 .host_dense_array => {
                     if (logicalHandleForNumericPayloadValue(value)) |handle| {
                         if (handle.header.owner == .managed) {
                             handle.header.ref_count += 1;
-                            syncNumericArrayChildren(handle);
                         }
                     } else {
                         const array = @constCast(value.asHostDenseArray());
@@ -18934,8 +27795,17 @@ fn retainHeapValue(value: Value) void {
                     }
                 },
                 .host_boxed_array => {
-                    const array = @constCast(value.asHostBoxedArray());
-                    if (array.header.owner == .managed) array.header.ref_count += 1;
+                    switch (value.arrayKind()) {
+                        .host_boxed_array => {
+                            const array = @constCast(value.asHostBoxedArray());
+                            if (array.header.owner == .managed) array.header.ref_count += 1;
+                        },
+                        .host_keyed_store => {
+                            const store = @constCast(value.asHostKeyedStore());
+                            if (store.header.owner == .managed) store.header.ref_count += 1;
+                        },
+                        else => unreachable,
+                    }
                 },
                 .host_string => {
                     const text = @constCast(value.asHostString());
@@ -18946,8 +27816,21 @@ fn retainHeapValue(value: Value) void {
                     if (text.header.owner == .managed) text.header.ref_count += 1;
                 },
                 .host_string_view => {
-                    const view = @constCast(value.asHostStringView());
-                    if (view.header.owner == .managed) view.header.ref_count += 1;
+                    switch (value.arrayKind()) {
+                        .host_string_view => {
+                            const view = @constCast(value.asHostStringView());
+                            if (view.header.owner == .managed) view.header.ref_count += 1;
+                        },
+                        .host_relation => {
+                            const relation = @constCast(value.asHostRelation());
+                            if (relation.header.owner == .managed) relation.header.ref_count += 1;
+                        },
+                        .host_table_scalar => {
+                            const scalar = @constCast(valueAsHostTableScalar(value));
+                            if (scalar.header.owner == .managed) scalar.header.ref_count += 1;
+                        },
+                        else => unreachable,
+                    }
                 },
                 .host_string_list => {
                     const list = @constCast(value.asHostStringList());
@@ -18957,7 +27840,6 @@ fn retainHeapValue(value: Value) void {
                     if (logicalHandleForNumericPayloadValue(value)) |handle| {
                         if (handle.header.owner == .managed) {
                             handle.header.ref_count += 1;
-                            syncNumericArrayChildren(handle);
                         }
                     } else {
                         const array = @constCast(value.asBackendArray());
@@ -19019,12 +27901,26 @@ fn releaseHeapValue(allocator: std.mem.Allocator, value: Value) void {
                     }
                 },
                 .host_boxed_array => {
-                    const array = @constCast(value.asHostBoxedArray());
-                    if (array.header.owner != .managed) return;
-                    std.debug.assert(array.header.ref_count != 0);
-                    array.header.ref_count -= 1;
-                    if (array.header.ref_count == 0) {
-                        destroyManagedHostBoxedArrayNoPool(allocator, array);
+                    switch (value.arrayKind()) {
+                        .host_boxed_array => {
+                            const array = @constCast(value.asHostBoxedArray());
+                            if (array.header.owner != .managed) return;
+                            std.debug.assert(array.header.ref_count != 0);
+                            array.header.ref_count -= 1;
+                            if (array.header.ref_count == 0) {
+                                destroyManagedHostBoxedArrayNoPool(allocator, array);
+                            }
+                        },
+                        .host_keyed_store => {
+                            const store = @constCast(value.asHostKeyedStore());
+                            if (store.header.owner != .managed) return;
+                            std.debug.assert(store.header.ref_count != 0);
+                            store.header.ref_count -= 1;
+                            if (store.header.ref_count == 0) {
+                                destroyManagedHostKeyedStoreNoPool(allocator, store);
+                            }
+                        },
+                        else => unreachable,
                     }
                 },
                 .host_string, .host_symbol => {
@@ -19039,13 +27935,37 @@ fn releaseHeapValue(allocator: std.mem.Allocator, value: Value) void {
                     if (text.header.ref_count == 0) freeHostTextAlloc(allocator, text);
                 },
                 .host_string_view => {
-                    const view = @constCast(value.asHostStringView());
-                    if (view.header.owner != .managed) return;
-                    std.debug.assert(view.header.ref_count != 0);
-                    view.header.ref_count -= 1;
-                    if (view.header.ref_count == 0) {
-                        releaseHeapValue(allocator, Value.array(view.base));
-                        allocator.destroy(view);
+                    switch (value.arrayKind()) {
+                        .host_string_view => {
+                            const view = @constCast(value.asHostStringView());
+                            if (view.header.owner != .managed) return;
+                            std.debug.assert(view.header.ref_count != 0);
+                            view.header.ref_count -= 1;
+                            if (view.header.ref_count == 0) {
+                                releaseHeapValue(allocator, Value.array(view.base));
+                                allocator.destroy(view);
+                            }
+                        },
+                        .host_relation => {
+                            const relation = @constCast(value.asHostRelation());
+                            if (relation.header.owner != .managed) return;
+                            std.debug.assert(relation.header.ref_count != 0);
+                            relation.header.ref_count -= 1;
+                            if (relation.header.ref_count == 0) {
+                                destroyManagedHostRelationNoPool(allocator, relation);
+                            }
+                        },
+                        .host_table_scalar => {
+                            const scalar = @constCast(valueAsHostTableScalar(value));
+                            if (scalar.header.owner != .managed) return;
+                            std.debug.assert(scalar.header.ref_count != 0);
+                            scalar.header.ref_count -= 1;
+                            if (scalar.header.ref_count == 0) {
+                                releaseHeapValue(allocator, scalar.value);
+                                allocator.destroy(scalar);
+                            }
+                        },
+                        else => unreachable,
                     }
                 },
                 .host_string_list => {
@@ -19135,13 +28055,9 @@ fn allocNumericArrayHandle(self: *Session, owner: HeapOwner) !*NumericArray {
 fn syncNumericArrayChildren(handle: *NumericArray) void {
     if (handle.host) |host| {
         host.logical_handle = handle;
-        host.header.owner = handle.header.owner;
-        host.header.ref_count = if (handle.header.owner == .managed) handle.header.ref_count else 0;
     }
     if (handle.mlx) |array| {
         array.logical_handle = handle;
-        array.header.owner = handle.header.owner;
-        array.header.ref_count = if (handle.header.owner == .managed) handle.header.ref_count else 0;
     }
 }
 
@@ -19643,14 +28559,14 @@ fn numericVectorLen(value: Value) ?usize {
 
 fn supportsBackendDyad(op: BuiltinId) bool {
     return switch (op) {
-        .add, .sub, .mul, .div, .less, .more, .equal => true,
+        .add, .sub, .mul, .div, .pow, .minimum, .maximum, .less, .more, .equal => true,
         else => false,
     };
 }
 
 fn supportsBackendMonad(op: BuiltinId) bool {
     return switch (op) {
-        .add, .sub, .div, .exp, .log, .tanh, .sigmoid => true,
+        .add, .sub, .div, .exp, .log, .sin, .cos, .tanh, .sigmoid => true,
         else => false,
     };
 }
@@ -19880,6 +28796,7 @@ fn createHostArrayFromRangeIota(self: *Session, owner: HeapOwner, handle: *const
 }
 
 fn createBackendArrayFromRangeIota(self: *Session, handle: *const NumericArray) KError!mlx.Array {
+    if (comptime !runtime_has_mlx) return error.Unsupported;
     if (!numericArrayIsRangeIota(handle)) return error.Type;
     const len = numericArrayRangeLen(handle);
     const ctx = try self.backendContext();
@@ -20903,8 +29820,8 @@ fn planDenseNumericDyadBackend(self: *Session, op: BuiltinId, left: Value, right
         .has_unmaterialized_range = left_facts.has_unmaterialized_range or right_facts.has_unmaterialized_range,
         .prefer_host_kernel = prefer_small_vector_host_kernel or
             (!preserve_mlx_pipeline and
-            has_backend_residency and
-            left_facts.supports_cheap_host_dense and right_facts.supports_cheap_host_dense),
+                has_backend_residency and
+                left_facts.supports_cheap_host_dense and right_facts.supports_cheap_host_dense),
         .prefer_backend_pipeline = transposePipelinePrefersBackend(self, left) or transposePipelinePrefersBackend(self, right),
         .supports_backend = supportsBackendDyad(op),
     });
@@ -21177,6 +30094,11 @@ fn isGenericArrayValue(value: Value) bool {
 
 fn shouldUseGenericArrayDyad(left: Value, right: Value) bool {
     if (isBackendArrayValue(left) or isBackendArrayValue(right)) return false;
+    if ((left.tag() == .array and left.arrayKind() == .host_table_scalar) or
+        (right.tag() == .array and right.arrayKind() == .host_table_scalar))
+    {
+        return false;
+    }
     if ((valueIsRenderableMatrixLike(left) and valueNumericMode(right) != null) or
         (valueIsRenderableMatrixLike(right) and valueNumericMode(left) != null))
     {
@@ -21824,6 +30746,7 @@ fn checkedIntOp(op: BuiltinId, left: i64, right: i64) KError!i64 {
             if (result[1] != 0) return error.Unsupported;
             break :blk result[0];
         },
+        .pow => try intPowLikeMlx(left, right),
         .div => unreachable,
         else => unreachable,
     };
@@ -21837,6 +30760,7 @@ fn applyFloatOp(op: BuiltinId, left: f64, right: f64) f64 {
         .maximum => @max(left, right),
         .mul => left * right,
         .div => left / right,
+        .pow => std.math.pow(f64, left, right),
         else => unreachable,
     };
 }
@@ -21846,6 +30770,8 @@ fn applyFloatMonadOp(op: BuiltinId, value: f64) f64 {
         .div => std.math.sqrt(value),
         .exp => std.math.exp(value),
         .log => std.math.log(f64, std.math.e, value),
+        .sin => std.math.sin(value),
+        .cos => std.math.cos(value),
         .tanh => std.math.tanh(value),
         .sigmoid => 1.0 / (1.0 + std.math.exp(-value)),
         else => unreachable,
@@ -21860,6 +30786,7 @@ fn applyIntOpUnchecked(op: BuiltinId, left: i64, right: i64) i64 {
         .minimum => @min(left, right),
         .maximum => @max(left, right),
         .mul => left * right,
+        .pow => @intFromFloat(@trunc(std.math.pow(f64, @floatFromInt(left), @floatFromInt(right)))),
         .div => unreachable,
         else => unreachable,
     };
@@ -22180,7 +31107,10 @@ fn applyIntOpUncheckedTyped(comptime T: type, op: BuiltinId, left: anytype, righ
         .add => lhs + rhs,
         .sub => lhs - rhs,
         .iota => castDenseInt(T, bangIntOp(@as(i64, @intCast(lhs)), @as(i64, @intCast(rhs)))),
+        .minimum => @min(lhs, rhs),
+        .maximum => @max(lhs, rhs),
         .mul => lhs * rhs,
+        .pow => castDenseInt(T, @as(i64, @intFromFloat(@trunc(std.math.pow(f64, @floatFromInt(lhs), @floatFromInt(rhs)))))),
         .div => unreachable,
         else => unreachable,
     };
@@ -22233,16 +31163,314 @@ fn toDenseFloat(value: anytype) f64 {
     };
 }
 
-fn fillBitScalarArrayResultGeneric(out: *HostBitAlloc, op: BuiltinId, scalar: i64, items: HostIntArrayView, scalar_left: bool, unchecked_safe: bool) KError!void {
-    if (op == .mul and scalar >= 0 and scalar <= 1 and std.meta.activeTag(items) == .bit) {
-        const bit_items = items.bit;
-        if (scalar == 0) {
-            bitFill(out.words, out.len, false);
-            return;
+const dense_host_simd_bytes = 32;
+const enable_dense_float_simd = true;
+const enable_packed_bit_simd = true;
+const enable_mixed_bit_float_simd = true;
+const enable_dense_int_simd = true;
+
+fn denseFloatSimdSupported(op: BuiltinId) bool {
+    return switch (op) {
+        .add, .sub, .minimum, .maximum, .mul, .div => true,
+        else => false,
+    };
+}
+
+fn denseIntSimdSupported(op: BuiltinId) bool {
+    return switch (op) {
+        .add, .sub, .minimum, .maximum => true,
+        else => false,
+    };
+}
+
+fn denseFloatBinaryVec(comptime op: BuiltinId, lhs: anytype, rhs: @TypeOf(lhs)) @TypeOf(lhs) {
+    return switch (op) {
+        .add => lhs + rhs,
+        .sub => lhs - rhs,
+        .minimum => @min(lhs, rhs),
+        .maximum => @max(lhs, rhs),
+        .mul => lhs * rhs,
+        .div => lhs / rhs,
+        else => unreachable,
+    };
+}
+
+fn denseIntBinaryVec(comptime op: BuiltinId, lhs: anytype, rhs: @TypeOf(lhs)) @TypeOf(lhs) {
+    return switch (op) {
+        .add => lhs + rhs,
+        .sub => lhs - rhs,
+        .minimum => @min(lhs, rhs),
+        .maximum => @max(lhs, rhs),
+        .mul => lhs * rhs,
+        else => unreachable,
+    };
+}
+
+fn denseBitWordSimdSupported(op: BuiltinId) bool {
+    return switch (op) {
+        .mul, .minimum, .maximum, .equal, .less, .more => true,
+        else => false,
+    };
+}
+
+fn denseBitWordBinaryVec(comptime op: BuiltinId, lhs: anytype, rhs: @TypeOf(lhs)) @TypeOf(lhs) {
+    return switch (op) {
+        .mul, .minimum => lhs & rhs,
+        .maximum => lhs | rhs,
+        .equal => ~(lhs ^ rhs),
+        .less => (~lhs) & rhs,
+        .more => lhs & (~rhs),
+        else => unreachable,
+    };
+}
+
+fn fillBitWordsBinarySimd(comptime op: BuiltinId, out: []u64, left_words: []const u64, right_words: []const u64) void {
+    const lane_count = dense_host_simd_bytes / @sizeOf(u64);
+    const Vec = @Vector(lane_count, u64);
+    var idx: usize = 0;
+    const vector_limit = left_words.len - (left_words.len % lane_count);
+    while (idx < vector_limit) : (idx += lane_count) {
+        const lhs: Vec = left_words[idx..][0..lane_count].*;
+        const rhs: Vec = right_words[idx..][0..lane_count].*;
+        out[idx..][0..lane_count].* = denseBitWordBinaryVec(op, lhs, rhs);
+    }
+    while (idx < left_words.len) : (idx += 1) {
+        out[idx] = switch (op) {
+            .mul, .minimum => left_words[idx] & right_words[idx],
+            .maximum => left_words[idx] | right_words[idx],
+            .equal => ~(left_words[idx] ^ right_words[idx]),
+            .less => (~left_words[idx]) & right_words[idx],
+            .more => left_words[idx] & (~right_words[idx]),
+            else => unreachable,
+        };
+    }
+}
+
+fn fillBitWordsBinary(out: []u64, op: BuiltinId, left_words: []const u64, right_words: []const u64) void {
+    return switch (op) {
+        .mul => fillBitWordsBinarySimd(.mul, out, left_words, right_words),
+        .minimum => fillBitWordsBinarySimd(.minimum, out, left_words, right_words),
+        .maximum => fillBitWordsBinarySimd(.maximum, out, left_words, right_words),
+        .equal => fillBitWordsBinarySimd(.equal, out, left_words, right_words),
+        .less => fillBitWordsBinarySimd(.less, out, left_words, right_words),
+        .more => fillBitWordsBinarySimd(.more, out, left_words, right_words),
+        else => unreachable,
+    };
+}
+
+fn fillIntDenseArrayArraySameTypeSimd(comptime T: type, comptime op: BuiltinId, out: []T, left_items: []const T, right_items: []const T) void {
+    const lane_count = dense_host_simd_bytes / @sizeOf(T);
+    const Vec = @Vector(lane_count, T);
+    var idx: usize = 0;
+    const vector_limit = left_items.len - (left_items.len % lane_count);
+    while (idx < vector_limit) : (idx += lane_count) {
+        const lhs: Vec = left_items[idx..][0..lane_count].*;
+        const rhs: Vec = right_items[idx..][0..lane_count].*;
+        out[idx..][0..lane_count].* = denseIntBinaryVec(op, lhs, rhs);
+    }
+    while (idx < left_items.len) : (idx += 1) {
+        out[idx] = applyIntOpUncheckedTyped(T, op, left_items[idx], right_items[idx]);
+    }
+}
+
+fn fillIntDenseScalarArraySameTypeSimd(comptime T: type, comptime op: BuiltinId, out: []T, scalar: T, items: []const T, scalar_left: bool) void {
+    const lane_count = dense_host_simd_bytes / @sizeOf(T);
+    const Vec = @Vector(lane_count, T);
+    const scalar_vec: Vec = @splat(scalar);
+    var idx: usize = 0;
+    const vector_limit = items.len - (items.len % lane_count);
+    while (idx < vector_limit) : (idx += lane_count) {
+        const item_vec: Vec = items[idx..][0..lane_count].*;
+        out[idx..][0..lane_count].* = if (scalar_left)
+            denseIntBinaryVec(op, scalar_vec, item_vec)
+        else
+            denseIntBinaryVec(op, item_vec, scalar_vec);
+    }
+    while (idx < items.len) : (idx += 1) {
+        out[idx] = if (scalar_left)
+            applyIntOpUncheckedTyped(T, op, scalar, items[idx])
+        else
+            applyIntOpUncheckedTyped(T, op, items[idx], scalar);
+    }
+}
+
+fn fillIntDenseArrayArraySameType(comptime T: type, out: []T, op: BuiltinId, left_items: []const T, right_items: []const T) void {
+    return switch (op) {
+        .add => fillIntDenseArrayArraySameTypeSimd(T, .add, out, left_items, right_items),
+        .sub => fillIntDenseArrayArraySameTypeSimd(T, .sub, out, left_items, right_items),
+        .minimum => fillIntDenseArrayArraySameTypeSimd(T, .minimum, out, left_items, right_items),
+        .maximum => fillIntDenseArrayArraySameTypeSimd(T, .maximum, out, left_items, right_items),
+        .mul => fillIntDenseArrayArraySameTypeSimd(T, .mul, out, left_items, right_items),
+        else => unreachable,
+    };
+}
+
+fn fillIntDenseScalarArraySameType(comptime T: type, out: []T, op: BuiltinId, scalar: T, items: []const T, scalar_left: bool) void {
+    return switch (op) {
+        .add => fillIntDenseScalarArraySameTypeSimd(T, .add, out, scalar, items, scalar_left),
+        .sub => fillIntDenseScalarArraySameTypeSimd(T, .sub, out, scalar, items, scalar_left),
+        .minimum => fillIntDenseScalarArraySameTypeSimd(T, .minimum, out, scalar, items, scalar_left),
+        .maximum => fillIntDenseScalarArraySameTypeSimd(T, .maximum, out, scalar, items, scalar_left),
+        .mul => fillIntDenseScalarArraySameTypeSimd(T, .mul, out, scalar, items, scalar_left),
+        else => unreachable,
+    };
+}
+
+fn fillFloatDenseArrayArraySimd(comptime op: BuiltinId, out: []f64, left_items: []const f64, right_items: []const f64) void {
+    const lane_count = dense_host_simd_bytes / @sizeOf(f64);
+    const Vec = @Vector(lane_count, f64);
+    var idx: usize = 0;
+    const vector_limit = left_items.len - (left_items.len % lane_count);
+    while (idx < vector_limit) : (idx += lane_count) {
+        const lhs: Vec = left_items[idx..][0..lane_count].*;
+        const rhs: Vec = right_items[idx..][0..lane_count].*;
+        out[idx..][0..lane_count].* = denseFloatBinaryVec(op, lhs, rhs);
+    }
+    while (idx < left_items.len) : (idx += 1) {
+        out[idx] = applyFloatOp(op, left_items[idx], right_items[idx]);
+    }
+}
+
+fn fillFloatDenseScalarArraySimd(comptime op: BuiltinId, out: []f64, scalar: f64, items: []const f64, scalar_left: bool) void {
+    const lane_count = dense_host_simd_bytes / @sizeOf(f64);
+    const Vec = @Vector(lane_count, f64);
+    const scalar_vec: Vec = @splat(scalar);
+    var idx: usize = 0;
+    const vector_limit = items.len - (items.len % lane_count);
+    while (idx < vector_limit) : (idx += lane_count) {
+        const item_vec: Vec = items[idx..][0..lane_count].*;
+        out[idx..][0..lane_count].* = if (scalar_left)
+            denseFloatBinaryVec(op, scalar_vec, item_vec)
+        else
+            denseFloatBinaryVec(op, item_vec, scalar_vec);
+    }
+    while (idx < items.len) : (idx += 1) {
+        const item = items[idx];
+        out[idx] = if (scalar_left) applyFloatOp(op, scalar, item) else applyFloatOp(op, item, scalar);
+    }
+}
+
+fn bitWordFloatVec(comptime lane_count: usize, bits: u64) @Vector(lane_count, f64) {
+    var values: [lane_count]f64 = undefined;
+    inline for (0..lane_count) |lane| {
+        values[lane] = @floatFromInt((bits >> lane) & 1);
+    }
+    return values;
+}
+
+fn fillFloatScalarBitArraySimd(comptime op: BuiltinId, out: []f64, scalar: f64, items: HostBitSlice, scalar_left: bool) void {
+    if (items.len == 0) return;
+    const lane_count = dense_host_simd_bytes / @sizeOf(f64);
+    const Vec = @Vector(lane_count, f64);
+    const scalar_vec: Vec = @splat(scalar);
+    var out_idx: usize = 0;
+    for (items.words, 0..) |_, word_idx| {
+        var bits = bitWordMasked(items.words, items.len, word_idx);
+        var active = bitWordActiveLen(items.len, word_idx, items.words.len);
+        while (active >= lane_count) : (active -= lane_count) {
+            const bit_vec = bitWordFloatVec(lane_count, bits);
+            out[out_idx..][0..lane_count].* = if (scalar_left)
+                denseFloatBinaryVec(op, scalar_vec, bit_vec)
+            else
+                denseFloatBinaryVec(op, bit_vec, scalar_vec);
+            bits >>= lane_count;
+            out_idx += lane_count;
         }
-        if (out.words.ptr != bit_items.words.ptr) @memcpy(out.words, bit_items.words);
-        bitClearUnusedTail(out.words, out.len);
-        return;
+        var tail_idx: usize = 0;
+        while (tail_idx < active) : (tail_idx += 1) {
+            const item = @as(f64, @floatFromInt(@as(u8, @intCast(bits & 1))));
+            out[out_idx] = if (scalar_left) applyFloatOp(op, scalar, item) else applyFloatOp(op, item, scalar);
+            bits >>= 1;
+            out_idx += 1;
+        }
+    }
+}
+
+fn fillFloatBitViewsSimd(comptime op: BuiltinId, out: []f64, left_items: HostBitSlice, right_items: HostBitSlice) void {
+    if (left_items.len == 0) return;
+    const lane_count = dense_host_simd_bytes / @sizeOf(f64);
+    var out_idx: usize = 0;
+    for (left_items.words, 0..) |_, word_idx| {
+        var left_bits = bitWordMasked(left_items.words, left_items.len, word_idx);
+        var right_bits = bitWordMasked(right_items.words, right_items.len, word_idx);
+        var active = bitWordActiveLen(left_items.len, word_idx, left_items.words.len);
+        while (active >= lane_count) : (active -= lane_count) {
+            const left_vec = bitWordFloatVec(lane_count, left_bits);
+            const right_vec = bitWordFloatVec(lane_count, right_bits);
+            out[out_idx..][0..lane_count].* = denseFloatBinaryVec(op, left_vec, right_vec);
+            left_bits >>= lane_count;
+            right_bits >>= lane_count;
+            out_idx += lane_count;
+        }
+        var tail_idx: usize = 0;
+        while (tail_idx < active) : (tail_idx += 1) {
+            out[out_idx] = applyFloatOp(
+                op,
+                @as(f64, @floatFromInt(@as(u8, @intCast(left_bits & 1)))),
+                @as(f64, @floatFromInt(@as(u8, @intCast(right_bits & 1)))),
+            );
+            left_bits >>= 1;
+            right_bits >>= 1;
+            out_idx += 1;
+        }
+    }
+}
+
+fn fillFloatBitViewArraySimd(comptime LeftBit: bool, comptime op: BuiltinId, out: []f64, bit_items: HostBitSlice, other_items: []const f64) void {
+    if (bit_items.len == 0) return;
+    const lane_count = dense_host_simd_bytes / @sizeOf(f64);
+    const Vec = @Vector(lane_count, f64);
+    const zero: Vec = @splat(0.0);
+    var out_idx: usize = 0;
+    for (bit_items.words, 0..) |_, word_idx| {
+        var bits = bitWordMasked(bit_items.words, bit_items.len, word_idx);
+        var active = bitWordActiveLen(bit_items.len, word_idx, bit_items.words.len);
+        while (active >= lane_count) : (active -= lane_count) {
+            const bit_vec = bitWordFloatVec(lane_count, bits);
+            const other_vec: Vec = other_items[out_idx..][0..lane_count].*;
+            out[out_idx..][0..lane_count].* = if (op == .mul)
+                @select(f64, bit_vec != zero, other_vec, zero)
+            else if (LeftBit)
+                denseFloatBinaryVec(op, bit_vec, other_vec)
+            else
+                denseFloatBinaryVec(op, other_vec, bit_vec);
+            bits >>= lane_count;
+            out_idx += lane_count;
+        }
+        var tail_idx: usize = 0;
+        while (tail_idx < active) : (tail_idx += 1) {
+            const bit_value = @as(f64, @floatFromInt(@as(u8, @intCast(bits & 1))));
+            out[out_idx] = if (LeftBit) applyFloatOp(op, bit_value, other_items[out_idx]) else applyFloatOp(op, other_items[out_idx], bit_value);
+            bits >>= 1;
+            out_idx += 1;
+        }
+    }
+}
+
+fn fillBitScalarArrayResultGeneric(out: *HostBitAlloc, op: BuiltinId, scalar: i64, items: HostIntArrayView, scalar_left: bool, unchecked_safe: bool) KError!void {
+    if (enable_packed_bit_simd and (op == .mul or op == .minimum or op == .maximum) and scalar >= 0 and scalar <= 1 and std.meta.activeTag(items) == .bit) {
+        const bit_items = items.bit;
+        switch (op) {
+            .mul, .minimum => {
+                if (scalar == 0) {
+                    bitFill(out.words, out.len, false);
+                    return;
+                }
+                if (out.words.ptr != bit_items.words.ptr) @memcpy(out.words, bit_items.words);
+                bitClearUnusedTail(out.words, out.len);
+                return;
+            },
+            .maximum => {
+                if (scalar == 1) {
+                    bitFill(out.words, out.len, true);
+                    return;
+                }
+                if (out.words.ptr != bit_items.words.ptr) @memcpy(out.words, bit_items.words);
+                bitClearUnusedTail(out.words, out.len);
+                return;
+            },
+            else => unreachable,
+        }
     }
 
     var generic_out = HostIntResult{ .bit = out.* };
@@ -22257,10 +31485,10 @@ fn fillBitScalarArrayResultGeneric(out: *HostBitAlloc, op: BuiltinId, scalar: i6
 }
 
 fn fillBitArrayArrayResultGeneric(out: *HostBitAlloc, op: BuiltinId, left_items: HostIntArrayView, right_items: HostIntArrayView, unchecked_safe: bool) KError!void {
-    if (op == .mul and std.meta.activeTag(left_items) == .bit and std.meta.activeTag(right_items) == .bit) {
+    if (enable_packed_bit_simd and denseBitWordSimdSupported(op) and std.meta.activeTag(left_items) == .bit and std.meta.activeTag(right_items) == .bit) {
         const left_bits = left_items.bit;
         const right_bits = right_items.bit;
-        for (0..out.words.len) |idx| out.words[idx] = left_bits.words[idx] & right_bits.words[idx];
+        fillBitWordsBinary(out.words, op, left_bits.words, right_bits.words);
         bitClearUnusedTail(out.words, out.len);
         return;
     }
@@ -22397,6 +31625,12 @@ fn fillIntNegBitArrayTo(comptime OutT: type, out: []OutT, items: HostBitSlice) v
 fn fillIntScalarArrayTo(comptime OutT: type, comptime InT: type, out: []OutT, op: BuiltinId, scalar: i64, items: []const InT, scalar_left: bool, unchecked_safe: bool) KError!void {
     if (unchecked_safe) {
         const scalar_value: OutT = castDenseInt(OutT, scalar);
+        if (enable_dense_int_simd and comptime InT == OutT) {
+            if (denseIntSimdSupported(op)) {
+                fillIntDenseScalarArraySameType(OutT, out, op, scalar_value, items, scalar_left);
+                return;
+            }
+        }
         for (items, 0..) |item, idx| {
             const item_value: OutT = castDenseInt(OutT, item);
             out[idx] = if (scalar_left)
@@ -22416,6 +31650,12 @@ fn fillIntScalarArrayTo(comptime OutT: type, comptime InT: type, out: []OutT, op
 
 fn fillIntArrayArrayTo(comptime OutT: type, comptime LT: type, comptime RT: type, out: []OutT, op: BuiltinId, left_items: []const LT, right_items: []const RT, unchecked_safe: bool) KError!void {
     if (unchecked_safe) {
+        if (enable_dense_int_simd and comptime LT == OutT and RT == OutT) {
+            if (denseIntSimdSupported(op)) {
+                fillIntDenseArrayArraySameType(OutT, out, op, left_items, right_items);
+                return;
+            }
+        }
         for (left_items, 0..) |left_item, idx| {
             out[idx] = applyIntOpUncheckedTyped(OutT, op, left_item, right_items[idx]);
         }
@@ -22748,6 +31988,19 @@ fn fillIntNegDenseResult(out: *HostIntResult, items: HostIntDenseView, unchecked
 }
 
 fn fillFloatScalarArray(comptime T: type, out: []f64, op: BuiltinId, scalar: f64, items: []const T, scalar_left: bool) void {
+    if (enable_dense_float_simd and comptime T == f64) {
+        if (denseFloatSimdSupported(op)) {
+            return switch (op) {
+                .add => fillFloatDenseScalarArraySimd(.add, out, scalar, items, scalar_left),
+                .sub => fillFloatDenseScalarArraySimd(.sub, out, scalar, items, scalar_left),
+                .minimum => fillFloatDenseScalarArraySimd(.minimum, out, scalar, items, scalar_left),
+                .maximum => fillFloatDenseScalarArraySimd(.maximum, out, scalar, items, scalar_left),
+                .mul => fillFloatDenseScalarArraySimd(.mul, out, scalar, items, scalar_left),
+                .div => fillFloatDenseScalarArraySimd(.div, out, scalar, items, scalar_left),
+                else => unreachable,
+            };
+        }
+    }
     for (items, 0..) |item, idx| {
         const lhs = if (scalar_left) scalar else toDenseFloat(item);
         const rhs = if (scalar_left) toDenseFloat(item) else scalar;
@@ -22774,6 +32027,19 @@ fn fillFloatReciprocalIntDenseView(out: []f64, items: HostIntDenseView) void {
 }
 
 fn fillFloatArrayArray(comptime LT: type, comptime RT: type, out: []f64, op: BuiltinId, left_items: []const LT, right_items: []const RT) void {
+    if (enable_dense_float_simd and comptime LT == f64 and RT == f64) {
+        if (denseFloatSimdSupported(op)) {
+            return switch (op) {
+                .add => fillFloatDenseArrayArraySimd(.add, out, left_items, right_items),
+                .sub => fillFloatDenseArrayArraySimd(.sub, out, left_items, right_items),
+                .minimum => fillFloatDenseArrayArraySimd(.minimum, out, left_items, right_items),
+                .maximum => fillFloatDenseArrayArraySimd(.maximum, out, left_items, right_items),
+                .mul => fillFloatDenseArrayArraySimd(.mul, out, left_items, right_items),
+                .div => fillFloatDenseArrayArraySimd(.div, out, left_items, right_items),
+                else => unreachable,
+            };
+        }
+    }
     for (left_items, 0..) |left_item, idx| {
         out[idx] = applyFloatOp(op, toDenseFloat(left_item), toDenseFloat(right_items[idx]));
     }
@@ -22798,6 +32064,17 @@ fn fillFloatUnaryDenseView(out: []f64, op: BuiltinId, items: HostFloatDenseView)
 }
 
 fn fillFloatScalarBitArray(out: []f64, op: BuiltinId, scalar: f64, items: HostBitSlice, scalar_left: bool) void {
+    if (enable_mixed_bit_float_simd and denseFloatSimdSupported(op)) {
+        return switch (op) {
+            .add => fillFloatScalarBitArraySimd(.add, out, scalar, items, scalar_left),
+            .sub => fillFloatScalarBitArraySimd(.sub, out, scalar, items, scalar_left),
+            .minimum => fillFloatScalarBitArraySimd(.minimum, out, scalar, items, scalar_left),
+            .maximum => fillFloatScalarBitArraySimd(.maximum, out, scalar, items, scalar_left),
+            .mul => fillFloatScalarBitArraySimd(.mul, out, scalar, items, scalar_left),
+            .div => fillFloatScalarBitArraySimd(.div, out, scalar, items, scalar_left),
+            else => unreachable,
+        };
+    }
     if (items.len == 0) return;
     var out_idx: usize = 0;
     for (items.words, 0..) |_, word_idx| {
@@ -22829,6 +32106,17 @@ fn fillFloatUnaryBitArray(out: []f64, op: BuiltinId, items: HostBitSlice) void {
 }
 
 fn fillFloatBitViews(out: []f64, op: BuiltinId, left_items: HostBitSlice, right_items: HostBitSlice) void {
+    if (enable_mixed_bit_float_simd and denseFloatSimdSupported(op)) {
+        return switch (op) {
+            .add => fillFloatBitViewsSimd(.add, out, left_items, right_items),
+            .sub => fillFloatBitViewsSimd(.sub, out, left_items, right_items),
+            .minimum => fillFloatBitViewsSimd(.minimum, out, left_items, right_items),
+            .maximum => fillFloatBitViewsSimd(.maximum, out, left_items, right_items),
+            .mul => fillFloatBitViewsSimd(.mul, out, left_items, right_items),
+            .div => fillFloatBitViewsSimd(.div, out, left_items, right_items),
+            else => unreachable,
+        };
+    }
     if (left_items.len == 0) return;
     var out_idx: usize = 0;
     for (left_items.words, 0..) |_, word_idx| {
@@ -22850,6 +32138,17 @@ fn fillFloatBitViews(out: []f64, op: BuiltinId, left_items: HostBitSlice, right_
 }
 
 fn fillFloatBitViewArray(comptime LeftBit: bool, out: []f64, op: BuiltinId, bit_items: HostBitSlice, other_items: []const f64) void {
+    if (enable_mixed_bit_float_simd and denseFloatSimdSupported(op)) {
+        return switch (op) {
+            .add => fillFloatBitViewArraySimd(LeftBit, .add, out, bit_items, other_items),
+            .sub => fillFloatBitViewArraySimd(LeftBit, .sub, out, bit_items, other_items),
+            .minimum => fillFloatBitViewArraySimd(LeftBit, .minimum, out, bit_items, other_items),
+            .maximum => fillFloatBitViewArraySimd(LeftBit, .maximum, out, bit_items, other_items),
+            .mul => fillFloatBitViewArraySimd(LeftBit, .mul, out, bit_items, other_items),
+            .div => fillFloatBitViewArraySimd(LeftBit, .div, out, bit_items, other_items),
+            else => unreachable,
+        };
+    }
     if (bit_items.len == 0) return;
     var out_idx: usize = 0;
     for (bit_items.words, 0..) |_, word_idx| {
@@ -23078,8 +32377,11 @@ fn builtinChar(id: BuiltinId) u8 {
         .sub => '-',
         .mul => '*',
         .div => '%',
+        .pow => 'P',
         .exp => 'E',
         .log => 'L',
+        .sin => 'I',
+        .cos => 'O',
         .tanh => 'T',
         .sigmoid => 'S',
         .iota => '!',
@@ -23095,15 +32397,39 @@ fn builtinChar(id: BuiltinId) u8 {
         .equal => '=',
         .stringify, .cast => '$',
         .contains, .split, .join, .unique, .find => '?',
+        .bytes => 'b',
+        .utf8 => '8',
+        .char => 'c',
+        .tokenize => 'k',
+        .detokenize => 'D',
         .eval_string => '.',
         .grad => 'g',
         .valuegrad => 'v',
         .prng => 'p',
         .load => 'l',
+        .save => 'W',
+        .sql => 'q',
+        .register => 'Z',
         .rotcache => 'r',
         .rotcacheupdate => 'u',
         .rotcacheview => 'w',
+        .rope => 'R',
+        .ropeflat => 'J',
+        .ropecisflat => 'F',
         .rmsnorm => 'n',
+        .layernorm => 'H',
+        .gelu => 'X',
+        .geluapprox => 'G',
+        .mlpdense => 'M',
+        .conv2d => 'C',
+        .convtranspose2d => 'K',
+        .upsamplenearest2d => 'U',
+        .groupnorm => 'Q',
+        .softmax => 's',
+        .sdpa => 'A',
+        .sam3boxrpb => 'P',
+        .sdpamask => 'Y',
+        .sdpaflat => 'B',
     };
 }
 
@@ -23150,7 +32476,7 @@ fn denseAutodiffProgramScanSumsq() Session.DenseAutodiffProgram {
 
 fn applyDenseAutodiffUnaryMap(op: BuiltinId, value: f64) f64 {
     return switch (op) {
-        .exp, .log, .tanh, .sigmoid => applyFloatMonadOp(op, value),
+        .exp, .log, .sin, .cos, .tanh, .sigmoid => applyFloatMonadOp(op, value),
         else => unreachable,
     };
 }
@@ -23159,6 +32485,8 @@ fn applyDenseAutodiffUnaryMapDerivative(op: BuiltinId, input: f64, output: f64) 
     return switch (op) {
         .exp => output,
         .log => 1.0 / input,
+        .sin => std.math.cos(input),
+        .cos => -std.math.sin(input),
         .tanh => 1.0 - (output * output),
         .sigmoid => output * (1.0 - output),
         else => unreachable,
@@ -23783,6 +33111,48 @@ fn mapMlxError(err: anyerror) KError {
     };
 }
 
+fn mapSafetensorsError(err: anyerror) KError {
+    return switch (err) {
+        error.UnsupportedTarget,
+        error.UnsupportedDtype,
+        error.UnsupportedShape,
+        => error.Unsupported,
+        else => error.Type,
+    };
+}
+
+fn safetensorMlxDtype(dtype: safetensors.Dtype) c.mlx_dtype {
+    return switch (dtype) {
+        .bool => c.MLX_BOOL,
+        .u8, .f8_e4m3 => c.MLX_UINT8,
+        .u16 => c.MLX_UINT16,
+        .u32 => c.MLX_UINT32,
+        .u64 => c.MLX_UINT64,
+        .i8 => c.MLX_INT8,
+        .i16 => c.MLX_INT16,
+        .i32 => c.MLX_INT32,
+        .i64 => c.MLX_INT64,
+        .f16 => c.MLX_FLOAT16,
+        .f32 => c.MLX_FLOAT32,
+        .f64 => c.MLX_FLOAT64,
+        .bf16 => c.MLX_BFLOAT16,
+        .complex64 => c.MLX_COMPLEX64,
+    };
+}
+
+fn mapDuckDbError(err: anyerror) KError {
+    return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.DuckDbPrepareFailed,
+        error.DuckDbQueryFailed,
+        => error.Internal,
+        error.DuckDbBindFailed => error.Type,
+        error.DuckDbAppenderFailed => error.Unsupported,
+        error.DuckDbParameterNameFailed => error.Unsupported,
+        else => error.Unsupported,
+    };
+}
+
 fn isIdentStart(ch: u8) bool {
     return std.ascii.isAlphabetic(ch) or ch == '_';
 }
@@ -23802,7 +33172,8 @@ const max_captures = 32;
 const max_body_instructions = 256;
 const max_scope_depth = 32;
 const max_body_bytes = max_body_instructions * 10;
-const max_body_globals = 64;
+const max_shaped_global_local_args = max_body_instructions * 4;
+const max_body_globals = 96;
 const max_body_templates = 32;
 const max_body_constants = 64;
 const max_runtime_stack = 512;
@@ -23855,6 +33226,121 @@ const ResolveResult = union(enum) {
     inline_local: u16,
     capture: u16,
     global: void,
+};
+
+const ConsumeTrackedSlot = struct {
+    slot: u16,
+    last_load_start: ?usize = null,
+};
+
+const ShapedGlobalLocalArg = struct {
+    slot: u8,
+    load_start: usize,
+    arg_kind_start: usize,
+};
+
+const ConsumeCandidates = struct {
+    locals: [max_explicit_params]ConsumeTrackedSlot = undefined,
+    local_count: u8 = 0,
+    inline_locals: [max_explicit_params]ConsumeTrackedSlot = undefined,
+    inline_local_count: u8 = 0,
+    shaped_global_locals: [max_shaped_global_local_args]ShapedGlobalLocalArg = undefined,
+    shaped_global_local_count: u16 = 0,
+
+    fn addLocal(self: *ConsumeCandidates, slot: u16) KError!void {
+        for (self.locals[0..self.local_count]) |candidate| {
+            if (candidate.slot == slot) return;
+        }
+        if (self.local_count >= self.locals.len) return error.Unsupported;
+        self.locals[self.local_count] = .{ .slot = slot };
+        self.local_count += 1;
+    }
+
+    fn addInlineLocal(self: *ConsumeCandidates, slot: u16) KError!void {
+        for (self.inline_locals[0..self.inline_local_count]) |candidate| {
+            if (candidate.slot == slot) return;
+        }
+        if (self.inline_local_count >= self.inline_locals.len) return error.Unsupported;
+        self.inline_locals[self.inline_local_count] = .{ .slot = slot };
+        self.inline_local_count += 1;
+    }
+
+    fn addResolved(self: *ConsumeCandidates, resolved: ResolveResult) KError!void {
+        switch (resolved) {
+            .local => |slot| try self.addLocal(slot),
+            .inline_local => |slot| try self.addInlineLocal(slot),
+            .capture, .global => {},
+        }
+    }
+
+    fn addCaptureSource(self: *ConsumeCandidates, source: CaptureSource) KError!void {
+        switch (source) {
+            .local => |slot| try self.addLocal(slot),
+            .inline_local => |slot| try self.addInlineLocal(slot),
+            .capture => {},
+        }
+    }
+
+    fn mergeFrom(self: *ConsumeCandidates, other: ConsumeCandidates) KError!void {
+        for (other.locals[0..other.local_count]) |candidate| try self.addLocal(candidate.slot);
+        for (other.inline_locals[0..other.inline_local_count]) |candidate| try self.addInlineLocal(candidate.slot);
+        for (other.shaped_global_locals[0..other.shaped_global_local_count]) |site| {
+            try self.noteShapedGlobalLocalArg(site.slot, site.load_start, site.arg_kind_start);
+        }
+    }
+
+    fn noteLoad(self: *ConsumeCandidates, resolved: ResolveResult, start: usize) void {
+        switch (resolved) {
+            .local => |slot| {
+                for (self.locals[0..self.local_count]) |*candidate| {
+                    if (candidate.slot == slot) candidate.last_load_start = start;
+                }
+            },
+            .inline_local => |slot| {
+                for (self.inline_locals[0..self.inline_local_count]) |*candidate| {
+                    if (candidate.slot == slot) candidate.last_load_start = start;
+                }
+            },
+            .capture, .global => {},
+        }
+    }
+
+    fn noteShapedGlobalLocalArg(self: *ConsumeCandidates, slot: u8, load_start: usize, arg_kind_start: usize) KError!void {
+        if (self.shaped_global_local_count >= self.shaped_global_locals.len) return error.Unsupported;
+        self.shaped_global_locals[self.shaped_global_local_count] = .{
+            .slot = slot,
+            .load_start = load_start,
+            .arg_kind_start = arg_kind_start,
+        };
+        self.shaped_global_local_count += 1;
+    }
+
+    fn patchInto(self: ConsumeCandidates, out: *InstructionBuffer) void {
+        for (self.locals[0..self.local_count]) |candidate| {
+            const start = candidate.last_load_start orelse continue;
+            if (start >= out.byte_len) continue;
+            const current = std.meta.intToEnum(Op, out.bytes[start]) catch continue;
+            if (current == .load_local) out.patchOpAt(start, .take_local);
+        }
+        for (self.inline_locals[0..self.inline_local_count]) |candidate| {
+            const start = candidate.last_load_start orelse continue;
+            if (start >= out.byte_len) continue;
+            const current = std.meta.intToEnum(Op, out.bytes[start]) catch continue;
+            if (current == .load_inline_local) out.patchOpAt(start, .take_inline_local);
+        }
+        for (self.shaped_global_locals[0..self.shaped_global_local_count]) |site| {
+            if (!self.localLoadShouldConsume(site.slot, site.load_start)) continue;
+            if (site.arg_kind_start >= out.byte_len) continue;
+            out.bytes[site.arg_kind_start] |= global_call_arg_consume_bit;
+        }
+    }
+
+    fn localLoadShouldConsume(self: ConsumeCandidates, slot: u8, start: usize) bool {
+        for (self.locals[0..self.local_count]) |candidate| {
+            if (candidate.slot == slot and candidate.last_load_start == start) return true;
+        }
+        return false;
+    }
 };
 
 const ParsedLambda = struct {
@@ -23973,6 +33459,13 @@ const ProducedValue = union(enum) {
         end: usize,
         slot: u8,
     },
+    local_const_op: struct {
+        start: usize,
+        end: usize,
+        slot: u8,
+        op: BuiltinId,
+        const_value: i64,
+    },
     array_value: struct {
         start: usize,
         end: usize,
@@ -23986,6 +33479,7 @@ const ProducedValue = union(enum) {
             .load_local => |inst| inst.start,
             .load_inline_local => |inst| inst.start,
             .load_capture => |inst| inst.start,
+            .local_const_op => |inst| inst.start,
             .array_value => |inst| inst.start,
         };
     }
@@ -23997,9 +33491,24 @@ const ProducedValue = union(enum) {
             .load_local => |inst| inst.end,
             .load_inline_local => |inst| inst.end,
             .load_capture => |inst| inst.end,
+            .local_const_op => |inst| inst.end,
             .array_value => |inst| inst.end,
         };
     }
+};
+
+const GlobalCallArgSource = union(enum) {
+    local: struct {
+        slot: u8,
+        consume: bool,
+    },
+    const_int: i64,
+    local_const_op: struct {
+        slot: u8,
+        consume: bool,
+        op: BuiltinId,
+        const_value: i64,
+    },
 };
 
 const InstructionBuffer = struct {
@@ -24013,10 +33522,54 @@ const InstructionBuffer = struct {
     constant_len: usize = 0,
     previous_simple: ?ProducedValue = null,
     last_simple: ?ProducedValue = null,
+    simple_history: [4]ProducedValue = undefined,
+    simple_history_len: usize = 0,
     last_op_start: usize = 0,
+    control_flow_op_count: usize = 0,
+
+    const Mark = struct {
+        byte_len: usize,
+        global_len: usize,
+        template_len: usize,
+        constant_len: usize,
+        previous_simple: ?ProducedValue,
+        last_simple: ?ProducedValue,
+        simple_history: [4]ProducedValue,
+        simple_history_len: usize,
+        last_op_start: usize,
+        control_flow_op_count: usize,
+    };
 
     fn byteSlice(self: *const InstructionBuffer) []const u8 {
         return self.bytes[0..self.byte_len];
+    }
+
+    fn mark(self: *const InstructionBuffer) Mark {
+        return .{
+            .byte_len = self.byte_len,
+            .global_len = self.global_len,
+            .template_len = self.template_len,
+            .constant_len = self.constant_len,
+            .previous_simple = self.previous_simple,
+            .last_simple = self.last_simple,
+            .simple_history = self.simple_history,
+            .simple_history_len = self.simple_history_len,
+            .last_op_start = self.last_op_start,
+            .control_flow_op_count = self.control_flow_op_count,
+        };
+    }
+
+    fn restore(self: *InstructionBuffer, saved: Mark) void {
+        self.byte_len = saved.byte_len;
+        self.global_len = saved.global_len;
+        self.template_len = saved.template_len;
+        self.constant_len = saved.constant_len;
+        self.previous_simple = saved.previous_simple;
+        self.last_simple = saved.last_simple;
+        self.simple_history = saved.simple_history;
+        self.simple_history_len = saved.simple_history_len;
+        self.last_op_start = saved.last_op_start;
+        self.control_flow_op_count = saved.control_flow_op_count;
     }
 
     fn globalSlice(self: *const InstructionBuffer) []const u16 {
@@ -24039,6 +33592,10 @@ const InstructionBuffer = struct {
     inline fn appendRawOp(self: *InstructionBuffer, op: Op) KError!void {
         self.last_op_start = self.byte_len;
         try self.appendByte(@intFromEnum(op));
+        switch (op) {
+            .jump, .jump_if_false => self.control_flow_op_count += 1,
+            else => {},
+        }
     }
 
     fn appendShapedDyad(self: *InstructionBuffer, op: BuiltinId) KError!void {
@@ -24094,6 +33651,12 @@ const InstructionBuffer = struct {
         }
     }
 
+    fn appendShapedCall1(self: *InstructionBuffer) KError!void {
+        if (try self.tryShapeCall1()) return;
+        try self.appendOp(.call1);
+        _ = try self.tryShapeArgmaxSuffix();
+    }
+
     fn emitConstInt(self: *InstructionBuffer, value: i64) KError!void {
         const start = self.byte_len;
         try self.appendRawOp(.const_int);
@@ -24125,16 +33688,38 @@ const InstructionBuffer = struct {
         self.noteSimple(.{ .load_capture = .{ .start = start, .end = self.byte_len, .slot = pooled } });
     }
 
+    fn emitStoreLocal(self: *InstructionBuffer, slot: u16) KError!void {
+        const pooled = std.math.cast(u8, slot) orelse return error.Unsupported;
+        if (try self.tryShapeStoreLocalLocalConst(pooled)) return;
+        if (try self.tryShapeStoreLocalGlobalCallSlots(pooled)) return;
+        try self.appendOp(.store_local);
+        try self.appendByte(pooled);
+    }
+
+    fn patchOpAt(self: *InstructionBuffer, start: usize, op: Op) void {
+        std.debug.assert(start < self.byte_len);
+        self.bytes[start] = @intFromEnum(op);
+    }
+
     fn noteArrayValue(self: *InstructionBuffer, start: usize, end: usize, elem_mode: ?HostDenseElem) void {
-        const previous = self.last_simple;
-        self.previous_simple = previous;
-        self.last_simple = .{
+        self.noteSimple(.{
             .array_value = .{
                 .start = start,
                 .end = end,
                 .elem_mode = elem_mode,
             },
-        };
+        });
+    }
+
+    fn rotateRangeLeft(self: *InstructionBuffer, start: usize, middle: usize, end: usize) void {
+        std.debug.assert(start <= middle and middle <= end and end <= self.byte_len);
+        if (start == middle or middle == end) return;
+        const left_len = middle - start;
+        const right_len = end - middle;
+        var scratch: [max_body_bytes]u8 = undefined;
+        @memcpy(scratch[0..left_len], self.bytes[start..middle]);
+        std.mem.copyForwards(u8, self.bytes[start .. start + right_len], self.bytes[middle..end]);
+        std.mem.copyForwards(u8, self.bytes[start + right_len .. end], scratch[0..left_len]);
     }
 
     inline fn appendByte(self: *InstructionBuffer, value: u8) KError!void {
@@ -24441,6 +34026,50 @@ const InstructionBuffer = struct {
             try self.appendByte(shaped.?.slot);
             try self.appendU64(@bitCast(shaped.?.const_value));
         }
+        if (!shaped.?.const_first) {
+            self.noteSimple(.{
+                .local_const_op = .{
+                    .start = left.start(),
+                    .end = self.byte_len,
+                    .slot = shaped.?.slot,
+                    .op = op,
+                    .const_value = shaped.?.const_value,
+                },
+            });
+        }
+        return true;
+    }
+
+    fn tryShapeStoreLocalLocalConst(self: *InstructionBuffer, dst_slot: u8) KError!bool {
+        const value = self.last_simple orelse return false;
+        if (value.end() != self.byte_len) return false;
+        const inst = switch (value) {
+            .local_const_op => |op_inst| op_inst,
+            else => return false,
+        };
+        const op: Op = switch (inst.op) {
+            .add => .store_local_add_local_const,
+            .sub => .store_local_sub_local_const,
+            .mul => .store_local_mul_local_const,
+            else => return false,
+        };
+
+        self.byte_len = inst.start;
+        self.invalidateSimple();
+        try self.appendOp(op);
+        try self.appendByte(dst_slot);
+        try self.appendByte(inst.slot);
+        try self.appendU64(@bitCast(inst.const_value));
+        return true;
+    }
+
+    fn tryShapeStoreLocalGlobalCallSlots(self: *InstructionBuffer, dst_slot: u8) KError!bool {
+        if (self.byte_len == 0 or self.last_op_start >= self.byte_len) return false;
+        const op = std.meta.intToEnum(Op, self.bytes[self.last_op_start]) catch return false;
+        if (op != .call_global_slots) return false;
+        self.patchOpAt(self.last_op_start, .call_global_slots_store_local);
+        self.invalidateSimple();
+        try self.appendByte(dst_slot);
         return true;
     }
 
@@ -24544,14 +34173,140 @@ const InstructionBuffer = struct {
         return false;
     }
 
+    fn tryShapeCall1(self: *InstructionBuffer) KError!bool {
+        const callee = self.previous_simple orelse return false;
+        const arg = self.last_simple orelse return false;
+        if (callee.end() != arg.start() or arg.end() != self.byte_len) return false;
+
+        const shaped: ?struct { op: Op, callee_slot: u8, arg_slot: u8 } = switch (callee) {
+            .load_local => |callee_inst| switch (arg) {
+                .load_local => |arg_inst| .{
+                    .op = .call1_local_local,
+                    .callee_slot = callee_inst.slot,
+                    .arg_slot = arg_inst.slot,
+                },
+                else => null,
+            },
+            .load_inline_local => |callee_inst| switch (arg) {
+                .load_inline_local => |arg_inst| .{
+                    .op = .call1_inline_local_local,
+                    .callee_slot = callee_inst.slot,
+                    .arg_slot = arg_inst.slot,
+                },
+                else => null,
+            },
+            else => null,
+        };
+        if (shaped == null) return false;
+
+        self.byte_len = callee.start();
+        self.invalidateSimple();
+        try self.appendOp(shaped.?.op);
+        try self.appendByte(shaped.?.callee_slot);
+        try self.appendByte(shaped.?.arg_slot);
+        return true;
+    }
+
+    fn simpleTail(self: *const InstructionBuffer, count: usize) ?[]const ProducedValue {
+        if (count == 0 or count > self.simple_history_len) return null;
+        const start = self.simple_history_len - count;
+        const tail = self.simple_history[start..self.simple_history_len];
+        if (tail[tail.len - 1].end() != self.byte_len) return null;
+        for (1..tail.len) |idx| {
+            if (tail[idx - 1].end() != tail[idx].start()) return null;
+        }
+        return tail;
+    }
+
+    fn simpleGlobalCallArg(self: *const InstructionBuffer, simple: ProducedValue) ?GlobalCallArgSource {
+        _ = self;
+        return switch (simple) {
+            .load_local => |inst| .{
+                .local = .{
+                    .slot = inst.slot,
+                    .consume = false,
+                },
+            },
+            .const_int => |inst| .{ .const_int = inst.value },
+            .local_const_op => |inst| .{
+                .local_const_op = .{
+                    .slot = inst.slot,
+                    .consume = false,
+                    .op = inst.op,
+                    .const_value = inst.const_value,
+                },
+            },
+            else => null,
+        };
+    }
+
+    fn appendGlobalCallArgSource(self: *InstructionBuffer, arg: GlobalCallArgSource) KError!void {
+        switch (arg) {
+            .local => |value| {
+                try self.appendByte(global_call_arg_kind_byte(.local, value.consume));
+                try self.appendByte(value.slot);
+            },
+            .const_int => |value| {
+                try self.appendByte(global_call_arg_kind_byte(.const_int, false));
+                try self.appendU64(@bitCast(value));
+            },
+            .local_const_op => |value| {
+                const kind: GlobalCallArgKind = switch (value.op) {
+                    .add => .local_add_const,
+                    .sub => .local_sub_const,
+                    .mul => .local_mul_const,
+                    else => return error.Unsupported,
+                };
+                try self.appendByte(global_call_arg_kind_byte(kind, value.consume));
+                try self.appendByte(value.slot);
+                try self.appendU64(@bitCast(value.const_value));
+            },
+        }
+    }
+
+    fn tryShapeGlobalCallSlots(self: *InstructionBuffer, slot: u16, argc: u8, candidates: *ConsumeCandidates) KError!bool {
+        const args = self.simpleTail(argc) orelse return false;
+        return try self.tryShapeGlobalCallSlotsFromSimples(slot, args, candidates);
+    }
+
+    fn tryShapeGlobalCallSlotsFromSimples(self: *InstructionBuffer, slot: u16, args: []const ProducedValue, candidates: *ConsumeCandidates) KError!bool {
+        if (args.len == 0 or args.len > 4) return false;
+        if (args[args.len - 1].end() != self.byte_len) return false;
+        const start = args[0].start();
+        var sources: [4]GlobalCallArgSource = undefined;
+        for (args, 0..) |arg, idx| {
+            sources[idx] = self.simpleGlobalCallArg(arg) orelse return false;
+        }
+
+        self.byte_len = start;
+        self.invalidateSimple();
+        try self.appendOp(.call_global_slots);
+        try self.appendByte(try self.internGlobal(slot));
+        try self.appendByte(@intCast(args.len));
+        for (args, 0..) |arg, idx| {
+            const arg_kind_start = self.byte_len;
+            try self.appendGlobalCallArgSource(sources[idx]);
+            switch (arg) {
+                .load_local => |inst| try candidates.noteShapedGlobalLocalArg(inst.slot, inst.start, arg_kind_start),
+                .local_const_op => |inst| try candidates.noteShapedGlobalLocalArg(inst.slot, inst.start, arg_kind_start),
+                else => {},
+            }
+        }
+        return true;
+    }
+
     fn tryRewriteTailCall(self: *InstructionBuffer) bool {
         if (self.byte_len == 0 or self.last_op_start >= self.byte_len) return false;
         const op = std.meta.intToEnum(Op, self.bytes[self.last_op_start]) catch return false;
         const shaped: ?Op = switch (op) {
             .call1 => .tail_call1,
+            .call1_local_local => .tail_call1_local_local,
             .call2 => .tail_call2,
             .call_global1 => .tail_call_global1,
             .call_global2 => .tail_call_global2,
+            .call_global3 => .tail_call_global3,
+            .call_global4 => .tail_call_global4,
+            .call_global_slots => .tail_call_global_slots,
             else => null,
         };
         if (shaped == null) return false;
@@ -24570,11 +34325,18 @@ const InstructionBuffer = struct {
     fn invalidateSimple(self: *InstructionBuffer) void {
         self.previous_simple = null;
         self.last_simple = null;
+        self.simple_history_len = 0;
     }
 
     fn noteSimple(self: *InstructionBuffer, simple: ProducedValue) void {
-        self.previous_simple = self.last_simple;
-        self.last_simple = simple;
+        if (self.simple_history_len == self.simple_history.len) {
+            std.mem.copyForwards(ProducedValue, self.simple_history[0 .. self.simple_history.len - 1], self.simple_history[1..]);
+            self.simple_history_len -= 1;
+        }
+        self.simple_history[self.simple_history_len] = simple;
+        self.simple_history_len += 1;
+        self.last_simple = self.simple_history[self.simple_history_len - 1];
+        self.previous_simple = if (self.simple_history_len >= 2) self.simple_history[self.simple_history_len - 2] else null;
     }
 };
 
@@ -24693,11 +34455,15 @@ const Scope = struct {
     parent: ?*Scope = null,
     explicit_names: [max_explicit_params]IdentRef = undefined,
     explicit_count: u8 = 0,
+    local_names: [max_explicit_params]IdentRef = undefined,
+    local_slots: [max_explicit_params]u16 = undefined,
+    local_count: u8 = 0,
     capture_bindings: [max_captures]CaptureBinding = undefined,
     capture_count: u8 = 0,
     allow_implicit_params: bool = false,
     param_binding_kind: ParamBindingKind = .frame_local,
     arity: u8 = 0,
+    frame_slot_count: u8 = 0,
 
     fn deinit(self: *Scope, allocator: std.mem.Allocator) void {
         _ = self;
@@ -24709,9 +34475,25 @@ const Scope = struct {
         if (self.explicit_count >= max_explicit_params) return error.Unsupported;
         const slot: u16 = self.arity;
         self.arity += 1;
+        self.frame_slot_count = self.arity;
         self.explicit_names[self.explicit_count] = ident;
         self.explicit_count += 1;
         if (slot != self.explicit_count - 1) return error.Internal;
+    }
+
+    fn declareLocal(self: *Scope, ident: IdentRef) !u16 {
+        if (self.lookupExplicit(ident)) |slot| return slot;
+        var idx: u8 = 0;
+        while (idx < self.local_count) : (idx += 1) {
+            if (identMatches(self.local_names[idx], ident)) return self.local_slots[idx];
+        }
+        if (self.local_count >= max_explicit_params) return error.Unsupported;
+        const slot: u16 = self.frame_slot_count;
+        self.local_names[self.local_count] = ident;
+        self.local_slots[self.local_count] = slot;
+        self.local_count += 1;
+        self.frame_slot_count += 1;
+        return slot;
     }
 
     fn resolveLoad(self: *Scope, ident: IdentRef) !ResolveResult {
@@ -24752,20 +34534,28 @@ const Scope = struct {
     }
 
     fn lookupLocal(self: *Scope, ident: IdentRef) ?u16 {
+        var local_idx = self.local_count;
+        while (local_idx > 0) {
+            local_idx -= 1;
+            if (identMatches(self.local_names[local_idx], ident)) return self.local_slots[local_idx];
+        }
         if (self.lookupExplicit(ident)) |slot| return slot;
         if (!self.allow_implicit_params) return null;
         if (ident.text.len == 1) {
             switch (ident.text[0]) {
                 'x' => {
                     if (self.arity < 1) self.arity = 1;
+                    if (self.frame_slot_count < 1) self.frame_slot_count = 1;
                     return 0;
                 },
                 'y' => {
                     if (self.arity < 2) self.arity = 2;
+                    if (self.frame_slot_count < 2) self.frame_slot_count = 2;
                     return 1;
                 },
                 'z' => {
                     if (self.arity < 3) self.arity = 3;
+                    if (self.frame_slot_count < 3) self.frame_slot_count = 3;
                     return 2;
                 },
                 else => {},
@@ -24775,7 +34565,7 @@ const Scope = struct {
         return null;
     }
 
-    fn resolveLocal(self: *Scope, slot: u16) ResolveResult {
+    fn resolveLocal(self: *const Scope, slot: u16) ResolveResult {
         return switch (self.param_binding_kind) {
             .frame_local => .{ .local = slot },
             .inline_local => .{ .inline_local = slot },
@@ -24846,6 +34636,7 @@ const Compiler = struct {
     code_allocator: std.mem.Allocator,
     compile_mode: CompileMode,
     index: usize = 0,
+    consume_candidates: ConsumeCandidates = .{},
 
     fn init(session: *Session, source: []const u8, code_allocator: std.mem.Allocator, compile_mode: CompileMode) KError!Compiler {
         return .{
@@ -24863,7 +34654,7 @@ const Compiler = struct {
 
         var instructions = InstructionBuffer{};
         try self.compileTopLevelInto(&instructions, &scope);
-        return try self.finalizeCode(scope.arity, &instructions, .top_level, self.source);
+        return try self.finalizeCode(scope.arity, scope.frame_slot_count, &instructions, .top_level, self.source);
     }
 
     fn compileTopLevelScratch(self: *Compiler, scratch: *ScratchCode) KError!*const Code {
@@ -24871,7 +34662,7 @@ const Compiler = struct {
         defer scope.deinit(self.session.allocator);
 
         try self.compileTopLevelInto(&scratch.instructions, &scope);
-        const code = scratch.finalize(scope.arity);
+        const code = scratch.finalize(scope.arity, scope.frame_slot_count);
         self.assignCodeProfile(code, .top_level, self.source);
         return code;
     }
@@ -24930,16 +34721,123 @@ const Compiler = struct {
     }
 
     fn compileExprSliceInto(self: *Compiler, out: *InstructionBuffer, scope: *Scope, source_slice: []const u8) KError!void {
-        if (try self.tryCompileSimpleExprSlice(out, scope, source_slice)) return;
+        const updated_candidates = try self.compileExprSliceIntoWithConsumeCandidates(out, scope, source_slice, self.consume_candidates);
+        self.consume_candidates = updated_candidates;
+    }
 
+    fn compileExprSliceIntoWithConsumeCandidates(
+        self: *Compiler,
+        out: *InstructionBuffer,
+        scope: *Scope,
+        source_slice: []const u8,
+        candidates: ConsumeCandidates,
+    ) KError!ConsumeCandidates {
         var expr_compiler = try Compiler.init(
             self.session,
             source_slice,
             self.code_allocator,
             self.compile_mode,
         );
-        _ = try expr_compiler.parseExpr(out, scope);
+        expr_compiler.consume_candidates = candidates;
+        if (try expr_compiler.tryCompileSimpleExprSlice(out, scope, source_slice)) {
+            expr_compiler.index = expr_compiler.source.len;
+        } else {
+            _ = try expr_compiler.parseExpr(out, scope);
+        }
         if (!expr_compiler.atEnd()) return error.Parse;
+        return expr_compiler.consume_candidates;
+    }
+
+    fn compileLambdaBodyIntoWithConsumeCandidates(
+        self: *Compiler,
+        out: *InstructionBuffer,
+        scope: *Scope,
+        body_source: []const u8,
+        candidates: ConsumeCandidates,
+    ) KError!ConsumeCandidates {
+        var body_compiler = try Compiler.init(
+            self.session,
+            body_source,
+            self.code_allocator,
+            self.compile_mode,
+        );
+        body_compiler.consume_candidates = candidates;
+        try body_compiler.compileLambdaBodyInto(out, scope, body_source);
+        return body_compiler.consume_candidates;
+    }
+
+    fn emitResolvedLoad(self: *Compiler, out: *InstructionBuffer, resolved: ResolveResult) KError!void {
+        switch (resolved) {
+            .local => |slot| try out.emitLoadLocal(slot),
+            .inline_local => |slot| try out.emitLoadInlineLocal(slot),
+            .capture => |slot| try out.emitLoadCapture(slot),
+            .global => return error.Internal,
+        }
+        self.consume_candidates.noteLoad(resolved, out.last_op_start);
+    }
+
+    fn patchConsumeCandidates(out: *InstructionBuffer, candidates: ConsumeCandidates) void {
+        candidates.patchInto(out);
+    }
+
+    fn addScopeParamConsumeCandidates(candidates: *ConsumeCandidates, scope: *Scope) KError!void {
+        var slot: u16 = 0;
+        while (slot < scope.arity) : (slot += 1) {
+            try candidates.addResolved(scope.resolveLocal(slot));
+        }
+    }
+
+    fn captureSourceMatchesResolved(source: CaptureSource, resolved: ResolveResult) bool {
+        return switch (source) {
+            .local => |slot| switch (resolved) {
+                .local => |resolved_slot| resolved_slot == slot,
+                else => false,
+            },
+            .inline_local => |slot| switch (resolved) {
+                .inline_local => |resolved_slot| resolved_slot == slot,
+                else => false,
+            },
+            .capture => |_| false,
+        };
+    }
+
+    fn addScopeParamConsumeCandidatesExceptSources(
+        candidates: *ConsumeCandidates,
+        scope: *Scope,
+        excluded_sources: []const CaptureSource,
+    ) KError!void {
+        var slot: u16 = 0;
+        while (slot < scope.arity) : (slot += 1) {
+            const resolved = scope.resolveLocal(slot);
+            var excluded = false;
+            for (excluded_sources) |source| {
+                if (captureSourceMatchesResolved(source, resolved)) {
+                    excluded = true;
+                    break;
+                }
+            }
+            if (!excluded) try candidates.addResolved(resolved);
+        }
+    }
+
+    fn directAmendBaseConsumeCandidates(self: *Compiler, scope: *Scope, body_source: []const u8) KError!ConsumeCandidates {
+        const trimmed = std.mem.trim(u8, body_source, " \t\r\n");
+        if (!(std.mem.startsWith(u8, trimmed, "@[") or std.mem.startsWith(u8, trimmed, ".["))) return .{};
+
+        const base_start = skipSpacesInSource(trimmed, 2);
+        var source_compiler = try Compiler.init(
+            self.session,
+            trimmed,
+            self.code_allocator,
+            self.compile_mode,
+        );
+        const scanned = source_compiler.scanIdentifierAt(base_start) orelse return .{};
+        const after_ident = skipSpacesInSource(trimmed, scanned.next_index);
+        if (after_ident >= trimmed.len or trimmed[after_ident] != ';') return .{};
+
+        var candidates = ConsumeCandidates{};
+        try candidates.addResolved(try scope.resolveLoad(scanned.ident));
+        return candidates;
     }
 
     fn compileLambdaBodyInto(self: *Compiler, out: *InstructionBuffer, scope: *Scope, body_source: []const u8) KError!void {
@@ -24976,20 +34874,60 @@ const Compiler = struct {
             }
         else
             null;
+
+        if (parent.param_binding_kind == .frame_local) {
+            var rhs_candidates = ConsumeCandidates{};
+            try rhs_candidates.addResolved(try parent.resolveLoad(ident));
+            if (maybe_explicit_count) |explicit_count| {
+                try addScopeParamConsumeCandidatesExceptSources(&rhs_candidates, parent, hoisted_sources[1..explicit_count]);
+            }
+            const rhs_control_before = out.control_flow_op_count;
+            const updated_rhs_candidates = try self.compileExprSliceIntoWithConsumeCandidates(out, parent, rhs_source, rhs_candidates);
+            if (out.control_flow_op_count == rhs_control_before) patchConsumeCandidates(out, updated_rhs_candidates);
+            const slot = try parent.declareLocal(ident);
+            try out.emitStoreLocal(slot);
+            try self.compileLambdaBodyInto(out, parent, body_source);
+            return;
+        }
+
+        var rhs_candidates = ConsumeCandidates{};
+        try rhs_candidates.addResolved(try parent.resolveLoad(ident));
         if (maybe_explicit_count) |explicit_count| {
-            const hoisted_count = explicit_count - 1;
-            for (hoisted_sources[0..hoisted_count]) |source| try self.emitCaptureSourceLoad(out, source);
-            try self.compileExprSliceInto(out, parent, rhs_source);
-            try self.inlineLambdaCallFromBodySource(out, parent, false, explicit_names[0..explicit_count], body_source, explicit_count);
+            try addScopeParamConsumeCandidatesExceptSources(&rhs_candidates, parent, hoisted_sources[1..explicit_count]);
+            const rhs_control_before = out.control_flow_op_count;
+            const updated_rhs_candidates = try self.compileExprSliceIntoWithConsumeCandidates(out, parent, rhs_source, rhs_candidates);
+            if (out.control_flow_op_count == rhs_control_before) patchConsumeCandidates(out, updated_rhs_candidates);
+
+            var hoist_candidates = ConsumeCandidates{};
+            var hoisted_idx: usize = 1;
+            while (hoisted_idx < explicit_count) : (hoisted_idx += 1) {
+                const source = hoisted_sources[hoisted_idx];
+                try hoist_candidates.addCaptureSource(source);
+                try self.emitCaptureSourceTransfer(out, source);
+            }
+            patchConsumeCandidates(out, hoist_candidates);
+
+            var body_consume_candidates = ConsumeCandidates{};
+            try body_consume_candidates.addInlineLocal(0);
+            try self.inlineLambdaCallFromBodySource(
+                out,
+                parent,
+                false,
+                explicit_names[0..explicit_count],
+                body_source,
+                explicit_count,
+                body_consume_candidates,
+            );
             _ = try out.tryShapeArgmaxSuffix();
             return;
         }
 
         const fallback_explicit_names = [_]IdentRef{ident};
         try self.emitLambdaValueFromBodySource(out, parent, false, &fallback_explicit_names, body_source);
-        try self.compileExprSliceInto(out, parent, rhs_source);
-        try out.appendOp(.call1);
-        _ = try out.tryShapeArgmaxSuffix();
+        const rhs_control_before = out.control_flow_op_count;
+        const updated_rhs_candidates = try self.compileExprSliceIntoWithConsumeCandidates(out, parent, rhs_source, rhs_candidates);
+        if (out.control_flow_op_count == rhs_control_before) patchConsumeCandidates(out, updated_rhs_candidates);
+        try out.appendShapedCall1();
     }
 
     fn collectInlineLocalBindingParams(
@@ -25011,10 +34949,13 @@ const Compiler = struct {
         try self.compileLambdaBodyInto(&temp_instructions, &scope, body_source);
 
         var count: u8 = 0;
+        explicit_out[count] = ident;
+        source_out[count] = .{ .local = 0 };
+        count += 1;
         for (scope.capture_bindings[0..scope.capture_count]) |binding| {
             switch (binding.source) {
                 .local, .inline_local => {
-                    if (count >= max_explicit_params - 1) return error.Unsupported;
+                    if (count >= max_explicit_params) return error.Unsupported;
                     explicit_out[count] = binding.ident;
                     source_out[count] = binding.source;
                     count += 1;
@@ -25022,10 +34963,7 @@ const Compiler = struct {
                 .capture => {},
             }
         }
-        if (count >= max_explicit_params) return error.Unsupported;
-        explicit_out[count] = ident;
-        source_out[count] = .{ .local = 0 };
-        return count + 1;
+        return count;
     }
 
     fn emitCaptureSourceLoad(self: *Compiler, out: *InstructionBuffer, source: CaptureSource) KError!void {
@@ -25033,6 +34971,21 @@ const Compiler = struct {
         switch (source) {
             .local => |slot| try out.emitLoadLocal(slot),
             .inline_local => |slot| try out.emitLoadInlineLocal(slot),
+            .capture => |slot| try out.emitLoadCapture(slot),
+        }
+    }
+
+    fn emitCaptureSourceTransfer(self: *Compiler, out: *InstructionBuffer, source: CaptureSource) KError!void {
+        _ = self;
+        switch (source) {
+            .local => |slot| {
+                try out.appendRawOp(.take_local);
+                try out.appendPoolByte(slot);
+            },
+            .inline_local => |slot| {
+                try out.appendRawOp(.take_inline_local);
+                try out.appendPoolByte(slot);
+            },
             .capture => |slot| try out.emitLoadCapture(slot),
         }
     }
@@ -25045,6 +34998,7 @@ const Compiler = struct {
         explicit_names: []const IdentRef,
         body_source: []const u8,
         argc: u8,
+        body_consume_candidates: ConsumeCandidates,
     ) KError!void {
         var scope = Scope{
             .parent = parent,
@@ -25058,9 +35012,13 @@ const Compiler = struct {
         try out.appendOp(.enter_inline);
         try out.appendByte(argc);
         const body_start = out.byte_len;
-        try self.compileLambdaBodyInto(out, &scope, body_source);
+        var combined_candidates = body_consume_candidates;
+        try combined_candidates.mergeFrom(try self.directAmendBaseConsumeCandidates(&scope, body_source));
+        const body_control_before = out.control_flow_op_count;
+        const updated_body_candidates = try self.compileLambdaBodyIntoWithConsumeCandidates(out, &scope, body_source, combined_candidates);
         if (argc != scope.arity) return error.Arity;
         if (try self.tryShapeInlineCall(out, call_start, body_start, argc)) return;
+        if (out.control_flow_op_count == body_control_before) patchConsumeCandidates(out, updated_body_candidates);
         try out.appendOp(.leave_inline);
         try out.appendByte(argc);
     }
@@ -25083,6 +35041,11 @@ const Compiler = struct {
             .ident = scanned.ident,
             .rhs_source = rhs_source,
         };
+    }
+
+    fn lambdaBodyStartsWithLocalBinding(self: *Compiler, body_source: []const u8) KError!bool {
+        const split = splitLambdaBodyHead(body_source) orelse return error.Parse;
+        return (try self.scanLocalAssignmentStatement(split.head)) != null;
     }
 
     fn emitGlobalLoadByName(self: *Compiler, out: *InstructionBuffer, name: []const u8) KError!void {
@@ -25225,12 +35188,18 @@ const Compiler = struct {
                 }
             }
             try self.emitSimpleAtom(out, scope, arg0.atom);
+            const arg0_simple = out.last_simple orelse return false;
             try self.emitSimpleAtom(out, scope, arg1.atom);
+            const arg1_simple = out.last_simple orelse return false;
             if (builtinFromName(callee_ident.text)) |builtin| {
                 if (try self.tryEmitBuiltinCall(out, builtin, 2)) return true;
             }
-            try out.appendOp(.call_global2);
-            try out.appendByte(try out.internGlobal(try self.globalSlot(callee_ident.text)));
+            const slot = try self.globalSlot(callee_ident.text);
+            const arg_simples = [_]ProducedValue{ arg0_simple, arg1_simple };
+            if (!(try out.tryShapeGlobalCallSlotsFromSimples(slot, arg_simples[0..], &self.consume_candidates))) {
+                try out.appendOp(.call_global2);
+                try out.appendByte(try out.internGlobal(slot));
+            }
             return true;
         }
 
@@ -25255,10 +35224,20 @@ const Compiler = struct {
     }
 
     fn parseDyadExpr(self: *Compiler, out: *InstructionBuffer, scope: *Scope) KError!ExprForm {
+        const left_start = out.byte_len;
         const left_form = try self.parseApply(out, scope);
+        const left_end = out.byte_len;
         const left_simple = out.last_simple;
         const op = self.peekDyadOp() orelse return left_form;
         _ = self.consumeByte();
+        if (op != '.' and op != '@' and self.startsDerivedVerb()) {
+            const primary = try self.parseBuiltinPrimaryFromConsumedChar(op);
+            _ = try self.parsePostfixTail(out, scope, primary.pending, primary.form);
+            out.rotateRangeLeft(left_start, left_end, out.byte_len);
+            _ = try self.parseDyadExpr(out, scope);
+            try out.appendOp(.call2);
+            return .nounish;
+        }
         const derived = if (op != '.') self.matchDerivedVerb() else null;
         _ = try self.parseDyadExpr(out, scope);
         if (left_simple) |left| {
@@ -25274,7 +35253,7 @@ const Compiler = struct {
 
     fn peekDyadOp(self: *Compiler) ?u8 {
         return switch (self.peekByte() orelse return null) {
-            ',', '=', '<', '>', '+', '-', '!', '&', '|', '#', '_', '^', '?', '$', '*', '%', '.', '@' => |op| op,
+            ',', '=', '<', '>', '+', '-', '!', '&', '|', '#', '_', '^', '?', '$', '*', '%', '~', '.', '@' => |op| op,
             else => null,
         };
     }
@@ -25298,6 +35277,7 @@ const Compiler = struct {
                 '$' => .cast,
                 '*' => .mul,
                 '%' => .div,
+                '~' => .not,
                 else => unreachable,
             }, kind);
             return;
@@ -25315,6 +35295,7 @@ const Compiler = struct {
             '#' => try out.appendOp(.take),
             '_' => try out.appendOp(.drop),
             '^' => try out.appendOp(.fill_without),
+            '~' => try out.appendOp(.match),
             '?' => {
                 try out.appendOp(.find);
                 _ = try out.tryShapeArgmaxSuffix();
@@ -25323,20 +35304,46 @@ const Compiler = struct {
             '*' => try out.appendShapedDyad(.mul),
             '%' => try out.appendShapedDyad(.div),
             '.' => try out.appendDot(),
-            '@' => try out.appendOp(.call1),
+            '@' => try out.appendShapedCall1(),
             else => unreachable,
         }
     }
 
     fn parseApply(self: *Compiler, out: *InstructionBuffer, scope: *Scope) KError!ExprForm {
+        const left_start = out.byte_len;
         const left_form = try self.parseUnary(out, scope);
+        if (try self.tryParseParenthesizedVerbialDyad(out, scope, left_start, left_form)) {
+            return .nounish;
+        }
         if (self.startsJuxtapositionOperand(left_form)) {
             _ = try self.parseExpr(out, scope);
-            try out.appendOp(.call1);
-            _ = try out.tryShapeArgmaxSuffix();
+            try out.appendShapedCall1();
             return .nounish;
         }
         return left_form;
+    }
+
+    fn tryParseParenthesizedVerbialDyad(self: *Compiler, out: *InstructionBuffer, scope: *Scope, left_start: usize, left_form: ExprForm) KError!bool {
+        if (left_form != .nounish) return false;
+        if (self.peekByte() != '(') return false;
+
+        const saved_index = self.index;
+        const saved_out = out.mark();
+        const left_end = out.byte_len;
+
+        const callee_form = try self.parseUnary(out, scope);
+        const callee_end = out.byte_len;
+
+        if (callee_form != .verbial or !self.startsJuxtapositionOperand(callee_form)) {
+            self.index = saved_index;
+            out.restore(saved_out);
+            return false;
+        }
+
+        _ = try self.parseExpr(out, scope);
+        out.rotateRangeLeft(left_start, left_end, callee_end);
+        try out.appendOp(.call2);
+        return true;
     }
 
     fn parseUnary(self: *Compiler, out: *InstructionBuffer, scope: *Scope) KError!ExprForm {
@@ -25511,10 +35518,26 @@ const Compiler = struct {
             }
 
             var argc: u8 = 0;
+            var arg_simples: [4]ProducedValue = undefined;
+            var arg_simples_valid = true;
             if (needs_projection) {
                 for (0..slot_summary.slot_count) |slot_idx| {
                     if (!slot_summary.isHole(slot_idx)) {
+                        const arg_start = out.byte_len;
                         _ = try self.parseExpr(out, scope);
+                        if (arg_simples_valid and argc < arg_simples.len) {
+                            if (out.last_simple) |simple| {
+                                if (simple.start() < arg_start or simple.end() != out.byte_len) {
+                                    arg_simples_valid = false;
+                                } else {
+                                    arg_simples[argc] = simple;
+                                }
+                            } else {
+                                arg_simples_valid = false;
+                            }
+                        } else if (arg_simples_valid) {
+                            arg_simples_valid = false;
+                        }
                         argc += 1;
                     }
                     if (slot_idx + 1 == slot_summary.slot_count) {
@@ -25525,7 +35548,21 @@ const Compiler = struct {
                 }
             } else if (!self.matchChar(']')) {
                 while (true) {
+                    const arg_start = out.byte_len;
                     _ = try self.parseExpr(out, scope);
+                    if (arg_simples_valid and argc < arg_simples.len) {
+                        if (out.last_simple) |simple| {
+                            if (simple.start() < arg_start or simple.end() != out.byte_len) {
+                                arg_simples_valid = false;
+                            } else {
+                                arg_simples[argc] = simple;
+                            }
+                        } else {
+                            arg_simples_valid = false;
+                        }
+                    } else if (arg_simples_valid) {
+                        arg_simples_valid = false;
+                    }
                     argc += 1;
                     if (self.matchChar(']')) break;
                     try self.expectChar(';');
@@ -25550,8 +35587,7 @@ const Compiler = struct {
                 }
                 switch (argc) {
                     1 => {
-                        try out.appendOp(.call1);
-                        _ = try out.tryShapeArgmaxSuffix();
+                        try out.appendShapedCall1();
                     },
                     2 => try out.appendOp(.call2),
                     else => {
@@ -25560,14 +35596,28 @@ const Compiler = struct {
                     },
                 }
             } else if (global_slot) |slot| {
+                const simple_args = if (arg_simples_valid and argc <= arg_simples.len)
+                    arg_simples[0..argc]
+                else
+                    &[_]ProducedValue{};
                 switch (argc) {
                     1 => {
-                        try out.appendOp(.call_global1);
-                        try out.appendByte(try out.internGlobal(slot));
+                        if (!(arg_simples_valid and try out.tryShapeGlobalCallSlotsFromSimples(slot, simple_args, &self.consume_candidates))) {
+                            try out.appendOp(.call_global1);
+                            try out.appendByte(try out.internGlobal(slot));
+                        }
                     },
                     2 => {
-                        try out.appendOp(.call_global2);
-                        try out.appendByte(try out.internGlobal(slot));
+                        if (!(arg_simples_valid and try out.tryShapeGlobalCallSlotsFromSimples(slot, simple_args, &self.consume_candidates))) {
+                            try out.appendOp(.call_global2);
+                            try out.appendByte(try out.internGlobal(slot));
+                        }
+                    },
+                    3, 4 => {
+                        if (!(arg_simples_valid and try out.tryShapeGlobalCallSlotsFromSimples(slot, simple_args, &self.consume_candidates))) {
+                            try out.appendOp(if (argc == 3) .call_global3 else .call_global4);
+                            try out.appendByte(try out.internGlobal(slot));
+                        }
                     },
                     else => {
                         try out.appendOp(.call_global);
@@ -25580,8 +35630,7 @@ const Compiler = struct {
             } else {
                 switch (argc) {
                     1 => {
-                        try out.appendOp(.call1);
-                        _ = try out.tryShapeArgmaxSuffix();
+                        try out.appendShapedCall1();
                     },
                     2 => try out.appendOp(.call2),
                     else => {
@@ -25595,6 +35644,14 @@ const Compiler = struct {
         }
         try self.emitPendingPrimary(out, scope, pending);
         return form;
+    }
+
+    fn startsDerivedVerb(self: *const Compiler) bool {
+        if (self.index >= self.source.len) return false;
+        return switch (self.source[self.index]) {
+            '\'', '/', '\\' => true,
+            else => false,
+        };
     }
 
     fn matchDerivedVerb(self: *Compiler) ?DerivedVerbKind {
@@ -25637,8 +35694,9 @@ const Compiler = struct {
                     .add => try out.appendOp(.transpose),
                     .sub => try out.appendOp(.negate),
                     .div => try out.appendOp(.sqrt),
+                    .pow => return false,
                     .mul => return false,
-                    .exp, .log, .tanh, .sigmoid => return false,
+                    .exp, .log, .sin, .cos, .tanh, .sigmoid => return false,
                     .iota => try out.appendOp(.iota),
                     .minimum => return false,
                     .maximum => try out.appendOp(.reverse),
@@ -25655,7 +35713,7 @@ const Compiler = struct {
                     .stringify => try out.appendOp(.stringify),
                     .unique => try out.appendOp(.unique),
                     .eval_string => try out.appendOp(.eval_string),
-                    .concat, .take, .drop, .equal, .reshape, .cast, .contains, .split, .join, .find, .grad, .valuegrad, .prng, .load, .rotcache, .rotcacheupdate, .rotcacheview, .rmsnorm => return false,
+                    .concat, .take, .drop, .equal, .reshape, .cast, .contains, .split, .join, .bytes, .utf8, .char, .find, .tokenize, .detokenize, .grad, .valuegrad, .prng, .load, .save, .sql, .register, .rotcache, .rotcacheupdate, .rotcacheview, .rope, .ropeflat, .ropecisflat, .rmsnorm, .layernorm, .gelu, .geluapprox, .mlpdense, .conv2d, .convtranspose2d, .upsamplenearest2d, .groupnorm, .softmax, .sdpa, .sam3boxrpb, .sdpamask, .sdpaflat => return false,
                 }
                 return true;
             },
@@ -25665,12 +35723,14 @@ const Compiler = struct {
                     .sub => try out.appendOp(.sub),
                     .mul => try out.appendOp(.mul),
                     .div => try out.appendOp(.div),
+                    .pow => return false,
                     .iota => try out.appendOp(.mod),
                     .minimum => try out.appendOp(.minimum),
                     .maximum => try out.appendOp(.maximum),
                     .less => try out.appendOp(.less),
                     .more => try out.appendOp(.more),
-                    .exp, .log, .tanh, .sigmoid => return false,
+                    .not => try out.appendOp(.match),
+                    .exp, .log, .sin, .cos, .tanh, .sigmoid => return false,
                     .concat => try out.appendOp(.concat),
                     .count => try out.appendOp(.take),
                     .floor => try out.appendOp(.drop),
@@ -25682,7 +35742,7 @@ const Compiler = struct {
                     .split => try out.appendOp(.split),
                     .join => try out.appendOp(.join),
                     .find => try out.appendOp(.find),
-                    .reverse, .grade_up, .grade_down, .not, .take, .drop, .reshape, .stringify, .unique, .eval_string, .grad, .valuegrad, .prng, .load, .rotcache, .rotcacheupdate, .rotcacheview, .rmsnorm => return false,
+                    .reverse, .grade_up, .grade_down, .take, .drop, .reshape, .stringify, .bytes, .utf8, .char, .unique, .tokenize, .detokenize, .eval_string, .grad, .valuegrad, .prng, .load, .save, .sql, .register, .rotcache, .rotcacheupdate, .rotcacheview, .rope, .ropeflat, .ropecisflat, .rmsnorm, .layernorm, .gelu, .geluapprox, .mlpdense, .conv2d, .convtranspose2d, .upsamplenearest2d, .groupnorm, .softmax, .sdpa, .sam3boxrpb, .sdpamask, .sdpaflat => return false,
                 }
                 return true;
             },
@@ -25692,7 +35752,7 @@ const Compiler = struct {
 
     fn builtinCallRequiresPreEmit(builtin: BuiltinId) bool {
         return switch (builtin) {
-            .exp, .log, .tanh, .sigmoid, .grad, .valuegrad, .prng, .load, .rotcache, .rotcacheupdate, .rotcacheview, .rmsnorm => true,
+            .pow, .exp, .log, .sin, .cos, .tanh, .sigmoid, .bytes, .utf8, .char, .tokenize, .detokenize, .grad, .valuegrad, .prng, .load, .save, .sql, .register, .rotcache, .rotcacheupdate, .rotcacheview, .rope, .ropeflat, .ropecisflat, .rmsnorm, .layernorm, .gelu, .geluapprox, .mlpdense, .conv2d, .convtranspose2d, .upsamplenearest2d, .groupnorm, .softmax, .sdpa, .sam3boxrpb, .sdpamask, .sdpaflat => true,
             else => false,
         };
     }
@@ -25711,6 +35771,17 @@ const Compiler = struct {
         if (self.peekPrimaryUnaryOpAt(next) != null) return null;
         self.index = skipSpacesInSource(self.source, next + 1);
         return .{ .const_value = Value.closure(try self.session.allocFrozenInnerProductClosure(reduce, map)) };
+    }
+
+    fn parseBuiltinPrimaryFromConsumedChar(self: *Compiler, ch: u8) KError!ParsedPrimary {
+        const builtin = builtinFromChar(ch) orelse return error.Unsupported;
+        if (self.compile_mode == .frozen) {
+            if (self.matchDerivedVerb()) |kind| {
+                const closure = try self.session.allocFrozenDerivedClosure(kind, Value.builtin(builtin));
+                return .{ .pending = .{ .const_value = Value.closure(closure) }, .form = .verbial };
+            }
+        }
+        return .{ .pending = .{ .builtin = builtin }, .form = .verbial };
     }
 
     fn parsePrimary(self: *Compiler, out: *InstructionBuffer, scope: *Scope) KError!ParsedPrimary {
@@ -25835,14 +35906,7 @@ const Compiler = struct {
                     return .{ .pending = inner_product, .form = .verbial };
                 }
                 _ = self.consumeByte();
-                const builtin = builtinFromChar(ch) orelse return error.Unsupported;
-                if (self.compile_mode == .frozen) {
-                    if (self.matchDerivedVerb()) |kind| {
-                        const closure = try self.session.allocFrozenDerivedClosure(kind, Value.builtin(builtin));
-                        return .{ .pending = .{ .const_value = Value.closure(closure) }, .form = .verbial };
-                    }
-                }
-                return .{ .pending = .{ .builtin = builtin }, .form = .verbial };
+                return try self.parseBuiltinPrimaryFromConsumedChar(ch);
             },
             else => {},
         }
@@ -25906,7 +35970,8 @@ const Compiler = struct {
     }
 
     fn parseStringLiteralValue(self: *Compiler) KError!Value {
-        if (!self.matchChar('"')) return error.Parse;
+        if (self.peekByte() != '"') return error.Parse;
+        self.index += 1;
         const start = self.index;
         while (self.index < self.source.len and self.source[self.index] != '"') : (self.index += 1) {}
         if (self.index >= self.source.len) return error.Parse;
@@ -26147,14 +36212,20 @@ const Compiler = struct {
             break :blk &body_storage;
         };
 
-        try self.compileLambdaBodyInto(body, &scope, body_source);
+        var body_candidates = try self.directAmendBaseConsumeCandidates(&scope, body_source);
+        if (!(try self.lambdaBodyStartsWithLocalBinding(body_source))) {
+            try addScopeParamConsumeCandidates(&body_candidates, &scope);
+        }
+        const body_control_before = body.control_flow_op_count;
+        const updated_body_candidates = try self.compileLambdaBodyIntoWithConsumeCandidates(body, &scope, body_source, body_candidates);
+        if (body.control_flow_op_count == body_control_before) patchConsumeCandidates(body, updated_body_candidates);
         try finishCompiledInstructions(body, .tail_position);
 
         const code = if (self.compile_mode == .scratch) blk: {
-            const scratch_code = lambda_scratch.?.finalize(scope.arity);
+            const scratch_code = lambda_scratch.?.finalize(scope.arity, scope.frame_slot_count);
             self.assignCodeProfile(scratch_code, .lambda, body_source);
             break :blk scratch_code;
-        } else try self.finalizeCode(scope.arity, body, .lambda, body_source);
+        } else try self.finalizeCode(scope.arity, scope.frame_slot_count, body, .lambda, body_source);
         const template = try self.code_allocator.create(LambdaTemplate);
         const captures = if (scope.capture_count == 0)
             &[_]CaptureSource{}
@@ -26221,8 +36292,15 @@ const Compiler = struct {
         return error.Parse;
     }
 
-    fn finalizeCode(self: *Compiler, arity: u8, instructions: *const InstructionBuffer, kind: SamplingProfileCodeKind, source: []const u8) !*const Code {
-        const code = try duplicateCodeFromInstructions(self.code_allocator, arity, instructions);
+    fn finalizeCode(
+        self: *Compiler,
+        arity: u8,
+        frame_slot_count: u8,
+        instructions: *const InstructionBuffer,
+        kind: SamplingProfileCodeKind,
+        source: []const u8,
+    ) !*const Code {
+        const code = try duplicateCodeFromInstructions(self.code_allocator, arity, frame_slot_count, instructions);
         self.assignCodeProfile(code, kind, source);
         return code;
     }
@@ -26306,8 +36384,8 @@ const Compiler = struct {
             if (maybe_slot) |slot| {
                 self.index = skipSpacesInSource(self.source, next);
                 switch (scope.param_binding_kind) {
-                    .frame_local => try out.emitLoadLocal(slot),
-                    .inline_local => try out.emitLoadInlineLocal(slot),
+                    .frame_local => try self.emitResolvedLoad(out, .{ .local = slot }),
+                    .inline_local => try self.emitResolvedLoad(out, .{ .inline_local = slot }),
                 }
                 return true;
             }
@@ -26320,15 +36398,15 @@ const Compiler = struct {
         if (builtinFromName(ident.text)) |builtin| return .{ .builtin = builtin };
         switch (try scope.resolveLoad(ident)) {
             .local => |slot| {
-                try out.emitLoadLocal(slot);
+                try self.emitResolvedLoad(out, .{ .local = slot });
                 return .none;
             },
             .inline_local => |slot| {
-                try out.emitLoadInlineLocal(slot);
+                try self.emitResolvedLoad(out, .{ .inline_local = slot });
                 return .none;
             },
             .capture => |slot| {
-                try out.emitLoadCapture(slot);
+                try self.emitResolvedLoad(out, .{ .capture = slot });
                 return .none;
             },
             .global => return .{ .global = try self.globalSlot(ident.text) },
@@ -26365,7 +36443,7 @@ const Compiler = struct {
     fn peekPrimaryUnaryOpAt(self: *const Compiler, index: usize) ?u8 {
         if (index >= self.source.len) return null;
         const ch = self.source[index];
-        if (ch != '+' and ch != '-' and ch != '%' and ch != '!' and ch != '&' and ch != '|' and ch != '<' and ch != '>' and ch != '~' and ch != '#' and ch != '_' and ch != '^' and ch != '$' and ch != '?' and ch != '.') return null;
+        if (ch != '+' and ch != '-' and ch != '%' and ch != '!' and ch != '|' and ch != '<' and ch != '>' and ch != '~' and ch != '#' and ch != '_' and ch != '^' and ch != '$' and ch != '?' and ch != '.') return null;
         const next = skipSpacesInSource(self.source, index + 1);
         if (next >= self.source.len) return null;
         const follower = self.source[next];
@@ -26450,6 +36528,13 @@ const Compiler = struct {
         return next < self.source.len and std.ascii.isDigit(self.source[next]);
     }
 
+    fn peekStartsVectorContinuationSignedNumericLiteral(self: *const Compiler, count: u8) bool {
+        if (!self.peekStartsSignedNumericLiteral()) return false;
+        if (count == 0) return true;
+        if (self.index == 0) return false;
+        return std.ascii.isWhitespace(self.source[self.index - 1]);
+    }
+
     fn emitSignedNumber(self: *Compiler, out: *InstructionBuffer) KError!void {
         if (!self.peekStartsSignedNumericLiteral()) return error.Parse;
         const digit_start = skipSpacesInSource(self.source, self.index + 1);
@@ -26525,16 +36610,16 @@ const Compiler = struct {
         var literal_mode: ?HostDenseElem = null;
 
         while (true) {
-            if (self.peekStartsSignedNumericLiteral()) {
+            if (self.peekStartsVectorContinuationSignedNumericLiteral(count)) {
                 try self.emitSignedNumber(out);
                 count = std.math.add(u8, count, 1) catch return error.Unsupported;
                 literal_mode = mergeLiteralMode(literal_mode, out.last_simple);
-                if (!self.peekStartsNumericLiteral() and !self.peekStartsSignedNumericLiteral()) break;
+                if (!self.peekStartsNumericLiteral() and !self.peekStartsVectorContinuationSignedNumericLiteral(count)) break;
                 continue;
             }
 
             if (try self.tryEmitBoolDigitVector(out, &count, &literal_mode)) {
-                if (!self.peekStartsNumericLiteral() and !self.peekStartsSignedNumericLiteral()) break;
+                if (!self.peekStartsNumericLiteral() and !self.peekStartsVectorContinuationSignedNumericLiteral(count)) break;
                 continue;
             }
 
@@ -26543,7 +36628,7 @@ const Compiler = struct {
             count = std.math.add(u8, count, 1) catch return error.Unsupported;
             literal_mode = mergeLiteralMode(literal_mode, out.last_simple);
 
-            if (!self.peekStartsNumericLiteral() and !self.peekStartsSignedNumericLiteral()) break;
+            if (!self.peekStartsNumericLiteral() and !self.peekStartsVectorContinuationSignedNumericLiteral(count)) break;
         }
 
         if (count == 0) return error.Parse;
@@ -26718,19 +36803,27 @@ fn builtinFromChar(ch: u8) ?BuiltinId {
 fn builtinSupportsInnerProductVerb(builtin: BuiltinId) bool {
     return switch (builtin) {
         .add, .sub, .mul, .div, .minimum, .maximum, .less, .more, .concat, .count, .floor, .sort, .equal => true,
-        .iota, .not, .reverse, .grade_up, .grade_down, .stringify, .unique, .eval_string, .cast, .contains, .split, .join, .find, .grad, .valuegrad, .prng, .load, .rotcache, .rotcacheupdate, .rotcacheview, .rmsnorm, .exp, .log, .tanh, .sigmoid, .take, .drop, .reshape, .null_fill_without => false,
+        .iota, .not, .reverse, .grade_up, .grade_down, .stringify, .bytes, .utf8, .char, .unique, .tokenize, .detokenize, .eval_string, .cast, .contains, .split, .join, .find, .grad, .valuegrad, .prng, .load, .save, .sql, .register, .rotcache, .rotcacheupdate, .rotcacheview, .rope, .ropeflat, .ropecisflat, .rmsnorm, .layernorm, .gelu, .geluapprox, .mlpdense, .conv2d, .convtranspose2d, .upsamplenearest2d, .groupnorm, .softmax, .sdpa, .sam3boxrpb, .sdpamask, .sdpaflat, .exp, .log, .sin, .cos, .tanh, .sigmoid, .take, .drop, .reshape, .null_fill_without, .pow => false,
     };
 }
 
 fn builtinFromName(name: []const u8) ?BuiltinId {
     if (std.mem.eql(u8, name, "sqrt")) return .div;
+    if (std.mem.eql(u8, name, "pow")) return .pow;
     if (std.mem.eql(u8, name, "exp")) return .exp;
     if (std.mem.eql(u8, name, "log")) return .log;
+    if (std.mem.eql(u8, name, "sin")) return .sin;
+    if (std.mem.eql(u8, name, "cos")) return .cos;
     if (std.mem.eql(u8, name, "tanh")) return .tanh;
     if (std.mem.eql(u8, name, "sigmoid")) return .sigmoid;
     if (std.mem.eql(u8, name, "contains")) return .contains;
     if (std.mem.eql(u8, name, "split")) return .split;
     if (std.mem.eql(u8, name, "join")) return .join;
+    if (std.mem.eql(u8, name, "bytes")) return .bytes;
+    if (std.mem.eql(u8, name, "utf8")) return .utf8;
+    if (std.mem.eql(u8, name, "char")) return .char;
+    if (std.mem.eql(u8, name, "tokenize")) return .tokenize;
+    if (std.mem.eql(u8, name, "detokenize")) return .detokenize;
     if (std.mem.eql(u8, name, "null")) return .null_fill_without;
     if (std.mem.eql(u8, name, "fill")) return .null_fill_without;
     if (std.mem.eql(u8, name, "without")) return .null_fill_without;
@@ -26739,9 +36832,28 @@ fn builtinFromName(name: []const u8) ?BuiltinId {
     if (std.mem.eql(u8, name, "valuegrad")) return .valuegrad;
     if (std.mem.eql(u8, name, "prng")) return .prng;
     if (std.mem.eql(u8, name, "load")) return .load;
+    if (std.mem.eql(u8, name, "save")) return .save;
+    if (std.mem.eql(u8, name, "sql")) return .sql;
+    if (std.mem.eql(u8, name, "register")) return .register;
     if (std.mem.eql(u8, name, "rotcache")) return .rotcache;
     if (std.mem.eql(u8, name, "rotcacheupdate")) return .rotcacheupdate;
     if (std.mem.eql(u8, name, "rotcacheview")) return .rotcacheview;
+    if (std.mem.eql(u8, name, "rope")) return .rope;
+    if (std.mem.eql(u8, name, "ropeflat")) return .ropeflat;
+    if (std.mem.eql(u8, name, "ropecisflat")) return .ropecisflat;
     if (std.mem.eql(u8, name, "rmsnorm")) return .rmsnorm;
+    if (std.mem.eql(u8, name, "layernorm")) return .layernorm;
+    if (std.mem.eql(u8, name, "gelu")) return .gelu;
+    if (std.mem.eql(u8, name, "geluapprox")) return .geluapprox;
+    if (std.mem.eql(u8, name, "mlpdense")) return .mlpdense;
+    if (std.mem.eql(u8, name, "conv2d")) return .conv2d;
+    if (std.mem.eql(u8, name, "convtranspose2d")) return .convtranspose2d;
+    if (std.mem.eql(u8, name, "upsamplenearest2d")) return .upsamplenearest2d;
+    if (std.mem.eql(u8, name, "groupnorm")) return .groupnorm;
+    if (std.mem.eql(u8, name, "softmax")) return .softmax;
+    if (std.mem.eql(u8, name, "sdpa")) return .sdpa;
+    if (std.mem.eql(u8, name, "sam3boxrpb")) return .sam3boxrpb;
+    if (std.mem.eql(u8, name, "sdpamask")) return .sdpamask;
+    if (std.mem.eql(u8, name, "sdpaflat")) return .sdpaflat;
     return null;
 }

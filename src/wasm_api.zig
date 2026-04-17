@@ -12,7 +12,7 @@ var last_value: ?runtime.Value = null;
 var last_array_info: ?runtime.WasmArrayInfo = null;
 var last_rendered: ?[]u8 = null;
 var last_echo: bool = false;
-var last_error_buf: [16]u8 = [_]u8{0} ** 16;
+var last_error_buf: [512]u8 = [_]u8{0} ** 512;
 var last_error_len: u32 = 0;
 
 fn alignForward(value: usize, alignment: usize) usize {
@@ -36,12 +36,16 @@ fn bytesAt(ptr: u32, len: u32) []u8 {
     return many[0..count];
 }
 
-fn setLastError(err: anyerror) void {
+fn setLastError(active: ?*runtime.Session, err: anyerror) void {
     @memset(&last_error_buf, 0);
-    const text = runtime.errorCode(err);
+    const text = if (active) |session_handle|
+        session_handle.lastErrorText() orelse runtime.errorCode(err)
+    else
+        runtime.errorCode(err);
     const count = @min(text.len, last_error_buf.len);
     @memcpy(last_error_buf[0..count], text[0..count]);
     last_error_len = @intCast(count);
+    if (active) |session_handle| session_handle.clearLastErrorText();
 }
 
 fn clearLastError() void {
@@ -73,15 +77,15 @@ fn ensureLastArrayInfo() bool {
 fn ensureLastRendered() i32 {
     if (last_rendered != null) return 0;
     const active = &(session orelse {
-        setLastError(error.Name);
+        setLastError(null, error.Name);
         return 1;
     });
     const value = last_value orelse {
-        setLastError(error.Type);
+        setLastError(active, error.Type);
         return 1;
     };
     last_rendered = active.renderValue(value) catch |err| {
-        setLastError(err);
+        setLastError(active, err);
         return 1;
     };
     return 0;
@@ -169,7 +173,7 @@ pub export fn kiwi_init(device: u32) i32 {
         session = null;
     }
     session = runtime.Session.initWithDevice(std.heap.wasm_allocator, deviceFromInt(device)) catch |err| {
-        setLastError(err);
+        setLastError(null, err);
         return 1;
     };
     return 0;
@@ -188,12 +192,12 @@ pub export fn kiwi_eval(ptr: u32, len: u32) i32 {
     clearLastValue();
     clearLastError();
     const active = &(session orelse {
-        setLastError(error.Name);
+        setLastError(null, error.Name);
         return 1;
     });
     const source = bytesAt(ptr, len);
     const result = active.evalSource(source) catch |err| {
-        setLastError(err);
+        setLastError(active, err);
         return 1;
     };
     last_echo = shouldEchoEvalLine(source);

@@ -3,6 +3,7 @@ const build_options = @import("build_options");
 const runtime_device = @import("device.zig");
 const profile = @import("profile.zig");
 const probe = @import("probe.zig");
+const repl_input = @import("repl_input.zig");
 const runtime = @import("runtime.zig");
 const version = @import("version.zig");
 
@@ -78,6 +79,10 @@ const bench_tools = if (enable_bench_cli) @import("bench_internal.zig") else str
         return error.InvalidArgument;
     }
 
+    pub fn auditFindLookupCli(_: std.mem.Allocator, _: f64, _: usize) !void {
+        return error.InvalidArgument;
+    }
+
     pub fn resolveVectorSize(_: []const u8, requested_size: usize) usize {
         return requested_size;
     }
@@ -139,6 +144,7 @@ pub const ProfileRequest = struct {
 
 pub const DebugRequest = enum {
     audit_dense_autodiff,
+    find_lookup_stages,
 };
 
 pub const CliRequest = union(enum) {
@@ -236,6 +242,10 @@ fn run() !void {
             .audit_dense_autodiff => {
                 if (!enable_debug_cli) return invalidArgument();
                 try bench_tools.auditDenseAutodiffCli(allocator);
+            },
+            .find_lookup_stages => {
+                if (!enable_debug_cli) return invalidArgument();
+                try bench_tools.auditFindLookupCli(allocator, parsed.target_batch_ms, parsed.vector_size);
             },
         },
     }
@@ -418,6 +428,8 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Cli
                 if (debug_request != null) return invalidArgument();
                 if (std.mem.eql(u8, arg, "audit-dense-autodiff")) {
                     debug_request = .audit_dense_autodiff;
+                } else if (std.mem.eql(u8, arg, "find-lookup-stages")) {
+                    debug_request = .find_lookup_stages;
                 } else {
                     return invalidArgument();
                 }
@@ -478,6 +490,12 @@ fn usage() !void {
         try stderr.print(
             "  {s} profile [--device cpu|gpu] [--backend auto|host|mlx_cpu|mlx_gpu] [--hz N] [--json] [--json-out path] [-e source | file.k | -]\n",
             .{cli_invocation},
+        );
+    }
+    if (comptime enable_debug_cli) {
+        try stderr.print(
+            "  {s} debug audit-dense-autodiff\n  {s} debug [--target-batch-ms N] [--size N] find-lookup-stages\n",
+            .{ cli_invocation, cli_invocation },
         );
     }
     return error.InvalidArgument;
@@ -638,26 +656,20 @@ fn repl(allocator: std.mem.Allocator, device: runtime_device.DevicePreference, b
 }
 
 fn replSession(session: *runtime.Session, allocator: std.mem.Allocator) !void {
-    var line = std.ArrayList(u8).empty;
-    defer line.deinit(allocator);
+    var input = try repl_input.ReplInput.init(allocator);
+    defer input.deinit();
 
-    const stdin = std.fs.File.stdin().deprecatedReader();
     const stdout = std.fs.File.stdout().deprecatedWriter();
     const stderr = std.fs.File.stderr().deprecatedWriter();
 
     while (true) {
-        try stdout.writeAll(" ");
-        line.clearRetainingCapacity();
-        stdin.streamUntilDelimiter(line.writer(allocator), '\n', null) catch |err| switch (err) {
-            error.EndOfStream => {
-                try stdout.writeByte('\n');
-                return;
-            },
-            else => return err,
-        };
+        const line = (try input.readLine(" ")) orelse return;
+        defer allocator.free(line);
 
-        const parsed = parseLine(line.items) catch |err| {
-            try stderr.print("!{s}\n", .{runtime.errorCode(err)});
+        if (sanitizeLine(line) != null) try input.rememberLine(line);
+
+        const parsed = parseLine(line) catch |err| {
+            try writeRuntimeError(null, stderr, err);
             continue;
         };
         switch (parsed) {
@@ -665,7 +677,7 @@ fn replSession(session: *runtime.Session, allocator: std.mem.Allocator) !void {
             .eval => |trimmed| {
                 if (std.mem.eql(u8, trimmed, "\\\\") or std.mem.eql(u8, trimmed, "\\q") or std.mem.eql(u8, trimmed, "quit") or std.mem.eql(u8, trimmed, "exit")) return;
                 const value = session.evalSource(trimmed) catch |err| {
-                    try stderr.print("!{s}\n", .{runtime.errorCode(err)});
+                    try writeRuntimeError(session, stderr, err);
                     continue;
                 };
                 const text = try session.renderValue(value);
@@ -674,7 +686,7 @@ fn replSession(session: *runtime.Session, allocator: std.mem.Allocator) !void {
             },
             .timing => |request| {
                 const text = evalTiming(session, allocator, request) catch |err| {
-                    try stderr.print("!{s}\n", .{runtime.errorCode(err)});
+                    try writeRuntimeError(session, stderr, err);
                     continue;
                 };
                 defer allocator.free(text);
@@ -889,6 +901,22 @@ fn execBufferedSource(session: *runtime.Session, allocator: std.mem.Allocator, p
     } else |_| {}
 }
 
+fn writeRuntimeError(session: ?*runtime.Session, writer: anytype, err: anyerror) !void {
+    try writer.print("!{s}\n", .{runtime.errorCode(err)});
+    const active = session orelse return;
+    const detail = active.lastErrorText() orelse return;
+    defer active.clearLastErrorText();
+    try writer.print("{s}\n", .{detail});
+}
+
+fn writeRuntimeErrorAt(session: ?*runtime.Session, writer: anytype, path: []const u8, line_no: usize, err: anyerror) !void {
+    try writer.print("{s}:{d}: !{s}\n", .{ path, line_no, runtime.errorCode(err) });
+    const active = session orelse return;
+    const detail = active.lastErrorText() orelse return;
+    defer active.clearLastErrorText();
+    try writer.print("{s}:{d}: {s}\n", .{ path, line_no, detail });
+}
+
 pub fn execSource(session: *runtime.Session, path: []const u8, source: []const u8, out_writer: anytype, err_writer: anytype) !void {
     if (sanitizeScript(session.allocator, source)) |cleaned| {
         defer session.allocator.free(cleaned);
@@ -926,14 +954,14 @@ fn execSourceLineByLine(session: *runtime.Session, path: []const u8, source: []c
     while (lines.next()) |raw| {
         line_no += 1;
         const parsed = parseLine(raw) catch |err| {
-            try err_writer.print("{s}:{d}: !{s}\n", .{ path, line_no, runtime.errorCode(err) });
+            try writeRuntimeErrorAt(null, err_writer, path, line_no, err);
             return error.ScriptFailed;
         };
         switch (parsed) {
             .skip => continue,
             .eval => |clean| {
                 const value = session.evalSource(clean) catch |err| {
-                    try err_writer.print("{s}:{d}: !{s}\n", .{ path, line_no, runtime.errorCode(err) });
+                    try writeRuntimeErrorAt(session, err_writer, path, line_no, err);
                     return error.ScriptFailed;
                 };
                 if (!shouldEchoEvalLine(clean)) continue;
@@ -943,7 +971,7 @@ fn execSourceLineByLine(session: *runtime.Session, path: []const u8, source: []c
             },
             .timing => |request| {
                 const text = evalTiming(session, session.allocator, request) catch |err| {
-                    try err_writer.print("{s}:{d}: !{s}\n", .{ path, line_no, runtime.errorCode(err) });
+                    try writeRuntimeErrorAt(session, err_writer, path, line_no, err);
                     return error.ScriptFailed;
                 };
                 defer session.allocator.free(text);

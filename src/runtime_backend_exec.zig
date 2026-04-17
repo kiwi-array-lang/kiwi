@@ -355,7 +355,6 @@ pub fn tryFastBackendNumericVectorFindValue(
     if (api.valueNumericMode(left) == null or api.valueNumericMatrixShape(left) != null) return null;
     const left_len = api.numericFlatLen(left) orelse return null;
     const query_len = api.numericRowQueryLen(right) orelse return null;
-    if (query_len != 1) return error.Type;
 
     const has_backend_residency = api.isBackendArrayValue(left) or
         api.isBackendArrayValue(right) or
@@ -369,28 +368,77 @@ pub fn tryFastBackendNumericVectorFindValue(
 
     var right_arr = try backendTensor(api, self, right);
     defer right_arr.deinit();
-    if (right_arr.ndim() > 1) return null;
-    if (right_arr.ndim() == 1) {
-        const shape = right_arr.shape();
-        if (shape.len != 1 or shape[0] != 1) return error.Type;
+    if (query_len == 1) {
+        if (right_arr.ndim() > 1) return null;
+        if (right_arr.ndim() == 1) {
+            const shape = right_arr.shape();
+            if (shape.len != 1 or shape[0] != 1) return error.Type;
+        }
+        const ctx = try api.backendContext(self);
+        var mask = api.mlx.Array.equal(ctx.*, left_arr, right_arr) catch |err| return api.mapMlxError(err);
+        defer mask.deinit();
+
+        var indices = api.mlx.Array.boolWhereIndices(ctx.*, mask) catch |err| return api.mapMlxError(err);
+        defer indices.deinit();
+        if (indices.ndim() != 1) return error.Type;
+        const match_count: usize = @intCast(indices.shape()[0]);
+        if (match_count == 0) return try api.intValue(self, @intCast(left_len));
+
+        var first = try sliceMlxAxis0Range(api, self, indices, 0, 1);
+        defer first.deinit();
+        const first_items = first.readInts(self.allocator) catch |err| return api.mapMlxError(err);
+        defer self.allocator.free(first_items);
+        if (first_items.len != 1) return error.Internal;
+        return try api.intValue(self, first_items[0]);
     }
 
+    const query_len_i32 = std.math.cast(i32, query_len) orelse return error.Unsupported;
+    if (query_len == 0) {
+        const dims = [_]i32{query_len_i32};
+        const empty = api.mlx.Array.fromIntSlice(&[_]i32{}, &dims);
+        return try api.wrapManagedBackendArray(self, empty);
+    }
+    const miss_index = std.math.cast(i32, left_len) orelse return error.Unsupported;
+    if (left_len == 0) {
+        const miss_items = try self.allocator.alloc(i32, query_len);
+        defer self.allocator.free(miss_items);
+        @memset(miss_items, miss_index);
+        const dims = [_]i32{query_len_i32};
+        const misses = api.mlx.Array.fromIntSlice(miss_items, &dims);
+        return try api.wrapManagedBackendArray(self, misses);
+    }
+
+    const left_len_i32 = std.math.cast(i32, left_len) orelse return error.Unsupported;
     const ctx = try api.backendContext(self);
-    var mask = api.mlx.Array.equal(ctx.*, left_arr, right_arr) catch |err| return api.mapMlxError(err);
+    var left_col = api.mlx.Array.reshape(ctx.*, left_arr, &[_]i32{ left_len_i32, 1 }) catch |err| return api.mapMlxError(err);
+    defer left_col.deinit();
+
+    var right_row = blk: {
+        switch (right_arr.ndim()) {
+            1 => break :blk api.mlx.Array.reshape(ctx.*, right_arr, &[_]i32{ 1, query_len_i32 }) catch |err| return api.mapMlxError(err),
+            2 => {
+                const shape = right_arr.shape();
+                if (shape.len != 2 or shape[0] != 1 or shape[1] != query_len_i32) return error.Type;
+                break :blk right_arr.clone() catch |err| return api.mapMlxError(err);
+            },
+            else => return error.Type,
+        }
+    };
+    defer right_row.deinit();
+
+    var mask = api.mlx.Array.equal(ctx.*, left_col, right_row) catch |err| return api.mapMlxError(err);
     defer mask.deinit();
 
-    var indices = api.mlx.Array.boolWhereIndices(ctx.*, mask) catch |err| return api.mapMlxError(err);
-    defer indices.deinit();
-    if (indices.ndim() != 1) return error.Type;
-    const match_count: usize = @intCast(indices.shape()[0]);
-    if (match_count == 0) return try api.intValue(self, @intCast(left_len));
+    var row_indices = api.mlx.Array.arangeStop(ctx.*, left_len_i32) catch |err| return api.mapMlxError(err);
+    defer row_indices.deinit();
+    var row_index_col = api.mlx.Array.reshape(ctx.*, row_indices, &[_]i32{ left_len_i32, 1 }) catch |err| return api.mapMlxError(err);
+    defer row_index_col.deinit();
+    const miss_value = api.mlx.Array.fromInt(miss_index);
+    var selected = api.mlx.Array.where(ctx.*, mask, row_index_col, miss_value) catch |err| return api.mapMlxError(err);
+    defer selected.deinit();
 
-    var first = try sliceMlxAxis0Range(api, self, indices, 0, 1);
-    defer first.deinit();
-    const first_items = first.readInts(self.allocator) catch |err| return api.mapMlxError(err);
-    defer self.allocator.free(first_items);
-    if (first_items.len != 1) return error.Internal;
-    return try api.intValue(self, first_items[0]);
+    const first = api.mlx.Array.minAxis0(ctx.*, selected) catch |err| return api.mapMlxError(err);
+    return try api.wrapManagedBackendArray(self, first);
 }
 
 pub fn tryFastBackendArgmaxValue(
@@ -509,6 +557,16 @@ pub fn applyBackendArrayMonad(
             const ctx = try api.backendContext(self);
             break :blk api.mlx.Array.log(ctx.*, input) catch |err| return api.mapMlxError(err);
         },
+        .sin => blk: {
+            try castMlxBoolArrayTo(api, self, &input, api.c.MLX_FLOAT32);
+            const ctx = try api.backendContext(self);
+            break :blk api.mlx.Array.sin(ctx.*, input) catch |err| return api.mapMlxError(err);
+        },
+        .cos => blk: {
+            try castMlxBoolArrayTo(api, self, &input, api.c.MLX_FLOAT32);
+            const ctx = try api.backendContext(self);
+            break :blk api.mlx.Array.cos(ctx.*, input) catch |err| return api.mapMlxError(err);
+        },
         .tanh => blk: {
             try castMlxBoolArrayTo(api, self, &input, api.c.MLX_FLOAT32);
             const ctx = try api.backendContext(self);
@@ -559,6 +617,9 @@ pub fn applyBackendArrayDyad(
         .sub => api.mlx.Array.sub(ctx.*, left_arr, right_arr) catch |err| return api.mapMlxError(err),
         .mul => api.mlx.Array.mul(ctx.*, left_arr, right_arr) catch |err| return api.mapMlxError(err),
         .div => api.mlx.Array.div(ctx.*, left_arr, right_arr) catch |err| return api.mapMlxError(err),
+        .pow => api.mlx.Array.power(ctx.*, left_arr, right_arr) catch |err| return api.mapMlxError(err),
+        .minimum => api.mlx.Array.minimum(ctx.*, left_arr, right_arr) catch |err| return api.mapMlxError(err),
+        .maximum => api.mlx.Array.maximum(ctx.*, left_arr, right_arr) catch |err| return api.mapMlxError(err),
         .less => api.mlx.Array.less(ctx.*, left_arr, right_arr) catch |err| return api.mapMlxError(err),
         .more => api.mlx.Array.greater(ctx.*, left_arr, right_arr) catch |err| return api.mapMlxError(err),
         .equal => api.mlx.Array.equal(ctx.*, left_arr, right_arr) catch |err| return api.mapMlxError(err),

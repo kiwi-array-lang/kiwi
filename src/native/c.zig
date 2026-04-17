@@ -185,6 +185,15 @@ pub const c = struct {
         file: [*:0]const u8,
         s: mlx_stream,
     ) c_int;
+    pub extern fn mlx_load_safetensor_tensor(
+        res: *mlx_array,
+        file: [*:0]const u8,
+        shape: [*]const c_int,
+        dim: c_int,
+        dtype: mlx_dtype,
+        data_offset: u64,
+        s: mlx_stream,
+    ) c_int;
     pub extern fn mlx_save_safetensors(
         file: [*:0]const u8,
         param: mlx_map_string_to_array,
@@ -204,6 +213,8 @@ pub const c = struct {
     pub extern fn mlx_logical_not(res: *mlx_array, a: mlx_array, stream: mlx_stream) c_int;
     pub extern fn mlx_negative(res: *mlx_array, a: mlx_array, stream: mlx_stream) c_int;
     pub extern fn mlx_sqrt(res: *mlx_array, a: mlx_array, stream: mlx_stream) c_int;
+    pub extern fn mlx_sin(res: *mlx_array, a: mlx_array, stream: mlx_stream) c_int;
+    pub extern fn mlx_cos(res: *mlx_array, a: mlx_array, stream: mlx_stream) c_int;
     pub extern fn mlx_floor(res: *mlx_array, a: mlx_array, stream: mlx_stream) c_int;
     pub extern fn mlx_astype(res: *mlx_array, a: mlx_array, dtype: mlx_dtype, stream: mlx_stream) c_int;
     pub extern fn mlx_arange(
@@ -234,6 +245,37 @@ pub const c = struct {
         stream: mlx_stream,
     ) c_int;
     pub extern fn mlx_argmax(res: *mlx_array, a: mlx_array, keepdims: bool, stream: mlx_stream) c_int;
+    pub extern fn mlxc_layer_norm(res: *mlx_array, a: mlx_array, weight: mlx_array, bias: mlx_array, eps: f32, stream: mlx_stream) c_int;
+    pub extern fn mlxc_conv2d(res: *mlx_array, input: mlx_array, weight: mlx_array, stride_h: c_int, stride_w: c_int, padding_h: c_int, padding_w: c_int, stream: mlx_stream) c_int;
+    pub extern fn mlxc_conv2d_bias(res: *mlx_array, input: mlx_array, weight: mlx_array, bias: mlx_array, stride_h: c_int, stride_w: c_int, padding_h: c_int, padding_w: c_int, stream: mlx_stream) c_int;
+    pub extern fn mlxc_conv_transpose2d(res: *mlx_array, input: mlx_array, weight: mlx_array, stride_h: c_int, stride_w: c_int, padding_h: c_int, padding_w: c_int, stream: mlx_stream) c_int;
+    pub extern fn mlxc_conv_transpose2d_bias(res: *mlx_array, input: mlx_array, weight: mlx_array, bias: mlx_array, stride_h: c_int, stride_w: c_int, padding_h: c_int, padding_w: c_int, stream: mlx_stream) c_int;
+    pub extern fn mlxc_upsample_nearest2d(res: *mlx_array, input: mlx_array, scale_h: c_int, scale_w: c_int, stream: mlx_stream) c_int;
+    pub extern fn mlxc_group_norm(res: *mlx_array, input: mlx_array, groups: c_int, weight: mlx_array, bias: mlx_array, eps: f32, stream: mlx_stream) c_int;
+    pub extern fn mlxc_gelu(res: *mlx_array, a: mlx_array, stream: mlx_stream) c_int;
+    pub extern fn mlxc_gelu_approx(res: *mlx_array, a: mlx_array, stream: mlx_stream) c_int;
+    pub extern fn mlxc_mlp_dense(res: *mlx_array, x: mlx_array, gate_w: mlx_array, up_w: mlx_array, down_w: mlx_array, stream: mlx_stream) c_int;
+    pub extern fn mlxc_softmax_last_axis(res: *mlx_array, a: mlx_array, precise: bool, stream: mlx_stream) c_int;
+    pub extern fn mlxc_sdpa_none(res: *mlx_array, q: mlx_array, k: mlx_array, v: mlx_array, scale: f32, stream: mlx_stream) c_int;
+    pub extern fn mlxc_sdpa_causal(res: *mlx_array, q: mlx_array, k: mlx_array, v: mlx_array, scale: f32, stream: mlx_stream) c_int;
+    pub extern fn mlxc_sdpa_masked(res: *mlx_array, q: mlx_array, k: mlx_array, v: mlx_array, mask: mlx_array, scale: f32, stream: mlx_stream) c_int;
+    pub extern fn mlxc_sam3_box_rpb_log(
+        res: *mlx_array,
+        reference_boxes: mlx_array,
+        xw0: mlx_array,
+        xb0: mlx_array,
+        xw1: mlx_array,
+        xb1: mlx_array,
+        yw0: mlx_array,
+        yb0: mlx_array,
+        yw1: mlx_array,
+        yb1: mlx_array,
+        height: c_int,
+        width: c_int,
+        stream: mlx_stream,
+    ) c_int;
+    pub extern fn mlxc_rope(res: *mlx_array, a: mlx_array, dims: c_int, base: f32, offset: c_int, stream: mlx_stream) c_int;
+    pub extern fn mlxc_rope_freqs(res: *mlx_array, a: mlx_array, dims: c_int, freqs: mlx_array, offset: c_int, stream: mlx_stream) c_int;
     pub extern fn mlx_argsort(res: *mlx_array, a: mlx_array, stream: mlx_stream) c_int;
     pub extern fn mlx_reshape(
         res: *mlx_array,

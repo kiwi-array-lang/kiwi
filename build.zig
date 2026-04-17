@@ -71,6 +71,8 @@ fn addWasmBuildOptions(
     options.addOption([]const u8, "cli_invocation", "kiwi");
     options.addOption(bool, "enable_bench_cli", false);
     options.addOption(bool, "runtime_has_mlx", runtime_has_mlx);
+    options.addOption(bool, "runtime_has_duckdb", false);
+    options.addOption(bool, "duckdb_external", false);
     options.addOption(bool, "wasm_exports_accelerator_handles", wasm_exports_accelerator_handles);
 }
 
@@ -102,6 +104,16 @@ fn configuredPathOrDefault(b: *std.Build, provided: ?[]const u8, fallback: []con
 fn pathExistsAbsolute(path: []const u8) bool {
     std.fs.accessAbsolute(path, .{}) catch return false;
     return true;
+}
+
+fn targetMatchesHost(b: *std.Build, target: std.Build.ResolvedTarget) bool {
+    return target.result.os.tag == b.graph.host.result.os.tag and
+        target.result.cpu.arch == b.graph.host.result.cpu.arch;
+}
+
+fn resolveInstallPrefixSubdir(b: *std.Build, prefix: []const u8, subdir: []const u8) []const u8 {
+    const candidate = b.fmt("{s}/{s}", .{ prefix, subdir });
+    return if (pathExistsAbsolute(candidate)) candidate else prefix;
 }
 
 fn cppFlags(target: std.Build.ResolvedTarget) []const []const u8 {
@@ -205,6 +217,53 @@ fn addRuntimeImports(
     }
 }
 
+fn addDuckDbImports(
+    b: *std.Build,
+    root_module: *std.Build.Module,
+    target: std.Build.ResolvedTarget,
+    repo_root: []const u8,
+    duckdb_prefix: ?[]const u8,
+) void {
+    if (target.result.cpu.arch == .wasm32) return;
+    if (duckdb_prefix) |prefix| {
+        const include_path = resolveInstallPrefixSubdir(b, prefix, "include");
+        const library_path = resolveInstallPrefixSubdir(b, prefix, "lib");
+        root_module.addIncludePath(.{ .cwd_relative = include_path });
+        root_module.addLibraryPath(.{ .cwd_relative = library_path });
+        root_module.addRPath(.{ .cwd_relative = library_path });
+        addRelocatableMlxRPath(root_module, target);
+        return;
+    }
+
+    root_module.addIncludePath(.{ .cwd_relative = b.fmt("{s}/vendor/duckdb-src", .{repo_root}) });
+    root_module.addCSourceFiles(.{
+        .files = &.{"../../vendor/duckdb-src/duckdb.cpp"},
+        .flags = &.{ "-std=c++17", "-Wno-error=date-time" },
+        .language = .cpp,
+    });
+}
+
+fn duckdbSharedLibraryName(target: std.Build.ResolvedTarget) ?[]const u8 {
+    return switch (target.result.os.tag) {
+        .linux => "libduckdb.so",
+        .macos, .ios, .watchos, .tvos, .visionos => "libduckdb.dylib",
+        else => null,
+    };
+}
+
+fn installExternalDuckDb(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    duckdb_prefix: ?[]const u8,
+) void {
+    const prefix = duckdb_prefix orelse return;
+    const lib_name = duckdbSharedLibraryName(target) orelse return;
+    const library_path = resolveInstallPrefixSubdir(b, prefix, "lib");
+    const lib_path = b.fmt("{s}/{s}", .{ library_path, lib_name });
+    if (!pathExistsAbsolute(lib_path)) return;
+    b.getInstallStep().dependOn(&b.addInstallLibFile(.{ .cwd_relative = lib_path }, lib_name).step);
+}
+
 fn configureRunLibraryPath(
     run: *std.Build.Step.Run,
     runtime_backend: RuntimeBackend,
@@ -213,6 +272,21 @@ fn configureRunLibraryPath(
 ) void {
     if (runtime_backend != .mlx) return;
     configureRunMlxLibraryPath(run, target, mlx_prefix);
+}
+
+fn linkDuckDb(
+    step: anytype,
+    target: std.Build.ResolvedTarget,
+    duckdb_prefix: ?[]const u8,
+) void {
+    if (target.result.cpu.arch == .wasm32) return;
+    if (duckdb_prefix) |prefix| {
+        const library_path = resolveInstallPrefixSubdir(step.step.owner, prefix, "lib");
+        step.root_module.addLibraryPath(.{ .cwd_relative = library_path });
+        step.root_module.addRPath(.{ .cwd_relative = library_path });
+        addRelocatableMlxRPath(step.root_module, target);
+        step.root_module.linkSystemLibrary("duckdb", .{});
+    }
 }
 
 fn linkMlxDeps(
@@ -260,9 +334,20 @@ fn linkMlxDeps(
     }
 }
 
+fn linkHostDeps(
+    step: anytype,
+    runtime_backend: RuntimeBackend,
+    target: std.Build.ResolvedTarget,
+) void {
+    if (target.result.cpu.arch == .wasm32) return;
+    if (runtime_backend != .host) return;
+    step.root_module.linkSystemLibrary("c", .{});
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const repo_root = b.pathFromRoot("../..");
     const public_export = pathExistsAbsolute(b.pathFromRoot("PUBLIC_EXPORT"));
     const has_probe_sources = pathExistsAbsolute(b.pathFromRoot("src/counter_probe.zig")) and
         pathExistsAbsolute(b.pathFromRoot("src/string_perf_probe.zig")) and
@@ -303,6 +388,14 @@ pub fn build(b: *std.Build) void {
         ".deps/mlx-c",
     );
     const mlxc_mini_bridge = b.option([]const u8, "mlxc-mini-bridge", "Link an external MLX helper bridge library instead of compiling csrc/mlxc_mini.cpp.");
+    const duckdb_prefix_option = b.option([]const u8, "duckdb-prefix", "External DuckDB install prefix. If unset, prefer .deps/duckdb when present, otherwise use the vendored source amalgamation. When set, prefer an install root that contains include/ and lib/.");
+    const default_duckdb_prefix = b.pathFromRoot(".deps/duckdb");
+    const duckdb_prefix = if (duckdb_prefix_option) |raw|
+        resolveBuildPath(b, raw)
+    else if (targetMatchesHost(b, target) and pathExistsAbsolute(default_duckdb_prefix))
+        default_duckdb_prefix
+    else
+        null;
     const raw_strip_symbols = b.option(bool, "strip", "Strip debug info from compiled artifacts.");
     const strip_symbols = raw_strip_symbols orelse false;
     const wasm_strip_symbols = b.option(bool, "wasm-strip", "Strip debug info from wasm artifacts. Defaults to true.") orelse raw_strip_symbols orelse true;
@@ -314,6 +407,8 @@ pub fn build(b: *std.Build) void {
     build_options.addOption([]const u8, "cli_invocation", cli_name);
     build_options.addOption(bool, "enable_bench_cli", !public_cli and has_bench_sources);
     build_options.addOption(bool, "runtime_has_mlx", runtime_backend == .mlx);
+    build_options.addOption(bool, "runtime_has_duckdb", target.result.cpu.arch != .wasm32);
+    build_options.addOption(bool, "duckdb_external", duckdb_prefix != null);
     build_options.addOption(bool, "wasm_exports_accelerator_handles", false);
     const wasm_webgpu_build_options = b.addOptions();
     addWasmBuildOptions(wasm_webgpu_build_options, true, true);
@@ -328,6 +423,7 @@ pub fn build(b: *std.Build) void {
     });
     addBuildOptions(module, build_options);
     addRuntimeImports(b, module, runtime_backend, target, optimize, mlx_c_include, mlx_prefix, mlxc_mini_bridge);
+    addDuckDbImports(b, module, target, repo_root, duckdb_prefix);
 
     const exe = b.addExecutable(.{
         .name = cli_name,
@@ -335,7 +431,10 @@ pub fn build(b: *std.Build) void {
     });
     exe.each_lib_rpath = false;
     linkMlxDeps(exe, runtime_backend, target, mlx_backend, mlx_linkage, mlxc_mini_bridge);
+    linkHostDeps(exe, runtime_backend, target);
+    linkDuckDb(exe, target, duckdb_prefix);
     b.installArtifact(exe);
+    installExternalDuckDb(b, target, duckdb_prefix);
 
     const run_cmd = b.addRunArtifact(exe);
     configureRunLibraryPath(run_cmd, runtime_backend, target, mlx_prefix);
@@ -352,6 +451,7 @@ pub fn build(b: *std.Build) void {
         });
         addBuildOptions(bridge_module, build_options);
         addRuntimeImports(b, bridge_module, runtime_backend, target, optimize, mlx_c_include, mlx_prefix, mlxc_mini_bridge);
+        addDuckDbImports(b, bridge_module, target, repo_root, duckdb_prefix);
 
         const bridge_shared = b.addLibrary(.{
             .linkage = .dynamic,
@@ -360,6 +460,8 @@ pub fn build(b: *std.Build) void {
         });
         bridge_shared.each_lib_rpath = false;
         linkMlxDeps(bridge_shared, runtime_backend, target, mlx_backend, mlx_linkage, mlxc_mini_bridge);
+        linkHostDeps(bridge_shared, runtime_backend, target);
+        linkDuckDb(bridge_shared, target, duckdb_prefix);
         b.installArtifact(bridge_shared);
         bridge_shared.installHeader(b.path("bridge/include/kiwi_bridge.h"), "kiwi_bridge.h");
         bridge_shared.installHeader(b.path("bridge/include/module.modulemap"), "module.modulemap");
@@ -381,6 +483,7 @@ pub fn build(b: *std.Build) void {
         });
         addBuildOptions(counter_probe_module, build_options);
         addRuntimeImports(b, counter_probe_module, runtime_backend, target, optimize, mlx_c_include, mlx_prefix, mlxc_mini_bridge);
+        addDuckDbImports(b, counter_probe_module, target, repo_root, duckdb_prefix);
 
         const counter_probe = b.addExecutable(.{
             .name = "kiwi-zig-counter-probe",
@@ -388,6 +491,8 @@ pub fn build(b: *std.Build) void {
         });
         counter_probe.each_lib_rpath = false;
         linkMlxDeps(counter_probe, runtime_backend, target, mlx_backend, mlx_linkage, mlxc_mini_bridge);
+        linkHostDeps(counter_probe, runtime_backend, target);
+        linkDuckDb(counter_probe, target, duckdb_prefix);
         b.installArtifact(counter_probe);
 
         const counter_probe_run = b.addRunArtifact(counter_probe);
@@ -404,6 +509,7 @@ pub fn build(b: *std.Build) void {
         });
         addBuildOptions(string_perf_probe_module, build_options);
         addRuntimeImports(b, string_perf_probe_module, runtime_backend, target, optimize, mlx_c_include, mlx_prefix, mlxc_mini_bridge);
+        addDuckDbImports(b, string_perf_probe_module, target, repo_root, duckdb_prefix);
 
         const string_perf_probe = b.addExecutable(.{
             .name = "kiwi-zig-string-perf-probe",
@@ -411,6 +517,8 @@ pub fn build(b: *std.Build) void {
         });
         string_perf_probe.each_lib_rpath = false;
         linkMlxDeps(string_perf_probe, runtime_backend, target, mlx_backend, mlx_linkage, mlxc_mini_bridge);
+        linkHostDeps(string_perf_probe, runtime_backend, target);
+        linkDuckDb(string_perf_probe, target, duckdb_prefix);
         b.installArtifact(string_perf_probe);
 
         const string_perf_probe_run = b.addRunArtifact(string_perf_probe);
@@ -427,6 +535,7 @@ pub fn build(b: *std.Build) void {
         });
         addBuildOptions(realistic_string_perf_probe_module, build_options);
         addRuntimeImports(b, realistic_string_perf_probe_module, runtime_backend, target, optimize, mlx_c_include, mlx_prefix, mlxc_mini_bridge);
+        addDuckDbImports(b, realistic_string_perf_probe_module, target, repo_root, duckdb_prefix);
 
         const realistic_string_perf_probe = b.addExecutable(.{
             .name = "kiwi-zig-realistic-string-perf-probe",
@@ -434,6 +543,8 @@ pub fn build(b: *std.Build) void {
         });
         realistic_string_perf_probe.each_lib_rpath = false;
         linkMlxDeps(realistic_string_perf_probe, runtime_backend, target, mlx_backend, mlx_linkage, mlxc_mini_bridge);
+        linkHostDeps(realistic_string_perf_probe, runtime_backend, target);
+        linkDuckDb(realistic_string_perf_probe, target, duckdb_prefix);
         b.installArtifact(realistic_string_perf_probe);
 
         const realistic_string_perf_probe_run = b.addRunArtifact(realistic_string_perf_probe);
@@ -452,12 +563,15 @@ pub fn build(b: *std.Build) void {
         });
         addBuildOptions(test_module, build_options);
         addRuntimeImports(b, test_module, runtime_backend, target, optimize, mlx_c_include, mlx_prefix, mlxc_mini_bridge);
+        addDuckDbImports(b, test_module, target, repo_root, duckdb_prefix);
 
         const tests = b.addTest(.{
             .root_module = test_module,
         });
         tests.each_lib_rpath = false;
         linkMlxDeps(tests, runtime_backend, target, mlx_backend, mlx_linkage, mlxc_mini_bridge);
+        linkHostDeps(tests, runtime_backend, target);
+        linkDuckDb(tests, target, duckdb_prefix);
         const test_run = b.addRunArtifact(tests);
         configureRunLibraryPath(test_run, runtime_backend, target, mlx_prefix);
         const test_step = b.step("test", "Run kiwi-zig tests");

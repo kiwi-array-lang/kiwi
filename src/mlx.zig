@@ -46,6 +46,7 @@ const placeholder = struct {
         scan_builtin = 8,
         scan_seeded_builtin = 9,
         index = 10,
+        select = 11,
     };
 
     pub const LoweredProgramInstr = extern struct {
@@ -413,6 +414,36 @@ const placeholder = struct {
         return error.MlxFailure;
     }
 
+    pub fn loadSafetensorTensor(
+        allocator: std.mem.Allocator,
+        ctx: Self.Context,
+        path: []const u8,
+        dims: []const i32,
+        dtype: c.mlx_dtype,
+        data_offset: u64,
+    ) (Self.Error || std.mem.Allocator.Error)!Self.Array {
+        _ = allocator;
+        _ = ctx;
+        _ = path;
+        _ = dims;
+        _ = dtype;
+        _ = data_offset;
+        return error.MlxFailure;
+    }
+
+    pub fn saveSafetensors(
+        allocator: std.mem.Allocator,
+        path: []const u8,
+        names: []const []const u8,
+        arrays: []const Self.Array,
+    ) (Self.Error || std.mem.Allocator.Error)!void {
+        _ = allocator;
+        _ = path;
+        _ = names;
+        _ = arrays;
+        return error.MlxFailure;
+    }
+
     pub fn deinitNamedArrays(allocator: std.mem.Allocator, entries: []Self.NamedArray) void {
         _ = allocator;
         _ = entries;
@@ -433,6 +464,8 @@ pub const Array = runtime.Array;
 pub const NamedArray = runtime.NamedArray;
 pub const check = runtime.check;
 pub const loadSafetensors = runtime.loadSafetensors;
+pub const loadSafetensorTensor = runtime.loadSafetensorTensor;
+pub const saveSafetensors = runtime.saveSafetensors;
 pub const deinitNamedArrays = runtime.deinitNamedArrays;
 pub const HotGradKind = runtime.HotGradKind;
 pub const LoweredProgramTag = runtime.LoweredProgramTag;

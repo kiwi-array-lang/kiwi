@@ -1,11 +1,15 @@
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
+#include <cmath>
+#include <fstream>
+#include <numeric>
 #include <sstream>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
+#include "mlx/compile.h"
 #include "mlx/c/array.h"
 #include "mlx/c/device.h"
 #include "mlx/c/error.h"
@@ -15,8 +19,10 @@
 #include "mlx/c/string.h"
 #include "mlx/c/vector.h"
 #include "mlx/c/version.h"
+#include "mlx/fast.h"
 #include "mlx/io.h"
 #include "mlx/mlx.h"
+#include "mlx/primitives.h"
 
 namespace {
 
@@ -37,10 +43,13 @@ enum LoweredProgramTag : uint8_t {
   LOWERED_SCAN_BUILTIN = 8,
   LOWERED_SCAN_SEEDED_BUILTIN = 9,
   LOWERED_INDEX = 10,
+  LOWERED_SELECT = 11,
 };
 
 constexpr uint8_t OP_EXP = 'E';
 constexpr uint8_t OP_LOG = 'L';
+constexpr uint8_t OP_SIN = 'I';
+constexpr uint8_t OP_COS = 'O';
 constexpr uint8_t OP_TANH = 'T';
 constexpr uint8_t OP_SIGMOID = 'S';
 
@@ -129,6 +138,165 @@ mlx_dtype to_c_dtype(mlx::core::Dtype dtype) {
       return MLX_COMPLEX64;
   }
   throw std::runtime_error("unknown cpp dtype");
+}
+
+void append_json_escaped(std::ostringstream& out, const std::string& value) {
+  for (unsigned char ch : value) {
+    switch (ch) {
+      case '\\':
+        out << "\\\\";
+        break;
+      case '"':
+        out << "\\\"";
+        break;
+      case '\b':
+        out << "\\b";
+        break;
+      case '\f':
+        out << "\\f";
+        break;
+      case '\n':
+        out << "\\n";
+        break;
+      case '\r':
+        out << "\\r";
+        break;
+      case '\t':
+        out << "\\t";
+        break;
+      default:
+        if (ch < 0x20) {
+          char buf[7];
+          std::snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned int>(ch));
+          out << buf;
+        } else {
+          out << static_cast<char>(ch);
+        }
+    }
+  }
+}
+
+std::string dtype_to_safetensor_str(mlx::core::Dtype dtype) {
+  switch (dtype) {
+    case mlx::core::float32:
+      return "F32";
+    case mlx::core::float64:
+      return "F64";
+    case mlx::core::bfloat16:
+      return "BF16";
+    case mlx::core::float16:
+      return "F16";
+    case mlx::core::int64:
+      return "I64";
+    case mlx::core::int32:
+      return "I32";
+    case mlx::core::int16:
+      return "I16";
+    case mlx::core::int8:
+      return "I8";
+    case mlx::core::uint64:
+      return "U64";
+    case mlx::core::uint32:
+      return "U32";
+    case mlx::core::uint16:
+      return "U16";
+    case mlx::core::uint8:
+      return "U8";
+    case mlx::core::bool_:
+      return "BOOL";
+    case mlx::core::complex64:
+      return "C64";
+  }
+  throw std::runtime_error("[save_safetensors] received invalid dtype.");
+}
+
+void append_json_string(std::ostringstream& out, const std::string& value) {
+  out << '"';
+  append_json_escaped(out, value);
+  out << '"';
+}
+
+void append_shape_json(std::ostringstream& out, const mlx::core::Shape& shape) {
+  out << '[';
+  for (size_t i = 0; i < shape.size(); ++i) {
+    if (i != 0) {
+      out << ',';
+    }
+    out << shape[i];
+  }
+  out << ']';
+}
+
+void save_safetensors_with_object_metadata(
+    std::string file,
+    const StringToArrayMap& arrays_in,
+    const StringToStringMap& metadata_in) {
+  if (file.length() < 12 ||
+      file.substr(file.length() - 12, 12) != ".safetensors") {
+    file += ".safetensors";
+  }
+
+  auto out_stream = std::make_shared<mlx::core::io::FileWriter>(std::move(file));
+  if (!out_stream->good() || !out_stream->is_open()) {
+    throw std::runtime_error(
+        "[save_safetensors] Failed to open " + out_stream->label());
+  }
+
+  auto arrays = arrays_in;
+  {
+    std::vector<array> to_eval;
+    to_eval.reserve(arrays.size());
+    for (auto& [_, value] : arrays) {
+      value = mlx::core::contiguous(value);
+      to_eval.push_back(value);
+    }
+    mlx::core::eval(std::move(to_eval));
+  }
+
+  std::ostringstream header;
+  header << "{\"__metadata__\":";
+  if (metadata_in.empty()) {
+    header << "null";
+  } else {
+    header << '{';
+    bool first_metadata = true;
+    for (const auto& [key, value] : metadata_in) {
+      if (!first_metadata) {
+        header << ',';
+      }
+      append_json_string(header, key);
+      header << ':';
+      append_json_string(header, value);
+      first_metadata = false;
+    }
+    header << '}';
+  }
+
+  size_t offset = 0;
+  for (const auto& [key, arr] : arrays) {
+    if (arr.nbytes() == 0) {
+      throw std::invalid_argument(
+          "[save_safetensors] cannot serialize an empty array key: " + key);
+    }
+
+    header << ',';
+    append_json_string(header, key);
+    header << ":{\"dtype\":";
+    append_json_string(header, dtype_to_safetensor_str(arr.dtype()));
+    header << ",\"shape\":";
+    append_shape_json(header, arr.shape());
+    header << ",\"data_offsets\":[" << offset << ',' << (offset + arr.nbytes()) << "]}";
+    offset += arr.nbytes();
+  }
+  header << '}';
+
+  const auto header_text = header.str();
+  uint64_t header_len = header_text.length();
+  out_stream->write(reinterpret_cast<char*>(&header_len), 8);
+  out_stream->write(header_text.c_str(), header_len);
+  for (const auto& [_, arr] : arrays) {
+    out_stream->write(arr.data<char>(), arr.nbytes());
+  }
 }
 
 mlx::core::Device::DeviceType to_cpp_device_type(mlx_device_type type) {
@@ -244,6 +412,30 @@ array broadcast_axis0_vector(const array& value, size_t target_ndim) {
   return mlx::core::reshape(value, dims);
 }
 
+array broadcast_last_axis_vector(const array& value, size_t target_ndim) {
+  mlx::core::Shape dims(target_ndim, 1);
+  dims[target_ndim - 1] = value.shape(0);
+  return mlx::core::reshape(value, dims);
+}
+
+array sam3_linear_last_dim(const array& value, const array& weight, const array& bias, mlx::core::Stream stream) {
+  const auto last_dim = value.shape(value.ndim() - 1);
+  const auto rows = value.size() / last_dim;
+  auto flat = mlx::core::reshape(
+      value,
+      mlx::core::Shape{static_cast<int>(rows), static_cast<int>(last_dim)},
+      stream);
+  auto out = mlx::core::matmul(flat, mlx::core::transpose(weight, stream), stream);
+  out = out + broadcast_last_axis_vector(bias, out.ndim());
+  auto out_shape = value.shape();
+  out_shape.back() = weight.shape(0);
+  return mlx::core::reshape(out, out_shape, stream);
+}
+
+array sam3_relu(const array& value, mlx::core::Stream stream) {
+  return mlx::core::maximum(value, array(0.0f), stream);
+}
+
 array reverse_axis0(const array& value) {
   if (value.ndim() == 0) {
     throw std::runtime_error("reverse requires a sequence");
@@ -309,6 +501,52 @@ array lowered_reshape(const array& left, array right) {
   return mlx::core::reshape(right, {right.shape(0) / count, count});
 }
 
+array bool_where_indices_array(const array& mask) {
+  auto contiguous = mlx::core::contiguous(mask);
+  contiguous.eval();
+  contiguous.wait();
+  if (contiguous.dtype() != mlx::core::bool_) {
+    throw std::invalid_argument("[bool_where_indices] mask must be boolean.");
+  }
+  std::vector<int32_t> indices;
+  indices.reserve(contiguous.size());
+  const bool* data = contiguous.data<bool>();
+  for (int32_t i = 0; i < static_cast<int32_t>(contiguous.size()); ++i) {
+    if (data[i]) {
+      indices.push_back(i);
+    }
+  }
+  const mlx::core::Shape shape = {static_cast<int>(indices.size())};
+  return array(indices.data(), shape, mlx::core::int32);
+}
+
+array lowered_iota(const array& value) {
+  if (value.ndim() == 0) {
+    const auto count = lowered_count_scalar(value);
+    if (count < 0) {
+      throw std::runtime_error("iota count must be non-negative");
+    }
+    return mlx::core::arange(count, mlx::core::int32);
+  }
+
+  const array mask = [&]() -> array {
+    switch (value.dtype()) {
+      case mlx::core::bool_:
+        return value;
+      case mlx::core::int32:
+      case mlx::core::int64:
+      case mlx::core::uint32: {
+        auto zeros = mlx::core::subtract(value, value);
+        return mlx::core::logical_not(mlx::core::equal(value, zeros));
+      }
+      default:
+        throw std::runtime_error("iota requires an integer-like array");
+    }
+  }();
+
+  return bool_where_indices_array(mask);
+}
+
 array apply_lowered_monad(uint8_t op, const array& value) {
   switch (op) {
     case '+':
@@ -333,10 +571,16 @@ array apply_lowered_monad(uint8_t op, const array& value) {
       return reverse_axis0(value);
     case '#':
       return array(static_cast<int32_t>(value.ndim() == 0 ? 1 : value.shape(0)));
+    case '!':
+      return lowered_iota(value);
     case OP_EXP:
       return mlx::core::exp(value);
     case OP_LOG:
       return mlx::core::log(value);
+    case OP_SIN:
+      return mlx::core::sin(value);
+    case OP_COS:
+      return mlx::core::cos(value);
     case OP_TANH:
       return mlx::core::tanh(value);
     case OP_SIGMOID:
@@ -410,6 +654,8 @@ array apply_lowered_reduce(uint8_t op, const array& value) {
       return mlx::core::sum(value, 0, false);
     case '*':
       return mlx::core::prod(value, 0, false);
+    case '&':
+      return mlx::core::min(value, 0, false);
     case '|':
       return mlx::core::max(value, 0, false);
     default:
@@ -424,6 +670,8 @@ array apply_lowered_seeded_reduce(uint8_t op, const array& seed, const array& va
       return mlx::core::add(seed, reduced);
     case '*':
       return mlx::core::multiply(seed, reduced);
+    case '&':
+      return mlx::core::minimum(seed, reduced);
     case '|':
       return mlx::core::maximum(seed, reduced);
     default:
@@ -555,6 +803,13 @@ array execute_lowered_program(
         values.push_back(
             value.ndim() <= 1 ? mlx::core::take(value, index)
                               : mlx::core::take(value, index, 0));
+        break;
+      }
+      case LOWERED_SELECT: {
+        if (instr.a >= values.size() || instr.b >= values.size() || instr.c >= values.size()) {
+          throw std::runtime_error("lowered select operand out of bounds");
+        }
+        values.push_back(mlx::core::where(values[instr.a], values[instr.b], values[instr.c]));
         break;
       }
       default:
@@ -1194,12 +1449,53 @@ extern "C" int mlx_load_safetensors(
   }
 }
 
+extern "C" int mlx_load_safetensor_tensor(
+    mlx_array* res,
+    const char* file,
+    const int* shape,
+    int dim,
+    mlx_dtype dtype,
+    uint64_t data_offset,
+    const mlx_stream s) {
+  (void)s;
+  try {
+    const auto path = std::string(file ? file : "");
+    std::ifstream in(path, std::ios::binary);
+    if (!in.is_open()) {
+      throw std::runtime_error("[load_safetensors] Failed to open " + path);
+    }
+
+    const auto cpp_shape = make_shape(shape, dim);
+    const auto cpp_dtype = to_cpp_dtype(dtype);
+    const size_t nbytes =
+        std::accumulate(cpp_shape.begin(), cpp_shape.end(), static_cast<size_t>(1),
+                        [&](size_t acc, auto extent) { return acc * static_cast<size_t>(extent); }) *
+        mlx::core::size_of(cpp_dtype);
+    auto buffer = mlx::core::allocator::malloc(nbytes);
+    if (nbytes != 0) {
+      in.seekg(static_cast<std::streamoff>(data_offset), std::ios::beg);
+      if (!in.good()) {
+        throw std::runtime_error("[load_safetensors] Failed to seek " + path);
+      }
+      in.read(static_cast<char*>(buffer.raw_ptr()), static_cast<std::streamsize>(nbytes));
+      if (in.gcount() != static_cast<std::streamsize>(nbytes)) {
+        throw std::runtime_error("[load_safetensors] Failed to read tensor bytes " + path);
+      }
+    }
+    auto value = array(buffer, cpp_shape, cpp_dtype);
+    return replace_array(res, value);
+  } catch (std::exception& e) {
+    mlx_error(e.what());
+    return 1;
+  }
+}
+
 extern "C" int mlx_save_safetensors(
     const char* file,
     const mlx_map_string_to_array param,
     const mlx_map_string_to_string metadata) {
   try {
-    mlx::core::save_safetensors(
+    save_safetensors_with_object_metadata(
         std::string(file ? file : ""),
         get_string_to_array_map_const(param),
         get_string_to_string_map_const(metadata));
@@ -1224,6 +1520,10 @@ extern "C" int mlx_multiply(mlx_array* res, const mlx_array a, const mlx_array b
 
 extern "C" int mlx_divide(mlx_array* res, const mlx_array a, const mlx_array b, const mlx_stream s) {
   return binary_array(res, a, b, s, [](const array& x, const array& y, auto stream) { return mlx::core::divide(x, y, stream); });
+}
+
+extern "C" int mlxc_power(mlx_array* res, const mlx_array a, const mlx_array b, const mlx_stream s) {
+  return binary_array(res, a, b, s, [](const array& x, const array& y, auto stream) { return mlx::core::power(x, y, stream); });
 }
 
 extern "C" int mlx_remainder(mlx_array* res, const mlx_array a, const mlx_array b, const mlx_stream s) {
@@ -1404,12 +1704,428 @@ extern "C" int mlx_argmax(mlx_array* res, const mlx_array a, bool keepdims, cons
   }
 }
 
+extern "C" int mlxc_softmax_last_axis(mlx_array* res, const mlx_array a, bool precise, const mlx_stream s) {
+  try {
+    return replace_array(
+        res,
+        mlx::core::softmax(get_array(a), std::vector<int>{-1}, precise, stream_or_default(s)));
+  } catch (std::exception& e) {
+    mlx_error(e.what());
+    return 1;
+  }
+}
+
+extern "C" int mlxc_layer_norm(
+    mlx_array* res,
+    const mlx_array a,
+    const mlx_array weight,
+    const mlx_array bias,
+    float eps,
+    const mlx_stream s) {
+  try {
+    return replace_array(
+        res,
+        mlx::core::fast::layer_norm(
+            get_array(a),
+            get_array(weight),
+            get_array(bias),
+            eps,
+            stream_or_default(s)));
+  } catch (std::exception& e) {
+    mlx_error(e.what());
+    return 1;
+  }
+}
+
+extern "C" int mlxc_conv2d(
+    mlx_array* res,
+    const mlx_array input,
+    const mlx_array weight,
+    int stride_h,
+    int stride_w,
+    int padding_h,
+    int padding_w,
+    const mlx_stream s) {
+  try {
+    return replace_array(
+        res,
+        mlx::core::conv2d(
+            get_array(input),
+            get_array(weight),
+            {stride_h, stride_w},
+            {padding_h, padding_w},
+            {1, 1},
+            1,
+            stream_or_default(s)));
+  } catch (std::exception& e) {
+    mlx_error(e.what());
+    return 1;
+  }
+}
+
+extern "C" int mlxc_conv2d_bias(
+    mlx_array* res,
+    const mlx_array input,
+    const mlx_array weight,
+    const mlx_array bias,
+    int stride_h,
+    int stride_w,
+    int padding_h,
+    int padding_w,
+    const mlx_stream s) {
+  try {
+    auto out = mlx::core::conv2d(
+        get_array(input),
+        get_array(weight),
+        {stride_h, stride_w},
+        {padding_h, padding_w},
+        {1, 1},
+        1,
+        stream_or_default(s));
+    out = out + broadcast_last_axis_vector(get_array(bias), out.ndim());
+    return replace_array(res, out);
+  } catch (std::exception& e) {
+    mlx_error(e.what());
+    return 1;
+  }
+}
+
+extern "C" int mlxc_conv_transpose2d(
+    mlx_array* res,
+    const mlx_array input,
+    const mlx_array weight,
+    int stride_h,
+    int stride_w,
+    int padding_h,
+    int padding_w,
+    const mlx_stream s) {
+  try {
+    return replace_array(
+        res,
+        mlx::core::conv_transpose2d(
+            get_array(input),
+            get_array(weight),
+            {stride_h, stride_w},
+            {padding_h, padding_w},
+            {1, 1},
+            {0, 0},
+            1,
+            stream_or_default(s)));
+  } catch (std::exception& e) {
+    mlx_error(e.what());
+    return 1;
+  }
+}
+
+extern "C" int mlxc_conv_transpose2d_bias(
+    mlx_array* res,
+    const mlx_array input,
+    const mlx_array weight,
+    const mlx_array bias,
+    int stride_h,
+    int stride_w,
+    int padding_h,
+    int padding_w,
+    const mlx_stream s) {
+  try {
+    auto out = mlx::core::conv_transpose2d(
+        get_array(input),
+        get_array(weight),
+        {stride_h, stride_w},
+        {padding_h, padding_w},
+        {1, 1},
+        {0, 0},
+        1,
+        stream_or_default(s));
+    out = out + broadcast_last_axis_vector(get_array(bias), out.ndim());
+    return replace_array(res, out);
+  } catch (std::exception& e) {
+    mlx_error(e.what());
+    return 1;
+  }
+}
+
+extern "C" int mlxc_upsample_nearest2d(
+    mlx_array* res,
+    const mlx_array input,
+    int scale_h,
+    int scale_w,
+    const mlx_stream s) {
+  try {
+    auto out = mlx::core::repeat(get_array(input), scale_h, 1, stream_or_default(s));
+    out = mlx::core::repeat(out, scale_w, 2, stream_or_default(s));
+    return replace_array(res, out);
+  } catch (std::exception& e) {
+    mlx_error(e.what());
+    return 1;
+  }
+}
+
+extern "C" int mlxc_group_norm(
+    mlx_array* res,
+    const mlx_array input,
+    int groups,
+    const mlx_array weight,
+    const mlx_array bias,
+    float eps,
+    const mlx_stream s) {
+  try {
+    const auto& x = get_array(input);
+    if (x.ndim() != 4) {
+      throw std::runtime_error("groupnorm expects rank-4 NHWC input");
+    }
+    const int batch = x.shape(0);
+    const int height = x.shape(1);
+    const int width = x.shape(2);
+    const int channels = x.shape(3);
+    if (groups <= 0 || channels % groups != 0) {
+      throw std::runtime_error("groupnorm expects channels divisible by groups");
+    }
+    // Match MLX nn.GroupNorm's default grouping order, which reshapes NHWC to
+    // [batch, -1, groups] before reducing across the middle axis.
+    const int grouped_extent = (height * width * channels) / groups;
+    auto grouped = mlx::core::reshape(x, {batch, grouped_extent, groups}, stream_or_default(s));
+    auto mean = mlx::core::mean(grouped, 1, true, stream_or_default(s));
+    auto var = mlx::core::var(grouped, 1, true, 0, stream_or_default(s));
+    auto normalized = (grouped - mean) / mlx::core::sqrt(var + eps, stream_or_default(s));
+    auto out = mlx::core::reshape(normalized, {batch, height, width, channels}, stream_or_default(s));
+    out = out * broadcast_last_axis_vector(get_array(weight), out.ndim()) +
+        broadcast_last_axis_vector(get_array(bias), out.ndim());
+    return replace_array(res, out);
+  } catch (std::exception& e) {
+    mlx_error(e.what());
+    return 1;
+  }
+}
+
+extern "C" int mlxc_sdpa_none(
+    mlx_array* res,
+    const mlx_array q,
+    const mlx_array k,
+    const mlx_array v,
+    float scale,
+    const mlx_stream s) {
+  try {
+    return replace_array(
+        res,
+        mlx::core::fast::scaled_dot_product_attention(
+            get_array(q),
+            get_array(k),
+            get_array(v),
+            scale,
+            "",
+            std::nullopt,
+            std::nullopt,
+            stream_or_default(s)));
+  } catch (std::exception& e) {
+    mlx_error(e.what());
+    return 1;
+  }
+}
+
+extern "C" int mlxc_sdpa_causal(
+    mlx_array* res,
+    const mlx_array q,
+    const mlx_array k,
+    const mlx_array v,
+    float scale,
+    const mlx_stream s) {
+  try {
+    return replace_array(
+        res,
+        mlx::core::fast::scaled_dot_product_attention(
+            get_array(q),
+            get_array(k),
+            get_array(v),
+            scale,
+            "causal",
+            std::nullopt,
+            std::nullopt,
+            stream_or_default(s)));
+  } catch (std::exception& e) {
+    mlx_error(e.what());
+    return 1;
+  }
+}
+
+extern "C" int mlxc_sdpa_masked(
+    mlx_array* res,
+    const mlx_array q,
+    const mlx_array k,
+    const mlx_array v,
+    const mlx_array mask,
+    float scale,
+    const mlx_stream s) {
+  try {
+    return replace_array(
+        res,
+        mlx::core::fast::scaled_dot_product_attention(
+            get_array(q),
+            get_array(k),
+            get_array(v),
+            scale,
+            "array",
+            get_array(mask),
+            std::nullopt,
+            stream_or_default(s)));
+  } catch (std::exception& e) {
+    mlx_error(e.what());
+    return 1;
+  }
+}
+
+extern "C" int mlxc_sam3_box_rpb_log(
+    mlx_array* res,
+    const mlx_array reference_boxes,
+    const mlx_array xw0,
+    const mlx_array xb0,
+    const mlx_array xw1,
+    const mlx_array xb1,
+    const mlx_array yw0,
+    const mlx_array yb0,
+    const mlx_array yw1,
+    const mlx_array yb1,
+    int height,
+    int width,
+    const mlx_stream s) {
+  try {
+    if (height <= 0 || width <= 0) {
+      throw std::runtime_error("sam3_box_rpb_log expects positive spatial dims");
+    }
+    const auto& boxes = get_array(reference_boxes);
+    if (boxes.ndim() != 2 || boxes.shape(1) != 4) {
+      throw std::runtime_error("sam3_box_rpb_log expects reference_boxes shaped (queries,4)");
+    }
+
+    const auto stream = stream_or_default(s);
+    const auto queries = boxes.shape(0);
+    const auto ln8 = std::log(8.0f);
+    const auto eps = array(1.0e-9f);
+
+    auto cx = mlx::core::slice(boxes, {0, 0}, {queries, 1}, {1, 1}, stream);
+    auto cy = mlx::core::slice(boxes, {0, 1}, {queries, 2}, {1, 1}, stream);
+    auto bw = mlx::core::slice(boxes, {0, 2}, {queries, 3}, {1, 1}, stream);
+    auto bh = mlx::core::slice(boxes, {0, 3}, {queries, 4}, {1, 1}, stream);
+
+    auto x0 = cx - bw * 0.5f;
+    auto y0 = cy - bh * 0.5f;
+    auto x1 = cx + bw * 0.5f;
+    auto y1 = cy + bh * 0.5f;
+
+    auto coords_w = mlx::core::arange(0.0, static_cast<double>(width), 1.0, mlx::core::float32, stream) / static_cast<float>(width);
+    auto coords_h = mlx::core::arange(0.0, static_cast<double>(height), 1.0, mlx::core::float32, stream) / static_cast<float>(height);
+
+    auto deltas_x = mlx::core::concatenate(
+        std::vector<array>{
+            mlx::core::reshape(coords_w, {1, width, 1}, stream) - mlx::core::reshape(x0, {queries, 1, 1}, stream),
+            mlx::core::reshape(coords_w, {1, width, 1}, stream) - mlx::core::reshape(x1, {queries, 1, 1}, stream),
+        },
+        2,
+        stream);
+    auto deltas_y = mlx::core::concatenate(
+        std::vector<array>{
+            mlx::core::reshape(coords_h, {1, height, 1}, stream) - mlx::core::reshape(y0, {queries, 1, 1}, stream),
+            mlx::core::reshape(coords_h, {1, height, 1}, stream) - mlx::core::reshape(y1, {queries, 1, 1}, stream),
+        },
+        2,
+        stream);
+
+    auto normalize_deltas = [&](const array& deltas) {
+      auto scaled = deltas * 8.0f;
+      auto abs_scaled = mlx::core::abs(scaled, stream);
+      auto sign_scaled = scaled / mlx::core::maximum(abs_scaled, eps, stream);
+      return sign_scaled * (mlx::core::log(abs_scaled + 1.0f, stream) / ln8);
+    };
+
+    auto x_hidden = sam3_relu(sam3_linear_last_dim(normalize_deltas(deltas_x), get_array(xw0), get_array(xb0), stream), stream);
+    auto y_hidden = sam3_relu(sam3_linear_last_dim(normalize_deltas(deltas_y), get_array(yw0), get_array(yb0), stream), stream);
+    auto x_proj = sam3_linear_last_dim(x_hidden, get_array(xw1), get_array(xb1), stream);
+    auto y_proj = sam3_linear_last_dim(y_hidden, get_array(yw1), get_array(yb1), stream);
+
+    auto bias = mlx::core::reshape(y_proj, {queries, height, 1, y_proj.shape(2)}, stream) +
+        mlx::core::reshape(x_proj, {queries, 1, width, x_proj.shape(2)}, stream);
+    bias = mlx::core::reshape(bias, {queries, height * width, bias.shape(3)}, stream);
+    bias = mlx::core::transpose(bias, {2, 0, 1}, stream);
+    bias = mlx::core::reshape(bias, {1, bias.shape(0), bias.shape(1), bias.shape(2)}, stream);
+    auto presence_mask = mlx::core::zeros(
+        mlx::core::Shape{1, static_cast<int>(bias.shape(1)), 1, static_cast<int>(bias.shape(3))},
+        bias.dtype(),
+        stream);
+    bias = mlx::core::concatenate(std::vector<array>{presence_mask, bias}, 2, stream);
+    return replace_array(res, bias);
+  } catch (std::exception& e) {
+    mlx_error(e.what());
+    return 1;
+  }
+}
+
+extern "C" int mlxc_rope(
+    mlx_array* res,
+    const mlx_array a,
+    int dims,
+    float base,
+    int offset,
+    const mlx_stream s) {
+  try {
+    return replace_array(
+        res,
+        mlx::core::fast::rope(get_array(a), dims, false, base, 1.0f, offset, std::nullopt, stream_or_default(s)));
+  } catch (std::exception& e) {
+    mlx_error(e.what());
+    return 1;
+  }
+}
+
+extern "C" int mlxc_rope_freqs(
+    mlx_array* res,
+    const mlx_array a,
+    int dims,
+    const mlx_array freqs,
+    int offset,
+    const mlx_stream s) {
+  try {
+    return replace_array(
+        res,
+        mlx::core::fast::rope(
+            get_array(a),
+            dims,
+            false,
+            std::nullopt,
+            1.0f,
+            offset,
+            get_array(freqs),
+            stream_or_default(s)));
+  } catch (std::exception& e) {
+    mlx_error(e.what());
+    return 1;
+  }
+}
+
 extern "C" int mlxc_exp(mlx_array* res, const mlx_array a, const mlx_stream s) {
   return unary_array(res, a, s, [](const array& x, auto stream) { return mlx::core::exp(x, stream); });
 }
 
+extern "C" int mlxc_gelu(mlx_array* res, const mlx_array a, const mlx_stream s) {
+  try {
+    const auto& x = get_array(a);
+    const float inv_sqrt2 = 0.7071067811865475f;
+    return replace_array(res, 0.5f * x * (1.0f + mlx::core::erf(x * inv_sqrt2, stream_or_default(s))));
+  } catch (std::exception& e) {
+    mlx_error(e.what());
+    return 1;
+  }
+}
+
 extern "C" int mlxc_log(mlx_array* res, const mlx_array a, const mlx_stream s) {
   return unary_array(res, a, s, [](const array& x, auto stream) { return mlx::core::log(x, stream); });
+}
+
+extern "C" int mlxc_sin(mlx_array* res, const mlx_array a, const mlx_stream s) {
+  return unary_array(res, a, s, [](const array& x, auto stream) { return mlx::core::sin(x, stream); });
+}
+
+extern "C" int mlxc_cos(mlx_array* res, const mlx_array a, const mlx_stream s) {
+  return unary_array(res, a, s, [](const array& x, auto stream) { return mlx::core::cos(x, stream); });
 }
 
 extern "C" int mlxc_tanh(mlx_array* res, const mlx_array a, const mlx_stream s) {
@@ -1418,6 +2134,61 @@ extern "C" int mlxc_tanh(mlx_array* res, const mlx_array a, const mlx_stream s) 
 
 extern "C" int mlxc_sigmoid(mlx_array* res, const mlx_array a, const mlx_stream s) {
   return unary_array(res, a, s, [](const array& x, auto stream) { return mlx::core::sigmoid(x, stream); });
+}
+
+extern "C" int mlxc_gelu_approx(mlx_array* res, const mlx_array a, const mlx_stream s) {
+  try {
+    static auto compiled = mlx::core::compile(
+        [](const std::vector<array>& inputs) -> std::vector<array> {
+          const auto& x = inputs[0];
+          const auto half = array(0.5f, x.dtype());
+          const auto one = array(1.0f, x.dtype());
+          const auto coeff = array(0.044715f, x.dtype());
+          const auto sqrt_2_over_pi = array(std::sqrt(2.0f / static_cast<float>(M_PI)), x.dtype());
+          const auto x3 = mlx::core::power(x, array(3.0f, x.dtype()));
+          auto out = half * x * (one + mlx::core::tanh(sqrt_2_over_pi * (x + coeff * x3)));
+          return {mlx::core::astype(out, x.dtype())};
+        },
+        true);
+    auto outputs = compiled({get_array(a)});
+    return replace_array(res, outputs[0]);
+  } catch (std::exception& e) {
+    mlx_error(e.what());
+    return 1;
+  }
+}
+
+extern "C" int mlxc_mlp_dense(
+    mlx_array* res,
+    const mlx_array x,
+    const mlx_array gate_w,
+    const mlx_array up_w,
+    const mlx_array down_w,
+    const mlx_stream s) {
+  try {
+    static auto compiled = mlx::core::compile(
+        [](const std::vector<array>& inputs) -> std::vector<array> {
+          const auto& x = inputs[0];
+          const auto& gate_w = inputs[1];
+          const auto& up_w = inputs[2];
+          const auto& down_w = inputs[3];
+          auto gate = mlx::core::matmul(x, gate_w);
+          auto up = mlx::core::matmul(x, up_w);
+          const auto half = array(0.5f, gate.dtype());
+          const auto one = array(1.0f, gate.dtype());
+          const auto coeff = array(0.044715f, gate.dtype());
+          const auto sqrt_2_over_pi = array(std::sqrt(2.0f / static_cast<float>(M_PI)), gate.dtype());
+          const auto gate3 = mlx::core::power(gate, array(3.0f, gate.dtype()));
+          auto geglu = half * gate * (one + mlx::core::tanh(sqrt_2_over_pi * (gate + coeff * gate3))) * up;
+          return {mlx::core::astype(mlx::core::matmul(geglu, down_w), x.dtype())};
+        },
+        true);
+    auto outputs = compiled({get_array(x), get_array(gate_w), get_array(up_w), get_array(down_w)});
+    return replace_array(res, outputs[0]);
+  } catch (std::exception& e) {
+    mlx_error(e.what());
+    return 1;
+  }
 }
 
 extern "C" int mlxc_rms_norm(
@@ -1474,18 +2245,7 @@ extern "C" int mlxc_bool_where_indices(
     if (contiguous.ndim() != 1) {
       throw std::invalid_argument("[bool_where_indices] mask must be rank 1.");
     }
-    const bool* data = contiguous.data<bool>();
-    std::vector<int32_t> indices;
-    indices.reserve(contiguous.size());
-    for (int32_t i = 0; i < static_cast<int32_t>(contiguous.size()); ++i) {
-      if (data[i]) {
-        indices.push_back(i);
-      }
-    }
-    const mlx::core::Shape shape = {static_cast<int>(indices.size())};
-    return replace_array(
-        res,
-        array(indices.data(), shape, mlx::core::int32));
+    return replace_array(res, bool_where_indices_array(contiguous));
   } catch (std::exception& e) {
     mlx_error(e.what());
     return 1;

@@ -60,6 +60,7 @@ pub const LoweredProgramTag = enum(u8) {
     scan_builtin = 8,
     scan_seeded_builtin = 9,
     index = 10,
+    select = 11,
 };
 
 pub const LoweredProgramInstr = extern struct {
@@ -104,12 +105,15 @@ extern "bridge" fn kiwi_bridge_remainder(left: u32, right: u32) u32;
 extern "bridge" fn kiwi_bridge_less(left: u32, right: u32) u32;
 extern "bridge" fn kiwi_bridge_greater(left: u32, right: u32) u32;
 extern "bridge" fn kiwi_bridge_equal(left: u32, right: u32) u32;
+extern "bridge" fn kiwi_bridge_power(left: u32, right: u32) u32;
 extern "bridge" fn kiwi_bridge_logical_not(value: u32) u32;
 extern "bridge" fn kiwi_bridge_negate(value: u32) u32;
 extern "bridge" fn kiwi_bridge_exp(value: u32) u32;
 extern "bridge" fn kiwi_bridge_log(value: u32) u32;
 extern "bridge" fn kiwi_bridge_tanh(value: u32) u32;
 extern "bridge" fn kiwi_bridge_sigmoid(value: u32) u32;
+extern "bridge" fn kiwi_bridge_sin(value: u32) u32;
+extern "bridge" fn kiwi_bridge_cos(value: u32) u32;
 extern "bridge" fn kiwi_bridge_floor(value: u32) u32;
 extern "bridge" fn kiwi_bridge_cast(value: u32, dtype: i32) u32;
 extern "bridge" fn kiwi_bridge_bool_where_indices(value: u32) u32;
@@ -349,6 +353,11 @@ pub const Array = struct {
         return binaryResult(kiwi_bridge_div(left.handle, right.handle), left, right, c.MLX_FLOAT32);
     }
 
+    pub fn power(ctx: Context, left: Array, right: Array) Error!Array {
+        _ = ctx;
+        return binaryResult(kiwi_bridge_power(left.handle, right.handle), left, right, if (left.dtype() == c.MLX_FLOAT32 or right.dtype() == c.MLX_FLOAT32) c.MLX_FLOAT32 else c.MLX_INT32);
+    }
+
     pub fn minimum(ctx: Context, left: Array, right: Array) Error!Array {
         _ = ctx;
         return binaryResult(kiwi_bridge_minimum(left.handle, right.handle), left, right, if (left.dtype() == c.MLX_FLOAT32 or right.dtype() == c.MLX_FLOAT32) c.MLX_FLOAT32 else if (left.dtype() == c.MLX_BOOL and right.dtype() == c.MLX_BOOL) c.MLX_BOOL else c.MLX_INT32);
@@ -415,6 +424,16 @@ pub const Array = struct {
     pub fn sigmoid(ctx: Context, value: Array) Error!Array {
         _ = ctx;
         return unaryResult(kiwi_bridge_sigmoid(value.handle), value, c.MLX_FLOAT32);
+    }
+
+    pub fn sin(ctx: Context, value: Array) Error!Array {
+        _ = ctx;
+        return unaryResult(kiwi_bridge_sin(value.handle), value, c.MLX_FLOAT32);
+    }
+
+    pub fn cos(ctx: Context, value: Array) Error!Array {
+        _ = ctx;
+        return unaryResult(kiwi_bridge_cos(value.handle), value, c.MLX_FLOAT32);
     }
 
     pub fn sqrt(ctx: Context, value: Array) Error!Array {
@@ -665,6 +684,36 @@ pub fn loadSafetensors(
     _ = allocator;
     _ = ctx;
     _ = path;
+    return error.MlxFailure;
+}
+
+pub fn loadSafetensorTensor(
+    allocator: std.mem.Allocator,
+    ctx: Context,
+    path: []const u8,
+    dims: []const i32,
+    dtype: c.mlx_dtype,
+    data_offset: u64,
+) (Error || std.mem.Allocator.Error)!Array {
+    _ = allocator;
+    _ = ctx;
+    _ = path;
+    _ = dims;
+    _ = dtype;
+    _ = data_offset;
+    return error.MlxFailure;
+}
+
+pub fn saveSafetensors(
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    names: []const []const u8,
+    arrays: []const Array,
+) (Error || std.mem.Allocator.Error)!void {
+    _ = allocator;
+    _ = path;
+    _ = names;
+    _ = arrays;
     return error.MlxFailure;
 }
 

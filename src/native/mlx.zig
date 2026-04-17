@@ -30,9 +30,14 @@ extern fn mlxc_cummin0_inclusive(out: *c.mlx_array, value: c.mlx_array, stream: 
 extern fn mlxc_cummax0_inclusive(out: *c.mlx_array, value: c.mlx_array, stream: c.mlx_stream) c_int;
 extern fn mlxc_exp(out: *c.mlx_array, value: c.mlx_array, stream: c.mlx_stream) c_int;
 extern fn mlxc_log(out: *c.mlx_array, value: c.mlx_array, stream: c.mlx_stream) c_int;
+extern fn mlxc_sin(out: *c.mlx_array, value: c.mlx_array, stream: c.mlx_stream) c_int;
+extern fn mlxc_cos(out: *c.mlx_array, value: c.mlx_array, stream: c.mlx_stream) c_int;
 extern fn mlxc_tanh(out: *c.mlx_array, value: c.mlx_array, stream: c.mlx_stream) c_int;
 extern fn mlxc_sigmoid(out: *c.mlx_array, value: c.mlx_array, stream: c.mlx_stream) c_int;
+extern fn mlxc_power(out: *c.mlx_array, left: c.mlx_array, right: c.mlx_array, stream: c.mlx_stream) c_int;
 extern fn mlxc_rms_norm(out: *c.mlx_array, value: c.mlx_array, weight: ?*const c.mlx_array, eps: f32, stream: c.mlx_stream) c_int;
+extern fn mlxc_rope(out: *c.mlx_array, value: c.mlx_array, dims: c_int, base: f32, offset: c_int, stream: c.mlx_stream) c_int;
+extern fn mlxc_rope_freqs(out: *c.mlx_array, value: c.mlx_array, dims: c_int, freqs: c.mlx_array, offset: c_int, stream: c.mlx_stream) c_int;
 extern fn mlxc_set_default_device_type(device_type: c.mlx_device_type, index: c_int) c_int;
 
 pub const Error = error{
@@ -84,6 +89,7 @@ pub const LoweredProgramTag = enum(u8) {
     scan_builtin = 8,
     scan_seeded_builtin = 9,
     index = 10,
+    select = 11,
 };
 
 pub const LoweredProgramInstr = extern struct {
@@ -369,6 +375,12 @@ pub const Array = struct {
         return .{ .handle = out };
     }
 
+    pub fn power(ctx: Context, left: Array, right: Array) Error!Array {
+        var out = c.mlx_array_new();
+        try check(mlxc_power(&out, left.handle, right.handle, ctx.stream));
+        return .{ .handle = out };
+    }
+
     pub fn remainder(ctx: Context, left: Array, right: Array) Error!Array {
         var out = c.mlx_array_new();
         try check(c.mlx_remainder(&out, left.handle, right.handle, ctx.stream));
@@ -432,6 +444,18 @@ pub const Array = struct {
     pub fn sqrt(ctx: Context, value: Array) Error!Array {
         var out = c.mlx_array_new();
         try check(c.mlx_sqrt(&out, value.handle, ctx.stream));
+        return .{ .handle = out };
+    }
+
+    pub fn sin(ctx: Context, value: Array) Error!Array {
+        var out = c.mlx_array_new();
+        try check(mlxc_sin(&out, value.handle, ctx.stream));
+        return .{ .handle = out };
+    }
+
+    pub fn cos(ctx: Context, value: Array) Error!Array {
+        var out = c.mlx_array_new();
+        try check(mlxc_cos(&out, value.handle, ctx.stream));
         return .{ .handle = out };
     }
 
@@ -558,6 +582,135 @@ pub const Array = struct {
     pub fn argmax(ctx: Context, value: Array) Error!Array {
         var out = c.mlx_array_new();
         try check(c.mlx_argmax(&out, value.handle, false, ctx.stream));
+        return .{ .handle = out };
+    }
+
+    pub fn layerNorm(ctx: Context, value: Array, weight: Array, bias: Array, eps: f32) Error!Array {
+        var out = c.mlx_array_new();
+        try check(c.mlxc_layer_norm(&out, value.handle, weight.handle, bias.handle, eps, ctx.stream));
+        return .{ .handle = out };
+    }
+
+    pub fn conv2d(ctx: Context, input: Array, weight: Array, stride_h: i32, stride_w: i32, padding_h: i32, padding_w: i32) Error!Array {
+        var out = c.mlx_array_new();
+        try check(c.mlxc_conv2d(&out, input.handle, weight.handle, stride_h, stride_w, padding_h, padding_w, ctx.stream));
+        return .{ .handle = out };
+    }
+
+    pub fn conv2dBias(ctx: Context, input: Array, weight: Array, bias: Array, stride_h: i32, stride_w: i32, padding_h: i32, padding_w: i32) Error!Array {
+        var out = c.mlx_array_new();
+        try check(c.mlxc_conv2d_bias(&out, input.handle, weight.handle, bias.handle, stride_h, stride_w, padding_h, padding_w, ctx.stream));
+        return .{ .handle = out };
+    }
+
+    pub fn convTranspose2d(ctx: Context, input: Array, weight: Array, stride_h: i32, stride_w: i32, padding_h: i32, padding_w: i32) Error!Array {
+        var out = c.mlx_array_new();
+        try check(c.mlxc_conv_transpose2d(&out, input.handle, weight.handle, stride_h, stride_w, padding_h, padding_w, ctx.stream));
+        return .{ .handle = out };
+    }
+
+    pub fn convTranspose2dBias(ctx: Context, input: Array, weight: Array, bias: Array, stride_h: i32, stride_w: i32, padding_h: i32, padding_w: i32) Error!Array {
+        var out = c.mlx_array_new();
+        try check(c.mlxc_conv_transpose2d_bias(&out, input.handle, weight.handle, bias.handle, stride_h, stride_w, padding_h, padding_w, ctx.stream));
+        return .{ .handle = out };
+    }
+
+    pub fn upsampleNearest2d(ctx: Context, input: Array, scale_h: i32, scale_w: i32) Error!Array {
+        var out = c.mlx_array_new();
+        try check(c.mlxc_upsample_nearest2d(&out, input.handle, scale_h, scale_w, ctx.stream));
+        return .{ .handle = out };
+    }
+
+    pub fn groupNorm(ctx: Context, input: Array, groups: i32, weight: Array, bias: Array, eps: f32) Error!Array {
+        var out = c.mlx_array_new();
+        try check(c.mlxc_group_norm(&out, input.handle, groups, weight.handle, bias.handle, eps, ctx.stream));
+        return .{ .handle = out };
+    }
+
+    pub fn gelu(ctx: Context, value: Array) Error!Array {
+        var out = c.mlx_array_new();
+        try check(c.mlxc_gelu(&out, value.handle, ctx.stream));
+        return .{ .handle = out };
+    }
+
+    pub fn geluApprox(ctx: Context, value: Array) Error!Array {
+        var out = c.mlx_array_new();
+        try check(c.mlxc_gelu_approx(&out, value.handle, ctx.stream));
+        return .{ .handle = out };
+    }
+
+    pub fn mlpDense(ctx: Context, x: Array, gate_w: Array, up_w: Array, down_w: Array) Error!Array {
+        var out = c.mlx_array_new();
+        try check(c.mlxc_mlp_dense(&out, x.handle, gate_w.handle, up_w.handle, down_w.handle, ctx.stream));
+        return .{ .handle = out };
+    }
+
+    pub fn softmaxLastAxis(ctx: Context, value: Array, precise: bool) Error!Array {
+        var out = c.mlx_array_new();
+        try check(c.mlxc_softmax_last_axis(&out, value.handle, precise, ctx.stream));
+        return .{ .handle = out };
+    }
+
+    pub fn sdpaNone(ctx: Context, q: Array, k: Array, v: Array, scale: f32) Error!Array {
+        var out = c.mlx_array_new();
+        try check(c.mlxc_sdpa_none(&out, q.handle, k.handle, v.handle, scale, ctx.stream));
+        return .{ .handle = out };
+    }
+
+    pub fn sdpaCausal(ctx: Context, q: Array, k: Array, v: Array, scale: f32) Error!Array {
+        var out = c.mlx_array_new();
+        try check(c.mlxc_sdpa_causal(&out, q.handle, k.handle, v.handle, scale, ctx.stream));
+        return .{ .handle = out };
+    }
+
+    pub fn sdpaMasked(ctx: Context, q: Array, k: Array, v: Array, mask: Array, scale: f32) Error!Array {
+        var out = c.mlx_array_new();
+        try check(c.mlxc_sdpa_masked(&out, q.handle, k.handle, v.handle, mask.handle, scale, ctx.stream));
+        return .{ .handle = out };
+    }
+
+    pub fn sam3BoxRpbLog(
+        ctx: Context,
+        reference_boxes: Array,
+        xw0: Array,
+        xb0: Array,
+        xw1: Array,
+        xb1: Array,
+        yw0: Array,
+        yb0: Array,
+        yw1: Array,
+        yb1: Array,
+        height: i32,
+        width: i32,
+    ) Error!Array {
+        var out = c.mlx_array_new();
+        try check(c.mlxc_sam3_box_rpb_log(
+            &out,
+            reference_boxes.handle,
+            xw0.handle,
+            xb0.handle,
+            xw1.handle,
+            xb1.handle,
+            yw0.handle,
+            yb0.handle,
+            yw1.handle,
+            yb1.handle,
+            height,
+            width,
+            ctx.stream,
+        ));
+        return .{ .handle = out };
+    }
+
+    pub fn rope(ctx: Context, value: Array, dims: i32, base: f32, offset: i32) Error!Array {
+        var out = c.mlx_array_new();
+        try check(mlxc_rope(&out, value.handle, dims, base, offset, ctx.stream));
+        return .{ .handle = out };
+    }
+
+    pub fn ropeFreqs(ctx: Context, value: Array, dims: i32, freqs: Array, offset: i32) Error!Array {
+        var out = c.mlx_array_new();
+        try check(mlxc_rope_freqs(&out, value.handle, dims, freqs.handle, offset, ctx.stream));
         return .{ .handle = out };
     }
 
@@ -814,6 +967,77 @@ pub fn loadSafetensors(
         }
     }.lessThan);
     return owned;
+}
+
+pub fn loadSafetensorTensor(
+    allocator: std.mem.Allocator,
+    ctx: Context,
+    path: []const u8,
+    dims: []const i32,
+    dtype: c.mlx_dtype,
+    data_offset: u64,
+) (Error || std.mem.Allocator.Error)!Array {
+    const zpath = try allocator.dupeZ(u8, path);
+    defer allocator.free(zpath);
+
+    var cpu_ctx: ?Context = null;
+    defer {
+        if (cpu_ctx) |*owned| owned.deinit();
+        _ = mlxc_set_default_device_type(switch (ctx.resolved) {
+            .gpu => c.MLX_GPU,
+            else => c.MLX_CPU,
+        }, 0);
+    }
+    const load_stream = if (ctx.resolved == .gpu) blk: {
+        cpu_ctx = try Context.init(.cpu);
+        break :blk cpu_ctx.?.stream;
+    } else ctx.stream;
+
+    var out = c.mlx_array_new();
+    errdefer _ = c.mlx_array_free(out);
+    try check(c.mlx_load_safetensor_tensor(
+        &out,
+        zpath.ptr,
+        dims.ptr,
+        @intCast(dims.len),
+        dtype,
+        data_offset,
+        load_stream,
+    ));
+
+    var array = Array{ .handle = out };
+    errdefer array.deinit();
+    if (ctx.resolved == .gpu) {
+        const copied = try Array.copy(ctx, array);
+        array.deinit();
+        array = copied;
+    }
+    return array;
+}
+
+pub fn saveSafetensors(
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    names: []const []const u8,
+    arrays: []const Array,
+) (Error || std.mem.Allocator.Error)!void {
+    std.debug.assert(names.len == arrays.len);
+
+    const zpath = try allocator.dupeZ(u8, path);
+    defer allocator.free(zpath);
+
+    const map = c.mlx_map_string_to_array_new();
+    defer _ = c.mlx_map_string_to_array_free(map);
+    const metadata = c.mlx_map_string_to_string_new();
+    defer _ = c.mlx_map_string_to_string_free(metadata);
+
+    for (names, arrays) |name, array| {
+        const zname = try allocator.dupeZ(u8, name);
+        defer allocator.free(zname);
+        try check(c.mlx_map_string_to_array_insert(map, zname.ptr, array.handle));
+    }
+
+    try check(c.mlx_save_safetensors(zpath.ptr, map, metadata));
 }
 
 pub fn deinitNamedArrays(allocator: std.mem.Allocator, entries: []NamedArray) void {

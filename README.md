@@ -25,6 +25,11 @@ KIWI_MLX_BACKEND=cpu scripts/bootstrap_deps.sh
 zig build
 ```
 
+`scripts/bootstrap_deps.sh` now also bootstraps a repo-local DuckDB into
+`.deps/duckdb`. Host-matching builds prefer that install automatically so
+DuckDB-backed CSV, Parquet, and HTTP(S) scans work without runtime extension
+installation.
+
 ## Dependencies
 
 Pinned dependency revisions live in `deps.lock.toml`.

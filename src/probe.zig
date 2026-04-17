@@ -54,6 +54,14 @@ pub const ProbeResult = struct {
     each_right_fast_string_contains_miss_non_string_left_count: usize,
     each_right_fast_string_contains_miss_non_string_right_count: usize,
     grade_structural_numeric_fast_count: usize,
+    fast_dense_assign_attempt_count: usize,
+    fast_dense_assign_hit_count: usize,
+    fast_dense_assign_miss_count: usize,
+    fast_dense_assign_reuse_count: usize,
+    fast_dense_assign_clone_count: usize,
+    fast_dense_assign_clone_non_unique_count: usize,
+    fast_dense_assign_clone_frozen_count: usize,
+    fast_dense_assign_clone_other_count: usize,
     host_fold_fast_count: usize,
     host_scan_fast_count: usize,
     host_fold_scan_miss_unsupported_builtin_count: usize,
@@ -196,6 +204,14 @@ pub fn collectProbeResult(session: *runtime.Session, name: []const u8, err_name:
         .each_right_fast_string_contains_miss_non_string_left_count = session.debugEachRightFastStringContainsMissNonStringLeftCount(),
         .each_right_fast_string_contains_miss_non_string_right_count = session.debugEachRightFastStringContainsMissNonStringRightCount(),
         .grade_structural_numeric_fast_count = session.debugGradeStructuralNumericFastCount(),
+        .fast_dense_assign_attempt_count = session.debugFastDenseAssignAttemptCount(),
+        .fast_dense_assign_hit_count = session.debugFastDenseAssignHitCount(),
+        .fast_dense_assign_miss_count = session.debugFastDenseAssignMissCount(),
+        .fast_dense_assign_reuse_count = session.debugFastDenseAssignReuseCount(),
+        .fast_dense_assign_clone_count = session.debugFastDenseAssignCloneCount(),
+        .fast_dense_assign_clone_non_unique_count = session.debugFastDenseAssignCloneReasonCount(.non_unique),
+        .fast_dense_assign_clone_frozen_count = session.debugFastDenseAssignCloneReasonCount(.frozen),
+        .fast_dense_assign_clone_other_count = session.debugFastDenseAssignCloneReasonCount(.other),
         .host_fold_fast_count = session.debugHostFoldFastCount(),
         .host_scan_fast_count = session.debugHostScanFastCount(),
         .host_fold_scan_miss_unsupported_builtin_count = session.debugHostFoldScanMissCount(.unsupported_builtin),
@@ -331,6 +347,14 @@ pub fn writeProbeResultText(writer: anytype, result: ProbeResult) !void {
     try writer.print("each_right_fast_string_contains_miss_non_string_left_count={d}\n", .{result.each_right_fast_string_contains_miss_non_string_left_count});
     try writer.print("each_right_fast_string_contains_miss_non_string_right_count={d}\n", .{result.each_right_fast_string_contains_miss_non_string_right_count});
     try writer.print("grade_structural_numeric_fast_count={d}\n", .{result.grade_structural_numeric_fast_count});
+    try writer.print("fast_dense_assign_attempt_count={d}\n", .{result.fast_dense_assign_attempt_count});
+    try writer.print("fast_dense_assign_hit_count={d}\n", .{result.fast_dense_assign_hit_count});
+    try writer.print("fast_dense_assign_miss_count={d}\n", .{result.fast_dense_assign_miss_count});
+    try writer.print("fast_dense_assign_reuse_count={d}\n", .{result.fast_dense_assign_reuse_count});
+    try writer.print("fast_dense_assign_clone_count={d}\n", .{result.fast_dense_assign_clone_count});
+    try writer.print("fast_dense_assign_clone_non_unique_count={d}\n", .{result.fast_dense_assign_clone_non_unique_count});
+    try writer.print("fast_dense_assign_clone_frozen_count={d}\n", .{result.fast_dense_assign_clone_frozen_count});
+    try writer.print("fast_dense_assign_clone_other_count={d}\n", .{result.fast_dense_assign_clone_other_count});
     try writer.print("host_fold_fast_count={d}\n", .{result.host_fold_fast_count});
     try writer.print("host_scan_fast_count={d}\n", .{result.host_scan_fast_count});
     try writer.print("host_fold_scan_miss_unsupported_builtin_count={d}\n", .{result.host_fold_scan_miss_unsupported_builtin_count});

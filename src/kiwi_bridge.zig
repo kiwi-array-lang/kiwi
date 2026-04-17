@@ -95,12 +95,7 @@ pub const kiwi_session = struct {
             },
             .timing => |request| blk: {
                 const rendered = evalTiming(&self.session, std.heap.c_allocator, request) catch |err| {
-                    break :blk .{
-                        .status = statusFromError(err),
-                        .echoed = false,
-                        .autograd_path = .none,
-                        .text = null,
-                    };
+                    break :blk errorEvalOwned(&self.session, err);
                 };
                 break :blk .{
                     .status = .ok,
@@ -111,12 +106,7 @@ pub const kiwi_session = struct {
             },
             .eval => |expr| blk: {
                 const value = self.session.evalSource(expr) catch |err| {
-                    break :blk .{
-                        .status = statusFromError(err),
-                        .echoed = false,
-                        .autograd_path = .none,
-                        .text = null,
-                    };
+                    break :blk errorEvalOwned(&self.session, err);
                 };
 
                 var owned = EvalOwned{
@@ -128,10 +118,7 @@ pub const kiwi_session = struct {
                 if (!owned.echoed) break :blk owned;
 
                 const rendered = self.session.renderValue(value) catch |err| {
-                    owned.status = statusFromError(err);
-                    owned.echoed = false;
-                    owned.autograd_path = .none;
-                    break :blk owned;
+                    break :blk errorEvalOwned(&self.session, err);
                 };
                 defer self.session.allocator.free(rendered);
 
@@ -188,6 +175,21 @@ pub const EvalOwned = struct {
         };
     }
 };
+
+fn diagnosticTextOwned(session: *runtime.Session) ?[]u8 {
+    const detail = session.lastErrorText() orelse return null;
+    defer session.clearLastErrorText();
+    return std.heap.c_allocator.dupe(u8, detail) catch null;
+}
+
+fn errorEvalOwned(session: *runtime.Session, err: anyerror) EvalOwned {
+    return .{
+        .status = statusFromError(err),
+        .echoed = false,
+        .autograd_path = .none,
+        .text = diagnosticTextOwned(session),
+    };
+}
 
 pub fn statusName(status: kiwi_status_e) [*:0]const u8 {
     return switch (status) {

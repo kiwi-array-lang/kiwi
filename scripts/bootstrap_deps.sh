@@ -29,6 +29,7 @@ usage:
 default behavior:
   - fetch the locked mlx and mlx-c sources into .deps/src
   - apply any checked-in overlay patches from the lock file
+  - bootstrap DuckDB into .deps/duckdb with linked parquet/http support
   - build MLX into .deps/mlx
   - expose MLX C headers at .deps/mlx-c
 
@@ -39,6 +40,8 @@ environment:
     (default: default; `kiwi_minimal` and `kiwi_core` are experimental
     size-reduction profiles)
   - KIWI_DEPS_DIR=<path> (default: .deps under kiwi-zig-main)
+  - KIWI_DUCKDB_VERSION=<version> (default: 1.5.1)
+  - KIWI_DUCKDB_URL=<asset-url> (override the default release asset)
 EOF
   exit 1
 }
@@ -215,12 +218,14 @@ build_mlx() {
   local host_os
   local backend
   local linkage
+  local macos_deployment_target
   local metal_kernel_profile
   local -a cmake_args
 
   host_os="$(uname -s)"
   backend="${KIWI_MLX_BACKEND:-}"
   linkage="${KIWI_MLX_LINKAGE:-shared}"
+  macos_deployment_target="${KIWI_MLX_MACOS_DEPLOYMENT_TARGET:-}"
   metal_kernel_profile="${KIWI_MLX_METAL_KERNEL_PROFILE:-default}"
 
   rm -rf "$build_dir" "$install_dir"
@@ -256,6 +261,9 @@ build_mlx() {
   case "$host_os" in
     Darwin)
       backend="${backend:-metal}"
+      if [[ -n "$macos_deployment_target" ]]; then
+        cmake_args+=("-DCMAKE_OSX_DEPLOYMENT_TARGET=$macos_deployment_target")
+      fi
       case "$backend" in
         metal)
           cmake_args+=(
@@ -313,6 +321,13 @@ build_mlx() {
 
   "$BOOTSTRAP_CMAKE_BIN" "${cmake_args[@]}"
   "$BOOTSTRAP_CMAKE_BIN" --build "$build_dir" --parallel "$BOOTSTRAP_BUILD_PARALLEL" --target install
+  cat > "$install_dir/.kiwi-build-config" <<EOF
+host_os=$host_os
+backend=$backend
+linkage=$linkage
+metal_kernel_profile=$metal_kernel_profile
+macos_deployment_target=$macos_deployment_target
+EOF
   printf 'built MLX install at %s\n' "$install_dir"
 }
 
@@ -360,6 +375,7 @@ if [[ "$LINK_LOCAL" -eq 1 ]]; then
 
   printf 'bootstrapped %s/mlx -> %s\n' "$DEPS_DIR" "$(absolute_dir "$MLX_PREFIX")"
   printf 'bootstrapped %s/mlx-c -> %s\n' "$DEPS_DIR" "$(absolute_dir "$MLX_C_INCLUDE")"
+  KIWI_DEPS_DIR="$DEPS_DIR" bash "$ROOT/scripts/bootstrap_duckdb.sh"
   exit 0
 fi
 
@@ -368,6 +384,7 @@ fi
 sync_locked_repo "mlx"
 sync_locked_repo "mlx_c"
 stage_mlx_c_headers
+KIWI_DEPS_DIR="$DEPS_DIR" bash "$ROOT/scripts/bootstrap_duckdb.sh"
 
 if [[ "$FETCH_ONLY" -eq 0 ]]; then
   BOOTSTRAP_CMAKE_BIN="$(find_cmake)"
