@@ -251,7 +251,12 @@ fn tryFastBackendReduceUnary(
     var arr = try backendTensor(api, self, vector);
     defer arr.deinit();
     if (arr.ndim() == 0) return null;
-    if (@as(usize, @intCast(arr.shape()[0])) == 0) return error.Type;
+    if (@as(usize, @intCast(arr.shape()[0])) == 0) {
+        return switch (op) {
+            .mul => null,
+            else => error.Type,
+        };
+    }
     try castMlxBoolArrayTo(api, self, &arr, api.c.MLX_INT32);
 
     const ctx = try api.backendContext(self);
@@ -278,7 +283,7 @@ fn tryFastBackendAddFoldScan(
     var arr = try backendTensor(api, self, vector);
     defer arr.deinit();
     if (arr.ndim() == 0) return null;
-    if (@as(usize, @intCast(arr.shape()[0])) == 0) return error.Type;
+    if (@as(usize, @intCast(arr.shape()[0])) == 0) return null;
     try castMlxBoolArrayTo(api, self, &arr, api.c.MLX_INT32);
 
     const ctx = try api.backendContext(self);

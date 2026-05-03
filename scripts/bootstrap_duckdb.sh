@@ -12,7 +12,7 @@ else
   DEPS_DIR="$ROOT/.deps"
 fi
 
-DUCKDB_VERSION="${KIWI_DUCKDB_VERSION:-1.5.1}"
+DUCKDB_VERSION="${KIWI_DUCKDB_VERSION:-1.5.2}"
 DUCKDB_DIR="$DEPS_DIR/duckdb"
 
 detect_asset_name() {

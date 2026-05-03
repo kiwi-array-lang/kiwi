@@ -40,7 +40,7 @@ environment:
     (default: default; `kiwi_minimal` and `kiwi_core` are experimental
     size-reduction profiles)
   - KIWI_DEPS_DIR=<path> (default: .deps under kiwi-zig-main)
-  - KIWI_DUCKDB_VERSION=<version> (default: 1.5.1)
+  - KIWI_DUCKDB_VERSION=<version> (default: 1.5.2)
   - KIWI_DUCKDB_URL=<asset-url> (override the default release asset)
 EOF
   exit 1
@@ -220,6 +220,8 @@ build_mlx() {
   local linkage
   local macos_deployment_target
   local metal_kernel_profile
+  local clang_bin
+  local clangxx_bin
   local -a cmake_args
 
   host_os="$(uname -s)"
@@ -257,6 +259,15 @@ build_mlx() {
     -DMLX_BUILD_SAFETENSORS=ON
     -DMLX_BUILD_GGUF=OFF
   )
+
+  clang_bin="${CC:-$(command -v clang || true)}"
+  clangxx_bin="${CXX:-$(command -v clang++ || true)}"
+  if [[ -n "$clang_bin" && -n "$clangxx_bin" ]]; then
+    cmake_args+=(
+      -DCMAKE_C_COMPILER="$clang_bin"
+      -DCMAKE_CXX_COMPILER="$clangxx_bin"
+    )
+  fi
 
   case "$host_os" in
     Darwin)

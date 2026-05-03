@@ -733,21 +733,20 @@ pub const DebugArraySubkind = Value.ArraySubkind;
 pub const Value = struct {
     raw: u64,
 
-    const tag_bits = 3;
-    const tag_mask: u64 = (1 << tag_bits) - 1;
-    const array_kind_bits = 3;
-    const array_kind_shift = tag_bits;
-    const array_kind_mask: u64 = ((1 << array_kind_bits) - 1) << array_kind_shift;
-    const array_payload_mask: u64 = tag_mask | array_kind_mask;
-    const int_tag: u64 = 0b001;
-    const bool_tag: u64 = 0b010;
-    const builtin_tag: u64 = 0b011;
-    const closure_tag: u64 = 0b100;
-    const boxed_float_tag: u64 = 0b101;
-    const boxed_int_tag: u64 = 0b110;
-    const array_tag: u64 = 0b111;
+    const payload_bits = 48;
+    const payload_mask: u64 = (@as(u64, 1) << payload_bits) - 1;
+    const tag_shift = payload_bits;
+    pub const tag_mask: u64 = 0xffff << tag_shift;
+    pub const array_payload_mask: u64 = tag_mask;
+    const int_tag: u64 = 0xfff1 << tag_shift;
+    const bool_tag: u64 = 0xfff2 << tag_shift;
+    const builtin_tag: u64 = 0xfff3 << tag_shift;
+    const closure_tag: u64 = 0xfff4 << tag_shift;
+    const boxed_int_tag: u64 = 0xfff6 << tag_shift;
+    const array_tag: u64 = 0xfff7 << tag_shift;
+    const canonical_nan_raw: u64 = 0x7ff8_0000_0000_0000;
 
-    const ArraySubkind = enum(u3) {
+    const ArraySubkind = enum(u8) {
         numeric_array,
         host_dense_array,
         host_boxed_array,
@@ -755,25 +754,33 @@ pub const Value = struct {
         host_symbol,
         host_string_list,
         host_string_view,
+        host_relation,
+        host_keyed_store,
+        host_table_scalar,
         backend_array,
     };
 
     pub fn int(value: i64) KError!Value {
         if (!fitsInlineInt(value)) return error.Unsupported;
         return .{
-            .raw = (@as(u64, @bitCast(value)) << tag_bits) | int_tag,
+            .raw = int_tag | (@as(u64, @bitCast(value)) & payload_mask),
         };
+    }
+
+    pub fn float(value: f64) Value {
+        const raw: u64 = @bitCast(value);
+        return .{ .raw = if (isReservedTag(raw)) canonical_nan_raw else raw };
     }
 
     pub fn fromBool(value: bool) Value {
         return .{
-            .raw = (@as(u64, @intFromBool(value)) << tag_bits) | bool_tag,
+            .raw = bool_tag | @as(u64, @intFromBool(value)),
         };
     }
 
     pub fn builtin(id: BuiltinId) Value {
         return .{
-            .raw = (@as(u64, @intFromEnum(id)) << tag_bits) | builtin_tag,
+            .raw = builtin_tag | @as(u64, @intFromEnum(id)),
         };
     }
 
@@ -785,15 +792,8 @@ pub const Value = struct {
 
     pub fn array(ptr: anytype) Value {
         const raw = @intFromPtr(ptr);
-        std.debug.assert((raw & array_payload_mask) == 0);
-        const subkind = arraySubkindFromPtr(ptr);
-        return .{ .raw = raw | (@as(u64, @intFromEnum(subkind)) << array_kind_shift) | array_tag };
-    }
-
-    fn boxedFloat(ptr: *const BoxedFloat) Value {
-        const raw = @intFromPtr(ptr);
         std.debug.assert((raw & tag_mask) == 0);
-        return .{ .raw = raw | boxed_float_tag };
+        return .{ .raw = raw | array_tag };
     }
 
     fn boxedInt(ptr: *const BoxedInt) Value {
@@ -808,16 +808,15 @@ pub const Value = struct {
             bool_tag => .bool,
             builtin_tag => .builtin,
             closure_tag => .closure,
-            boxed_float_tag => .float,
             boxed_int_tag => .int,
             array_tag => .array,
-            else => unreachable,
+            else => .float,
         };
     }
 
     pub fn asInt(self: Value) i64 {
         return switch (self.raw & tag_mask) {
-            int_tag => @as(i64, @bitCast(self.raw)) >> tag_bits,
+            int_tag => signExtendInlineInt(self.raw & payload_mask),
             boxed_int_tag => self.asBoxedInt().value,
             else => unreachable,
         };
@@ -825,17 +824,17 @@ pub const Value = struct {
 
     pub fn asFloat(self: Value) f64 {
         std.debug.assert(self.tag() == .float);
-        return self.asBoxedFloat().value;
+        return @bitCast(self.raw);
     }
 
     pub fn asBool(self: Value) bool {
         std.debug.assert((self.raw & tag_mask) == bool_tag);
-        return ((self.raw >> tag_bits) & 1) != 0;
+        return (self.raw & 1) != 0;
     }
 
     pub fn asBuiltin(self: Value) BuiltinId {
         std.debug.assert((self.raw & tag_mask) == builtin_tag);
-        return @enumFromInt(self.raw >> tag_bits);
+        return @enumFromInt(self.raw & payload_mask);
     }
 
     pub fn asClosure(self: Value) *const Closure {
@@ -846,21 +845,12 @@ pub const Value = struct {
 
     pub fn arrayKind(self: Value) HeapKind {
         std.debug.assert(self.tag() == .array);
-        return switch (self.arraySubkind()) {
-            .numeric_array => .numeric_array,
-            .host_dense_array => .host_dense_array,
-            .host_boxed_array => self.arrayHeader().kind,
-            .host_string => self.arrayHeader().kind,
-            .host_symbol => self.arrayHeader().kind,
-            .host_string_list => .host_string_list,
-            .host_string_view => self.arrayHeader().kind,
-            .backend_array => .backend_array,
-        };
+        return self.arrayHeader().kind;
     }
 
     pub fn activeArrayKind(self: Value) HeapKind {
         std.debug.assert(self.tag() == .array);
-        return switch (self.arraySubkind()) {
+        return switch (self.arrayKind()) {
             .numeric_array => self.asNumericArray().activeKind(),
             else => self.arrayKind(),
         };
@@ -868,39 +858,43 @@ pub const Value = struct {
 
     pub fn arrayOwner(self: Value) HeapOwner {
         std.debug.assert(self.tag() == .array);
-        return switch (self.arraySubkind()) {
+        return switch (self.arrayKind()) {
             .numeric_array => self.asNumericArray().header.owner,
             .host_dense_array => if (self.asHostDenseArray().logical_handle) |handle| handle.header.owner else self.asHostDenseArray().header.owner,
-            .host_boxed_array,
             .host_string,
             .host_symbol,
             .host_string_list,
             .host_string_view,
+            .host_relation,
+            .host_keyed_store,
+            .host_table_scalar,
+            .host_boxed_array,
             => self.arrayHeader().owner,
             .backend_array => if (self.asBackendArray().logical_handle) |handle| handle.header.owner else self.asBackendArray().header.owner,
+            else => unreachable,
         };
     }
 
     pub fn asNumericArray(self: Value) *const NumericArray {
-        std.debug.assert(self.arraySubkind() == .numeric_array);
+        std.debug.assert(self.arrayKind() == .numeric_array);
         const ptr: *const NumericArray = @ptrFromInt(rawPtr(self.arrayPtrRaw()));
         return ptr;
     }
 
     pub fn asHostDenseArray(self: Value) *const HostDenseArray {
-        std.debug.assert(self.arraySubkind() == .host_dense_array);
+        std.debug.assert(self.arrayKind() == .host_dense_array);
         const ptr: *const HostDenseArray = @ptrFromInt(rawPtr(self.arrayPtrRaw()));
         return ptr;
     }
 
     pub fn asHostBoxedArray(self: Value) *const HostBoxedArray {
-        std.debug.assert(self.arraySubkind() == .host_boxed_array);
+        std.debug.assert(self.arrayKind() == .host_boxed_array);
         const ptr: *const HostBoxedArray = @ptrFromInt(rawPtr(self.arrayPtrRaw()));
         return ptr;
     }
 
     pub fn asBackendArray(self: Value) *const BackendArray {
-        return switch (self.arraySubkind()) {
+        return switch (self.arrayKind()) {
             .numeric_array => numericBackendAttachment(self.asNumericArray()) orelse unreachable,
             .backend_array => @ptrFromInt(rawPtr(self.arrayPtrRaw())),
             else => unreachable,
@@ -943,12 +937,6 @@ pub const Value = struct {
         return ptr;
     }
 
-    fn asBoxedFloat(self: Value) *const BoxedFloat {
-        std.debug.assert((self.raw & tag_mask) == boxed_float_tag);
-        const ptr: *const BoxedFloat = @ptrFromInt(rawPtr(self.raw & ~tag_mask));
-        return ptr;
-    }
-
     fn asBoxedInt(self: Value) *const BoxedInt {
         std.debug.assert((self.raw & tag_mask) == boxed_int_tag);
         const ptr: *const BoxedInt = @ptrFromInt(rawPtr(self.raw & ~tag_mask));
@@ -957,12 +945,25 @@ pub const Value = struct {
 
     fn arraySubkind(self: Value) ArraySubkind {
         std.debug.assert(self.tag() == .array);
-        return @enumFromInt((self.raw & array_kind_mask) >> array_kind_shift);
+        return switch (self.arrayKind()) {
+            .numeric_array => .numeric_array,
+            .host_dense_array => .host_dense_array,
+            .host_boxed_array => .host_boxed_array,
+            .host_string => .host_string,
+            .host_symbol => .host_symbol,
+            .host_string_list => .host_string_list,
+            .host_string_view => .host_string_view,
+            .host_relation => .host_relation,
+            .host_keyed_store => .host_keyed_store,
+            .host_table_scalar => .host_table_scalar,
+            .backend_array => .backend_array,
+            else => unreachable,
+        };
     }
 
     fn arrayPtrRaw(self: Value) u64 {
         std.debug.assert(self.tag() == .array);
-        return self.raw & ~array_payload_mask;
+        return self.raw & payload_mask;
     }
 
     fn arrayHeader(self: Value) *const HeapHeader {
@@ -972,35 +973,74 @@ pub const Value = struct {
     }
 
     fn fitsInlineInt(value: i64) bool {
-        const min_inline = -(@as(i64, 1) << 60);
-        const max_inline = (@as(i64, 1) << 60) - 1;
+        const min_inline = -(@as(i64, 1) << (payload_bits - 1));
+        const max_inline = (@as(i64, 1) << (payload_bits - 1)) - 1;
         return value >= min_inline and value <= max_inline;
+    }
+
+    fn isReservedTag(raw: u64) bool {
+        return switch (raw & tag_mask) {
+            int_tag,
+            bool_tag,
+            builtin_tag,
+            closure_tag,
+            boxed_int_tag,
+            array_tag,
+            => true,
+            else => false,
+        };
+    }
+
+    fn signExtendInlineInt(payload: u64) i64 {
+        const shift = 64 - payload_bits;
+        return @as(i64, @bitCast(payload << shift)) >> shift;
     }
 };
 
-fn arraySubkindFromPtr(ptr: anytype) Value.ArraySubkind {
-    const Child = std.meta.Child(@TypeOf(ptr));
-    if (Child == NumericArray) return .numeric_array;
-    if (Child == HostDenseArray) return .host_dense_array;
-    if (Child == HostBoxedArray) return .host_boxed_array;
-    if (Child == HostKeyedStore) return .host_boxed_array;
-    if (Child == BackendArray) return .backend_array;
-    if (Child == HostText) {
-        return switch (ptr.header.kind) {
-            .host_string => .host_string,
-            .host_symbol => .host_symbol,
-            else => unreachable,
+const ClosureKind = enum(u8) {
+    plain,
+    projection,
+    inner_product,
+    each,
+    fold,
+    scan,
+    each_right,
+    each_left,
+    each_prior,
+    grad,
+    valuegrad,
+
+    fn fromDerived(kind: DerivedVerbKind) ClosureKind {
+        return switch (kind) {
+            .each => .each,
+            .fold => .fold,
+            .scan => .scan,
+            .each_right => .each_right,
+            .each_left => .each_left,
+            .each_prior => .each_prior,
+            .grad => .grad,
+            .valuegrad => .valuegrad,
         };
     }
-    if (Child == HostStringList) return .host_string_list;
-    if (Child == HostRelation) return .host_string_view;
-    if (Child == HostStringView) return .host_string_view;
-    if (@hasField(Child, "header") and @hasField(Child, "value") and @hasField(Child, "is_null")) return .host_string_view;
-    @compileError("unsupported array pointer type");
-}
+
+    fn derivedKind(self: ClosureKind) ?DerivedVerbKind {
+        return switch (self) {
+            .each => .each,
+            .fold => .fold,
+            .scan => .scan,
+            .each_right => .each_right,
+            .each_left => .each_left,
+            .each_prior => .each_prior,
+            .grad => .grad,
+            .valuegrad => .valuegrad,
+            .plain, .projection, .inner_product => null,
+        };
+    }
+};
 
 pub const Closure = struct {
     header: HeapHeader align(8),
+    kind: ClosureKind = .plain,
     code: *const Code,
     captures: []const Value,
 };
@@ -1012,7 +1052,6 @@ const HeapOwner = enum(u8) {
 };
 
 const HeapKind = enum(u8) {
-    boxed_float,
     boxed_int,
     closure,
     numeric_array,
@@ -1042,24 +1081,19 @@ const HeapHeader = struct {
     }
 };
 
-const BoxedFloat = struct {
-    header: HeapHeader align(8),
-    value: f64,
-};
-
 const BoxedInt = struct {
     header: HeapHeader align(8),
     value: i64,
 };
 
 comptime {
-    if (@alignOf(Closure) < 8) @compileError("Closure must remain at least 8-byte aligned for tagged Value pointers.");
-    if (@alignOf(BoxedFloat) < 8) @compileError("BoxedFloat must remain at least 8-byte aligned for tagged Value pointers.");
-    if (@alignOf(BoxedInt) < 8) @compileError("BoxedInt must remain at least 8-byte aligned for tagged Value pointers.");
+    if (@sizeOf(Value) != 8) @compileError("Value must remain an 8-byte runtime word.");
+    if (@alignOf(Closure) < 8) @compileError("Closure must remain at least 8-byte aligned.");
+    if (@alignOf(BoxedInt) < 8) @compileError("BoxedInt must remain at least 8-byte aligned.");
 }
 
 const HostText = struct {
-    header: HeapHeader align(64),
+    header: HeapHeader align(8),
     len: usize,
 
     pub fn slice(self: *const HostText) []const u8 {
@@ -1085,7 +1119,7 @@ const HostStringListStorage = union(enum) {
 };
 
 const HostStringList = struct {
-    header: HeapHeader align(64),
+    header: HeapHeader align(8),
     len: usize,
     bytes_len: usize,
     base: ?*HostText,
@@ -1093,7 +1127,7 @@ const HostStringList = struct {
 };
 
 const HostStringView = struct {
-    header: HeapHeader align(64),
+    header: HeapHeader align(8),
     base: *HostText,
     span: HostTextSpan,
 };
@@ -1115,7 +1149,7 @@ const HostRelationOrigin = union(enum) {
 };
 
 const HostRelation = struct {
-    header: HeapHeader align(64),
+    header: HeapHeader align(8),
     origin: HostRelationOrigin,
     cached_row_count_known: bool = false,
     cached_row_count: usize = 0,
@@ -1167,7 +1201,7 @@ const HostKeyedColumnMetadata = struct {
 };
 
 const HostKeyedStore = struct {
-    header: HeapHeader align(64),
+    header: HeapHeader align(8),
     layout: HostKeyedLayout = .dict,
     row_count: usize = 0,
     path: []const u8,
@@ -1179,7 +1213,7 @@ const HostKeyedStore = struct {
 };
 
 const HostTableScalar = struct {
-    header: HeapHeader align(64),
+    header: HeapHeader align(8),
     kind: HostTableColumnKind,
     value: Value,
     is_null: bool,
@@ -1393,21 +1427,25 @@ const HostDenseFindCacheKind = enum(u8) {
     float,
 };
 
+const HostDenseFindCache = struct {
+    kind: HostDenseFindCacheKind = .none,
+    keys: ?[]u64 = null,
+    slots: ?[]usize = null,
+    mask: usize = 0,
+    float_bounds_known: bool = false,
+    float_bounds_min: f64 = 0.0,
+    float_bounds_max: f64 = 0.0,
+};
+
 const HostDenseArray = struct {
-    header: HeapHeader align(64),
+    header: HeapHeader align(8),
     logical_handle: ?*NumericArray = null,
     logical_len: usize,
     flags: u8 = 0,
     int_range_known: bool = false,
     int_range_min: i64 = 0,
     int_range_max: i64 = 0,
-    find_cache_kind: HostDenseFindCacheKind = .none,
-    find_cache_keys: ?[]u64 = null,
-    find_cache_slots: ?[]usize = null,
-    find_cache_mask: usize = 0,
-    float_bounds_known: bool = false,
-    float_bounds_min: f64 = 0.0,
-    float_bounds_max: f64 = 0.0,
+    find_cache: ?*HostDenseFindCache = null,
     storage: HostDenseStorage,
 
     fn len(self: *const HostDenseArray) usize {
@@ -1423,7 +1461,7 @@ const ManagedHostDenseBufferEntry = struct {
 };
 
 const HostBoxedArray = struct {
-    header: HeapHeader align(64),
+    header: HeapHeader align(8),
     logical_len: usize,
     items: []Value,
 
@@ -1439,6 +1477,78 @@ fn hostDenseNumericMode(array: *const HostDenseArray) HostDenseElem {
         .bit, .int8, .int16, .int32, .int64 => .int,
         .float64 => .float,
     };
+}
+
+fn hostDenseStorageCapacityLen(array: *const HostDenseArray) usize {
+    return switch (array.storage) {
+        .bit => |words| words.len * host_bit_word_bits,
+        .int8 => |items| items.len,
+        .int16 => |items| items.len,
+        .int32 => |items| items.len,
+        .int64 => |items| items.len,
+        .float64 => |items| items.len,
+    };
+}
+
+fn hostDenseStorageKindForIntKind(kind: HostIntStorageKind) HostDenseStorageKind {
+    return switch (kind) {
+        .bit => .bit,
+        .int8 => .int8,
+        .int16 => .int16,
+        .int32 => .int32,
+        .int64 => .int64,
+    };
+}
+
+fn hostDenseStorageElemBytes(kind: HostDenseStorageKind) usize {
+    return switch (kind) {
+        .bit => @sizeOf(u64),
+        .int8 => @sizeOf(i8),
+        .int16 => @sizeOf(i16),
+        .int32 => @sizeOf(i32),
+        .int64 => @sizeOf(i64),
+        .float64 => @sizeOf(f64),
+    };
+}
+
+fn hostDenseStorageBytesForLen(kind: HostDenseStorageKind, len: usize) usize {
+    return switch (kind) {
+        .bit => bitWordCount(len) * @sizeOf(u64),
+        else => len * hostDenseStorageElemBytes(kind),
+    };
+}
+
+fn hostDenseCapacityLenForBytes(kind: HostDenseStorageKind, bytes: usize) usize {
+    return switch (kind) {
+        .bit => (bytes / @sizeOf(u64)) * host_bit_word_bits,
+        else => bytes / hostDenseStorageElemBytes(kind),
+    };
+}
+
+fn hostDenseGrowCapacityLen(kind: HostDenseStorageKind, current_capacity_len: usize, required_len: usize) usize {
+    if (required_len == 0) return 0;
+    const required_bytes = hostDenseStorageBytesForLen(kind, required_len);
+    const current_bytes = hostDenseStorageBytesForLen(kind, current_capacity_len);
+    const doubled_bytes = std.math.mul(usize, current_bytes, 2) catch std.math.maxInt(usize);
+    const target_bytes = @max(required_bytes, @max(@as(usize, 64), doubled_bytes));
+    const rounded_bytes = std.math.ceilPowerOfTwo(usize, target_bytes) catch target_bytes;
+    return @max(required_len, hostDenseCapacityLenForBytes(kind, rounded_bytes));
+}
+
+fn hostDenseLogicalBitWords(array: *const HostDenseArray, words: []const u64) []const u64 {
+    const logical_words = bitWordCount(array.logical_len);
+    std.debug.assert(logical_words <= words.len);
+    return words[0..logical_words];
+}
+
+fn hostDenseLogicalItems(comptime T: type, array: *const HostDenseArray, items: []const T) []const T {
+    std.debug.assert(array.logical_len <= items.len);
+    return items[0..array.logical_len];
+}
+
+fn hostDenseMutableLogicalItems(comptime T: type, array: *const HostDenseArray, items: []T) []T {
+    std.debug.assert(array.logical_len <= items.len);
+    return items[0..array.logical_len];
 }
 
 pub fn debugHostDenseFlags(value: Value) u8 {
@@ -1479,6 +1589,11 @@ pub fn debugActiveHostLen(value: Value) ?usize {
     return hostDenseIfPresent(value).?.len();
 }
 
+pub fn debugActiveHostCapacityLen(value: Value) ?usize {
+    if (value.tag() != .array or value.activeArrayKind() != .host_dense_array) return null;
+    return hostDenseStorageCapacityLen(hostDenseIfPresent(value).?);
+}
+
 pub fn debugActiveHostIntAt(value: Value, idx: usize) KError!i64 {
     if (value.tag() != .array or value.activeArrayKind() != .host_dense_array) return error.Type;
     return hostDenseIntAt(hostDenseIfPresent(value).?, idx);
@@ -1486,8 +1601,9 @@ pub fn debugActiveHostIntAt(value: Value, idx: usize) KError!i64 {
 
 pub fn debugActiveHostFloatSlice(value: Value) ?[]const f64 {
     if (value.tag() != .array or value.activeArrayKind() != .host_dense_array) return null;
-    return switch (hostDenseIfPresent(value).?.storage) {
-        .float64 => |items| items,
+    const host = hostDenseIfPresent(value).?;
+    return switch (host.storage) {
+        .float64 => |items| hostDenseLogicalItems(f64, host, items),
         else => null,
     };
 }
@@ -1584,13 +1700,7 @@ fn hostDenseClearCachedIntRange(array: *HostDenseArray) void {
 }
 
 fn hostDenseResetFindCacheState(array: *HostDenseArray) void {
-    array.find_cache_kind = .none;
-    array.find_cache_keys = null;
-    array.find_cache_slots = null;
-    array.find_cache_mask = 0;
-    array.float_bounds_known = false;
-    array.float_bounds_min = 0.0;
-    array.float_bounds_max = 0.0;
+    array.find_cache = null;
 }
 
 fn hostDenseCachedIntRange(array: *const HostDenseArray) ?HostIntRange {
@@ -1638,6 +1748,23 @@ fn invertMonotonicFlags(flags: u8) u8 {
         (if ((mono & host_dense_flag_dsc) != 0) host_dense_flag_asc else 0);
 }
 
+fn reversedDenseFlags(flags: u8) u8 {
+    return host_dense_flag_normalized | invertMonotonicFlags(flags);
+}
+
+fn hostDenseCopyFloatBounds(dst: *HostDenseArray, src: *const HostDenseArray) void {
+    const dst_cache = dst.find_cache orelse return;
+    const src_cache = src.find_cache orelse {
+        dst_cache.float_bounds_known = false;
+        dst_cache.float_bounds_min = 0.0;
+        dst_cache.float_bounds_max = 0.0;
+        return;
+    };
+    dst_cache.float_bounds_known = src_cache.float_bounds_known;
+    dst_cache.float_bounds_min = if (src_cache.float_bounds_known) src_cache.float_bounds_min else 0.0;
+    dst_cache.float_bounds_max = if (src_cache.float_bounds_known) src_cache.float_bounds_max else 0.0;
+}
+
 fn isRenderableMatrix(items: []const Value) bool {
     if (items.len == 0) return false;
     var row_len: ?usize = null;
@@ -1662,8 +1789,7 @@ fn numericArraySetVectorShape(handle: *NumericArray, len: usize) void {
 }
 
 fn numericArraySetRangeIota(handle: *NumericArray, len: usize) void {
-    handle.structural = .range_iota;
-    handle.range_iota = .{ .start = 0, .step = 1 };
+    handle.structural = .{ .range_iota = .{ .start = 0, .step = 1 } };
     numericArraySetVectorShape(handle, len);
 }
 
@@ -1709,40 +1835,107 @@ fn numericShapeSnapshotFromHandle(handle: *const NumericArray) NumericShapeSnaps
     };
 }
 
+fn numericArrayStructuralTag(handle: *const NumericArray) NumericArrayStructuralTag {
+    return std.meta.activeTag(handle.structural);
+}
+
+fn numericArrayRangeIota(handle: *const NumericArray) NumericRangeIota {
+    return switch (handle.structural) {
+        .range_iota => |range| range,
+        else => unreachable,
+    };
+}
+
+fn numericArrayFlatSlicePayload(handle: *const NumericArray) ?NumericFlatSlice {
+    return switch (handle.structural) {
+        .flat_slice => |slice| slice,
+        else => null,
+    };
+}
+
+fn numericArrayFlatConcatPayload(handle: *const NumericArray) ?NumericFlatConcat {
+    return switch (handle.structural) {
+        .flat_concat => |concat| concat,
+        else => null,
+    };
+}
+
+fn numericArrayFlatSegmentsPayload(handle: *const NumericArray) ?NumericFlatSegments {
+    return switch (handle.structural) {
+        .flat_segments => |segments| segments,
+        else => null,
+    };
+}
+
+fn numericArrayFirstAxisSlicePayload(handle: *const NumericArray) ?NumericFirstAxisSlice {
+    return switch (handle.structural) {
+        .first_axis_slice => |slice| slice,
+        else => null,
+    };
+}
+
+fn numericArrayFirstAxisIndexPayload(handle: *const NumericArray) ?NumericFirstAxisIndex {
+    return switch (handle.structural) {
+        .first_axis_index => |index| index,
+        else => null,
+    };
+}
+
+fn numericArrayFirstAxisConcatPayload(handle: *const NumericArray) ?NumericFirstAxisConcat {
+    return switch (handle.structural) {
+        .first_axis_concat => |concat| concat,
+        else => null,
+    };
+}
+
+fn numericArrayReshapePayload(handle: *const NumericArray) ?NumericReshapeView {
+    return switch (handle.structural) {
+        .reshape_view => |reshape| reshape,
+        else => null,
+    };
+}
+
+fn numericArrayTransposePayload(handle: *const NumericArray) ?NumericTransposeView {
+    return switch (handle.structural) {
+        .transpose_view => |transpose| transpose,
+        else => null,
+    };
+}
+
 fn numericArrayIsRangeIota(handle: *const NumericArray) bool {
-    return handle.structural == .range_iota;
+    return numericArrayStructuralTag(handle) == .range_iota;
 }
 
 fn numericArrayIsFlatSlice(handle: *const NumericArray) bool {
-    return handle.structural == .flat_slice and handle.flat_slice != null;
+    return numericArrayStructuralTag(handle) == .flat_slice;
 }
 
 fn numericArrayIsFlatConcat(handle: *const NumericArray) bool {
-    return handle.structural == .flat_concat and handle.flat_concat != null;
+    return numericArrayStructuralTag(handle) == .flat_concat;
 }
 
 fn numericArrayIsFlatSegments(handle: *const NumericArray) bool {
-    return handle.structural == .flat_segments and handle.flat_segments != null;
+    return numericArrayStructuralTag(handle) == .flat_segments;
 }
 
 fn numericArrayIsFirstAxisSlice(handle: *const NumericArray) bool {
-    return handle.structural == .first_axis_slice and handle.first_axis_slice != null;
+    return numericArrayStructuralTag(handle) == .first_axis_slice;
 }
 
 fn numericArrayIsFirstAxisIndex(handle: *const NumericArray) bool {
-    return handle.structural == .first_axis_index and handle.first_axis_index != null;
+    return numericArrayStructuralTag(handle) == .first_axis_index;
 }
 
 fn numericArrayIsFirstAxisConcat(handle: *const NumericArray) bool {
-    return handle.structural == .first_axis_concat and handle.first_axis_concat != null;
+    return numericArrayStructuralTag(handle) == .first_axis_concat;
 }
 
 fn numericArrayIsReshapeView(handle: *const NumericArray) bool {
-    return handle.structural == .reshape_view and handle.reshape_view != null;
+    return numericArrayStructuralTag(handle) == .reshape_view;
 }
 
 fn numericArrayIsTransposeView(handle: *const NumericArray) bool {
-    return handle.structural == .transpose_view and handle.transpose_view != null;
+    return numericArrayStructuralTag(handle) == .transpose_view;
 }
 
 fn numericArrayIsVectorRangeIota(handle: *const NumericArray) bool {
@@ -1750,73 +1943,73 @@ fn numericArrayIsVectorRangeIota(handle: *const NumericArray) bool {
 }
 
 fn numericArrayFlatSliceSource(handle: *const NumericArray) ?Value {
-    const slice = handle.flat_slice orelse return null;
-    return if (numericArrayIsFlatSlice(handle)) slice.source else null;
+    const slice = numericArrayFlatSlicePayload(handle) orelse return null;
+    return slice.source;
 }
 
 fn numericArrayFlatSliceStart(handle: *const NumericArray) ?usize {
-    const slice = handle.flat_slice orelse return null;
-    return if (numericArrayIsFlatSlice(handle)) slice.start else null;
+    const slice = numericArrayFlatSlicePayload(handle) orelse return null;
+    return slice.start;
 }
 
 fn numericArrayFlatConcatLeft(handle: *const NumericArray) ?Value {
-    const concat = handle.flat_concat orelse return null;
-    return if (numericArrayIsFlatConcat(handle)) concat.left else null;
+    const concat = numericArrayFlatConcatPayload(handle) orelse return null;
+    return concat.left;
 }
 
 fn numericArrayFlatConcatRight(handle: *const NumericArray) ?Value {
-    const concat = handle.flat_concat orelse return null;
-    return if (numericArrayIsFlatConcat(handle)) concat.right else null;
+    const concat = numericArrayFlatConcatPayload(handle) orelse return null;
+    return concat.right;
 }
 
 fn numericArrayFlatSegmentsValues(handle: *const NumericArray) ?[]const Value {
-    const segments = handle.flat_segments orelse return null;
-    return if (numericArrayIsFlatSegments(handle)) segments.values else null;
+    const segments = numericArrayFlatSegmentsPayload(handle) orelse return null;
+    return segments.values;
 }
 
 fn numericArrayFirstAxisSliceSource(handle: *const NumericArray) ?Value {
-    const slice = handle.first_axis_slice orelse return null;
-    return if (numericArrayIsFirstAxisSlice(handle)) slice.source else null;
+    const slice = numericArrayFirstAxisSlicePayload(handle) orelse return null;
+    return slice.source;
 }
 
 fn numericArrayFirstAxisSliceRowStart(handle: *const NumericArray) ?usize {
-    const slice = handle.first_axis_slice orelse return null;
-    return if (numericArrayIsFirstAxisSlice(handle)) slice.start else null;
+    const slice = numericArrayFirstAxisSlicePayload(handle) orelse return null;
+    return slice.start;
 }
 
 fn numericArrayFirstAxisSliceRowStep(handle: *const NumericArray) ?i32 {
-    const slice = handle.first_axis_slice orelse return null;
-    return if (numericArrayIsFirstAxisSlice(handle)) slice.step else null;
+    const slice = numericArrayFirstAxisSlicePayload(handle) orelse return null;
+    return slice.step;
 }
 
 fn numericArrayFirstAxisIndexSource(handle: *const NumericArray) ?Value {
-    const index = handle.first_axis_index orelse return null;
-    return if (numericArrayIsFirstAxisIndex(handle)) index.source else null;
+    const index = numericArrayFirstAxisIndexPayload(handle) orelse return null;
+    return index.source;
 }
 
 fn numericArrayFirstAxisIndexRows(handle: *const NumericArray) ?Value {
-    const index = handle.first_axis_index orelse return null;
-    return if (numericArrayIsFirstAxisIndex(handle)) index.row_indices else null;
+    const index = numericArrayFirstAxisIndexPayload(handle) orelse return null;
+    return index.row_indices;
 }
 
 fn numericArrayFirstAxisConcatLeft(handle: *const NumericArray) ?Value {
-    const concat = handle.first_axis_concat orelse return null;
-    return if (numericArrayIsFirstAxisConcat(handle)) concat.left else null;
+    const concat = numericArrayFirstAxisConcatPayload(handle) orelse return null;
+    return concat.left;
 }
 
 fn numericArrayFirstAxisConcatRight(handle: *const NumericArray) ?Value {
-    const concat = handle.first_axis_concat orelse return null;
-    return if (numericArrayIsFirstAxisConcat(handle)) concat.right else null;
+    const concat = numericArrayFirstAxisConcatPayload(handle) orelse return null;
+    return concat.right;
 }
 
 fn numericArrayReshapeSource(handle: *const NumericArray) ?Value {
-    const reshape = handle.reshape_view orelse return null;
-    return if (numericArrayIsReshapeView(handle)) reshape.source else null;
+    const reshape = numericArrayReshapePayload(handle) orelse return null;
+    return reshape.source;
 }
 
 fn numericArrayTransposeSource(handle: *const NumericArray) ?Value {
-    const transpose = handle.transpose_view orelse return null;
-    return if (numericArrayIsTransposeView(handle)) transpose.source else null;
+    const transpose = numericArrayTransposePayload(handle) orelse return null;
+    return transpose.source;
 }
 
 fn numericArrayElementCount(handle: *const NumericArray) usize {
@@ -1835,15 +2028,17 @@ fn numericArrayRangeIotaValueAt(handle: *const NumericArray, idx: usize) KError!
     std.debug.assert(numericArrayIsRangeIota(handle));
     if (idx >= numericArrayRangeLen(handle)) return error.Type;
     const idx_i64 = std.math.cast(i64, idx) orelse return error.Unsupported;
-    const scaled = std.math.mul(i64, handle.range_iota.step, idx_i64) catch return error.Unsupported;
-    return std.math.add(i64, handle.range_iota.start, scaled) catch return error.Unsupported;
+    const range = numericArrayRangeIota(handle);
+    const scaled = std.math.mul(i64, range.step, idx_i64) catch return error.Unsupported;
+    return std.math.add(i64, range.start, scaled) catch return error.Unsupported;
 }
 
 fn numericArrayRangeIotaBounds(handle: *const NumericArray) HostIntRange {
     std.debug.assert(numericArrayIsRangeIota(handle));
     const len = numericArrayRangeLen(handle);
-    if (len == 0) return .{ .min = handle.range_iota.start, .max = handle.range_iota.start };
-    const first = handle.range_iota.start;
+    const range = numericArrayRangeIota(handle);
+    if (len == 0) return .{ .min = range.start, .max = range.start };
+    const first = range.start;
     const last = numericArrayRangeIotaValueAt(handle, len - 1) catch unreachable;
     return .{
         .min = @min(first, last),
@@ -2058,7 +2253,7 @@ fn tryCollapseHostFlatSlice(self: *Session, source: Value, start: usize, len: us
     const row_pos = start / row_width;
 
     if (numericArrayIsFirstAxisSlice(handle)) {
-        const slice = handle.first_axis_slice orelse return error.Type;
+        const slice = numericArrayFirstAxisSlicePayload(handle) orelse return error.Type;
         const source_row_i64 = @as(i64, @intCast(slice.start)) + @as(i64, @intCast(row_pos)) * @as(i64, slice.step);
         if (source_row_i64 < 0) return error.Type;
         const base_source = slice.source;
@@ -2072,7 +2267,7 @@ fn tryCollapseHostFlatSlice(self: *Session, source: Value, start: usize, len: us
     }
 
     if (numericArrayIsFirstAxisIndex(handle)) {
-        const index = handle.first_axis_index orelse return error.Type;
+        const index = numericArrayFirstAxisIndexPayload(handle) orelse return error.Type;
         const source_row_i64 = try numericIntAt(index.row_indices, row_pos);
         if (source_row_i64 < 0) return error.Type;
         const base_source = index.source;
@@ -2086,7 +2281,7 @@ fn tryCollapseHostFlatSlice(self: *Session, source: Value, start: usize, len: us
     }
 
     if (numericArrayIsTransposeView(handle)) {
-        const transpose = handle.transpose_view orelse return error.Type;
+        const transpose = numericArrayTransposePayload(handle) orelse return error.Type;
         const base_source = transpose.source;
         const base_shape = valueNumericMatrixShape(base_source) orelse return error.Type;
         return .{ .flat_stride = .{
@@ -2103,7 +2298,7 @@ fn tryCollapseHostFlatSlice(self: *Session, source: Value, start: usize, len: us
 
 pub fn debugNumericStructuralTag(value: Value) ?DebugNumericStructuralTag {
     const handle = valueNumericHandle(value) orelse return null;
-    return handle.structural;
+    return numericArrayStructuralTag(handle);
 }
 
 fn debugBackendArrayForValue(value: Value) ?mlx.Array {
@@ -2566,7 +2761,7 @@ fn numericStructuralScalarIndexValue(self: *Session, view: NumericStructuralView
             .managed,
             block_len,
             start,
-            handle.range_iota.step,
+            numericArrayRangeIota(handle).step,
             numericShapeTailSnapshot(handle),
         );
     }
@@ -2665,7 +2860,7 @@ fn numericStructuralArithmeticSliceValue(self: *Session, view: NumericStructural
             const out_len = slice.len * block_len;
             const start_idx = slice.start * block_len;
             const start = if (out_len == 0)
-                handle.range_iota.start
+                numericArrayRangeIota(handle).start
             else
                 try numericArrayRangeIotaValueAt(handle, start_idx);
             return try newRangeIotaValueWithShape(
@@ -2673,7 +2868,7 @@ fn numericStructuralArithmeticSliceValue(self: *Session, view: NumericStructural
                 .managed,
                 out_len,
                 start,
-                handle.range_iota.step,
+                numericArrayRangeIota(handle).step,
                 numericShapeFirstAxisSliceSnapshot(handle, slice.len),
             );
         }
@@ -2684,7 +2879,7 @@ fn numericStructuralArithmeticSliceValue(self: *Session, view: NumericStructural
     if (slice.start > len) return error.Type;
     if (slice.len == 0) return try newRangeIotaValue(self, .managed, 0);
     const start = try numericArrayRangeIotaValueAt(handle, slice.start);
-    const step = @as(i64, handle.range_iota.step) * @as(i64, slice.step);
+    const step = @as(i64, numericArrayRangeIota(handle).step) * @as(i64, slice.step);
     return try newRangeIotaValueWithParams(self, .managed, slice.len, start, step);
 }
 
@@ -2744,8 +2939,8 @@ fn numericStructuralDenseMonadValue(self: *Session, value: Value, view: NumericS
         .add => self.shareValue(value),
         .sub => blk: {
             const len = numericArrayRangeLen(handle);
-            const start = try checkedIntOp(.sub, 0, handle.range_iota.start);
-            const step = try checkedIntOp(.sub, 0, handle.range_iota.step);
+            const start = try checkedIntOp(.sub, 0, numericArrayRangeIota(handle).start);
+            const step = try checkedIntOp(.sub, 0, numericArrayRangeIota(handle).step);
             break :blk try newRangeIotaValueWithShape(
                 self,
                 .managed,
@@ -2767,9 +2962,9 @@ fn numericStructuralGradeValue(self: *Session, view: NumericStructuralView, asce
     else
         numericArrayRangeLen(handle);
     if (len == 0) return try newRangeIotaValue(self, .managed, 0);
-    if (handle.range_iota.step == 0 or
-        (ascending and handle.range_iota.step > 0) or
-        (!ascending and handle.range_iota.step < 0))
+    if (numericArrayRangeIota(handle).step == 0 or
+        (ascending and numericArrayRangeIota(handle).step > 0) or
+        (!ascending and numericArrayRangeIota(handle).step < 0))
     {
         return try newRangeIotaValue(self, .managed, len);
     }
@@ -3207,12 +3402,12 @@ fn collectFlatNumericSegments(allocator: std.mem.Allocator, value: Value, out: *
 fn tryFuseStructuredFlatNumericSegments(self: *Session, left: FlatNumericSegment, right: FlatNumericSegment) KError!?FlatNumericSegment {
     if (valueRangeIotaHandle(left.value)) |left_handle| {
         if (valueRangeIotaHandle(right.value)) |right_handle| {
-            if (left_handle.rank == 1 and right_handle.rank == 1 and left_handle.range_iota.step == right_handle.range_iota.step) {
+            if (left_handle.rank == 1 and right_handle.rank == 1 and numericArrayRangeIota(left_handle).step == numericArrayRangeIota(right_handle).step) {
                 const left_len_i64 = std.math.cast(i64, left.len) orelse return error.Unsupported;
-                const offset = std.math.mul(i64, left_handle.range_iota.step, left_len_i64) catch return error.Unsupported;
-                const expected_right_start = std.math.add(i64, left_handle.range_iota.start, offset) catch return error.Unsupported;
-                if (right_handle.range_iota.start == expected_right_start) {
-                    const value = try newRangeIotaValueWithParams(self, .managed, left.len + right.len, left_handle.range_iota.start, left_handle.range_iota.step);
+                const offset = std.math.mul(i64, numericArrayRangeIota(left_handle).step, left_len_i64) catch return error.Unsupported;
+                const expected_right_start = std.math.add(i64, numericArrayRangeIota(left_handle).start, offset) catch return error.Unsupported;
+                if (numericArrayRangeIota(right_handle).start == expected_right_start) {
+                    const value = try newRangeIotaValueWithParams(self, .managed, left.len + right.len, numericArrayRangeIota(left_handle).start, numericArrayRangeIota(left_handle).step);
                     return .{ .value = value, .len = left.len + right.len, .owned = true };
                 }
             }
@@ -3451,7 +3646,7 @@ fn concatNumericMatrixShape(self: *Session, left: Value, right: Value) KError!?N
 fn valueNumericBitSlice(value: Value) ?HostBitSlice {
     const array = hostDenseIfPresent(value) orelse return null;
     return switch (array.storage) {
-        .bit => |words| .{ .words = words, .len = array.logical_len },
+        .bit => |words| .{ .words = hostDenseLogicalBitWords(array, words), .len = array.logical_len },
         else => null,
     };
 }
@@ -3459,26 +3654,26 @@ fn valueNumericBitSlice(value: Value) ?HostBitSlice {
 fn tryConcatStructuredNumericMatrix(self: *Session, left: Value, right: Value, shape: NumericMatrixShape) KError!?Value {
     const left_handle = valueRangeIotaHandle(left) orelse return null;
     const right_handle = valueRangeIotaHandle(right) orelse return null;
-    if (left_handle.range_iota.step != right_handle.range_iota.step) return null;
+    if (numericArrayRangeIota(left_handle).step != numericArrayRangeIota(right_handle).step) return null;
     const left_len = numericFlatLen(left) orelse return null;
     const right_len = numericFlatLen(right) orelse return null;
     const total_len = left_len + right_len;
     const start = if (left_len != 0)
-        left_handle.range_iota.start
+        numericArrayRangeIota(left_handle).start
     else
-        right_handle.range_iota.start;
+        numericArrayRangeIota(right_handle).start;
     if (left_len != 0 and right_len != 0) {
         const left_len_i64 = std.math.cast(i64, left_len) orelse return error.Unsupported;
-        const offset = std.math.mul(i64, left_handle.range_iota.step, left_len_i64) catch return error.Unsupported;
-        const expected_right_start = std.math.add(i64, left_handle.range_iota.start, offset) catch return error.Unsupported;
-        if (right_handle.range_iota.start != expected_right_start) return null;
+        const offset = std.math.mul(i64, numericArrayRangeIota(left_handle).step, left_len_i64) catch return error.Unsupported;
+        const expected_right_start = std.math.add(i64, numericArrayRangeIota(left_handle).start, offset) catch return error.Unsupported;
+        if (numericArrayRangeIota(right_handle).start != expected_right_start) return null;
     }
     return try newRangeIotaValueWithShape(
         self,
         .managed,
         total_len,
         start,
-        left_handle.range_iota.step,
+        numericArrayRangeIota(left_handle).step,
         numericShapeSnapshotMatrix(shape.rows, shape.cols),
     );
 }
@@ -3488,8 +3683,8 @@ fn tryConcatFirstAxisSliceNumericMatrix(self: *Session, left: Value, right: Valu
     const right_handle = valueNumericHandle(right) orelse return null;
     if (!numericArrayIsFirstAxisSlice(left_handle) or !numericArrayIsFirstAxisSlice(right_handle)) return null;
 
-    const left_slice = left_handle.first_axis_slice orelse return error.Type;
-    const right_slice = right_handle.first_axis_slice orelse return error.Type;
+    const left_slice = numericArrayFirstAxisSlicePayload(left_handle) orelse return error.Type;
+    const right_slice = numericArrayFirstAxisSlicePayload(right_handle) orelse return error.Type;
     if (left_slice.source.raw != right_slice.source.raw) return null;
     if (left_slice.step != right_slice.step) return null;
 
@@ -3653,6 +3848,12 @@ fn bitWordCount(len: usize) usize {
     return if (len == 0) 0 else (len + host_bit_word_bits - 1) / host_bit_word_bits;
 }
 
+fn bitLowMask(bits: usize) u64 {
+    if (bits == 0) return 0;
+    if (bits >= host_bit_word_bits) return std.math.maxInt(u64);
+    return (@as(u64, 1) << @intCast(bits)) - 1;
+}
+
 fn bitTailMask(len: usize) u64 {
     const tail = len % host_bit_word_bits;
     if (tail == 0) return std.math.maxInt(u64);
@@ -3678,7 +3879,14 @@ fn bitSet(words: []u64, idx: usize, value: bool) void {
 
 fn bitClearUnusedTail(words: []u64, len: usize) void {
     if (words.len == 0) return;
-    words[words.len - 1] &= bitTailMask(len);
+    const used_words = bitWordCount(len);
+    if (used_words == 0) {
+        @memset(words, 0);
+        return;
+    }
+    std.debug.assert(used_words <= words.len);
+    words[used_words - 1] &= bitTailMask(len);
+    if (used_words < words.len) @memset(words[used_words..], 0);
 }
 
 fn bitFill(words: []u64, len: usize, value: bool) void {
@@ -3697,12 +3905,147 @@ fn bitWordMasked(words: []const u64, len: usize, word_idx: usize) u64 {
     return if (word_idx + 1 == words.len) word & bitTailMask(len) else word;
 }
 
+fn bitCountTrue(items: HostBitSlice) usize {
+    var total: usize = 0;
+    for (items.words, 0..) |_, word_idx| total += @popCount(bitWordMasked(items.words, items.len, word_idx));
+    return total;
+}
+
 fn bitWordsAllTrue(items: HostBitSlice) bool {
     for (items.words, 0..) |_, word_idx| {
         const expected = if (word_idx + 1 == items.words.len) bitTailMask(items.len) else std.math.maxInt(u64);
         if (bitWordMasked(items.words, items.len, word_idx) != expected) return false;
     }
     return true;
+}
+
+fn bitExtractWindow(words: []const u64, start: usize) u64 {
+    if (words.len == 0) return 0;
+    const word_idx = start / host_bit_word_bits;
+    if (word_idx >= words.len) return 0;
+    const bit_idx = start % host_bit_word_bits;
+    var out = words[word_idx] >> @intCast(bit_idx);
+    if (bit_idx != 0 and word_idx + 1 < words.len) {
+        out |= words[word_idx + 1] << @intCast(host_bit_word_bits - bit_idx);
+    }
+    return out;
+}
+
+fn bitWriteChunk(words: []u64, start: usize, len: usize, chunk_bits: u64) void {
+    if (len == 0) return;
+    std.debug.assert(len <= host_bit_word_bits);
+    const word_idx = start / host_bit_word_bits;
+    const bit_idx = start % host_bit_word_bits;
+    const mask = bitLowMask(len);
+    const bits = chunk_bits & mask;
+    words[word_idx] = (words[word_idx] & ~(mask << @intCast(bit_idx))) | (bits << @intCast(bit_idx));
+    if (bit_idx != 0) {
+        const first_len = host_bit_word_bits - bit_idx;
+        if (len > first_len) {
+            const spill_len = len - first_len;
+            const spill_mask = bitLowMask(spill_len);
+            words[word_idx + 1] = (words[word_idx + 1] & ~spill_mask) | ((bits >> @intCast(first_len)) & spill_mask);
+        }
+    }
+}
+
+fn bitFillRange(words: []u64, start: usize, len: usize, value: bool) void {
+    var remaining = len;
+    var dst_idx = start;
+    while (remaining != 0) {
+        const chunk_len = @min(remaining, host_bit_word_bits - (dst_idx % host_bit_word_bits));
+        bitWriteChunk(words, dst_idx, chunk_len, if (value) bitLowMask(chunk_len) else 0);
+        dst_idx += chunk_len;
+        remaining -= chunk_len;
+    }
+}
+
+fn bitCopyRange(dst_words: []u64, dst_start: usize, source: HostBitSlice, src_start: usize, len: usize) void {
+    var remaining = len;
+    var dst_idx = dst_start;
+    var src_idx = src_start;
+    while (remaining != 0) {
+        const chunk_len = @min(remaining, host_bit_word_bits - (dst_idx % host_bit_word_bits));
+        const chunk_bits = bitExtractWindow(source.words, src_idx) & bitLowMask(chunk_len);
+        bitWriteChunk(dst_words, dst_idx, chunk_len, chunk_bits);
+        dst_idx += chunk_len;
+        src_idx += chunk_len;
+        remaining -= chunk_len;
+    }
+}
+
+fn bitReverseInto(dst_words: []u64, source: HostBitSlice) void {
+    if (source.len == 0) return;
+    const tail = source.len % host_bit_word_bits;
+    if (tail == 0) {
+        for (0..source.words.len) |dst_word_idx| {
+            const src_word_idx = source.words.len - 1 - dst_word_idx;
+            dst_words[dst_word_idx] = @bitReverse(bitWordMasked(source.words, source.len, src_word_idx));
+        }
+        return;
+    }
+
+    const shift = host_bit_word_bits - tail;
+    for (0..source.words.len) |dst_word_idx| {
+        const hi_src_word_idx = source.words.len - 1 - dst_word_idx;
+        const hi = @bitReverse(bitWordMasked(source.words, source.len, hi_src_word_idx));
+        var word = hi >> @intCast(shift);
+        if (dst_word_idx + 1 < source.words.len) {
+            const lo_src_word_idx = hi_src_word_idx - 1;
+            const lo = @bitReverse(bitWordMasked(source.words, source.len, lo_src_word_idx));
+            word |= lo << @intCast(tail);
+        }
+        dst_words[dst_word_idx] = word;
+    }
+    bitClearUnusedTail(dst_words, source.len);
+}
+
+const BitDenseMetadata = struct {
+    flags: u8,
+    range: HostIntRange,
+};
+
+const BitSequenceStats = struct {
+    asc: bool = true,
+    dsc: bool = true,
+    saw_zero: bool = false,
+    saw_one: bool = false,
+    has_prev: bool = false,
+    prev: bool = false,
+
+    fn note(self: *BitSequenceStats, item: bool) void {
+        if (item) self.saw_one = true else self.saw_zero = true;
+        if (self.has_prev) {
+            if (@intFromBool(self.prev) > @intFromBool(item)) self.asc = false;
+            if (@intFromBool(self.prev) < @intFromBool(item)) self.dsc = false;
+        } else {
+            self.has_prev = true;
+        }
+        self.prev = item;
+    }
+
+    fn metadata(self: BitSequenceStats) BitDenseMetadata {
+        return .{
+            .flags = host_dense_flag_normalized | orderFlagsFromMonotonic(self.asc, self.dsc),
+            .range = .{
+                .min = if (!self.saw_one) 0 else if (self.saw_zero) 0 else 1,
+                .max = if (self.saw_one) 1 else 0,
+            },
+        };
+    }
+};
+
+fn analyzeBitSlice(items: HostBitSlice) BitDenseMetadata {
+    var stats = BitSequenceStats{};
+    for (items.words, 0..) |_, word_idx| {
+        var word = bitWordMasked(items.words, items.len, word_idx);
+        const active = bitWordActiveLen(items.len, word_idx, items.words.len);
+        for (0..active) |_| {
+            stats.note((word & 1) != 0);
+            word >>= 1;
+        }
+    }
+    return stats.metadata();
 }
 
 fn fillBitNotWords(out: []u64, items: HostBitSlice) void {
@@ -3826,7 +4169,7 @@ const HostBitAlloc = struct {
 };
 
 const BackendArray = struct {
-    header: HeapHeader align(64),
+    header: HeapHeader align(8),
     logical_handle: ?*NumericArray = null,
     backend_kind: mlx.BackendKind = switch (mlx.backend_kind) {
         .mlx => .mlx,
@@ -3906,6 +4249,32 @@ pub const DebugHostDenseDyadOp = enum {
 };
 const debug_host_dense_dyad_op_count = @typeInfo(DebugHostDenseDyadOp).@"enum".fields.len;
 
+pub const DebugCompactKGlobalCallFallbackReason = enum {
+    no_compact,
+    arity,
+    direct_mask,
+    other,
+};
+const debug_compact_k_global_call_fallback_reason_count = @typeInfo(DebugCompactKGlobalCallFallbackReason).@"enum".fields.len;
+
+pub const DebugCompactKGlobalCallFallbackKind = enum {
+    builtin,
+    closure,
+    array,
+    other,
+};
+const debug_compact_k_global_call_fallback_kind_count = @typeInfo(DebugCompactKGlobalCallFallbackKind).@"enum".fields.len;
+
+pub const DebugVmCall1LocalKind = enum {
+    local_local,
+    tail_local_local,
+    local_local_op,
+    tail_local_local_op,
+    local_local_op_const,
+    tail_local_local_op_const,
+};
+const debug_vm_call1_local_kind_count = @typeInfo(DebugVmCall1LocalKind).@"enum".fields.len;
+
 pub const DebugDenseEachMiss = enum {
     unsupported_base,
     non_dense_args_or_shape,
@@ -3968,26 +4337,30 @@ const NumericTransposeView = struct {
     source: Value,
 };
 
+const NumericStructural = union(NumericArrayStructuralTag) {
+    materialized: void,
+    range_iota: NumericRangeIota,
+    flat_slice: NumericFlatSlice,
+    flat_concat: NumericFlatConcat,
+    flat_segments: NumericFlatSegments,
+    first_axis_slice: NumericFirstAxisSlice,
+    first_axis_index: NumericFirstAxisIndex,
+    first_axis_concat: NumericFirstAxisConcat,
+    reshape_view: NumericReshapeView,
+    transpose_view: NumericTransposeView,
+};
+
 const NumericArray = struct {
-    header: HeapHeader align(64),
-    preferred: NumericArrayPreferred,
-    structural: NumericArrayStructuralTag = .materialized,
-    rank: u8 = 0,
-    shape: [numeric_array_max_rank]i32 = [_]i32{0} ** numeric_array_max_rank,
-    range_iota: NumericRangeIota = .{},
-    flat_slice: ?NumericFlatSlice = null,
-    flat_concat: ?NumericFlatConcat = null,
-    flat_segments: ?NumericFlatSegments = null,
-    first_axis_slice: ?NumericFirstAxisSlice = null,
-    first_axis_index: ?NumericFirstAxisIndex = null,
-    first_axis_concat: ?NumericFirstAxisConcat = null,
-    reshape_view: ?NumericReshapeView = null,
-    transpose_view: ?NumericTransposeView = null,
+    header: HeapHeader align(8),
     host: ?*HostDenseArray = null,
     mlx: ?*BackendArray = null,
+    preferred: NumericArrayPreferred,
+    rank: u8 = 0,
+    tracked_in_session: bool = false,
+    shape: [numeric_array_max_rank]i32 = [_]i32{0} ** numeric_array_max_rank,
+    structural: NumericStructural = .{ .materialized = {} },
     registry_prev: ?*NumericArray = null,
     registry_next: ?*NumericArray = null,
-    tracked_in_session: bool = false,
     last_host_touch: usize = 0,
     last_mlx_touch: usize = 0,
 
@@ -4013,16 +4386,61 @@ const NumericArray = struct {
     }
 };
 
-const CaptureSource = union(enum) {
-    local: u16,
-    inline_local: u16,
-    capture: u16,
+pub const DebugRuntimeLayoutFacts = struct {
+    value_size: usize,
+    value_align: usize,
+    heap_header_size: usize,
+    heap_header_align: usize,
+    host_text_size: usize,
+    host_text_align: usize,
+    host_string_view_size: usize,
+    host_string_view_align: usize,
+    host_string_list_size: usize,
+    host_string_list_align: usize,
+    host_dense_array_size: usize,
+    host_dense_array_align: usize,
+    host_boxed_array_size: usize,
+    host_boxed_array_align: usize,
+    backend_array_size: usize,
+    backend_array_align: usize,
+    numeric_array_size: usize,
+    numeric_array_align: usize,
 };
 
-const LambdaTemplate = struct {
-    code: *const Code,
-    captures: []const CaptureSource,
-};
+pub fn debugRuntimeLayoutFacts() DebugRuntimeLayoutFacts {
+    return .{
+        .value_size = @sizeOf(Value),
+        .value_align = @alignOf(Value),
+        .heap_header_size = @sizeOf(HeapHeader),
+        .heap_header_align = @alignOf(HeapHeader),
+        .host_text_size = @sizeOf(HostText),
+        .host_text_align = @alignOf(HostText),
+        .host_string_view_size = @sizeOf(HostStringView),
+        .host_string_view_align = @alignOf(HostStringView),
+        .host_string_list_size = @sizeOf(HostStringList),
+        .host_string_list_align = @alignOf(HostStringList),
+        .host_dense_array_size = @sizeOf(HostDenseArray),
+        .host_dense_array_align = @alignOf(HostDenseArray),
+        .host_boxed_array_size = @sizeOf(HostBoxedArray),
+        .host_boxed_array_align = @alignOf(HostBoxedArray),
+        .backend_array_size = @sizeOf(BackendArray),
+        .backend_array_align = @alignOf(BackendArray),
+        .numeric_array_size = @sizeOf(NumericArray),
+        .numeric_array_align = @alignOf(NumericArray),
+    };
+}
+
+comptime {
+    const facts = debugRuntimeLayoutFacts();
+    if (facts.value_size != 8) @compileError("Value must remain one machine word.");
+    if (facts.host_text_align != 8) @compileError("HostText should use natural 8-byte heap object alignment.");
+    if (facts.host_string_view_align != 8) @compileError("HostStringView should use natural 8-byte heap object alignment.");
+    if (facts.host_string_list_align != 8) @compileError("HostStringList should use natural 8-byte heap object alignment.");
+    if (facts.host_dense_array_align != 8) @compileError("HostDenseArray should use natural 8-byte heap object alignment.");
+    if (facts.host_boxed_array_align != 8) @compileError("HostBoxedArray should use natural 8-byte heap object alignment.");
+    if (facts.backend_array_align != 8) @compileError("BackendArray should use natural 8-byte heap object alignment.");
+    if (facts.numeric_array_align != 8) @compileError("NumericArray should use natural 8-byte heap object alignment.");
+}
 
 const CompileMode = enum {
     frozen,
@@ -4053,81 +4471,81 @@ const Op = enum(u8) {
     const_builtin,
     load_global,
     store_global,
+    modify_global,
+    modify_global_const,
     load_local,
     store_local,
+    modify_local,
+    modify_local_const,
     store_local_add_local_const,
     store_local_sub_local_const,
     store_local_mul_local_const,
+    assign_index_global,
+    assign_index_global_sources,
+    assign_index_local,
+    assign_index_local_sources,
+    assign_index_inline_local,
     take_local,
     load_inline_local,
     take_inline_local,
-    load_capture,
+    modify_inline_local,
     add_local_local,
     add_inline_local_local,
-    add_capture_local,
-    add_local_capture,
-    add_capture_inline_local,
-    add_inline_local_capture,
     add_const_local,
     add_local_const,
     add_const_inline_local,
     add_inline_local_const,
-    add_const_capture,
-    add_capture_const,
     sub_local_local,
     sub_inline_local_local,
-    sub_capture_local,
-    sub_local_capture,
-    sub_capture_inline_local,
-    sub_inline_local_capture,
     sub_const_local,
     sub_local_const,
     sub_const_inline_local,
     sub_inline_local_const,
-    sub_const_capture,
-    sub_capture_const,
     mul_local_local,
     mul_inline_local_local,
-    mul_capture_local,
-    mul_local_capture,
-    mul_capture_inline_local,
-    mul_inline_local_capture,
     mul_const_local,
     mul_local_const,
     mul_const_inline_local,
     mul_inline_local_const,
-    mul_const_capture,
-    mul_capture_const,
+    minimum_local_local,
+    maximum_local_local,
+    less_local_local,
+    more_local_local,
+    equal_local_local,
+    minimum_local_const,
+    maximum_local_const,
+    less_local_const,
+    more_local_const,
+    equal_local_const,
+    minimum_const_local,
+    maximum_const_local,
+    less_const_local,
+    more_const_local,
+    equal_const_local,
     neg_local,
     neg_inline_local,
-    neg_capture,
     sqrt_local,
     sqrt_inline_local,
-    sqrt_capture,
     call1_local_local,
     tail_call1_local_local,
+    call1_local_local_op,
+    tail_call1_local_local_op,
+    call1_local_local_op_const,
+    tail_call1_local_local_op_const,
     call1_inline_local_local,
     inline_call_add2,
     inline_call_add_global,
     inline_call_add_arg_global,
-    inline_call_add_capture,
-    inline_call_add_arg_capture,
     inline_call_sub2,
     inline_call_sub_global,
     inline_call_sub_arg_global,
-    inline_call_sub_capture,
-    inline_call_sub_arg_capture,
     inline_call_mul2,
     inline_call_mul_global,
     inline_call_mul_arg_global,
-    inline_call_mul_capture,
-    inline_call_mul_arg_capture,
     inline_call_negate1,
     inline_call_negate_global,
-    inline_call_negate_capture,
     inline_call_sqrt1,
     inline_call_sqrt_global,
-    inline_call_sqrt_capture,
     inline_call_argmax1,
     add,
     sub,
@@ -4198,11 +4616,13 @@ const Op = enum(u8) {
     enter_inline,
     leave_inline,
     make_vector,
-    make_lambda,
     make_adverb,
     make_projection,
     jump,
     jump_if_false,
+    jump_if_false_equal_local_const,
+    jump_if_false_less_local_const,
+    jump_if_false_more_local_const,
     call_global,
     call_global1,
     call_global2,
@@ -4210,11 +4630,14 @@ const Op = enum(u8) {
     call_global4,
     call_global_slots,
     call_global_slots_store_local,
+    index_global_source,
+    index_global_source_store_local,
     tail_call_global1,
     tail_call_global2,
     tail_call_global3,
     tail_call_global4,
     tail_call_global_slots,
+    tail_index_global_source,
     call1,
     call2,
     tail_call1,
@@ -4231,9 +4654,13 @@ pub const DebugOp = Op;
 const GlobalCallArgKind = enum(u7) {
     local,
     const_int,
+    const_false,
+    const_true,
     local_add_const,
     local_sub_const,
     local_mul_const,
+    local_local_op,
+    local_local_const_op,
 };
 
 const global_call_arg_consume_bit: u8 = 0x80;
@@ -4295,6 +4722,7 @@ const sampling_profile_code_id_derived_scan: u16 = 3;
 const sampling_profile_code_id_derived_each_right: u16 = 4;
 const sampling_profile_code_id_derived_each_left: u16 = 5;
 const sampling_profile_code_id_derived_each_prior: u16 = 6;
+
 const sampling_profile_code_id_derived_grad: u16 = 7;
 const sampling_profile_code_id_derived_valuegrad: u16 = 8;
 const sampling_profile_code_id_projection: u16 = 9;
@@ -4366,19 +4794,18 @@ const AmendMode = enum(u8) {
 pub const Code = struct {
     arity: u8,
     frame_slot_count: u8 = 0,
+    operand_stack_slot_count: u8 = 0,
     bytes: []const u8,
-    globals: []const u16,
-    templates: []const *const LambdaTemplate,
     constants: []const Value,
+    compact_k: ?*const CompactKCode = null,
     direct_closure_mask: u8 = 0,
+    references_globals: bool = false,
     profile_id: u16 = sampling_profile_no_code,
     profile_kind: SamplingProfileCodeKind = .none,
     profile_source: []const u8 = "",
 };
 
 const empty_code_bytes = &[_]u8{};
-const empty_code_globals = &[_]u16{};
-const empty_code_templates = &[_]*const LambdaTemplate{};
 const empty_code_constants = &[_]Value{};
 
 const derived_each_bytes = &[_]u8{0};
@@ -4408,14 +4835,29 @@ fn classifyDirectClosureMask(bytes: []const u8) u8 {
         .add_local_const,
         .sub_local_const,
         .mul_local_const,
+        .minimum_local_const,
+        .maximum_local_const,
+        .less_local_const,
+        .more_local_const,
+        .equal_local_const,
         .add_const_local,
         .sub_const_local,
         .mul_const_local,
+        .minimum_const_local,
+        .maximum_const_local,
+        .less_const_local,
+        .more_const_local,
+        .equal_const_local,
         .tail_call_global1,
         => mask |= directClosureMaskBit(1),
         .add_local_local,
         .sub_local_local,
         .mul_local_local,
+        .minimum_local_local,
+        .maximum_local_local,
+        .less_local_local,
+        .more_local_local,
+        .equal_local_local,
         .tail_call_global2,
         => mask |= directClosureMaskBit(2),
         else => {},
@@ -4425,12 +4867,1210 @@ fn classifyDirectClosureMask(bytes: []const u8) u8 {
     return mask;
 }
 
+inline fn staticFrameSlotCount(code: *const Code) usize {
+    const slot_count: u8 = if (code.frame_slot_count == 0 and code.arity != 0) code.arity else code.frame_slot_count;
+    return slot_count;
+}
+
+inline fn staticActivationSlotCount(code: *const Code) usize {
+    return staticFrameSlotCount(code) + @as(usize, code.operand_stack_slot_count);
+}
+
+fn readByteFromCode(bytes: []const u8, ip: *usize) ?u8 {
+    if (ip.* >= bytes.len) return null;
+    const value = bytes[ip.*];
+    ip.* += 1;
+    return value;
+}
+
+fn readU16FromCode(bytes: []const u8, ip: *usize) ?usize {
+    const lo = readByteFromCode(bytes, ip) orelse return null;
+    const hi = readByteFromCode(bytes, ip) orelse return null;
+    return @as(usize, lo) | (@as(usize, hi) << 8);
+}
+
+fn readI64FromCode(bytes: []const u8, ip: *usize) ?i64 {
+    const end = ip.* + 8;
+    if (end > bytes.len) return null;
+    var raw: u64 = 0;
+    var idx: usize = 0;
+    while (idx < 8) : (idx += 1) {
+        raw |= @as(u64, bytes[ip.* + idx]) << @intCast(idx * 8);
+    }
+    ip.* = end;
+    return @bitCast(raw);
+}
+
+fn skipGlobalCallArgSource(bytes: []const u8, ip: *usize) bool {
+    const encoded = readByteFromCode(bytes, ip) orelse return false;
+    const kind = std.meta.intToEnum(GlobalCallArgKind, encoded & ~global_call_arg_consume_bit) catch return false;
+    switch (kind) {
+        .local => _ = readByteFromCode(bytes, ip) orelse return false,
+        .const_int => _ = readI64FromCode(bytes, ip) orelse return false,
+        .const_false, .const_true => {},
+        .local_add_const, .local_sub_const, .local_mul_const => {
+            _ = readByteFromCode(bytes, ip) orelse return false;
+            _ = readI64FromCode(bytes, ip) orelse return false;
+        },
+        .local_local_op => {
+            _ = readByteFromCode(bytes, ip) orelse return false;
+            _ = readByteFromCode(bytes, ip) orelse return false;
+            _ = readByteFromCode(bytes, ip) orelse return false;
+        },
+        .local_local_const_op => {
+            _ = readByteFromCode(bytes, ip) orelse return false;
+            _ = readByteFromCode(bytes, ip) orelse return false;
+            _ = readByteFromCode(bytes, ip) orelse return false;
+            _ = readByteFromCode(bytes, ip) orelse return false;
+            _ = readI64FromCode(bytes, ip) orelse return false;
+        },
+    }
+    return true;
+}
+
+const CompactKCode = struct {
+    arity: u8,
+    local_count: u8,
+    max_stack: u8,
+    bytes: []const u8,
+    constants: []const Value,
+    profile_id: u16 = sampling_profile_no_code,
+    profile_source: []const u8 = "",
+};
+
+const ck_load_local_base: u8 = 0x00;
+const ck_store_local_base: u8 = 0x10;
+const ck_take_local_base: u8 = 0x20;
+const ck_const_value_base: u8 = 0x30;
+const ck_range_width: u8 = 0x10;
+const ck_const_range_width: u8 = 0x20;
+
+const ck_const_i8: u8 = 0x80;
+const ck_const_i64: u8 = 0x81;
+const ck_const_value_u8: u8 = 0x82;
+const ck_const_false: u8 = 0x83;
+const ck_const_true: u8 = 0x84;
+const ck_discard: u8 = 0x85;
+const ck_return: u8 = 0x86;
+const ck_jump_u8: u8 = 0x87;
+const ck_jump_if_false_u8: u8 = 0x88;
+const ck_jump_if_false_equal_local_const_i64: u8 = 0x89;
+const ck_jump_if_false_less_local_const_i64: u8 = 0x8a;
+const ck_jump_if_false_more_local_const_i64: u8 = 0x8b;
+const ck_load_global_u8: u8 = 0x8c;
+const ck_store_global_u8: u8 = 0x8d;
+const ck_modify_global_const_i64: u8 = 0x8e;
+const ck_assign_index_global_sources_u8: u8 = 0x8f;
+const ck_index_global_source_u8: u8 = 0x90;
+const ck_index_global_source_store_local_u8: u8 = 0x91;
+const ck_call_global_slots_u8: u8 = 0x92;
+const ck_call_global_slots_store_local_u8: u8 = 0x93;
+const ck_tail_call_global_slots_u8: u8 = 0x94;
+const ck_tail_index_global_source_u8: u8 = 0x95;
+const ck_add_local_local: u8 = 0x96;
+const ck_sub_local_local: u8 = 0x97;
+const ck_mul_local_local: u8 = 0x98;
+const ck_less_local_local: u8 = 0x99;
+const ck_more_local_local: u8 = 0x9a;
+const ck_equal_local_local: u8 = 0x9b;
+const ck_add_local_const_i64: u8 = 0x9c;
+const ck_sub_local_const_i64: u8 = 0x9d;
+const ck_mul_local_const_i64: u8 = 0x9e;
+const ck_less_local_const_i64: u8 = 0x9f;
+const ck_more_local_const_i64: u8 = 0xa0;
+const ck_equal_local_const_i64: u8 = 0xa1;
+const ck_add_const_local_i64: u8 = 0xa2;
+const ck_sub_const_local_i64: u8 = 0xa3;
+const ck_less_const_local_i64: u8 = 0xa4;
+const ck_more_const_local_i64: u8 = 0xa5;
+const ck_equal_const_local_i64: u8 = 0xa6;
+const ck_store_local_add_local_const_i64: u8 = 0xa7;
+const ck_store_local_sub_local_const_i64: u8 = 0xa8;
+const ck_store_local_mul_local_const_i64: u8 = 0xa9;
+const ck_less: u8 = 0xaa;
+const ck_more: u8 = 0xab;
+const ck_equal: u8 = 0xac;
+const ck_add: u8 = 0xad;
+const ck_sub: u8 = 0xae;
+const ck_mul: u8 = 0xaf;
+const ck_assign_index_global_stack_u8: u8 = 0xb0;
+const ck_assign_index_local_sources_u8: u8 = 0xb1;
+const ck_assign_index_local_stack_u8: u8 = 0xb2;
+const ck_index_local_source_u8: u8 = 0xb3;
+const ck_tail_index_local_source_u8: u8 = 0xb4;
+const ck_minimum_local_local: u8 = 0xb5;
+const ck_maximum_local_local: u8 = 0xb6;
+const ck_minimum_local_const_i64: u8 = 0xb7;
+const ck_maximum_local_const_i64: u8 = 0xb8;
+const ck_minimum_const_local_i64: u8 = 0xb9;
+const ck_maximum_const_local_i64: u8 = 0xba;
+const ck_minimum: u8 = 0xbb;
+const ck_maximum: u8 = 0xbc;
+const ck_div: u8 = 0xbd;
+const ck_floor: u8 = 0xbe;
+const ck_iota: u8 = 0xbf;
+const ck_call_global_stack_u8: u8 = 0xc0;
+const ck_tail_call_global_stack_u8: u8 = 0xc1;
+
+const compact_k_no_offset = std.math.maxInt(u16);
+
+inline fn compactFitsLocal(slot: usize) bool {
+    return slot < ck_range_width;
+}
+
+inline fn compactFitsGlobal(slot: usize) bool {
+    return slot <= std.math.maxInt(u8);
+}
+
+inline fn compactFitsConstSlot(slot: usize) bool {
+    return slot < ck_const_range_width;
+}
+
+fn compactArgSourceLen(bytes: []const u8, ip: *usize) ?usize {
+    const start = ip.*;
+    if (!skipGlobalCallArgSource(bytes, ip)) return null;
+    return ip.* - start;
+}
+
+fn compactEncodedLenForOp(bytes: []const u8, ip: *usize, op: Op) ?usize {
+    switch (op) {
+        .const_int => {
+            const value = readI64FromCode(bytes, ip) orelse return null;
+            return if (value >= -128 and value <= 127) 2 else 9;
+        },
+        .const_value => {
+            const slot = readByteFromCode(bytes, ip) orelse return null;
+            return if (compactFitsConstSlot(slot)) 1 else 2;
+        },
+        .const_false, .const_true, .discard, .@"return", .less, .more, .equal, .add, .sub, .mul, .div, .minimum, .maximum, .floor, .iota => return 1,
+        .load_local, .store_local, .take_local => {
+            const slot = readByteFromCode(bytes, ip) orelse return null;
+            return if (compactFitsLocal(slot)) 1 else null;
+        },
+        .load_global, .store_global => {
+            const slot = readU16FromCode(bytes, ip) orelse return null;
+            return if (compactFitsGlobal(slot)) 2 else null;
+        },
+        .modify_global_const => {
+            const slot = readU16FromCode(bytes, ip) orelse return null;
+            _ = readByteFromCode(bytes, ip) orelse return null;
+            _ = readWantResultFromCode(bytes, ip) orelse return null;
+            _ = readI64FromCode(bytes, ip) orelse return null;
+            return if (compactFitsGlobal(slot)) 12 else null;
+        },
+        .assign_index_global_sources => {
+            const slot = readU16FromCode(bytes, ip) orelse return null;
+            _ = readByteFromCode(bytes, ip) orelse return null;
+            _ = readByteFromCode(bytes, ip) orelse return null;
+            _ = readWantResultFromCode(bytes, ip) orelse return null;
+            const selector_len = compactArgSourceLen(bytes, ip) orelse return null;
+            const rhs_len = compactArgSourceLen(bytes, ip) orelse return null;
+            return if (compactFitsGlobal(slot)) 5 + selector_len + rhs_len else null;
+        },
+        .assign_index_local_sources => {
+            const slot = readByteFromCode(bytes, ip) orelse return null;
+            _ = readByteFromCode(bytes, ip) orelse return null;
+            _ = readByteFromCode(bytes, ip) orelse return null;
+            _ = readWantResultFromCode(bytes, ip) orelse return null;
+            const selector_len = compactArgSourceLen(bytes, ip) orelse return null;
+            const rhs_len = compactArgSourceLen(bytes, ip) orelse return null;
+            return if (compactFitsLocal(slot)) 5 + selector_len + rhs_len else null;
+        },
+        .assign_index_global => {
+            const slot = readU16FromCode(bytes, ip) orelse return null;
+            _ = readByteFromCode(bytes, ip) orelse return null;
+            _ = readByteFromCode(bytes, ip) orelse return null;
+            _ = readWantResultFromCode(bytes, ip) orelse return null;
+            return if (compactFitsGlobal(slot)) 5 else null;
+        },
+        .assign_index_local => {
+            const slot = readByteFromCode(bytes, ip) orelse return null;
+            _ = readByteFromCode(bytes, ip) orelse return null;
+            _ = readByteFromCode(bytes, ip) orelse return null;
+            _ = readWantResultFromCode(bytes, ip) orelse return null;
+            return if (compactFitsLocal(slot)) 5 else null;
+        },
+        .index_global_source, .tail_index_global_source => {
+            const slot = readU16FromCode(bytes, ip) orelse return null;
+            const source_len = compactArgSourceLen(bytes, ip) orelse return null;
+            return if (compactFitsGlobal(slot)) 2 + source_len else null;
+        },
+        .call1_local_local, .tail_call1_local_local => {
+            const callee = readByteFromCode(bytes, ip) orelse return null;
+            const selector = readByteFromCode(bytes, ip) orelse return null;
+            return if (compactFitsLocal(callee) and compactFitsLocal(selector)) 4 else null;
+        },
+        .call1_local_local_op, .tail_call1_local_local_op => {
+            const callee = readByteFromCode(bytes, ip) orelse return null;
+            _ = readByteFromCode(bytes, ip) orelse return null;
+            const left = readByteFromCode(bytes, ip) orelse return null;
+            const right = readByteFromCode(bytes, ip) orelse return null;
+            return if (compactFitsLocal(callee) and compactFitsLocal(left) and compactFitsLocal(right)) 6 else null;
+        },
+        .call1_local_local_op_const, .tail_call1_local_local_op_const => {
+            const callee = readByteFromCode(bytes, ip) orelse return null;
+            _ = readByteFromCode(bytes, ip) orelse return null;
+            const left = readByteFromCode(bytes, ip) orelse return null;
+            const right = readByteFromCode(bytes, ip) orelse return null;
+            _ = readByteFromCode(bytes, ip) orelse return null;
+            _ = readI64FromCode(bytes, ip) orelse return null;
+            return if (compactFitsLocal(callee) and compactFitsLocal(left) and compactFitsLocal(right)) 15 else null;
+        },
+        .index_global_source_store_local => {
+            const slot = readU16FromCode(bytes, ip) orelse return null;
+            const source_len = compactArgSourceLen(bytes, ip) orelse return null;
+            const dst = readByteFromCode(bytes, ip) orelse return null;
+            return if (compactFitsGlobal(slot) and compactFitsLocal(dst)) 3 + source_len else null;
+        },
+        .call_global_slots, .tail_call_global_slots => {
+            const slot = readU16FromCode(bytes, ip) orelse return null;
+            const argc = readByteFromCode(bytes, ip) orelse return null;
+            if (argc == 0 or argc > max_shaped_call_args) return null;
+            var total: usize = 3;
+            var idx: u8 = 0;
+            while (idx < argc) : (idx += 1) total += compactArgSourceLen(bytes, ip) orelse return null;
+            return if (compactFitsGlobal(slot)) total else null;
+        },
+        .call_global1, .call_global2, .call_global3, .call_global4, .tail_call_global1, .tail_call_global2, .tail_call_global3, .tail_call_global4 => {
+            const slot = readU16FromCode(bytes, ip) orelse return null;
+            return if (compactFitsGlobal(slot)) 3 else null;
+        },
+        .call_global_slots_store_local => {
+            const slot = readU16FromCode(bytes, ip) orelse return null;
+            const argc = readByteFromCode(bytes, ip) orelse return null;
+            if (argc == 0 or argc > max_shaped_call_args) return null;
+            var total: usize = 4;
+            var idx: u8 = 0;
+            while (idx < argc) : (idx += 1) total += compactArgSourceLen(bytes, ip) orelse return null;
+            const dst = readByteFromCode(bytes, ip) orelse return null;
+            return if (compactFitsGlobal(slot) and compactFitsLocal(dst)) total else null;
+        },
+        .jump => {
+            _ = readU16FromCode(bytes, ip) orelse return null;
+            return 2;
+        },
+        .jump_if_false => {
+            _ = readU16FromCode(bytes, ip) orelse return null;
+            return 2;
+        },
+        .jump_if_false_equal_local_const,
+        .jump_if_false_less_local_const,
+        .jump_if_false_more_local_const,
+        => {
+            const slot = readByteFromCode(bytes, ip) orelse return null;
+            _ = readI64FromCode(bytes, ip) orelse return null;
+            _ = readU16FromCode(bytes, ip) orelse return null;
+            return if (compactFitsLocal(slot)) 11 else null;
+        },
+        .add_local_local, .sub_local_local, .mul_local_local, .minimum_local_local, .maximum_local_local, .less_local_local, .more_local_local, .equal_local_local => {
+            const left = readByteFromCode(bytes, ip) orelse return null;
+            const right = readByteFromCode(bytes, ip) orelse return null;
+            return if (compactFitsLocal(left) and compactFitsLocal(right)) 3 else null;
+        },
+        .add_local_const, .sub_local_const, .mul_local_const, .minimum_local_const, .maximum_local_const, .less_local_const, .more_local_const, .equal_local_const => {
+            const slot = readByteFromCode(bytes, ip) orelse return null;
+            _ = readI64FromCode(bytes, ip) orelse return null;
+            return if (compactFitsLocal(slot)) 10 else null;
+        },
+        .add_const_local, .sub_const_local, .minimum_const_local, .maximum_const_local, .less_const_local, .more_const_local, .equal_const_local => {
+            _ = readI64FromCode(bytes, ip) orelse return null;
+            const slot = readByteFromCode(bytes, ip) orelse return null;
+            return if (compactFitsLocal(slot)) 10 else null;
+        },
+        .store_local_add_local_const, .store_local_sub_local_const, .store_local_mul_local_const => {
+            const dst = readByteFromCode(bytes, ip) orelse return null;
+            const src = readByteFromCode(bytes, ip) orelse return null;
+            _ = readI64FromCode(bytes, ip) orelse return null;
+            return if (compactFitsLocal(dst) and compactFitsLocal(src)) 11 else null;
+        },
+        else => return null,
+    }
+}
+
+fn compactWriteByte(out: *[max_body_bytes]u8, len: *usize, value: u8) ?void {
+    if (len.* >= out.len) return null;
+    out[len.*] = value;
+    len.* += 1;
+}
+
+fn compactWriteI64(out: *[max_body_bytes]u8, len: *usize, value: i64) ?void {
+    const raw: u64 = @bitCast(value);
+    var idx: usize = 0;
+    while (idx < 8) : (idx += 1) compactWriteByte(out, len, @intCast((raw >> @intCast(idx * 8)) & 0xff)) orelse return null;
+}
+
+fn compactCopyArgSource(out: *[max_body_bytes]u8, out_len: *usize, bytes: []const u8, ip: *usize) ?void {
+    const start = ip.*;
+    const len = compactArgSourceLen(bytes, ip) orelse return null;
+    var idx: usize = 0;
+    while (idx < len) : (idx += 1) compactWriteByte(out, out_len, bytes[start + idx]) orelse return null;
+}
+
+fn compactWriteGlobalCallArgSource(out: *[max_body_bytes]u8, out_len: *usize, arg: GlobalCallArgSource) ?void {
+    switch (arg) {
+        .local => |value| {
+            compactWriteByte(out, out_len, global_call_arg_kind_byte(.local, value.consume)) orelse return null;
+            compactWriteByte(out, out_len, value.slot) orelse return null;
+        },
+        .const_int => |value| {
+            compactWriteByte(out, out_len, global_call_arg_kind_byte(.const_int, false)) orelse return null;
+            compactWriteI64(out, out_len, value) orelse return null;
+        },
+        .const_bool => |value| compactWriteByte(out, out_len, global_call_arg_kind_byte(if (value) .const_true else .const_false, false)) orelse return null,
+        .local_const_op => |value| {
+            const kind: GlobalCallArgKind = switch (value.op) {
+                .add => .local_add_const,
+                .sub => .local_sub_const,
+                .mul => .local_mul_const,
+                else => return null,
+            };
+            compactWriteByte(out, out_len, global_call_arg_kind_byte(kind, value.consume)) orelse return null;
+            compactWriteByte(out, out_len, value.slot) orelse return null;
+            compactWriteI64(out, out_len, value.const_value) orelse return null;
+        },
+        .local_local_op => |value| {
+            compactWriteByte(out, out_len, global_call_arg_kind_byte(.local_local_op, false)) orelse return null;
+            compactWriteByte(out, out_len, @intFromEnum(value.op)) orelse return null;
+            compactWriteByte(out, out_len, value.left_slot) orelse return null;
+            compactWriteByte(out, out_len, value.right_slot) orelse return null;
+        },
+        .local_local_const_op => |value| {
+            compactWriteByte(out, out_len, global_call_arg_kind_byte(.local_local_const_op, false)) orelse return null;
+            compactWriteByte(out, out_len, @intFromEnum(value.op)) orelse return null;
+            compactWriteByte(out, out_len, value.left_slot) orelse return null;
+            compactWriteByte(out, out_len, value.right_slot) orelse return null;
+            compactWriteByte(out, out_len, @intFromEnum(value.const_op)) orelse return null;
+            compactWriteI64(out, out_len, value.const_value) orelse return null;
+        },
+    }
+}
+
+fn compactMappedTarget(offset_map: []const u16, old_target: usize) ?u8 {
+    if (old_target >= offset_map.len) return null;
+    const mapped = offset_map[old_target];
+    if (mapped == compact_k_no_offset or mapped > std.math.maxInt(u8)) return null;
+    return @intCast(mapped);
+}
+
+fn compactEmitOp(out: *[max_body_bytes]u8, out_len: *usize, bytes: []const u8, ip: *usize, op: Op, offset_map: []const u16) ?void {
+    switch (op) {
+        .const_int => {
+            const value = readI64FromCode(bytes, ip) orelse return null;
+            if (value >= -128 and value <= 127) {
+                compactWriteByte(out, out_len, ck_const_i8) orelse return null;
+                compactWriteByte(out, out_len, @bitCast(@as(i8, @intCast(value)))) orelse return null;
+            } else {
+                compactWriteByte(out, out_len, ck_const_i64) orelse return null;
+                compactWriteI64(out, out_len, value) orelse return null;
+            }
+        },
+        .const_value => {
+            const slot = readByteFromCode(bytes, ip) orelse return null;
+            if (compactFitsConstSlot(slot)) {
+                compactWriteByte(out, out_len, ck_const_value_base + slot) orelse return null;
+            } else {
+                compactWriteByte(out, out_len, ck_const_value_u8) orelse return null;
+                compactWriteByte(out, out_len, slot) orelse return null;
+            }
+        },
+        .const_false => compactWriteByte(out, out_len, ck_const_false) orelse return null,
+        .const_true => compactWriteByte(out, out_len, ck_const_true) orelse return null,
+        .discard => compactWriteByte(out, out_len, ck_discard) orelse return null,
+        .@"return" => compactWriteByte(out, out_len, ck_return) orelse return null,
+        .load_local => {
+            const slot = readByteFromCode(bytes, ip) orelse return null;
+            if (!compactFitsLocal(slot)) return null;
+            compactWriteByte(out, out_len, ck_load_local_base + slot) orelse return null;
+        },
+        .store_local => {
+            const slot = readByteFromCode(bytes, ip) orelse return null;
+            if (!compactFitsLocal(slot)) return null;
+            compactWriteByte(out, out_len, ck_store_local_base + slot) orelse return null;
+        },
+        .take_local => {
+            const slot = readByteFromCode(bytes, ip) orelse return null;
+            if (!compactFitsLocal(slot)) return null;
+            compactWriteByte(out, out_len, ck_take_local_base + slot) orelse return null;
+        },
+        .load_global, .store_global => {
+            const slot = readU16FromCode(bytes, ip) orelse return null;
+            if (!compactFitsGlobal(slot)) return null;
+            compactWriteByte(out, out_len, if (op == .load_global) ck_load_global_u8 else ck_store_global_u8) orelse return null;
+            compactWriteByte(out, out_len, @intCast(slot)) orelse return null;
+        },
+        .modify_global_const => {
+            const slot = readU16FromCode(bytes, ip) orelse return null;
+            const builtin = readByteFromCode(bytes, ip) orelse return null;
+            const want_result = readWantResultFromCode(bytes, ip) orelse return null;
+            const rhs = readI64FromCode(bytes, ip) orelse return null;
+            if (!compactFitsGlobal(slot)) return null;
+            compactWriteByte(out, out_len, ck_modify_global_const_i64) orelse return null;
+            compactWriteByte(out, out_len, @intCast(slot)) orelse return null;
+            compactWriteByte(out, out_len, builtin) orelse return null;
+            compactWriteByte(out, out_len, @intFromBool(want_result)) orelse return null;
+            compactWriteI64(out, out_len, rhs) orelse return null;
+        },
+        .assign_index_global_sources => {
+            const slot = readU16FromCode(bytes, ip) orelse return null;
+            const mode = readByteFromCode(bytes, ip) orelse return null;
+            const builtin = readByteFromCode(bytes, ip) orelse return null;
+            const want_result = readWantResultFromCode(bytes, ip) orelse return null;
+            if (!compactFitsGlobal(slot)) return null;
+            compactWriteByte(out, out_len, ck_assign_index_global_sources_u8) orelse return null;
+            compactWriteByte(out, out_len, @intCast(slot)) orelse return null;
+            compactWriteByte(out, out_len, mode) orelse return null;
+            compactWriteByte(out, out_len, builtin) orelse return null;
+            compactWriteByte(out, out_len, @intFromBool(want_result)) orelse return null;
+            compactCopyArgSource(out, out_len, bytes, ip) orelse return null;
+            compactCopyArgSource(out, out_len, bytes, ip) orelse return null;
+        },
+        .assign_index_local_sources => {
+            const slot = readByteFromCode(bytes, ip) orelse return null;
+            const mode = readByteFromCode(bytes, ip) orelse return null;
+            const builtin = readByteFromCode(bytes, ip) orelse return null;
+            const want_result = readWantResultFromCode(bytes, ip) orelse return null;
+            if (!compactFitsLocal(slot)) return null;
+            compactWriteByte(out, out_len, ck_assign_index_local_sources_u8) orelse return null;
+            compactWriteByte(out, out_len, slot) orelse return null;
+            compactWriteByte(out, out_len, mode) orelse return null;
+            compactWriteByte(out, out_len, builtin) orelse return null;
+            compactWriteByte(out, out_len, @intFromBool(want_result)) orelse return null;
+            compactCopyArgSource(out, out_len, bytes, ip) orelse return null;
+            compactCopyArgSource(out, out_len, bytes, ip) orelse return null;
+        },
+        .assign_index_global => {
+            const slot = readU16FromCode(bytes, ip) orelse return null;
+            const mode = readByteFromCode(bytes, ip) orelse return null;
+            const builtin = readByteFromCode(bytes, ip) orelse return null;
+            const want_result = readWantResultFromCode(bytes, ip) orelse return null;
+            if (!compactFitsGlobal(slot)) return null;
+            compactWriteByte(out, out_len, ck_assign_index_global_stack_u8) orelse return null;
+            compactWriteByte(out, out_len, @intCast(slot)) orelse return null;
+            compactWriteByte(out, out_len, mode) orelse return null;
+            compactWriteByte(out, out_len, builtin) orelse return null;
+            compactWriteByte(out, out_len, @intFromBool(want_result)) orelse return null;
+        },
+        .assign_index_local => {
+            const slot = readByteFromCode(bytes, ip) orelse return null;
+            const mode = readByteFromCode(bytes, ip) orelse return null;
+            const builtin = readByteFromCode(bytes, ip) orelse return null;
+            const want_result = readWantResultFromCode(bytes, ip) orelse return null;
+            if (!compactFitsLocal(slot)) return null;
+            compactWriteByte(out, out_len, ck_assign_index_local_stack_u8) orelse return null;
+            compactWriteByte(out, out_len, slot) orelse return null;
+            compactWriteByte(out, out_len, mode) orelse return null;
+            compactWriteByte(out, out_len, builtin) orelse return null;
+            compactWriteByte(out, out_len, @intFromBool(want_result)) orelse return null;
+        },
+        .index_global_source, .tail_index_global_source => {
+            const slot = readU16FromCode(bytes, ip) orelse return null;
+            if (!compactFitsGlobal(slot)) return null;
+            compactWriteByte(out, out_len, if (op == .index_global_source) ck_index_global_source_u8 else ck_tail_index_global_source_u8) orelse return null;
+            compactWriteByte(out, out_len, @intCast(slot)) orelse return null;
+            compactCopyArgSource(out, out_len, bytes, ip) orelse return null;
+        },
+        .call1_local_local, .tail_call1_local_local => {
+            const callee = readByteFromCode(bytes, ip) orelse return null;
+            const selector = readByteFromCode(bytes, ip) orelse return null;
+            if (!compactFitsLocal(callee) or !compactFitsLocal(selector)) return null;
+            compactWriteByte(out, out_len, if (op == .call1_local_local) ck_index_local_source_u8 else ck_tail_index_local_source_u8) orelse return null;
+            compactWriteByte(out, out_len, callee) orelse return null;
+            compactWriteGlobalCallArgSource(out, out_len, .{
+                .local = .{
+                    .slot = selector,
+                    .consume = false,
+                },
+            }) orelse return null;
+        },
+        .call1_local_local_op, .tail_call1_local_local_op => {
+            const callee = readByteFromCode(bytes, ip) orelse return null;
+            const selector_op: BuiltinId = @enumFromInt(readByteFromCode(bytes, ip) orelse return null);
+            const left = readByteFromCode(bytes, ip) orelse return null;
+            const right = readByteFromCode(bytes, ip) orelse return null;
+            if (!compactFitsLocal(callee) or !compactFitsLocal(left) or !compactFitsLocal(right)) return null;
+            compactWriteByte(out, out_len, if (op == .call1_local_local_op) ck_index_local_source_u8 else ck_tail_index_local_source_u8) orelse return null;
+            compactWriteByte(out, out_len, callee) orelse return null;
+            compactWriteGlobalCallArgSource(out, out_len, .{
+                .local_local_op = .{
+                    .op = selector_op,
+                    .left_slot = left,
+                    .right_slot = right,
+                },
+            }) orelse return null;
+        },
+        .call1_local_local_op_const, .tail_call1_local_local_op_const => {
+            const callee = readByteFromCode(bytes, ip) orelse return null;
+            const selector_op: BuiltinId = @enumFromInt(readByteFromCode(bytes, ip) orelse return null);
+            const left = readByteFromCode(bytes, ip) orelse return null;
+            const right = readByteFromCode(bytes, ip) orelse return null;
+            const const_op: BuiltinId = @enumFromInt(readByteFromCode(bytes, ip) orelse return null);
+            const const_value = readI64FromCode(bytes, ip) orelse return null;
+            if (!compactFitsLocal(callee) or !compactFitsLocal(left) or !compactFitsLocal(right)) return null;
+            compactWriteByte(out, out_len, if (op == .call1_local_local_op_const) ck_index_local_source_u8 else ck_tail_index_local_source_u8) orelse return null;
+            compactWriteByte(out, out_len, callee) orelse return null;
+            compactWriteGlobalCallArgSource(out, out_len, .{
+                .local_local_const_op = .{
+                    .op = selector_op,
+                    .left_slot = left,
+                    .right_slot = right,
+                    .const_op = const_op,
+                    .const_value = const_value,
+                },
+            }) orelse return null;
+        },
+        .index_global_source_store_local => {
+            const slot = readU16FromCode(bytes, ip) orelse return null;
+            if (!compactFitsGlobal(slot)) return null;
+            compactWriteByte(out, out_len, ck_index_global_source_store_local_u8) orelse return null;
+            compactWriteByte(out, out_len, @intCast(slot)) orelse return null;
+            compactCopyArgSource(out, out_len, bytes, ip) orelse return null;
+            const dst = readByteFromCode(bytes, ip) orelse return null;
+            if (!compactFitsLocal(dst)) return null;
+            compactWriteByte(out, out_len, dst) orelse return null;
+        },
+        .call_global_slots, .tail_call_global_slots, .call_global_slots_store_local => {
+            const slot = readU16FromCode(bytes, ip) orelse return null;
+            const argc = readByteFromCode(bytes, ip) orelse return null;
+            if (!compactFitsGlobal(slot) or argc == 0 or argc > max_shaped_call_args) return null;
+            const compact_op = switch (op) {
+                .call_global_slots => ck_call_global_slots_u8,
+                .tail_call_global_slots => ck_tail_call_global_slots_u8,
+                .call_global_slots_store_local => ck_call_global_slots_store_local_u8,
+                else => unreachable,
+            };
+            compactWriteByte(out, out_len, compact_op) orelse return null;
+            compactWriteByte(out, out_len, @intCast(slot)) orelse return null;
+            compactWriteByte(out, out_len, argc) orelse return null;
+            var idx: u8 = 0;
+            while (idx < argc) : (idx += 1) compactCopyArgSource(out, out_len, bytes, ip) orelse return null;
+            if (op == .call_global_slots_store_local) {
+                const dst = readByteFromCode(bytes, ip) orelse return null;
+                if (!compactFitsLocal(dst)) return null;
+                compactWriteByte(out, out_len, dst) orelse return null;
+            }
+        },
+        .call_global1, .call_global2, .call_global3, .call_global4, .tail_call_global1, .tail_call_global2, .tail_call_global3, .tail_call_global4 => {
+            const slot = readU16FromCode(bytes, ip) orelse return null;
+            if (!compactFitsGlobal(slot)) return null;
+            const argc: u8 = switch (op) {
+                .call_global1, .tail_call_global1 => 1,
+                .call_global2, .tail_call_global2 => 2,
+                .call_global3, .tail_call_global3 => 3,
+                .call_global4, .tail_call_global4 => 4,
+                else => unreachable,
+            };
+            compactWriteByte(out, out_len, switch (op) {
+                .call_global1, .call_global2, .call_global3, .call_global4 => ck_call_global_stack_u8,
+                .tail_call_global1, .tail_call_global2, .tail_call_global3, .tail_call_global4 => ck_tail_call_global_stack_u8,
+                else => unreachable,
+            }) orelse return null;
+            compactWriteByte(out, out_len, @intCast(slot)) orelse return null;
+            compactWriteByte(out, out_len, argc) orelse return null;
+        },
+        .jump => {
+            const old_target = readU16FromCode(bytes, ip) orelse return null;
+            const target = compactMappedTarget(offset_map, old_target) orelse return null;
+            compactWriteByte(out, out_len, ck_jump_u8) orelse return null;
+            compactWriteByte(out, out_len, target) orelse return null;
+        },
+        .jump_if_false => {
+            const old_target = readU16FromCode(bytes, ip) orelse return null;
+            const target = compactMappedTarget(offset_map, old_target) orelse return null;
+            compactWriteByte(out, out_len, ck_jump_if_false_u8) orelse return null;
+            compactWriteByte(out, out_len, target) orelse return null;
+        },
+        .jump_if_false_equal_local_const, .jump_if_false_less_local_const, .jump_if_false_more_local_const => {
+            const slot = readByteFromCode(bytes, ip) orelse return null;
+            const rhs = readI64FromCode(bytes, ip) orelse return null;
+            const old_target = readU16FromCode(bytes, ip) orelse return null;
+            if (!compactFitsLocal(slot)) return null;
+            const target = compactMappedTarget(offset_map, old_target) orelse return null;
+            compactWriteByte(out, out_len, switch (op) {
+                .jump_if_false_equal_local_const => ck_jump_if_false_equal_local_const_i64,
+                .jump_if_false_less_local_const => ck_jump_if_false_less_local_const_i64,
+                .jump_if_false_more_local_const => ck_jump_if_false_more_local_const_i64,
+                else => unreachable,
+            }) orelse return null;
+            compactWriteByte(out, out_len, slot) orelse return null;
+            compactWriteI64(out, out_len, rhs) orelse return null;
+            compactWriteByte(out, out_len, target) orelse return null;
+        },
+        .add_local_local, .sub_local_local, .mul_local_local, .minimum_local_local, .maximum_local_local, .less_local_local, .more_local_local, .equal_local_local => {
+            const left = readByteFromCode(bytes, ip) orelse return null;
+            const right = readByteFromCode(bytes, ip) orelse return null;
+            if (!compactFitsLocal(left) or !compactFitsLocal(right)) return null;
+            compactWriteByte(out, out_len, switch (op) {
+                .add_local_local => ck_add_local_local,
+                .sub_local_local => ck_sub_local_local,
+                .mul_local_local => ck_mul_local_local,
+                .minimum_local_local => ck_minimum_local_local,
+                .maximum_local_local => ck_maximum_local_local,
+                .less_local_local => ck_less_local_local,
+                .more_local_local => ck_more_local_local,
+                .equal_local_local => ck_equal_local_local,
+                else => unreachable,
+            }) orelse return null;
+            compactWriteByte(out, out_len, left) orelse return null;
+            compactWriteByte(out, out_len, right) orelse return null;
+        },
+        .add_local_const, .sub_local_const, .mul_local_const, .minimum_local_const, .maximum_local_const, .less_local_const, .more_local_const, .equal_local_const => {
+            const slot = readByteFromCode(bytes, ip) orelse return null;
+            const rhs = readI64FromCode(bytes, ip) orelse return null;
+            if (!compactFitsLocal(slot)) return null;
+            compactWriteByte(out, out_len, switch (op) {
+                .add_local_const => ck_add_local_const_i64,
+                .sub_local_const => ck_sub_local_const_i64,
+                .mul_local_const => ck_mul_local_const_i64,
+                .minimum_local_const => ck_minimum_local_const_i64,
+                .maximum_local_const => ck_maximum_local_const_i64,
+                .less_local_const => ck_less_local_const_i64,
+                .more_local_const => ck_more_local_const_i64,
+                .equal_local_const => ck_equal_local_const_i64,
+                else => unreachable,
+            }) orelse return null;
+            compactWriteByte(out, out_len, slot) orelse return null;
+            compactWriteI64(out, out_len, rhs) orelse return null;
+        },
+        .add_const_local, .sub_const_local, .minimum_const_local, .maximum_const_local, .less_const_local, .more_const_local, .equal_const_local => {
+            const lhs = readI64FromCode(bytes, ip) orelse return null;
+            const slot = readByteFromCode(bytes, ip) orelse return null;
+            if (!compactFitsLocal(slot)) return null;
+            compactWriteByte(out, out_len, switch (op) {
+                .add_const_local => ck_add_const_local_i64,
+                .sub_const_local => ck_sub_const_local_i64,
+                .minimum_const_local => ck_minimum_const_local_i64,
+                .maximum_const_local => ck_maximum_const_local_i64,
+                .less_const_local => ck_less_const_local_i64,
+                .more_const_local => ck_more_const_local_i64,
+                .equal_const_local => ck_equal_const_local_i64,
+                else => unreachable,
+            }) orelse return null;
+            compactWriteI64(out, out_len, lhs) orelse return null;
+            compactWriteByte(out, out_len, slot) orelse return null;
+        },
+        .store_local_add_local_const, .store_local_sub_local_const, .store_local_mul_local_const => {
+            const dst = readByteFromCode(bytes, ip) orelse return null;
+            const src = readByteFromCode(bytes, ip) orelse return null;
+            const rhs = readI64FromCode(bytes, ip) orelse return null;
+            if (!compactFitsLocal(dst) or !compactFitsLocal(src)) return null;
+            compactWriteByte(out, out_len, switch (op) {
+                .store_local_add_local_const => ck_store_local_add_local_const_i64,
+                .store_local_sub_local_const => ck_store_local_sub_local_const_i64,
+                .store_local_mul_local_const => ck_store_local_mul_local_const_i64,
+                else => unreachable,
+            }) orelse return null;
+            compactWriteByte(out, out_len, dst) orelse return null;
+            compactWriteByte(out, out_len, src) orelse return null;
+            compactWriteI64(out, out_len, rhs) orelse return null;
+        },
+        .less => compactWriteByte(out, out_len, ck_less) orelse return null,
+        .more => compactWriteByte(out, out_len, ck_more) orelse return null,
+        .equal => compactWriteByte(out, out_len, ck_equal) orelse return null,
+        .add => compactWriteByte(out, out_len, ck_add) orelse return null,
+        .sub => compactWriteByte(out, out_len, ck_sub) orelse return null,
+        .mul => compactWriteByte(out, out_len, ck_mul) orelse return null,
+        .div => compactWriteByte(out, out_len, ck_div) orelse return null,
+        .minimum => compactWriteByte(out, out_len, ck_minimum) orelse return null,
+        .maximum => compactWriteByte(out, out_len, ck_maximum) orelse return null,
+        .floor => compactWriteByte(out, out_len, ck_floor) orelse return null,
+        .iota => compactWriteByte(out, out_len, ck_iota) orelse return null,
+        else => return null,
+    }
+}
+
+fn compileCompactKCode(allocator: std.mem.Allocator, arity: u8, frame_slot_count: u8, bytes: []const u8, constants: []const Value) !?*const CompactKCode {
+    if (frame_slot_count > max_explicit_params or arity > max_explicit_params or bytes.len == 0 or bytes.len > max_body_bytes) return null;
+
+    var offset_map: [max_body_bytes + 1]u16 = [_]u16{compact_k_no_offset} ** (max_body_bytes + 1);
+    var ip: usize = 0;
+    var compact_len: usize = 0;
+    while (ip < bytes.len) {
+        if (ip >= offset_map.len or compact_len > std.math.maxInt(u8)) return null;
+        offset_map[ip] = @intCast(compact_len);
+        const op = std.meta.intToEnum(Op, readByteFromCode(bytes, &ip) orelse return null) catch return null;
+        compact_len += compactEncodedLenForOp(bytes, &ip, op) orelse return null;
+        if (compact_len > max_body_bytes) return null;
+    }
+    if (ip != bytes.len or compact_len > std.math.maxInt(u8)) return null;
+    offset_map[bytes.len] = @intCast(compact_len);
+
+    var compact_bytes: [max_body_bytes]u8 = undefined;
+    var out_len: usize = 0;
+    ip = 0;
+    while (ip < bytes.len) {
+        const op = std.meta.intToEnum(Op, readByteFromCode(bytes, &ip) orelse return null) catch return null;
+        compactEmitOp(&compact_bytes, &out_len, bytes, &ip, op, offset_map[0 .. bytes.len + 1]) orelse return null;
+    }
+    if (out_len != compact_len) return null;
+
+    const max_stack = classifyOperandStackSlotCount(bytes);
+    if (max_stack > max_compact_k_stack_slots) return null;
+
+    const compact = try allocator.create(CompactKCode);
+    compact.* = .{
+        .arity = arity,
+        .local_count = if (frame_slot_count == 0 and arity != 0) arity else frame_slot_count,
+        .max_stack = max_stack,
+        .bytes = try allocator.dupe(u8, compact_bytes[0..out_len]),
+        .constants = constants,
+    };
+    return compact;
+}
+
+fn cloneCompactKCode(allocator: std.mem.Allocator, compact: *const CompactKCode, constants: []const Value) !*const CompactKCode {
+    const cloned = try allocator.create(CompactKCode);
+    cloned.* = .{
+        .arity = compact.arity,
+        .local_count = compact.local_count,
+        .max_stack = compact.max_stack,
+        .bytes = try allocator.dupe(u8, compact.bytes),
+        .constants = constants,
+        .profile_id = compact.profile_id,
+        .profile_source = compact.profile_source,
+    };
+    return cloned;
+}
+
+fn assignCompactKProfile(code: *Code) void {
+    if (code.compact_k) |compact_const| {
+        const compact = @constCast(compact_const);
+        compact.profile_id = code.profile_id;
+        compact.profile_source = code.profile_source;
+    }
+}
+
+fn applyStaticStackDelta(depth: *usize, max_depth: *usize, delta: isize) bool {
+    if (delta < 0) {
+        const remove: usize = @intCast(-delta);
+        if (remove > depth.*) return false;
+        depth.* -= remove;
+    } else {
+        depth.* += @intCast(delta);
+        max_depth.* = @max(max_depth.*, depth.*);
+    }
+    return depth.* <= std.math.maxInt(u8);
+}
+
+fn readWantResultFromCode(bytes: []const u8, ip: *usize) ?bool {
+    return (readByteFromCode(bytes, ip) orelse return null) != 0;
+}
+
+fn classifyOperandStackSlotCount(bytes: []const u8) u8 {
+    var ip: usize = 0;
+    var depth: usize = 0;
+    var max_depth: usize = 0;
+
+    while (ip < bytes.len) {
+        const op = std.meta.intToEnum(Op, readByteFromCode(bytes, &ip) orelse return 0) catch return 0;
+        const delta: isize = switch (op) {
+            .const_int => blk: {
+                _ = readI64FromCode(bytes, &ip) orelse return 0;
+                break :blk 1;
+            },
+            .const_value,
+            .load_local,
+            .take_local,
+            .load_inline_local,
+            .take_inline_local,
+            => blk: {
+                _ = readByteFromCode(bytes, &ip) orelse return 0;
+                break :blk 1;
+            },
+            .load_global => blk: {
+                _ = readU16FromCode(bytes, &ip) orelse return 0;
+                break :blk 1;
+            },
+            .const_false,
+            .const_true,
+            => 1,
+            .const_builtin => blk: {
+                _ = readByteFromCode(bytes, &ip) orelse return 0;
+                break :blk 1;
+            },
+            .store_global => blk: {
+                _ = readU16FromCode(bytes, &ip) orelse return 0;
+                break :blk 0;
+            },
+            .store_local,
+            .discard,
+            => blk: {
+                _ = if (op == .store_local) readByteFromCode(bytes, &ip) else 0;
+                break :blk -1;
+            },
+            .modify_local,
+            .modify_inline_local,
+            => blk: {
+                _ = readByteFromCode(bytes, &ip) orelse return 0;
+                _ = readByteFromCode(bytes, &ip) orelse return 0;
+                const want_result = readWantResultFromCode(bytes, &ip) orelse return 0;
+                break :blk if (want_result) 0 else -1;
+            },
+            .modify_global => blk: {
+                _ = readU16FromCode(bytes, &ip) orelse return 0;
+                _ = readByteFromCode(bytes, &ip) orelse return 0;
+                const want_result = readWantResultFromCode(bytes, &ip) orelse return 0;
+                break :blk if (want_result) 0 else -1;
+            },
+            .modify_local_const,
+            => blk: {
+                _ = readByteFromCode(bytes, &ip) orelse return 0;
+                _ = readByteFromCode(bytes, &ip) orelse return 0;
+                const want_result = readWantResultFromCode(bytes, &ip) orelse return 0;
+                _ = readI64FromCode(bytes, &ip) orelse return 0;
+                break :blk if (want_result) 1 else 0;
+            },
+            .modify_global_const => blk: {
+                _ = readU16FromCode(bytes, &ip) orelse return 0;
+                _ = readByteFromCode(bytes, &ip) orelse return 0;
+                const want_result = readWantResultFromCode(bytes, &ip) orelse return 0;
+                _ = readI64FromCode(bytes, &ip) orelse return 0;
+                break :blk if (want_result) 1 else 0;
+            },
+            .store_local_add_local_const,
+            .store_local_sub_local_const,
+            .store_local_mul_local_const,
+            => blk: {
+                _ = readByteFromCode(bytes, &ip) orelse return 0;
+                _ = readByteFromCode(bytes, &ip) orelse return 0;
+                _ = readI64FromCode(bytes, &ip) orelse return 0;
+                break :blk 0;
+            },
+            .assign_index_local,
+            .assign_index_inline_local,
+            => blk: {
+                _ = readByteFromCode(bytes, &ip) orelse return 0;
+                const mode = readByteFromCode(bytes, &ip) orelse return 0;
+                _ = readByteFromCode(bytes, &ip) orelse return 0;
+                const want_result = readWantResultFromCode(bytes, &ip) orelse return 0;
+                const consumed: isize = if (mode == @intFromEnum(AmendMode.binary)) 3 else 2;
+                break :blk (if (want_result) @as(isize, 1) else 0) - consumed;
+            },
+            .assign_index_global => blk: {
+                _ = readU16FromCode(bytes, &ip) orelse return 0;
+                const mode = readByteFromCode(bytes, &ip) orelse return 0;
+                _ = readByteFromCode(bytes, &ip) orelse return 0;
+                const want_result = readWantResultFromCode(bytes, &ip) orelse return 0;
+                const consumed: isize = if (mode == @intFromEnum(AmendMode.binary)) 3 else 2;
+                break :blk (if (want_result) @as(isize, 1) else 0) - consumed;
+            },
+            .assign_index_local_sources,
+            => blk: {
+                _ = readByteFromCode(bytes, &ip) orelse return 0;
+                _ = readByteFromCode(bytes, &ip) orelse return 0;
+                _ = readByteFromCode(bytes, &ip) orelse return 0;
+                const want_result = readWantResultFromCode(bytes, &ip) orelse return 0;
+                if (!skipGlobalCallArgSource(bytes, &ip)) return 0;
+                if (!skipGlobalCallArgSource(bytes, &ip)) return 0;
+                break :blk if (want_result) 1 else 0;
+            },
+            .assign_index_global_sources => blk: {
+                _ = readU16FromCode(bytes, &ip) orelse return 0;
+                _ = readByteFromCode(bytes, &ip) orelse return 0;
+                _ = readByteFromCode(bytes, &ip) orelse return 0;
+                const want_result = readWantResultFromCode(bytes, &ip) orelse return 0;
+                if (!skipGlobalCallArgSource(bytes, &ip)) return 0;
+                if (!skipGlobalCallArgSource(bytes, &ip)) return 0;
+                break :blk if (want_result) 1 else 0;
+            },
+            .add_local_local,
+            .add_inline_local_local,
+            .sub_local_local,
+            .sub_inline_local_local,
+            .mul_local_local,
+            .mul_inline_local_local,
+            .minimum_local_local,
+            .maximum_local_local,
+            .less_local_local,
+            .more_local_local,
+            .equal_local_local,
+            => blk: {
+                _ = readByteFromCode(bytes, &ip) orelse return 0;
+                _ = readByteFromCode(bytes, &ip) orelse return 0;
+                break :blk 1;
+            },
+            .add_const_local,
+            .add_local_const,
+            .add_const_inline_local,
+            .add_inline_local_const,
+            .sub_const_local,
+            .sub_local_const,
+            .sub_const_inline_local,
+            .sub_inline_local_const,
+            .mul_const_local,
+            .mul_local_const,
+            .mul_const_inline_local,
+            .mul_inline_local_const,
+            .minimum_local_const,
+            .maximum_local_const,
+            .less_local_const,
+            .more_local_const,
+            .equal_local_const,
+            .minimum_const_local,
+            .maximum_const_local,
+            .less_const_local,
+            .more_const_local,
+            .equal_const_local,
+            => blk: {
+                if (op == .add_const_local or op == .add_const_inline_local or
+                    op == .sub_const_local or op == .sub_const_inline_local or
+                    op == .mul_const_local or op == .mul_const_inline_local or
+                    op == .minimum_const_local or op == .maximum_const_local or op == .less_const_local or
+                    op == .more_const_local or op == .equal_const_local)
+                {
+                    _ = readI64FromCode(bytes, &ip) orelse return 0;
+                    _ = readByteFromCode(bytes, &ip) orelse return 0;
+                } else {
+                    _ = readByteFromCode(bytes, &ip) orelse return 0;
+                    _ = readI64FromCode(bytes, &ip) orelse return 0;
+                }
+                break :blk 1;
+            },
+            .neg_local,
+            .neg_inline_local,
+            .sqrt_local,
+            .sqrt_inline_local,
+            => blk: {
+                _ = readByteFromCode(bytes, &ip) orelse return 0;
+                break :blk 1;
+            },
+            .call1_local_local,
+            .tail_call1_local_local,
+            .call1_inline_local_local,
+            => blk: {
+                _ = readByteFromCode(bytes, &ip) orelse return 0;
+                _ = readByteFromCode(bytes, &ip) orelse return 0;
+                break :blk if (op == .tail_call1_local_local) 0 else 1;
+            },
+            .call1_local_local_op,
+            .tail_call1_local_local_op,
+            => blk: {
+                _ = readByteFromCode(bytes, &ip) orelse return 0;
+                _ = readByteFromCode(bytes, &ip) orelse return 0;
+                _ = readByteFromCode(bytes, &ip) orelse return 0;
+                _ = readByteFromCode(bytes, &ip) orelse return 0;
+                break :blk if (op == .tail_call1_local_local_op) 0 else 1;
+            },
+            .call1_local_local_op_const,
+            .tail_call1_local_local_op_const,
+            => blk: {
+                _ = readByteFromCode(bytes, &ip) orelse return 0;
+                _ = readByteFromCode(bytes, &ip) orelse return 0;
+                _ = readByteFromCode(bytes, &ip) orelse return 0;
+                _ = readByteFromCode(bytes, &ip) orelse return 0;
+                _ = readByteFromCode(bytes, &ip) orelse return 0;
+                _ = readI64FromCode(bytes, &ip) orelse return 0;
+                break :blk if (op == .tail_call1_local_local_op_const) 0 else 1;
+            },
+            .inline_call_add2,
+            .inline_call_sub2,
+            .inline_call_mul2,
+            .add,
+            .sub,
+            .mul,
+            .div,
+            .mod,
+            .dot,
+            .minimum,
+            .maximum,
+            .less,
+            .more,
+            .array_add,
+            .array_add_ii,
+            .array_add_ff,
+            .array_add_if,
+            .array_add_fi,
+            .array_sub,
+            .array_sub_ii,
+            .array_sub_ff,
+            .array_sub_if,
+            .array_sub_fi,
+            .array_mul,
+            .array_mul_ii,
+            .array_mul_ff,
+            .array_mul_if,
+            .array_mul_fi,
+            .array_div,
+            .array_div_ii,
+            .array_div_ff,
+            .array_div_if,
+            .array_div_fi,
+            .match,
+            .concat,
+            .take,
+            .drop,
+            .fill_without,
+            .equal,
+            .reshape,
+            .cast,
+            .contains,
+            .split,
+            .join,
+            .find,
+            .amend,
+            .deep_amend,
+            => blk: {
+                if (op == .amend or op == .deep_amend) {
+                    const mode = readByteFromCode(bytes, &ip) orelse return 0;
+                    break :blk if (mode == @intFromEnum(AmendMode.binary)) -3 else -2;
+                }
+                break :blk -1;
+            },
+            .identity,
+            .negate,
+            .sqrt,
+            .transpose,
+            .iota,
+            .reverse,
+            .grade_up,
+            .grade_down,
+            .not,
+            .count,
+            .floor,
+            .null_test,
+            .sort,
+            .stringify,
+            .unique,
+            .eval_string,
+            .array_negate,
+            .array_negate_i,
+            .array_negate_f,
+            .array_sqrt,
+            .array_sqrt_i,
+            .array_sqrt_f,
+            .argmax,
+            .inline_call_negate1,
+            .inline_call_sqrt1,
+            .inline_call_argmax1,
+            .make_adverb,
+            => blk: {
+                if (op == .make_adverb) _ = readByteFromCode(bytes, &ip) orelse return 0;
+                break :blk 0;
+            },
+            .inline_call_add_global,
+            .inline_call_add_arg_global,
+            .inline_call_sub_global,
+            .inline_call_sub_arg_global,
+            .inline_call_mul_global,
+            .inline_call_mul_arg_global,
+            .inline_call_negate_global,
+            .inline_call_sqrt_global,
+            => blk: {
+                _ = readU16FromCode(bytes, &ip) orelse return 0;
+                break :blk 0;
+            },
+            .call_builtin_derived2 => blk: {
+                _ = readByteFromCode(bytes, &ip) orelse return 0;
+                _ = readByteFromCode(bytes, &ip) orelse return 0;
+                break :blk -1;
+            },
+            .enter_inline,
+            .leave_inline,
+            => blk: {
+                _ = readByteFromCode(bytes, &ip) orelse return 0;
+                break :blk 0;
+            },
+            .make_vector => blk: {
+                const count = readByteFromCode(bytes, &ip) orelse return 0;
+                break :blk 1 - @as(isize, @intCast(count));
+            },
+            .make_projection => blk: {
+                const slot_count = readByteFromCode(bytes, &ip) orelse return 0;
+                const hole_mask: u64 = @bitCast(readI64FromCode(bytes, &ip) orelse return 0);
+                if (slot_count > 63) return 0;
+                const bound_count = @as(usize, slot_count) - @popCount(hole_mask & ((@as(u64, 1) << @intCast(slot_count)) - 1));
+                break :blk 1 - @as(isize, @intCast(bound_count + 1));
+            },
+            .jump,
+            .jump_if_false,
+            => blk: {
+                _ = readU16FromCode(bytes, &ip) orelse return 0;
+                break :blk if (op == .jump_if_false) -1 else 0;
+            },
+            .jump_if_false_equal_local_const,
+            .jump_if_false_less_local_const,
+            .jump_if_false_more_local_const,
+            => blk: {
+                _ = readByteFromCode(bytes, &ip) orelse return 0;
+                _ = readI64FromCode(bytes, &ip) orelse return 0;
+                _ = readU16FromCode(bytes, &ip) orelse return 0;
+                break :blk 0;
+            },
+            .call_global => blk: {
+                _ = readU16FromCode(bytes, &ip) orelse return 0;
+                const argc = readByteFromCode(bytes, &ip) orelse return 0;
+                break :blk 1 - @as(isize, @intCast(argc));
+            },
+            .call_global1,
+            .call_global2,
+            .call_global3,
+            .call_global4,
+            .tail_call_global1,
+            .tail_call_global2,
+            .tail_call_global3,
+            .tail_call_global4,
+            => blk: {
+                _ = readU16FromCode(bytes, &ip) orelse return 0;
+                const argc: u8 = switch (op) {
+                    .call_global1, .tail_call_global1 => 1,
+                    .call_global2, .tail_call_global2 => 2,
+                    .call_global3, .tail_call_global3 => 3,
+                    .call_global4, .tail_call_global4 => 4,
+                    else => unreachable,
+                };
+                break :blk switch (op) {
+                    .tail_call_global1,
+                    .tail_call_global2,
+                    .tail_call_global3,
+                    .tail_call_global4,
+                    => 0,
+                    else => 1 - @as(isize, argc),
+                };
+            },
+            .call_global_slots,
+            .call_global_slots_store_local,
+            .tail_call_global_slots,
+            => blk: {
+                _ = readU16FromCode(bytes, &ip) orelse return 0;
+                const argc = readByteFromCode(bytes, &ip) orelse return 0;
+                if (argc == 0 or argc > max_shaped_call_args) return 0;
+                var arg_idx: u8 = 0;
+                while (arg_idx < argc) : (arg_idx += 1) {
+                    if (!skipGlobalCallArgSource(bytes, &ip)) return 0;
+                }
+                if (op == .call_global_slots_store_local) _ = readByteFromCode(bytes, &ip) orelse return 0;
+                break :blk if (op == .call_global_slots) 1 else 0;
+            },
+            .index_global_source,
+            .index_global_source_store_local,
+            .tail_index_global_source,
+            => blk: {
+                _ = readU16FromCode(bytes, &ip) orelse return 0;
+                if (!skipGlobalCallArgSource(bytes, &ip)) return 0;
+                if (op == .index_global_source_store_local) _ = readByteFromCode(bytes, &ip) orelse return 0;
+                break :blk if (op == .index_global_source) 1 else 0;
+            },
+            .call1,
+            .tail_call1,
+            => if (op == .tail_call1) 0 else -1,
+            .call2,
+            .tail_call2,
+            => if (op == .tail_call2) 0 else -2,
+            .call => blk: {
+                const argc = readByteFromCode(bytes, &ip) orelse return 0;
+                break :blk -@as(isize, @intCast(argc));
+            },
+            .@"return" => break,
+        };
+        if (!applyStaticStackDelta(&depth, &max_depth, delta)) return 0;
+    }
+
+    return @intCast(max_depth);
+}
+
 const derived_each_code = Code{
     .arity = 0,
     .frame_slot_count = 0,
     .bytes = derived_each_bytes,
-    .globals = empty_code_globals,
-    .templates = empty_code_templates,
     .constants = empty_code_constants,
     .profile_id = sampling_profile_code_id_derived_each,
     .profile_kind = .derived_each,
@@ -4440,8 +6080,6 @@ const derived_fold_code = Code{
     .arity = 0,
     .frame_slot_count = 0,
     .bytes = derived_fold_bytes,
-    .globals = empty_code_globals,
-    .templates = empty_code_templates,
     .constants = empty_code_constants,
     .profile_id = sampling_profile_code_id_derived_fold,
     .profile_kind = .derived_fold,
@@ -4451,8 +6089,6 @@ const derived_scan_code = Code{
     .arity = 0,
     .frame_slot_count = 0,
     .bytes = derived_scan_bytes,
-    .globals = empty_code_globals,
-    .templates = empty_code_templates,
     .constants = empty_code_constants,
     .profile_id = sampling_profile_code_id_derived_scan,
     .profile_kind = .derived_scan,
@@ -4462,8 +6098,6 @@ const derived_each_right_code = Code{
     .arity = 0,
     .frame_slot_count = 0,
     .bytes = derived_each_right_bytes,
-    .globals = empty_code_globals,
-    .templates = empty_code_templates,
     .constants = empty_code_constants,
     .profile_id = sampling_profile_code_id_derived_each_right,
     .profile_kind = .derived_each_right,
@@ -4473,8 +6107,6 @@ const derived_each_left_code = Code{
     .arity = 0,
     .frame_slot_count = 0,
     .bytes = derived_each_left_bytes,
-    .globals = empty_code_globals,
-    .templates = empty_code_templates,
     .constants = empty_code_constants,
     .profile_id = sampling_profile_code_id_derived_each_left,
     .profile_kind = .derived_each_left,
@@ -4484,8 +6116,6 @@ const derived_each_prior_code = Code{
     .arity = 0,
     .frame_slot_count = 0,
     .bytes = derived_each_prior_bytes,
-    .globals = empty_code_globals,
-    .templates = empty_code_templates,
     .constants = empty_code_constants,
     .profile_id = sampling_profile_code_id_derived_each_prior,
     .profile_kind = .derived_each_prior,
@@ -4495,8 +6125,6 @@ const derived_grad_code = Code{
     .arity = 0,
     .frame_slot_count = 0,
     .bytes = derived_grad_bytes,
-    .globals = empty_code_globals,
-    .templates = empty_code_templates,
     .constants = empty_code_constants,
     .profile_id = sampling_profile_code_id_derived_grad,
     .profile_kind = .derived_grad,
@@ -4506,8 +6134,6 @@ const derived_valuegrad_code = Code{
     .arity = 0,
     .frame_slot_count = 0,
     .bytes = derived_valuegrad_bytes,
-    .globals = empty_code_globals,
-    .templates = empty_code_templates,
     .constants = empty_code_constants,
     .profile_id = sampling_profile_code_id_derived_valuegrad,
     .profile_kind = .derived_valuegrad,
@@ -4517,8 +6143,6 @@ const projection_code = Code{
     .arity = 0,
     .frame_slot_count = 0,
     .bytes = projection_code_bytes,
-    .globals = empty_code_globals,
-    .templates = empty_code_templates,
     .constants = empty_code_constants,
     .profile_id = sampling_profile_code_id_projection,
     .profile_kind = .projection,
@@ -4528,8 +6152,6 @@ const inner_product_code = Code{
     .arity = 0,
     .frame_slot_count = 0,
     .bytes = inner_product_code_bytes,
-    .globals = empty_code_globals,
-    .templates = empty_code_templates,
     .constants = empty_code_constants,
     .profile_id = sampling_profile_code_id_inner_product,
     .profile_kind = .inner_product,
@@ -4550,43 +6172,36 @@ fn derivedCode(kind: DerivedVerbKind) *const Code {
 }
 
 fn closureDerivedKind(closure: *const Closure) ?DerivedVerbKind {
-    if (closure.code.bytes.len != 1 or
-        closure.code.globals.len != 0 or
-        closure.code.templates.len != 0 or
-        closure.code.constants.len != 0)
-        return null;
-    return switch (closure.code.bytes[0]) {
-        0 => .each,
-        1 => .fold,
-        2 => .scan,
-        3 => .each_right,
-        4 => .each_left,
-        5 => .each_prior,
-        6 => .grad,
-        7 => .valuegrad,
-        else => null,
-    };
+    return closure.kind.derivedKind();
 }
 
 fn closureMayUseDerivedApply(closure: *const Closure) bool {
-    return closure.code.bytes.len == 1 and
-        closure.code.globals.len == 0 and
-        closure.code.templates.len == 0 and
-        closure.code.constants.len == 0;
+    return closure.kind != .plain;
 }
 
 fn closureIsProjection(closure: *const Closure) bool {
-    return closureMayUseDerivedApply(closure) and
-        closure.code.bytes[0] == projection_code_bytes[0];
+    return closure.kind == .projection;
 }
 
 fn closureIsInnerProduct(closure: *const Closure) bool {
-    return closureMayUseDerivedApply(closure) and
-        closure.code.bytes[0] == inner_product_code_bytes[0];
+    return closure.kind == .inner_product;
 }
 
 fn closureIsCompactPlainGlobal(closure: *const Closure) bool {
-    return closure.captures.len == 0 and !closureMayUseDerivedApply(closure);
+    return closure.captures.len == 0 and closure.kind == .plain;
+}
+
+fn compactKCodeForPlainClosure(closure: *const Closure, argc: usize) ?*const CompactKCode {
+    if (!closureIsCompactPlainGlobal(closure)) return null;
+    const compact = closure.code.compact_k orelse return null;
+    if (compact.arity != argc) return null;
+    return compact;
+}
+
+fn compactKCodeForGlobalCellCall(cell: *const GlobalCell, argc: u8) ?*const CompactKCode {
+    const compact = cell.compact_k orelse return null;
+    if (compact.arity != argc) return null;
+    return compact;
 }
 
 const ScratchCode = struct {
@@ -4595,8 +6210,6 @@ const ScratchCode = struct {
         .arity = 0,
         .frame_slot_count = 0,
         .bytes = &[_]u8{},
-        .globals = &[_]u16{},
-        .templates = &[_]*const LambdaTemplate{},
         .constants = &[_]Value{},
     },
 
@@ -4606,9 +6219,8 @@ const ScratchCode = struct {
             .arity = 0,
             .frame_slot_count = 0,
             .bytes = &[_]u8{},
-            .globals = &[_]u16{},
-            .templates = &[_]*const LambdaTemplate{},
             .constants = &[_]Value{},
+            .compact_k = null,
         };
     }
 
@@ -4617,10 +6229,11 @@ const ScratchCode = struct {
             .arity = arity,
             .frame_slot_count = frame_slot_count,
             .bytes = self.instructions.byteSlice(),
-            .globals = self.instructions.globalSlice(),
-            .templates = self.instructions.templateSlice(),
             .constants = self.instructions.constantSlice(),
+            .compact_k = null,
+            .operand_stack_slot_count = classifyOperandStackSlotCount(self.instructions.byteSlice()),
             .direct_closure_mask = classifyDirectClosureMask(self.instructions.byteSlice()),
+            .references_globals = self.instructions.references_globals,
         };
         return &self.code;
     }
@@ -4628,14 +6241,17 @@ const ScratchCode = struct {
 
 fn duplicateCodeFromInstructions(allocator: std.mem.Allocator, arity: u8, frame_slot_count: u8, instructions: *const InstructionBuffer) !*Code {
     const code = try allocator.create(Code);
+    const bytes = try allocator.dupe(u8, instructions.byteSlice());
+    const constants = try allocator.dupe(Value, instructions.constantSlice());
     code.* = .{
         .arity = arity,
         .frame_slot_count = frame_slot_count,
-        .bytes = try allocator.dupe(u8, instructions.byteSlice()),
-        .globals = try allocator.dupe(u16, instructions.globalSlice()),
-        .templates = try allocator.dupe(*const LambdaTemplate, instructions.templateSlice()),
-        .constants = try allocator.dupe(Value, instructions.constantSlice()),
-        .direct_closure_mask = classifyDirectClosureMask(instructions.byteSlice()),
+        .bytes = bytes,
+        .constants = constants,
+        .compact_k = try compileCompactKCode(allocator, arity, frame_slot_count, bytes, constants),
+        .operand_stack_slot_count = classifyOperandStackSlotCount(bytes),
+        .direct_closure_mask = classifyDirectClosureMask(bytes),
+        .references_globals = instructions.references_globals,
     };
     return code;
 }
@@ -4670,16 +6286,88 @@ const CallFrame = struct {
     code: *const Code,
     ip: usize,
     base: usize,
-    captures: []const Value,
     owner: ?Value = null,
     callable_global_slot: u16 = sampling_profile_no_callable_slot,
-    result_target: CallResultTarget = .stack,
+    result_target: PackedCallResultTarget = .{},
+    heap_local_mask: u64 = 0,
+    heap_local_overflow: bool = false,
+
+    inline fn resultTarget(self: *const CallFrame) CallResultTarget {
+        return self.result_target.unpack();
+    }
+
+    inline fn resultTargetIsStack(self: *const CallFrame) bool {
+        return self.result_target.isStack();
+    }
 };
 
 const CallResultTarget = union(enum) {
     stack,
     parent_local: u8,
     parent_local_tail_global_slots: u8,
+};
+
+const PackedCallResultTarget = struct {
+    bits: u16 = stack_tag,
+
+    const stack_tag: u16 = 0;
+    const parent_local_tag: u16 = 1;
+    const parent_local_tail_global_slots_tag: u16 = 2;
+
+    inline fn init(target: CallResultTarget) PackedCallResultTarget {
+        return .{ .bits = switch (target) {
+            .stack => stack_tag,
+            .parent_local => |slot| encode(parent_local_tag, slot),
+            .parent_local_tail_global_slots => |slot| encode(parent_local_tail_global_slots_tag, slot),
+        } };
+    }
+
+    inline fn encode(tag: u16, slot: u8) u16 {
+        return tag | (@as(u16, slot) << 8);
+    }
+
+    inline fn isStack(self: PackedCallResultTarget) bool {
+        return (self.bits & 0xff) == stack_tag;
+    }
+
+    inline fn unpack(self: PackedCallResultTarget) CallResultTarget {
+        const slot: u8 = @truncate(self.bits >> 8);
+        return switch (self.bits & 0xff) {
+            stack_tag => .stack,
+            parent_local_tag => .{ .parent_local = slot },
+            parent_local_tail_global_slots_tag => .{ .parent_local_tail_global_slots = slot },
+            else => .stack,
+        };
+    }
+};
+
+const FusedBranchResult = struct {
+    truthy: bool,
+    scalar: bool,
+};
+
+const GlobalValueClass = enum(u8) {
+    uninitialized,
+    scalar,
+    builtin,
+    closure,
+    dense_int_vector,
+    dense_float_vector,
+    array,
+
+    inline fn isArray(self: GlobalValueClass) bool {
+        return switch (self) {
+            .dense_int_vector, .dense_float_vector, .array => true,
+            else => false,
+        };
+    }
+};
+
+const GlobalCell = struct {
+    value: Value = Value.fromBool(false),
+    initialized: bool = false,
+    class: GlobalValueClass = .uninitialized,
+    compact_k: ?*const CompactKCode = null,
 };
 
 pub const DebugMakeArrayBoxedReason = enum {
@@ -4689,6 +6377,44 @@ pub const DebugMakeArrayBoxedReason = enum {
 };
 
 const debug_make_array_boxed_reason_count = std.meta.fields(DebugMakeArrayBoxedReason).len;
+
+pub const DebugProbeLenBucket = enum {
+    len_0,
+    len_1,
+    len_2,
+    len_3_4,
+    len_5_8,
+    len_9_16,
+    len_17_32,
+    len_33_64,
+    len_65_128,
+    len_129_256,
+    len_257_plus,
+};
+
+const debug_probe_len_bucket_count = std.meta.fields(DebugProbeLenBucket).len;
+
+fn debugProbeLenBucket(len: usize) DebugProbeLenBucket {
+    if (len == 0) return .len_0;
+    if (len == 1) return .len_1;
+    if (len == 2) return .len_2;
+    if (len <= 4) return .len_3_4;
+    if (len <= 8) return .len_5_8;
+    if (len <= 16) return .len_9_16;
+    if (len <= 32) return .len_17_32;
+    if (len <= 64) return .len_33_64;
+    if (len <= 128) return .len_65_128;
+    if (len <= 256) return .len_129_256;
+    return .len_257_plus;
+}
+
+pub const DebugHostStringViewReason = enum {
+    generic,
+    string_list_eager_view,
+    string_list_split_scalar,
+};
+
+const debug_host_string_view_reason_count = std.meta.fields(DebugHostStringViewReason).len;
 
 pub const SamplingProfileState = struct {
     label: SamplingProfileLabel,
@@ -4725,8 +6451,7 @@ pub const Session = struct {
     loaded_safetensors: std.StringHashMap(LoadedSafetensorsStore),
     loaded_relations: std.StringHashMap(LoadedRelationStore),
     registered_duckdb_tables: std.StringHashMap(RegisteredDuckDbTableStore),
-    global_values: std.ArrayListUnmanaged(Value) = .{},
-    global_initialized: std.ArrayListUnmanaged(bool) = .{},
+    global_cells: std.ArrayListUnmanaged(GlobalCell) = .{},
     code_cache: std.StringHashMap(*const Code),
     dense_autodiff_cache: std.AutoHashMap(DenseAutodiffCacheKey, DenseAutodiffLowerResult),
     stack: [max_runtime_stack]Value = undefined,
@@ -4735,8 +6460,6 @@ pub const Session = struct {
     frame_len: usize = 0,
     inline_bases: [max_inline_frames]usize = undefined,
     inline_len: usize = 0,
-    free_boxed_floats: [max_pooled_objects]?*BoxedFloat = [_]?*BoxedFloat{null} ** max_pooled_objects,
-    free_boxed_float_len: usize = 0,
     free_boxed_ints: [max_pooled_objects]?*BoxedInt = [_]?*BoxedInt{null} ** max_pooled_objects,
     free_boxed_int_len: usize = 0,
     free_closures: [max_pooled_objects]?*Closure = [_]?*Closure{null} ** max_pooled_objects,
@@ -4776,9 +6499,12 @@ pub const Session = struct {
     debug_make_array_float_result_count: usize = 0,
     debug_make_array_boxed_fallback_count: usize = 0,
     debug_make_array_boxed_reason_counts: [debug_make_array_boxed_reason_count]usize = [_]usize{0} ** debug_make_array_boxed_reason_count,
+    debug_make_array_boxed_len_bucket_counts: [debug_probe_len_bucket_count]usize = [_]usize{0} ** debug_probe_len_bucket_count,
     debug_host_matrix_row_copy_count: usize = 0,
     debug_host_matrix_index_copy_count: usize = 0,
     debug_host_matrix_mask_copy_count: usize = 0,
+    debug_host_index_in_bounds_fast_count: usize = 0,
+    debug_host_index_in_bounds_fallback_count: usize = 0,
     debug_host_index_copy_count: usize = 0,
     debug_host_mask_copy_count: usize = 0,
     debug_projection_closure_alloc_count: usize = 0,
@@ -4803,10 +6529,49 @@ pub const Session = struct {
     debug_fast_dense_assign_reuse_count: usize = 0,
     debug_fast_dense_assign_clone_count: usize = 0,
     debug_fast_dense_assign_clone_reason_counts: [debug_fast_dense_assign_clone_reason_count]usize = [_]usize{0} ** debug_fast_dense_assign_clone_reason_count,
+    debug_fast_dense_assign_target_element_count: usize = 0,
+    debug_fast_dense_assign_scalar_target_count: usize = 0,
+    debug_fast_dense_assign_vector_target_count: usize = 0,
+    debug_fast_dense_assign_scalar_rhs_count: usize = 0,
+    debug_fast_dense_assign_vector_rhs_count: usize = 0,
+    debug_indexed_assign_count: usize = 0,
+    debug_indexed_assign_global_count: usize = 0,
+    debug_indexed_assign_local_count: usize = 0,
+    debug_indexed_assign_inline_local_count: usize = 0,
+    debug_owned_amend_count: usize = 0,
+    debug_local_release_skip_count: usize = 0,
+    debug_local_release_taken_count: usize = 0,
+    debug_frame_drop_fast_count: usize = 0,
+    debug_frame_drop_fallback_count: usize = 0,
+    debug_frame_push_count: usize = 0,
+    debug_frame_push_known_release_count: usize = 0,
+    debug_frame_reuse_known_release_count: usize = 0,
+    debug_frame_finish_count: usize = 0,
+    debug_jump_if_false_count: usize = 0,
+    debug_jump_if_false_scalar_count: usize = 0,
+    debug_inline_scalar_dyad_attempt_count: usize = 0,
+    debug_inline_scalar_dyad_hit_count: usize = 0,
+    debug_inline_scalar_dyad_fallback_count: usize = 0,
+    debug_shaped_scalar_dyad_count: usize = 0,
+    debug_global_call_slots_count: usize = 0,
+    debug_global_call_slots_fast_count: usize = 0,
+    debug_global_call_slots_fallback_count: usize = 0,
+    debug_compact_k_run_count: usize = 0,
+    debug_compact_k_tail_continue_count: usize = 0,
+    debug_compact_k_global_call_count: usize = 0,
+    debug_compact_k_global_call_compact_count: usize = 0,
+    debug_compact_k_global_call_fallback_count: usize = 0,
+    debug_compact_k_global_call_fallback_reason_counts: [debug_compact_k_global_call_fallback_reason_count]usize = [_]usize{0} ** debug_compact_k_global_call_fallback_reason_count,
+    debug_compact_k_global_call_fallback_kind_counts: [debug_compact_k_global_call_fallback_kind_count]usize = [_]usize{0} ** debug_compact_k_global_call_fallback_kind_count,
+    debug_compact_k_frame_fallback_count: usize = 0,
+    debug_compact_k_indexed_assign_sources_count: usize = 0,
+    debug_compact_k_indexed_assign_stack_count: usize = 0,
+    debug_vm_call1_local_kind_counts: [debug_vm_call1_local_kind_count]usize = [_]usize{0} ** debug_vm_call1_local_kind_count,
     debug_host_fold_fast_count: usize = 0,
     debug_host_scan_fast_count: usize = 0,
     debug_host_fold_scan_miss_counts: [debug_host_fold_scan_miss_count]usize = [_]usize{0} ** debug_host_fold_scan_miss_count,
     debug_host_dense_dyad_host_count: usize = 0,
+    debug_host_dense_dyad_host_element_count: usize = 0,
     debug_host_dense_dyad_host_op_counts: [debug_host_dense_dyad_op_count]usize = [_]usize{0} ** debug_host_dense_dyad_op_count,
     debug_host_dense_dyad_host_rowwise_count: usize = 0,
     debug_host_dense_dyad_host_with_backend_input_count: usize = 0,
@@ -4816,6 +6581,14 @@ pub const Session = struct {
     debug_backend_argmax_kernel_ns: u64 = 0,
     debug_host_string_view_alloc_count: usize = 0,
     debug_host_string_view_release_count: usize = 0,
+    debug_host_string_view_reason_counts: [debug_host_string_view_reason_count]usize = [_]usize{0} ** debug_host_string_view_reason_count,
+    debug_host_string_view_len_bucket_counts: [debug_probe_len_bucket_count]usize = [_]usize{0} ** debug_probe_len_bucket_count,
+    debug_host_string_list_item_value_count: usize = 0,
+    debug_host_string_list_item_eager_owned_count: usize = 0,
+    debug_host_string_list_item_eager_view_count: usize = 0,
+    debug_host_string_list_item_split_scalar_count: usize = 0,
+    debug_host_string_list_item_split_scalar_scan_byte_count: usize = 0,
+    debug_host_string_list_item_split_scalar_scan_sep_count: usize = 0,
     debug_numeric_structural_alloc_counts: [debug_numeric_structural_tag_count]usize = [_]usize{0} ** debug_numeric_structural_tag_count,
     debug_numeric_structural_release_counts: [debug_numeric_structural_tag_count]usize = [_]usize{0} ** debug_numeric_structural_tag_count,
     debug_numeric_structural_mlx_realization_counts: [debug_numeric_structural_tag_count]usize = [_]usize{0} ** debug_numeric_structural_tag_count,
@@ -4884,8 +6657,8 @@ pub const Session = struct {
         self.clearLastErrorText();
         if (self.last_result) |value| self.releaseValue(value);
         self.last_result = null;
-        for (self.global_values.items, self.global_initialized.items) |value, initialized| {
-            if (initialized) self.releaseValue(value);
+        for (self.global_cells.items) |cell| {
+            if (cell.initialized) self.releaseValue(cell.value);
         }
         // Release cached tensor bundles before forcibly draining the numeric
         // registry so bundle-owned backend arrays can unregister themselves.
@@ -4911,8 +6684,7 @@ pub const Session = struct {
         }
         self.registered_duckdb_tables.deinit();
         while (self.managed_numeric_registry_head) |handle| self.recycleManagedNumericArray(handle);
-        self.global_values.deinit(self.allocator);
-        self.global_initialized.deinit(self.allocator);
+        self.global_cells.deinit(self.allocator);
         self.global_slots.deinit();
         self.global_names.deinit(self.allocator);
         self.debug_global_call_counts.deinit(self.allocator);
@@ -4921,10 +6693,6 @@ pub const Session = struct {
         self.code_cache.deinit();
         self.dense_autodiff_cache.deinit();
         if (self.mlx_ctx) |*ctx| ctx.deinit();
-        while (self.free_boxed_float_len > 0) {
-            self.free_boxed_float_len -= 1;
-            self.allocator.destroy(self.free_boxed_floats[self.free_boxed_float_len].?);
-        }
         while (self.free_boxed_int_len > 0) {
             self.free_boxed_int_len -= 1;
             self.allocator.destroy(self.free_boxed_ints[self.free_boxed_int_len].?);
@@ -5135,15 +6903,18 @@ pub const Session = struct {
             code.profile_kind = .none;
             code.profile_source = "";
             code.profile_id = sampling_profile_no_code;
+            assignCompactKProfile(code);
             return;
         }
         code.profile_kind = .top_level;
         code.profile_source = std.mem.trim(u8, source, " \t\r\n");
         if (compile_mode != .frozen) {
             code.profile_id = sampling_profile_no_code;
+            assignCompactKProfile(code);
             return;
         }
         code.profile_id = self.nextSamplingProfileCodeId();
+        assignCompactKProfile(code);
         self.rememberSamplingProfileCodeInfo(code.profile_id, code.profile_kind, code.profile_source);
     }
 
@@ -5212,7 +6983,7 @@ pub const Session = struct {
                 "handle {*}: structural={s} ref={d} rank={d} host={} mlx={} sample={d},{d} last={}\n",
                 .{
                     handle,
-                    @tagName(handle.structural),
+                    @tagName(numericArrayStructuralTag(handle)),
                     handle.header.ref_count,
                     handle.rank,
                     handle.host != null,
@@ -5323,6 +7094,11 @@ pub const Session = struct {
         return self.debug_make_array_boxed_reason_counts[@intFromEnum(reason)];
     }
 
+    pub fn debugMakeArrayBoxedLenBucketCount(self: *const Session, bucket: DebugProbeLenBucket) usize {
+        if (comptime !enable_probe_instrumentation) return 0;
+        return self.debug_make_array_boxed_len_bucket_counts[@intFromEnum(bucket)];
+    }
+
     pub fn debugHostMatrixRowCopyCount(self: *const Session) usize {
         if (comptime !enable_probe_instrumentation) return 0;
         return self.debug_host_matrix_row_copy_count;
@@ -5336,6 +7112,16 @@ pub const Session = struct {
     pub fn debugHostMatrixMaskCopyCount(self: *const Session) usize {
         if (comptime !enable_probe_instrumentation) return 0;
         return self.debug_host_matrix_mask_copy_count;
+    }
+
+    pub fn debugHostIndexInBoundsFastCount(self: *const Session) usize {
+        if (comptime !enable_probe_instrumentation) return 0;
+        return self.debug_host_index_in_bounds_fast_count;
+    }
+
+    pub fn debugHostIndexInBoundsFallbackCount(self: *const Session) usize {
+        if (comptime !enable_probe_instrumentation) return 0;
+        return self.debug_host_index_in_bounds_fallback_count;
     }
 
     pub fn debugHostIndexCopyCount(self: *const Session) usize {
@@ -5463,6 +7249,196 @@ pub const Session = struct {
         return self.debug_fast_dense_assign_clone_reason_counts[@intFromEnum(reason)];
     }
 
+    pub fn debugFastDenseAssignTargetElementCount(self: *const Session) usize {
+        if (comptime !enable_probe_instrumentation) return 0;
+        return self.debug_fast_dense_assign_target_element_count;
+    }
+
+    pub fn debugFastDenseAssignScalarTargetCount(self: *const Session) usize {
+        if (comptime !enable_probe_instrumentation) return 0;
+        return self.debug_fast_dense_assign_scalar_target_count;
+    }
+
+    pub fn debugFastDenseAssignVectorTargetCount(self: *const Session) usize {
+        if (comptime !enable_probe_instrumentation) return 0;
+        return self.debug_fast_dense_assign_vector_target_count;
+    }
+
+    pub fn debugFastDenseAssignScalarRhsCount(self: *const Session) usize {
+        if (comptime !enable_probe_instrumentation) return 0;
+        return self.debug_fast_dense_assign_scalar_rhs_count;
+    }
+
+    pub fn debugFastDenseAssignVectorRhsCount(self: *const Session) usize {
+        if (comptime !enable_probe_instrumentation) return 0;
+        return self.debug_fast_dense_assign_vector_rhs_count;
+    }
+
+    pub fn debugIndexedAssignCount(self: *const Session) usize {
+        if (comptime !enable_probe_instrumentation) return 0;
+        return self.debug_indexed_assign_count;
+    }
+
+    pub fn debugIndexedAssignGlobalCount(self: *const Session) usize {
+        if (comptime !enable_probe_instrumentation) return 0;
+        return self.debug_indexed_assign_global_count;
+    }
+
+    pub fn debugIndexedAssignLocalCount(self: *const Session) usize {
+        if (comptime !enable_probe_instrumentation) return 0;
+        return self.debug_indexed_assign_local_count;
+    }
+
+    pub fn debugIndexedAssignInlineLocalCount(self: *const Session) usize {
+        if (comptime !enable_probe_instrumentation) return 0;
+        return self.debug_indexed_assign_inline_local_count;
+    }
+
+    pub fn debugOwnedAmendCount(self: *const Session) usize {
+        if (comptime !enable_probe_instrumentation) return 0;
+        return self.debug_owned_amend_count;
+    }
+
+    pub fn debugLocalReleaseSkipCount(self: *const Session) usize {
+        if (comptime !enable_probe_instrumentation) return 0;
+        return self.debug_local_release_skip_count;
+    }
+
+    pub fn debugLocalReleaseTakenCount(self: *const Session) usize {
+        if (comptime !enable_probe_instrumentation) return 0;
+        return self.debug_local_release_taken_count;
+    }
+
+    pub fn debugFrameDropFastCount(self: *const Session) usize {
+        if (comptime !enable_probe_instrumentation) return 0;
+        return self.debug_frame_drop_fast_count;
+    }
+
+    pub fn debugFrameDropFallbackCount(self: *const Session) usize {
+        if (comptime !enable_probe_instrumentation) return 0;
+        return self.debug_frame_drop_fallback_count;
+    }
+
+    pub fn debugFramePushCount(self: *const Session) usize {
+        if (comptime !enable_probe_instrumentation) return 0;
+        return self.debug_frame_push_count;
+    }
+
+    pub fn debugFramePushKnownReleaseCount(self: *const Session) usize {
+        if (comptime !enable_probe_instrumentation) return 0;
+        return self.debug_frame_push_known_release_count;
+    }
+
+    pub fn debugFrameReuseKnownReleaseCount(self: *const Session) usize {
+        if (comptime !enable_probe_instrumentation) return 0;
+        return self.debug_frame_reuse_known_release_count;
+    }
+
+    pub fn debugFrameFinishCount(self: *const Session) usize {
+        if (comptime !enable_probe_instrumentation) return 0;
+        return self.debug_frame_finish_count;
+    }
+
+    pub fn debugJumpIfFalseCount(self: *const Session) usize {
+        if (comptime !enable_probe_instrumentation) return 0;
+        return self.debug_jump_if_false_count;
+    }
+
+    pub fn debugJumpIfFalseScalarCount(self: *const Session) usize {
+        if (comptime !enable_probe_instrumentation) return 0;
+        return self.debug_jump_if_false_scalar_count;
+    }
+
+    pub fn debugInlineScalarDyadAttemptCount(self: *const Session) usize {
+        if (comptime !enable_probe_instrumentation) return 0;
+        return self.debug_inline_scalar_dyad_attempt_count;
+    }
+
+    pub fn debugInlineScalarDyadHitCount(self: *const Session) usize {
+        if (comptime !enable_probe_instrumentation) return 0;
+        return self.debug_inline_scalar_dyad_hit_count;
+    }
+
+    pub fn debugInlineScalarDyadFallbackCount(self: *const Session) usize {
+        if (comptime !enable_probe_instrumentation) return 0;
+        return self.debug_inline_scalar_dyad_fallback_count;
+    }
+
+    pub fn debugShapedScalarDyadCount(self: *const Session) usize {
+        if (comptime !enable_probe_instrumentation) return 0;
+        return self.debug_shaped_scalar_dyad_count;
+    }
+
+    pub fn debugGlobalCallSlotsCount(self: *const Session) usize {
+        if (comptime !enable_probe_instrumentation) return 0;
+        return self.debug_global_call_slots_count;
+    }
+
+    pub fn debugGlobalCallSlotsFastCount(self: *const Session) usize {
+        if (comptime !enable_probe_instrumentation) return 0;
+        return self.debug_global_call_slots_fast_count;
+    }
+
+    pub fn debugGlobalCallSlotsFallbackCount(self: *const Session) usize {
+        if (comptime !enable_probe_instrumentation) return 0;
+        return self.debug_global_call_slots_fallback_count;
+    }
+
+    pub fn debugCompactKRunCount(self: *const Session) usize {
+        if (comptime !enable_probe_instrumentation) return 0;
+        return self.debug_compact_k_run_count;
+    }
+
+    pub fn debugCompactKTailContinueCount(self: *const Session) usize {
+        if (comptime !enable_probe_instrumentation) return 0;
+        return self.debug_compact_k_tail_continue_count;
+    }
+
+    pub fn debugCompactKGlobalCallCount(self: *const Session) usize {
+        if (comptime !enable_probe_instrumentation) return 0;
+        return self.debug_compact_k_global_call_count;
+    }
+
+    pub fn debugCompactKGlobalCallCompactCount(self: *const Session) usize {
+        if (comptime !enable_probe_instrumentation) return 0;
+        return self.debug_compact_k_global_call_compact_count;
+    }
+
+    pub fn debugCompactKGlobalCallFallbackCount(self: *const Session) usize {
+        if (comptime !enable_probe_instrumentation) return 0;
+        return self.debug_compact_k_global_call_fallback_count;
+    }
+
+    pub fn debugCompactKGlobalCallFallbackReasonCount(self: *const Session, reason: DebugCompactKGlobalCallFallbackReason) usize {
+        if (comptime !enable_probe_instrumentation) return 0;
+        return self.debug_compact_k_global_call_fallback_reason_counts[@intFromEnum(reason)];
+    }
+
+    pub fn debugCompactKGlobalCallFallbackKindCount(self: *const Session, kind: DebugCompactKGlobalCallFallbackKind) usize {
+        if (comptime !enable_probe_instrumentation) return 0;
+        return self.debug_compact_k_global_call_fallback_kind_counts[@intFromEnum(kind)];
+    }
+
+    pub fn debugCompactKFrameFallbackCount(self: *const Session) usize {
+        if (comptime !enable_probe_instrumentation) return 0;
+        return self.debug_compact_k_frame_fallback_count;
+    }
+
+    pub fn debugCompactKIndexedAssignSourcesCount(self: *const Session) usize {
+        if (comptime !enable_probe_instrumentation) return 0;
+        return self.debug_compact_k_indexed_assign_sources_count;
+    }
+
+    pub fn debugCompactKIndexedAssignStackCount(self: *const Session) usize {
+        if (comptime !enable_probe_instrumentation) return 0;
+        return self.debug_compact_k_indexed_assign_stack_count;
+    }
+
+    pub fn debugVmCall1LocalKindCount(self: *const Session, kind: DebugVmCall1LocalKind) usize {
+        if (comptime !enable_probe_instrumentation) return 0;
+        return self.debug_vm_call1_local_kind_counts[@intFromEnum(kind)];
+    }
+
     pub fn debugHostScanFastCount(self: *const Session) usize {
         if (comptime !enable_probe_instrumentation) return 0;
         return self.debug_host_scan_fast_count;
@@ -5476,6 +7452,11 @@ pub const Session = struct {
     pub fn debugHostDenseDyadHostCount(self: *const Session) usize {
         if (comptime !enable_probe_instrumentation) return 0;
         return self.debug_host_dense_dyad_host_count;
+    }
+
+    pub fn debugHostDenseDyadHostElementCount(self: *const Session) usize {
+        if (comptime !enable_probe_instrumentation) return 0;
+        return self.debug_host_dense_dyad_host_element_count;
     }
 
     pub fn debugHostDenseDyadHostOpCount(self: *const Session, op: DebugHostDenseDyadOp) usize {
@@ -5521,6 +7502,46 @@ pub const Session = struct {
     pub fn debugHostStringViewReleaseCount(self: *const Session) usize {
         if (comptime !enable_probe_instrumentation) return 0;
         return self.debug_host_string_view_release_count;
+    }
+
+    pub fn debugHostStringViewReasonCount(self: *const Session, reason: DebugHostStringViewReason) usize {
+        if (comptime !enable_probe_instrumentation) return 0;
+        return self.debug_host_string_view_reason_counts[@intFromEnum(reason)];
+    }
+
+    pub fn debugHostStringViewLenBucketCount(self: *const Session, bucket: DebugProbeLenBucket) usize {
+        if (comptime !enable_probe_instrumentation) return 0;
+        return self.debug_host_string_view_len_bucket_counts[@intFromEnum(bucket)];
+    }
+
+    pub fn debugHostStringListItemValueCount(self: *const Session) usize {
+        if (comptime !enable_probe_instrumentation) return 0;
+        return self.debug_host_string_list_item_value_count;
+    }
+
+    pub fn debugHostStringListItemEagerOwnedCount(self: *const Session) usize {
+        if (comptime !enable_probe_instrumentation) return 0;
+        return self.debug_host_string_list_item_eager_owned_count;
+    }
+
+    pub fn debugHostStringListItemEagerViewCount(self: *const Session) usize {
+        if (comptime !enable_probe_instrumentation) return 0;
+        return self.debug_host_string_list_item_eager_view_count;
+    }
+
+    pub fn debugHostStringListItemSplitScalarCount(self: *const Session) usize {
+        if (comptime !enable_probe_instrumentation) return 0;
+        return self.debug_host_string_list_item_split_scalar_count;
+    }
+
+    pub fn debugHostStringListItemSplitScalarScanByteCount(self: *const Session) usize {
+        if (comptime !enable_probe_instrumentation) return 0;
+        return self.debug_host_string_list_item_split_scalar_scan_byte_count;
+    }
+
+    pub fn debugHostStringListItemSplitScalarScanSepCount(self: *const Session) usize {
+        if (comptime !enable_probe_instrumentation) return 0;
+        return self.debug_host_string_list_item_split_scalar_scan_sep_count;
     }
 
     pub fn debugNumericStructuralAllocCount(self: *const Session, tag: DebugNumericStructuralTag) usize {
@@ -5694,9 +7715,12 @@ pub const Session = struct {
         self.debug_make_array_float_result_count = 0;
         self.debug_make_array_boxed_fallback_count = 0;
         self.debug_make_array_boxed_reason_counts = [_]usize{0} ** debug_make_array_boxed_reason_count;
+        self.debug_make_array_boxed_len_bucket_counts = [_]usize{0} ** debug_probe_len_bucket_count;
         self.debug_host_matrix_row_copy_count = 0;
         self.debug_host_matrix_index_copy_count = 0;
         self.debug_host_matrix_mask_copy_count = 0;
+        self.debug_host_index_in_bounds_fast_count = 0;
+        self.debug_host_index_in_bounds_fallback_count = 0;
         self.debug_host_index_copy_count = 0;
         self.debug_host_mask_copy_count = 0;
         self.debug_projection_closure_alloc_count = 0;
@@ -5721,10 +7745,49 @@ pub const Session = struct {
         self.debug_fast_dense_assign_reuse_count = 0;
         self.debug_fast_dense_assign_clone_count = 0;
         self.debug_fast_dense_assign_clone_reason_counts = [_]usize{0} ** debug_fast_dense_assign_clone_reason_count;
+        self.debug_fast_dense_assign_target_element_count = 0;
+        self.debug_fast_dense_assign_scalar_target_count = 0;
+        self.debug_fast_dense_assign_vector_target_count = 0;
+        self.debug_fast_dense_assign_scalar_rhs_count = 0;
+        self.debug_fast_dense_assign_vector_rhs_count = 0;
+        self.debug_indexed_assign_count = 0;
+        self.debug_indexed_assign_global_count = 0;
+        self.debug_indexed_assign_local_count = 0;
+        self.debug_indexed_assign_inline_local_count = 0;
+        self.debug_owned_amend_count = 0;
+        self.debug_local_release_skip_count = 0;
+        self.debug_local_release_taken_count = 0;
+        self.debug_frame_drop_fast_count = 0;
+        self.debug_frame_drop_fallback_count = 0;
+        self.debug_frame_push_count = 0;
+        self.debug_frame_push_known_release_count = 0;
+        self.debug_frame_reuse_known_release_count = 0;
+        self.debug_frame_finish_count = 0;
+        self.debug_jump_if_false_count = 0;
+        self.debug_jump_if_false_scalar_count = 0;
+        self.debug_inline_scalar_dyad_attempt_count = 0;
+        self.debug_inline_scalar_dyad_hit_count = 0;
+        self.debug_inline_scalar_dyad_fallback_count = 0;
+        self.debug_shaped_scalar_dyad_count = 0;
+        self.debug_global_call_slots_count = 0;
+        self.debug_global_call_slots_fast_count = 0;
+        self.debug_global_call_slots_fallback_count = 0;
+        self.debug_compact_k_run_count = 0;
+        self.debug_compact_k_tail_continue_count = 0;
+        self.debug_compact_k_global_call_count = 0;
+        self.debug_compact_k_global_call_compact_count = 0;
+        self.debug_compact_k_global_call_fallback_count = 0;
+        self.debug_compact_k_global_call_fallback_reason_counts = [_]usize{0} ** debug_compact_k_global_call_fallback_reason_count;
+        self.debug_compact_k_global_call_fallback_kind_counts = [_]usize{0} ** debug_compact_k_global_call_fallback_kind_count;
+        self.debug_compact_k_frame_fallback_count = 0;
+        self.debug_compact_k_indexed_assign_sources_count = 0;
+        self.debug_compact_k_indexed_assign_stack_count = 0;
+        self.debug_vm_call1_local_kind_counts = [_]usize{0} ** debug_vm_call1_local_kind_count;
         self.debug_host_fold_fast_count = 0;
         self.debug_host_scan_fast_count = 0;
         self.debug_host_fold_scan_miss_counts = [_]usize{0} ** debug_host_fold_scan_miss_count;
         self.debug_host_dense_dyad_host_count = 0;
+        self.debug_host_dense_dyad_host_element_count = 0;
         self.debug_host_dense_dyad_host_op_counts = [_]usize{0} ** debug_host_dense_dyad_op_count;
         self.debug_host_dense_dyad_host_rowwise_count = 0;
         self.debug_host_dense_dyad_host_with_backend_input_count = 0;
@@ -5734,6 +7797,14 @@ pub const Session = struct {
         self.debug_backend_argmax_kernel_ns = 0;
         self.debug_host_string_view_alloc_count = 0;
         self.debug_host_string_view_release_count = 0;
+        self.debug_host_string_view_reason_counts = [_]usize{0} ** debug_host_string_view_reason_count;
+        self.debug_host_string_view_len_bucket_counts = [_]usize{0} ** debug_probe_len_bucket_count;
+        self.debug_host_string_list_item_value_count = 0;
+        self.debug_host_string_list_item_eager_owned_count = 0;
+        self.debug_host_string_list_item_eager_view_count = 0;
+        self.debug_host_string_list_item_split_scalar_count = 0;
+        self.debug_host_string_list_item_split_scalar_scan_byte_count = 0;
+        self.debug_host_string_list_item_split_scalar_scan_sep_count = 0;
         self.debug_numeric_structural_alloc_counts = [_]usize{0} ** debug_numeric_structural_tag_count;
         self.debug_numeric_structural_release_counts = [_]usize{0} ** debug_numeric_structural_tag_count;
         self.debug_numeric_structural_mlx_realization_counts = [_]usize{0} ** debug_numeric_structural_tag_count;
@@ -5840,9 +7911,10 @@ pub const Session = struct {
         self.debug_host_dense_dyad_host_op_counts[@intFromEnum(tag)] += 1;
     }
 
-    fn noteHostDenseDyadHost(self: *Session, op: BuiltinId, left: Value, right: Value, rowwise: bool) void {
+    fn noteHostDenseDyadHost(self: *Session, op: BuiltinId, left: Value, right: Value, result_len: usize, rowwise: bool) void {
         if (!self.debugDetailedProbeActive()) return;
         self.debug_host_dense_dyad_host_count += 1;
+        self.debug_host_dense_dyad_host_element_count += result_len;
         self.noteHostDenseDyadOp(op);
         if (rowwise) self.debug_host_dense_dyad_host_rowwise_count += 1;
         if (hasBackendRealization(left) or hasBackendRealization(right)) {
@@ -5853,6 +7925,34 @@ pub const Session = struct {
     fn noteHostDenseDyadMiss(self: *Session, reason: DebugHostDenseDyadMiss) void {
         if (!self.debugDetailedProbeActive()) return;
         self.debug_host_dense_dyad_miss_counts[@intFromEnum(reason)] += 1;
+    }
+
+    fn noteCompactKGlobalCallFallback(self: *Session, cell: *const GlobalCell, argc: u8) void {
+        if (comptime !enable_probe_instrumentation) return;
+
+        const reason: DebugCompactKGlobalCallFallbackReason = if (cell.compact_k) |compact|
+            if (compact.arity != argc)
+                .arity
+            else if (cell.value.tag() == .closure and (cell.value.asClosure().code.direct_closure_mask & directClosureMaskBit(argc)) != 0)
+                .direct_mask
+            else
+                .other
+        else
+            .no_compact;
+        self.debug_compact_k_global_call_fallback_reason_counts[@intFromEnum(reason)] += 1;
+
+        const kind: DebugCompactKGlobalCallFallbackKind = switch (cell.value.tag()) {
+            .builtin => .builtin,
+            .closure => .closure,
+            .array => .array,
+            else => .other,
+        };
+        self.debug_compact_k_global_call_fallback_kind_counts[@intFromEnum(kind)] += 1;
+    }
+
+    fn noteVmCall1Local(self: *Session, kind: DebugVmCall1LocalKind) void {
+        if (comptime !enable_probe_instrumentation) return;
+        self.debug_vm_call1_local_kind_counts[@intFromEnum(kind)] += 1;
     }
 
     fn noteDenseEachMiss(self: *Session, reason: DebugDenseEachMiss) void {
@@ -6482,31 +8582,31 @@ pub const Session = struct {
                 try out.append(self.allocator, 'b');
             },
             .int8 => |items| {
-                for (items, 0..) |item, idx| {
+                for (hostDenseLogicalItems(i8, array, items), 0..) |item, idx| {
                     if (idx != 0) try out.append(self.allocator, ' ');
                     try out.writer(self.allocator).print("{d}", .{item});
                 }
             },
             .int16 => |items| {
-                for (items, 0..) |item, idx| {
+                for (hostDenseLogicalItems(i16, array, items), 0..) |item, idx| {
                     if (idx != 0) try out.append(self.allocator, ' ');
                     try out.writer(self.allocator).print("{d}", .{item});
                 }
             },
             .int32 => |items| {
-                for (items, 0..) |item, idx| {
+                for (hostDenseLogicalItems(i32, array, items), 0..) |item, idx| {
                     if (idx != 0) try out.append(self.allocator, ' ');
                     try out.writer(self.allocator).print("{d}", .{item});
                 }
             },
             .int64 => |items| {
-                for (items, 0..) |item, idx| {
+                for (hostDenseLogicalItems(i64, array, items), 0..) |item, idx| {
                     if (idx != 0) try out.append(self.allocator, ' ');
                     try out.writer(self.allocator).print("{d}", .{item});
                 }
             },
             .float64 => |items| {
-                for (items, 0..) |item, idx| {
+                for (hostDenseLogicalItems(f64, array, items), 0..) |item, idx| {
                     if (idx != 0) try out.append(self.allocator, ' ');
                     const part = try formatFloat(self.allocator, item);
                     defer self.allocator.free(part);
@@ -6562,19 +8662,13 @@ pub const Session = struct {
     }
 
     fn managedFloat(self: *Session, value: f64) !Value {
-        const box = if (self.free_boxed_float_len != 0) blk: {
-            self.free_boxed_float_len -= 1;
-            break :blk self.free_boxed_floats[self.free_boxed_float_len].?;
-        } else try self.allocator.create(BoxedFloat);
-        box.* = .{
-            .header = HeapHeader.init(.boxed_float, .managed),
-            .value = value,
-        };
-        return Value.boxedFloat(box);
+        _ = self;
+        return Value.float(value);
     }
 
     fn scratchFloat(self: *Session, value: f64) !Value {
-        return try allocBoxedFloat(self.scratch_arena.allocator(), .scratch, value);
+        _ = self;
+        return Value.float(value);
     }
 
     fn managedInt(self: *Session, value: i64) !Value {
@@ -6597,13 +8691,14 @@ pub const Session = struct {
         return try allocBoxedInt(self.scratch_arena.allocator(), .scratch, value);
     }
 
-    fn allocManagedClosure(self: *Session, code: *const Code, captures: []const Value) !*Closure {
+    fn allocManagedClosure(self: *Session, kind: ClosureKind, code: *const Code, captures: []const Value) !*Closure {
         const closure = if (self.free_closure_len != 0) blk: {
             self.free_closure_len -= 1;
             break :blk self.free_closures[self.free_closure_len].?;
         } else try self.allocator.create(Closure);
         closure.* = .{
             .header = HeapHeader.init(.closure, .managed),
+            .kind = kind,
             .code = code,
             .captures = captures,
         };
@@ -6634,7 +8729,7 @@ pub const Session = struct {
         }
 
         if (comptime enable_probe_instrumentation) self.debug_projection_closure_alloc_count += 1;
-        return Value.closure(try self.allocManagedClosure(&projection_code, captures));
+        return Value.closure(try self.allocManagedClosure(.projection, &projection_code, captures));
     }
 
     fn allocFrozenDerivedClosure(self: *Session, kind: DerivedVerbKind, base: Value) !*Closure {
@@ -6643,6 +8738,7 @@ pub const Session = struct {
         const closure = try self.arena.allocator().create(Closure);
         closure.* = .{
             .header = HeapHeader.init(.closure, .frozen),
+            .kind = ClosureKind.fromDerived(kind),
             .code = derivedCode(kind),
             .captures = captures,
         };
@@ -6654,7 +8750,7 @@ pub const Session = struct {
         errdefer self.allocator.free(captures);
         captures[0] = try self.retainEscapedValue(base);
         errdefer self.releaseValue(captures[0]);
-        return try self.allocManagedClosure(derivedCode(kind), captures);
+        return try self.allocManagedClosure(ClosureKind.fromDerived(kind), derivedCode(kind), captures);
     }
 
     fn adverbBaseCanStayFrozen(base: Value) bool {
@@ -6678,6 +8774,7 @@ pub const Session = struct {
         const closure = try self.arena.allocator().create(Closure);
         closure.* = .{
             .header = HeapHeader.init(.closure, .frozen),
+            .kind = .inner_product,
             .code = &inner_product_code,
             .captures = captures,
         };
@@ -6692,6 +8789,7 @@ pub const Session = struct {
         const closure = try self.arena.allocator().create(Closure);
         closure.* = .{
             .header = HeapHeader.init(.closure, .frozen),
+            .kind = ClosureKind.fromDerived(kind),
             .code = derivedCode(kind),
             .captures = captures,
         };
@@ -6767,7 +8865,76 @@ pub const Session = struct {
         self.free_host_dense_buffer_len[pool_idx] = count + 1;
     }
 
-    fn allocHostArrayTyped(self: *Session, comptime T: type, comptime kind: HostDenseStorageKind, owner: HeapOwner, len: usize) !HostDenseAlloc(T) {
+    fn recycleManagedHostDenseStorage(self: *Session, storage: HostDenseStorage) void {
+        switch (storage) {
+            .bit => |words| self.recycleManagedHostDenseBuffer(u64, .bit, words),
+            .int8 => |items| self.recycleManagedHostDenseBuffer(i8, .int8, items),
+            .int16 => |items| self.recycleManagedHostDenseBuffer(i16, .int16, items),
+            .int32 => |items| self.recycleManagedHostDenseBuffer(i32, .int32, items),
+            .int64 => |items| self.recycleManagedHostDenseBuffer(i64, .int64, items),
+            .float64 => |items| self.recycleManagedHostDenseBuffer(f64, .float64, items),
+        }
+    }
+
+    fn allocManagedHostDenseStorage(self: *Session, kind: HostDenseStorageKind, capacity_len: usize) !HostDenseStorage {
+        return switch (kind) {
+            .bit => blk: {
+                const word_count = bitWordCount(capacity_len);
+                const words = self.takeManagedHostDenseBuffer(u64, .bit, word_count) orelse try self.allocator.alloc(u64, word_count);
+                @memset(words, 0);
+                break :blk .{ .bit = words };
+            },
+            .int8 => .{ .int8 = self.takeManagedHostDenseBuffer(i8, .int8, capacity_len) orelse try self.allocator.alloc(i8, capacity_len) },
+            .int16 => .{ .int16 = self.takeManagedHostDenseBuffer(i16, .int16, capacity_len) orelse try self.allocator.alloc(i16, capacity_len) },
+            .int32 => .{ .int32 = self.takeManagedHostDenseBuffer(i32, .int32, capacity_len) orelse try self.allocator.alloc(i32, capacity_len) },
+            .int64 => .{ .int64 = self.takeManagedHostDenseBuffer(i64, .int64, capacity_len) orelse try self.allocator.alloc(i64, capacity_len) },
+            .float64 => .{ .float64 = self.takeManagedHostDenseBuffer(f64, .float64, capacity_len) orelse try self.allocator.alloc(f64, capacity_len) },
+        };
+    }
+
+    fn copyHostDenseIntToStorage(array: *const HostDenseArray, storage: HostDenseStorage, len: usize) KError!void {
+        switch (storage) {
+            .bit => |words| {
+                for (0..len) |idx| {
+                    const value = try hostDenseIntAt(array, idx);
+                    if (value != 0 and value != 1) return error.Unsupported;
+                    bitSet(words, idx, value == 1);
+                }
+            },
+            .int8 => |items| {
+                for (0..len) |idx| items[idx] = std.math.cast(i8, try hostDenseIntAt(array, idx)) orelse return error.Unsupported;
+            },
+            .int16 => |items| {
+                for (0..len) |idx| items[idx] = std.math.cast(i16, try hostDenseIntAt(array, idx)) orelse return error.Unsupported;
+            },
+            .int32 => |items| {
+                for (0..len) |idx| items[idx] = std.math.cast(i32, try hostDenseIntAt(array, idx)) orelse return error.Unsupported;
+            },
+            .int64 => |items| {
+                for (0..len) |idx| items[idx] = try hostDenseIntAt(array, idx);
+            },
+            .float64 => return error.Type,
+        }
+    }
+
+    fn ensureManagedHostDenseIntCapacity(self: *Session, array: *HostDenseArray, result_kind: HostIntStorageKind, required_len: usize) KError!void {
+        const target_storage_kind = hostDenseStorageKindForIntKind(result_kind);
+        const current_storage_kind = std.meta.activeTag(array.storage);
+        if (current_storage_kind == target_storage_kind and hostDenseStorageCapacityLen(array) >= required_len) return;
+
+        const old_len = array.logical_len;
+        const new_capacity_len = hostDenseGrowCapacityLen(target_storage_kind, hostDenseStorageCapacityLen(array), required_len);
+        const new_storage = try self.allocManagedHostDenseStorage(target_storage_kind, new_capacity_len);
+        errdefer self.recycleManagedHostDenseStorage(new_storage);
+
+        try copyHostDenseIntToStorage(array, new_storage, old_len);
+        const old_storage = array.storage;
+        array.storage = new_storage;
+        self.recycleManagedHostDenseStorage(old_storage);
+    }
+
+    fn allocHostArrayTypedCapacity(self: *Session, comptime T: type, comptime kind: HostDenseStorageKind, owner: HeapOwner, len: usize, capacity_len: usize) !HostDenseAlloc(T) {
+        std.debug.assert(capacity_len >= len);
         const allocator = switch (owner) {
             .managed => self.allocator,
             .scratch => self.scratch_arena.allocator(),
@@ -6780,10 +8947,10 @@ pub const Session = struct {
             self.free_host_array_len -= 1;
             break :blk self.free_host_arrays[self.free_host_array_len].?;
         } else try allocator.create(HostDenseArray);
-        const items = if (owner == .managed)
-            self.takeManagedHostDenseBuffer(T, kind, len) orelse try allocator.alloc(T, len)
+        const storage_items = if (owner == .managed)
+            self.takeManagedHostDenseBuffer(T, kind, capacity_len) orelse try allocator.alloc(T, capacity_len)
         else
-            try allocator.alloc(T, len);
+            try allocator.alloc(T, capacity_len);
         array.header = HeapHeader.init(.host_dense_array, owner);
         array.logical_handle = null;
         array.logical_len = len;
@@ -6792,16 +8959,21 @@ pub const Session = struct {
         hostDenseResetFindCacheState(array);
         array.storage = switch (kind) {
             .bit => unreachable,
-            .int8 => .{ .int8 = items },
-            .int16 => .{ .int16 = items },
-            .int32 => .{ .int32 = items },
-            .int64 => .{ .int64 = items },
-            .float64 => .{ .float64 = items },
+            .int8 => .{ .int8 = storage_items },
+            .int16 => .{ .int16 = storage_items },
+            .int32 => .{ .int32 = storage_items },
+            .int64 => .{ .int64 = storage_items },
+            .float64 => .{ .float64 = storage_items },
         };
-        return .{ .array = array, .items = items };
+        return .{ .array = array, .items = storage_items[0..len] };
     }
 
-    fn allocHostBitArray(self: *Session, owner: HeapOwner, len: usize) !HostBitAlloc {
+    fn allocHostArrayTyped(self: *Session, comptime T: type, comptime kind: HostDenseStorageKind, owner: HeapOwner, len: usize) !HostDenseAlloc(T) {
+        return self.allocHostArrayTypedCapacity(T, kind, owner, len, len);
+    }
+
+    fn allocHostBitArrayWithInitCapacity(self: *Session, owner: HeapOwner, len: usize, capacity_len: usize, zero: bool) !HostBitAlloc {
+        std.debug.assert(capacity_len >= len);
         const allocator = switch (owner) {
             .managed => self.allocator,
             .scratch => self.scratch_arena.allocator(),
@@ -6815,11 +8987,12 @@ pub const Session = struct {
             break :blk self.free_host_arrays[self.free_host_array_len].?;
         } else try allocator.create(HostDenseArray);
         const word_count = bitWordCount(len);
+        const storage_word_count = bitWordCount(capacity_len);
         const words = if (owner == .managed)
-            self.takeManagedHostDenseBuffer(u64, .bit, word_count) orelse try allocator.alloc(u64, word_count)
+            self.takeManagedHostDenseBuffer(u64, .bit, storage_word_count) orelse try allocator.alloc(u64, storage_word_count)
         else
-            try allocator.alloc(u64, word_count);
-        @memset(words, 0);
+            try allocator.alloc(u64, storage_word_count);
+        if (zero) @memset(words, 0);
         array.header = HeapHeader.init(.host_dense_array, owner);
         array.logical_handle = null;
         array.logical_len = len;
@@ -6827,7 +9000,19 @@ pub const Session = struct {
         hostDenseClearCachedIntRange(array);
         hostDenseResetFindCacheState(array);
         array.storage = .{ .bit = words };
-        return .{ .array = array, .words = words, .len = len };
+        return .{ .array = array, .words = words[0..word_count], .len = len };
+    }
+
+    fn allocHostBitArrayWithInit(self: *Session, owner: HeapOwner, len: usize, zero: bool) !HostBitAlloc {
+        return self.allocHostBitArrayWithInitCapacity(owner, len, len, zero);
+    }
+
+    fn allocHostBitArray(self: *Session, owner: HeapOwner, len: usize) !HostBitAlloc {
+        return try self.allocHostBitArrayWithInit(owner, len, true);
+    }
+
+    fn allocHostBitArrayUninitialized(self: *Session, owner: HeapOwner, len: usize) !HostBitAlloc {
+        return try self.allocHostBitArrayWithInit(owner, len, false);
     }
 
     fn allocManagedHostIntResult(self: *Session, kind: HostIntStorageKind, len: usize) !HostIntResult {
@@ -6881,6 +9066,11 @@ pub const Session = struct {
             .scratch => try self.allocScratchHostIntResult(kind, len),
             .frozen => try self.allocFrozenHostIntResult(kind, len),
         };
+    }
+
+    fn allocOwnedHostIntCloneResult(self: *Session, owner: HeapOwner, kind: HostIntStorageKind, len: usize) !HostIntResult {
+        if (kind == .bit) return .{ .bit = try self.allocHostBitArrayUninitialized(owner, len) };
+        return try self.allocOwnedHostIntResult(owner, kind, len);
     }
 
     fn allocOwnedHostFloatResult(self: *Session, owner: HeapOwner, len: usize) !HostFloatResult {
@@ -6944,9 +9134,18 @@ pub const Session = struct {
             bitClearUnusedTail(host.storage.bit, host.logical_len);
         }
         hostDenseSetFlags(host, flags);
-        hostDenseClearCachedIntRange(host);
+        self.invalidateHostDenseCachesForMutation(host);
         const result = try applyNonVectorNumericShapeToValue(self, result_value, plan.shape);
         return if (plan.reused) self.shareValue(result) else result;
+    }
+
+    fn finishManagedHostBitAlloc(self: *Session, out: HostBitAlloc, flags: u8, range: HostIntRange) KError!Value {
+        bitClearUnusedTail(out.words, out.len);
+        const value = try wrapOwnedHostArrayValue(self, out.array);
+        const host = try mutableNumericHostArrayValue(self, value);
+        hostDenseSetFlags(host, flags);
+        hostDenseSetCachedIntRange(host, range);
+        return value;
     }
 
     fn planHostFloatUnaryOutput(self: *Session, source_value: Value, len: usize, allow_reuse: bool) !HostFloatOutputPlan {
@@ -6970,6 +9169,7 @@ pub const Session = struct {
     fn finishHostFloatOutput(self: *Session, plan: HostFloatOutputPlan, flags: u8) KError!Value {
         const result_value = try plan.output.value(self);
         hostDenseSetFlags(plan.output.array, flags);
+        self.invalidateHostDenseCachesForMutation(plan.output.array);
         const result = try applyNonVectorNumericShapeToValue(self, result_value, plan.shape);
         return if (plan.reused) self.shareValue(result) else result;
     }
@@ -6991,19 +9191,19 @@ pub const Session = struct {
                 else => null,
             },
             .int8 => switch (array.storage) {
-                .int8 => |items| .{ .int8 = .{ .array = array, .items = items } },
+                .int8 => |items| .{ .int8 = .{ .array = array, .items = hostDenseMutableLogicalItems(i8, array, items) } },
                 else => null,
             },
             .int16 => switch (array.storage) {
-                .int16 => |items| .{ .int16 = .{ .array = array, .items = items } },
+                .int16 => |items| .{ .int16 = .{ .array = array, .items = hostDenseMutableLogicalItems(i16, array, items) } },
                 else => null,
             },
             .int32 => switch (array.storage) {
-                .int32 => |items| .{ .int32 = .{ .array = array, .items = items } },
+                .int32 => |items| .{ .int32 = .{ .array = array, .items = hostDenseMutableLogicalItems(i32, array, items) } },
                 else => null,
             },
             .int64 => switch (array.storage) {
-                .int64 => |items| .{ .int64 = .{ .array = array, .items = items } },
+                .int64 => |items| .{ .int64 = .{ .array = array, .items = hostDenseMutableLogicalItems(i64, array, items) } },
                 else => null,
             },
         };
@@ -7022,7 +9222,7 @@ pub const Session = struct {
             .frozen => return null,
         }
         return switch (array.storage) {
-            .float64 => |items| .{ .array = array, .items = items },
+            .float64 => |items| .{ .array = array, .items = hostDenseMutableLogicalItems(f64, array, items) },
             else => null,
         };
     }
@@ -7053,7 +9253,9 @@ pub const Session = struct {
 
     fn ownedConstantFloat(self: *Session, allocator: std.mem.Allocator, owner: HeapOwner, value: f64) !Value {
         _ = self;
-        return try allocBoxedFloat(allocator, owner, value);
+        _ = allocator;
+        _ = owner;
+        return Value.float(value);
     }
 
     fn ownedConstantInt(self: *Session, allocator: std.mem.Allocator, owner: HeapOwner, value: i64) !Value {
@@ -7147,6 +9349,10 @@ pub const Session = struct {
     }
 
     fn managedHostStringView(self: *Session, base: *HostText, span: HostTextSpan) !Value {
+        return try self.managedHostStringViewWithReason(base, span, .generic);
+    }
+
+    fn managedHostStringViewWithReason(self: *Session, base: *HostText, span: HostTextSpan, reason: DebugHostStringViewReason) !Value {
         if (span.start == 0 and span.len == base.len and base.header.kind == .host_string) {
             return try self.retainEscapedValue(Value.array(base));
         }
@@ -7159,7 +9365,11 @@ pub const Session = struct {
             .base = @constCast(retained_base.asHostString()),
             .span = span,
         };
-        if (comptime enable_probe_instrumentation) self.debug_host_string_view_alloc_count += 1;
+        if (comptime enable_probe_instrumentation) {
+            self.debug_host_string_view_alloc_count += 1;
+            self.debug_host_string_view_reason_counts[@intFromEnum(reason)] += 1;
+            self.debug_host_string_view_len_bucket_counts[@intFromEnum(debugProbeLenBucket(span.len))] += 1;
+        }
         return Value.array(view);
     }
 
@@ -7180,11 +9390,6 @@ pub const Session = struct {
                 .managed => self.retainValue(canonical),
                 .frozen => canonical,
                 .scratch => self.managedInt(canonical.asInt()),
-            },
-            Value.boxed_float_tag => switch (canonical.asBoxedFloat().header.owner) {
-                .managed => self.retainValue(canonical),
-                .frozen => canonical,
-                .scratch => self.managedFloat(canonical.asFloat()),
             },
             Value.closure_tag => switch (canonical.asClosure().header.owner) {
                 .managed => self.retainValue(canonical),
@@ -7210,10 +9415,6 @@ pub const Session = struct {
                 .managed, .frozen => canonical,
                 .scratch => self.managedInt(canonical.asInt()),
             },
-            Value.boxed_float_tag => switch (canonical.asBoxedFloat().header.owner) {
-                .managed, .frozen => canonical,
-                .scratch => self.managedFloat(canonical.asFloat()),
-            },
             Value.closure_tag => switch (canonical.asClosure().header.owner) {
                 .managed, .frozen => canonical,
                 .scratch => self.promoteScratchClosure(canonical.asClosure()),
@@ -7237,11 +9438,6 @@ pub const Session = struct {
                 .frozen => canonical,
                 .scratch => try self.managedInt(canonical.asInt()),
             },
-            Value.boxed_float_tag => switch (canonical.asBoxedFloat().header.owner) {
-                .managed => canonical,
-                .frozen => canonical,
-                .scratch => try self.managedFloat(canonical.asFloat()),
-            },
             Value.closure_tag => switch (canonical.asClosure().header.owner) {
                 .managed => canonical,
                 .frozen => canonical,
@@ -7260,18 +9456,18 @@ pub const Session = struct {
     }
 
     fn finishFrame(self: *Session, frame_index: usize, result: Value) KError!?Value {
+        if (comptime enable_probe_instrumentation) self.debug_frame_finish_count += 1;
         const frame = self.frames[frame_index];
-        const base = frame.base;
         const owner = frame.owner;
         self.frame_len -= 1;
         const escaped_result = if (self.frame_len == 0)
             result
-        else switch (frame.result_target) {
-            .stack => try self.retainEscapedValue(result),
-            .parent_local, .parent_local_tail_global_slots => try self.moveEscapedValue(result),
+        else switch (frame.resultTarget()) {
+            .stack => if (valueMayNeedRelease(result)) try self.retainEscapedValue(result) else result,
+            .parent_local, .parent_local_tail_global_slots => if (valueMayNeedRelease(result)) try self.moveEscapedValue(result) else result,
         };
-        defer if (self.frame_len != 0 and frame.result_target == .stack) self.releaseValue(result);
-        self.dropStackFrom(base);
+        defer if (self.frame_len != 0 and frame.resultTargetIsStack() and valueMayNeedRelease(result)) self.releaseValue(result);
+        self.dropFrameStack(&frame);
         if (owner) |owned| self.releaseValue(owned);
         if (self.frame_len == 0) {
             if (comptime enable_sampling_profile) {
@@ -7283,7 +9479,7 @@ pub const Session = struct {
             if (self.root_results) return try self.finishResult(result);
             return result;
         }
-        switch (frame.result_target) {
+        switch (frame.resultTarget()) {
             .stack => try self.push(escaped_result),
             .parent_local => |slot| {
                 const parent_index = self.frame_len - 1;
@@ -7337,7 +9533,7 @@ pub const Session = struct {
         if (callee.tag() == .closure) {
             const closure = callee.asClosure();
             if (closureIsCompactPlainGlobal(closure) and closure.code.arity == argc) {
-                var sources_buf: [4]GlobalCallArgSource = undefined;
+                var sources_buf: [max_shaped_call_args]GlobalCallArgSource = undefined;
                 const sources = try readGlobalCallArgSources(frame, argc, &sources_buf);
                 try self.replaceCurrentFrameWithCompactPlainClosureFromGlobalCallSourcesWithOverride(frame_index, frame, callee, closure, slot, sources, local_slot, value);
                 return null;
@@ -7361,6 +9557,7 @@ pub const Session = struct {
         const frozen = try self.arena.allocator().create(Closure);
         frozen.* = .{
             .header = HeapHeader.init(.closure, .frozen),
+            .kind = closure.kind,
             .code = try self.stableCode(closure.code),
             .captures = &[_]Value{},
         };
@@ -7375,14 +9572,13 @@ pub const Session = struct {
             captures[idx] = try self.retainEscapedValue(capture);
         }
 
-        return Value.closure(try self.allocManagedClosure(try self.stableCode(closure.code), captures));
+        return Value.closure(try self.allocManagedClosure(closure.kind, try self.stableCode(closure.code), captures));
     }
 
     fn stableCode(self: *Session, code: *const Code) KError!*const Code {
         const arena_allocator = self.arena.allocator();
         const stable = try arena_allocator.create(Code);
         const constants = try arena_allocator.alloc(Value, code.constants.len);
-        const templates = try arena_allocator.alloc(*const LambdaTemplate, code.templates.len);
         const profile_source = if (code.profile_source.len == 0)
             ""
         else
@@ -7391,17 +9587,21 @@ pub const Session = struct {
         for (code.constants, 0..) |value, idx| {
             constants[idx] = try self.freezeConstantValue(value);
         }
-        for (code.templates, 0..) |template, idx| {
-            templates[idx] = try self.stableTemplate(template);
-        }
+
+        const compact_k = if (code.compact_k) |compact|
+            try cloneCompactKCode(arena_allocator, compact, constants)
+        else
+            try compileCompactKCode(arena_allocator, code.arity, code.frame_slot_count, code.bytes, constants);
 
         stable.* = .{
             .arity = code.arity,
             .frame_slot_count = code.frame_slot_count,
+            .operand_stack_slot_count = code.operand_stack_slot_count,
             .bytes = try arena_allocator.dupe(u8, code.bytes),
-            .globals = try arena_allocator.dupe(u16, code.globals),
-            .templates = templates,
             .constants = constants,
+            .compact_k = compact_k,
+            .direct_closure_mask = code.direct_closure_mask,
+            .references_globals = code.references_globals,
             .profile_id = code.profile_id,
             .profile_kind = code.profile_kind,
             .profile_source = profile_source,
@@ -7409,16 +9609,6 @@ pub const Session = struct {
         if (comptime enable_sampling_profile) {
             self.rememberSamplingProfileCodeInfo(stable.profile_id, stable.profile_kind, stable.profile_source);
         }
-        return stable;
-    }
-
-    fn stableTemplate(self: *Session, template: *const LambdaTemplate) KError!*const LambdaTemplate {
-        const arena_allocator = self.arena.allocator();
-        const stable = try arena_allocator.create(LambdaTemplate);
-        stable.* = .{
-            .code = try self.stableCode(template.code),
-            .captures = try arena_allocator.dupe(CaptureSource, template.captures),
-        };
         return stable;
     }
 
@@ -7475,7 +9665,6 @@ pub const Session = struct {
             },
             .host_string_view => switch (value.arrayKind()) {
                 .host_string_view => try self.frozenHostString(hostStringViewBytes(value.asHostStringView())),
-                .host_relation => error.Unsupported,
                 else => unreachable,
             },
             .host_symbol => switch (value.asHostSymbol().header.owner) {
@@ -7492,6 +9681,7 @@ pub const Session = struct {
                 .frozen => value,
                 .scratch, .managed => try self.freezeHostBoxedArrayConstant(value.asHostBoxedArray()),
             },
+            .host_relation, .host_keyed_store, .host_table_scalar => error.Unsupported,
             .backend_array => blk: {
                 const frozen_host = Value.array(try createHostDenseArrayFromBackendArray(self, .frozen, value.asBackendArray().array));
                 const shaped = try applyNonVectorNumericShapeToValue(self, frozen_host, valueNonVectorNumericShape(value));
@@ -7505,8 +9695,8 @@ pub const Session = struct {
                         self,
                         .frozen,
                         numericArrayRangeLen(handle),
-                        handle.range_iota.start,
-                        handle.range_iota.step,
+                        numericArrayRangeIota(handle).start,
+                        numericArrayRangeIota(handle).step,
                         valueNonVectorNumericShape(value),
                     );
                 }
@@ -7523,10 +9713,6 @@ pub const Session = struct {
                 .frozen => value,
                 .scratch, .managed => try allocBoxedInt(self.arena.allocator(), .frozen, value.asInt()),
             },
-            Value.boxed_float_tag => switch (value.asBoxedFloat().header.owner) {
-                .frozen => value,
-                .scratch, .managed => try allocBoxedFloat(self.arena.allocator(), .frozen, value.asFloat()),
-            },
             Value.closure_tag => switch (value.asClosure().header.owner) {
                 .frozen => value,
                 .scratch, .managed => blk: {
@@ -7538,6 +9724,7 @@ pub const Session = struct {
                     const frozen = try self.arena.allocator().create(Closure);
                     frozen.* = .{
                         .header = HeapHeader.init(.closure, .frozen),
+                        .kind = closure.kind,
                         .code = try self.stableCode(closure.code),
                         .captures = frozen_captures,
                     };
@@ -7651,8 +9838,8 @@ pub const Session = struct {
                         self,
                         .managed,
                         numericArrayRangeLen(handle),
-                        handle.range_iota.start,
-                        handle.range_iota.step,
+                        numericArrayRangeIota(handle).start,
+                        numericArrayRangeIota(handle).step,
                         valueNonVectorNumericShape(value),
                     );
                 }
@@ -7746,14 +9933,17 @@ pub const Session = struct {
         }
 
         if (saw_numeric_array or saw_non_numeric_item) {
-            if (comptime enable_probe_instrumentation) self.debug_make_array_boxed_fallback_count += 1;
             const reason: DebugMakeArrayBoxedReason = if (saw_non_numeric_item)
                 .non_numeric_item
             else if (saw_irregular_numeric_array)
                 .irregular_numeric_array
             else
                 .uniform_numeric_array_unstacked;
-            if (comptime enable_probe_instrumentation) self.debug_make_array_boxed_reason_counts[@intFromEnum(reason)] += 1;
+            if (comptime enable_probe_instrumentation) {
+                self.debug_make_array_boxed_fallback_count += 1;
+                self.debug_make_array_boxed_reason_counts[@intFromEnum(reason)] += 1;
+                self.debug_make_array_boxed_len_bucket_counts[@intFromEnum(debugProbeLenBucket(normalized.len))] += 1;
+            }
             return try self.createManagedHostBoxedArray(normalized);
         }
 
@@ -7816,19 +10006,38 @@ pub const Session = struct {
         };
     }
 
+    fn ensureManagedHostDenseFindCache(self: *Session, array: *HostDenseArray) !*HostDenseFindCache {
+        std.debug.assert(array.header.owner == .managed);
+        if (array.find_cache) |cache| return cache;
+        const cache = try self.allocator.create(HostDenseFindCache);
+        cache.* = .{};
+        array.find_cache = cache;
+        return cache;
+    }
+
+    fn clearManagedHostDenseFindCache(self: *Session, array: *HostDenseArray) void {
+        const cache = array.find_cache orelse return;
+        if (cache.keys) |keys| self.allocator.free(keys);
+        if (cache.slots) |slots| self.allocator.free(slots);
+        cache.* = .{};
+    }
+
+    fn destroyManagedHostDenseFindCache(self: *Session, array: *HostDenseArray) void {
+        const cache = array.find_cache orelse return;
+        self.clearManagedHostDenseFindCache(array);
+        self.allocator.destroy(cache);
+        array.find_cache = null;
+    }
+
+    fn invalidateHostDenseCachesForMutation(self: *Session, array: *HostDenseArray) void {
+        hostDenseClearCachedIntRange(array);
+        if (numericPayloadOwner(array) == .managed) self.clearManagedHostDenseFindCache(array);
+    }
+
     fn recycleManagedHostArray(self: *Session, array: *HostDenseArray) void {
-        if (array.find_cache_keys) |keys| self.allocator.free(keys);
-        if (array.find_cache_slots) |slots| self.allocator.free(slots);
-        hostDenseResetFindCacheState(array);
+        self.destroyManagedHostDenseFindCache(array);
         array.logical_handle = null;
-        switch (array.storage) {
-            .bit => |words| self.recycleManagedHostDenseBuffer(u64, .bit, words),
-            .int8 => |items| self.recycleManagedHostDenseBuffer(i8, .int8, items),
-            .int16 => |items| self.recycleManagedHostDenseBuffer(i16, .int16, items),
-            .int32 => |items| self.recycleManagedHostDenseBuffer(i32, .int32, items),
-            .int64 => |items| self.recycleManagedHostDenseBuffer(i64, .int64, items),
-            .float64 => |items| self.recycleManagedHostDenseBuffer(f64, .float64, items),
-        }
+        self.recycleManagedHostDenseStorage(array.storage);
         if (self.free_host_array_len < self.free_host_arrays.len) {
             self.free_host_arrays[self.free_host_array_len] = array;
             self.free_host_array_len += 1;
@@ -7995,35 +10204,32 @@ pub const Session = struct {
 
     fn recycleManagedNumericArray(self: *Session, handle: *NumericArray) void {
         self.unregisterManagedNumericHandle(handle);
-        if (comptime enable_probe_instrumentation) self.noteNumericStructuralRelease(handle.structural);
-        if (handle.flat_slice) |slice| self.releaseValue(slice.source);
-        handle.flat_slice = null;
-        if (handle.flat_concat) |concat| {
-            self.releaseValue(concat.left);
-            self.releaseValue(concat.right);
+        const structural_tag = numericArrayStructuralTag(handle);
+        if (comptime enable_probe_instrumentation) self.noteNumericStructuralRelease(structural_tag);
+        switch (handle.structural) {
+            .materialized, .range_iota => {},
+            .flat_slice => |slice| self.releaseValue(slice.source),
+            .flat_concat => |concat| {
+                self.releaseValue(concat.left);
+                self.releaseValue(concat.right);
+            },
+            .flat_segments => |segments| {
+                for (segments.values) |value| self.releaseValue(value);
+                self.allocator.free(segments.values);
+            },
+            .first_axis_slice => |slice| self.releaseValue(slice.source),
+            .first_axis_index => |index| {
+                self.releaseValue(index.source);
+                self.releaseValue(index.row_indices);
+            },
+            .first_axis_concat => |concat| {
+                self.releaseValue(concat.left);
+                self.releaseValue(concat.right);
+            },
+            .reshape_view => |reshape| self.releaseValue(reshape.source),
+            .transpose_view => |transpose| self.releaseValue(transpose.source),
         }
-        handle.flat_concat = null;
-        if (handle.flat_segments) |segments| {
-            for (segments.values) |value| self.releaseValue(value);
-            self.allocator.free(segments.values);
-        }
-        handle.flat_segments = null;
-        if (handle.first_axis_slice) |slice| self.releaseValue(slice.source);
-        handle.first_axis_slice = null;
-        if (handle.first_axis_index) |index| {
-            self.releaseValue(index.source);
-            self.releaseValue(index.row_indices);
-        }
-        handle.first_axis_index = null;
-        if (handle.first_axis_concat) |concat| {
-            self.releaseValue(concat.left);
-            self.releaseValue(concat.right);
-        }
-        handle.first_axis_concat = null;
-        if (handle.reshape_view) |reshape| self.releaseValue(reshape.source);
-        handle.reshape_view = null;
-        if (handle.transpose_view) |transpose| self.releaseValue(transpose.source);
-        handle.transpose_view = null;
+        handle.structural = .{ .materialized = {} };
         if (handle.host) |array| self.recycleManagedHostArray(array);
         handle.host = null;
         if (handle.mlx) |array| self.recycleManagedBackendArray(array);
@@ -8065,20 +10271,6 @@ pub const Session = struct {
 
     fn releaseValue(self: *Session, value: Value) void {
         switch (value.raw & Value.tag_mask) {
-            Value.boxed_float_tag => {
-                const box = @constCast(value.asBoxedFloat());
-                if (box.header.owner != .managed) return;
-                std.debug.assert(box.header.ref_count != 0);
-                box.header.ref_count -= 1;
-                if (box.header.ref_count == 0) {
-                    if (self.free_boxed_float_len < self.free_boxed_floats.len) {
-                        self.free_boxed_floats[self.free_boxed_float_len] = box;
-                        self.free_boxed_float_len += 1;
-                    } else {
-                        self.allocator.destroy(box);
-                    }
-                }
-            },
             Value.boxed_int_tag => {
                 const box = @constCast(value.asBoxedInt());
                 if (box.header.owner != .managed) return;
@@ -8131,23 +10323,18 @@ pub const Session = struct {
                     }
                 },
                 .host_boxed_array => {
-                    switch (value.arrayKind()) {
-                        .host_boxed_array => {
-                            const array = @constCast(value.asHostBoxedArray());
-                            if (array.header.owner != .managed) return;
-                            std.debug.assert(array.header.ref_count != 0);
-                            array.header.ref_count -= 1;
-                            if (array.header.ref_count == 0) self.recycleManagedHostBoxedArray(array);
-                        },
-                        .host_keyed_store => {
-                            const store = @constCast(value.asHostKeyedStore());
-                            if (store.header.owner != .managed) return;
-                            std.debug.assert(store.header.ref_count != 0);
-                            store.header.ref_count -= 1;
-                            if (store.header.ref_count == 0) self.recycleManagedHostKeyedStore(store);
-                        },
-                        else => unreachable,
-                    }
+                    const array = @constCast(value.asHostBoxedArray());
+                    if (array.header.owner != .managed) return;
+                    std.debug.assert(array.header.ref_count != 0);
+                    array.header.ref_count -= 1;
+                    if (array.header.ref_count == 0) self.recycleManagedHostBoxedArray(array);
+                },
+                .host_keyed_store => {
+                    const store = @constCast(value.asHostKeyedStore());
+                    if (store.header.owner != .managed) return;
+                    std.debug.assert(store.header.ref_count != 0);
+                    store.header.ref_count -= 1;
+                    if (store.header.ref_count == 0) self.recycleManagedHostKeyedStore(store);
                 },
                 .host_string, .host_symbol => {
                     const text = switch (value.arrayKind()) {
@@ -8164,38 +10351,33 @@ pub const Session = struct {
                     }
                 },
                 .host_string_view => {
-                    switch (value.arrayKind()) {
-                        .host_string_view => {
-                            const view = @constCast(value.asHostStringView());
-                            if (view.header.owner != .managed) return;
-                            std.debug.assert(view.header.ref_count != 0);
-                            view.header.ref_count -= 1;
-                            if (view.header.ref_count == 0) {
-                                if (comptime enable_probe_instrumentation) self.debug_host_string_view_release_count += 1;
-                                self.releaseValue(Value.array(view.base));
-                                self.allocator.destroy(view);
-                            }
-                        },
-                        .host_relation => {
-                            const relation = @constCast(value.asHostRelation());
-                            if (relation.header.owner != .managed) return;
-                            std.debug.assert(relation.header.ref_count != 0);
-                            relation.header.ref_count -= 1;
-                            if (relation.header.ref_count == 0) {
-                                destroyManagedHostRelationNoPool(self.allocator, relation);
-                            }
-                        },
-                        .host_table_scalar => {
-                            const scalar = @constCast(valueAsHostTableScalar(value));
-                            if (scalar.header.owner != .managed) return;
-                            std.debug.assert(scalar.header.ref_count != 0);
-                            scalar.header.ref_count -= 1;
-                            if (scalar.header.ref_count == 0) {
-                                self.releaseValue(scalar.value);
-                                self.allocator.destroy(scalar);
-                            }
-                        },
-                        else => unreachable,
+                    const view = @constCast(value.asHostStringView());
+                    if (view.header.owner != .managed) return;
+                    std.debug.assert(view.header.ref_count != 0);
+                    view.header.ref_count -= 1;
+                    if (view.header.ref_count == 0) {
+                        if (comptime enable_probe_instrumentation) self.debug_host_string_view_release_count += 1;
+                        self.releaseValue(Value.array(view.base));
+                        self.allocator.destroy(view);
+                    }
+                },
+                .host_relation => {
+                    const relation = @constCast(value.asHostRelation());
+                    if (relation.header.owner != .managed) return;
+                    std.debug.assert(relation.header.ref_count != 0);
+                    relation.header.ref_count -= 1;
+                    if (relation.header.ref_count == 0) {
+                        destroyManagedHostRelationNoPool(self.allocator, relation);
+                    }
+                },
+                .host_table_scalar => {
+                    const scalar = @constCast(valueAsHostTableScalar(value));
+                    if (scalar.header.owner != .managed) return;
+                    std.debug.assert(scalar.header.ref_count != 0);
+                    scalar.header.ref_count -= 1;
+                    if (scalar.header.ref_count == 0) {
+                        self.releaseValue(scalar.value);
+                        self.allocator.destroy(scalar);
                     }
                 },
                 .host_string_list => {
@@ -8564,6 +10746,954 @@ pub const Session = struct {
         }
     }
 
+    fn dropFrameStackFrom(self: *Session, start: usize) void {
+        var idx = start;
+        while (idx < self.stack_len) : (idx += 1) {
+            if (valueMayNeedRelease(self.stack[idx])) {
+                self.dropStackFrom(start);
+                return;
+            }
+        }
+        self.stack_len = start;
+    }
+
+    inline fn frameSlotCount(code: *const Code) usize {
+        const slot_count: u8 = if (code.frame_slot_count == 0 and code.arity != 0) code.arity else code.frame_slot_count;
+        return slot_count;
+    }
+
+    inline fn frameLocalBit(slot: usize) ?u64 {
+        if (slot >= 64) return null;
+        return @as(u64, 1) << @intCast(slot);
+    }
+
+    inline fn frameLocalMayNeedRelease(frame: *const CallFrame, slot: u8) bool {
+        if (frameLocalBit(slot)) |bit| return (frame.heap_local_mask & bit) != 0;
+        return frame.heap_local_overflow;
+    }
+
+    inline fn updateFrameLocalReleaseState(frame: *CallFrame, slot: u8, value: Value) void {
+        if (frameLocalBit(slot)) |bit| {
+            if (valueMayNeedRelease(value)) {
+                frame.heap_local_mask |= bit;
+            } else {
+                frame.heap_local_mask &= ~bit;
+            }
+        } else if (valueMayNeedRelease(value)) {
+            frame.heap_local_overflow = true;
+        }
+    }
+
+    inline fn clearFrameLocalReleaseState(frame: *CallFrame, slot: u8) void {
+        if (frameLocalBit(slot)) |bit| frame.heap_local_mask &= ~bit;
+    }
+
+    inline fn frameHasManagedLocals(frame: *const CallFrame) bool {
+        return frame.heap_local_mask != 0 or frame.heap_local_overflow;
+    }
+
+    const FrameLocalReleaseState = struct {
+        mask: u64 = 0,
+        overflow: bool = false,
+    };
+
+    inline fn applyFrameLocalReleaseState(frame: *CallFrame, state: FrameLocalReleaseState) void {
+        frame.heap_local_mask = state.mask;
+        frame.heap_local_overflow = state.overflow;
+    }
+
+    inline fn noteLocalReleaseState(state: *FrameLocalReleaseState, slot: usize, value: Value) void {
+        if (!valueMayNeedRelease(value)) return;
+        if (slot < 64) {
+            state.mask |= @as(u64, 1) << @intCast(slot);
+        } else {
+            state.overflow = true;
+        }
+    }
+
+    inline fn frameReleaseStateFromValues(args: []const Value) FrameLocalReleaseState {
+        var state = FrameLocalReleaseState{};
+        for (args, 0..) |arg, slot| noteLocalReleaseState(&state, slot, arg);
+        return state;
+    }
+
+    fn frameReleaseStateFromStackArgs(self: *Session, frame: *const CallFrame, arg_count: usize) KError!FrameLocalReleaseState {
+        if (arg_count > frameSlotCount(frame.code)) return error.Internal;
+        if (frame.base + arg_count > self.stack_len) return error.Internal;
+        var state = FrameLocalReleaseState{};
+        var slot: usize = 0;
+        while (slot < arg_count) : (slot += 1) {
+            noteLocalReleaseState(&state, slot, self.stack[frame.base + slot]);
+        }
+        return state;
+    }
+
+    const CompactKState = struct {
+        locals: [max_explicit_params]Value = undefined,
+        local_live: u16 = 0,
+        stack: [max_compact_k_stack_slots]Value = undefined,
+        stack_len: usize = 0,
+    };
+
+    inline fn compactLocalBit(slot: usize) u16 {
+        return @as(u16, 1) << @intCast(slot);
+    }
+
+    fn compactReleaseState(self: *Session, state: *CompactKState) void {
+        while (state.stack_len > 0) {
+            state.stack_len -= 1;
+            self.releaseValue(state.stack[state.stack_len]);
+        }
+        var slot: usize = 0;
+        while (slot < max_explicit_params) : (slot += 1) {
+            const bit = compactLocalBit(slot);
+            if ((state.local_live & bit) != 0) {
+                self.releaseValue(state.locals[slot]);
+                state.locals[slot] = Value.fromBool(false);
+                state.local_live &= ~bit;
+            }
+        }
+    }
+
+    fn compactInitOwnedArgs(state: *CompactKState, code: *const CompactKCode, args: []const Value) KError!void {
+        if (args.len != code.arity or args.len > max_explicit_params or code.local_count > max_explicit_params) return error.Arity;
+        state.local_live = 0;
+        state.stack_len = 0;
+        for (args, 0..) |arg, idx| {
+            state.locals[idx] = arg;
+            state.local_live |= compactLocalBit(idx);
+        }
+    }
+
+    fn compactInitBorrowedArgs(self: *Session, state: *CompactKState, code: *const CompactKCode, args: []const Value) KError!void {
+        if (args.len != code.arity or args.len > max_explicit_params or code.local_count > max_explicit_params) return error.Arity;
+        state.local_live = 0;
+        state.stack_len = 0;
+        var initialized: usize = 0;
+        errdefer {
+            while (initialized > 0) {
+                initialized -= 1;
+                self.releaseValue(state.locals[initialized]);
+            }
+            state.local_live = 0;
+        }
+        for (args, 0..) |arg, idx| {
+            state.locals[idx] = self.retainValue(arg);
+            state.local_live |= compactLocalBit(idx);
+            initialized += 1;
+        }
+    }
+
+    inline fn compactPush(state: *CompactKState, value: Value) KError!void {
+        if (state.stack_len >= state.stack.len) return error.Unsupported;
+        state.stack[state.stack_len] = value;
+        state.stack_len += 1;
+    }
+
+    inline fn compactPop(state: *CompactKState) KError!Value {
+        if (state.stack_len == 0) return error.Internal;
+        state.stack_len -= 1;
+        return state.stack[state.stack_len];
+    }
+
+    inline fn compactPeek(state: *const CompactKState) KError!Value {
+        if (state.stack_len == 0) return error.Internal;
+        return state.stack[state.stack_len - 1];
+    }
+
+    inline fn compactReadLocal(self: *Session, state: *const CompactKState, slot: u8) KError!Value {
+        if (slot >= max_explicit_params) return error.Internal;
+        if ((state.local_live & compactLocalBit(slot)) == 0) return Value.fromBool(false);
+        return self.retainValue(state.locals[slot]);
+    }
+
+    inline fn compactBorrowLocal(state: *const CompactKState, slot: u8) KError!Value {
+        if (slot >= max_explicit_params) return error.Internal;
+        if ((state.local_live & compactLocalBit(slot)) == 0) return Value.fromBool(false);
+        return state.locals[slot];
+    }
+
+    inline fn compactTakeLocal(state: *CompactKState, slot: u8) KError!Value {
+        if (slot >= max_explicit_params) return error.Internal;
+        const bit = compactLocalBit(slot);
+        if ((state.local_live & bit) == 0) return Value.fromBool(false);
+        const value = state.locals[slot];
+        state.locals[slot] = Value.fromBool(false);
+        state.local_live &= ~bit;
+        return value;
+    }
+
+    fn compactStoreLocal(self: *Session, state: *CompactKState, slot: u8, value: Value) KError!void {
+        if (slot >= max_explicit_params) return error.Internal;
+        const bit = compactLocalBit(slot);
+        if ((state.local_live & bit) != 0) self.releaseValue(state.locals[slot]);
+        state.locals[slot] = value;
+        state.local_live |= bit;
+    }
+
+    inline fn compactReadByte(code: *const CompactKCode, ip: *usize) KError!u8 {
+        if (ip.* >= code.bytes.len) return error.Internal;
+        const value = code.bytes[ip.*];
+        ip.* += 1;
+        return value;
+    }
+
+    fn compactReadI64(code: *const CompactKCode, ip: *usize) KError!i64 {
+        const end = ip.* + 8;
+        if (end > code.bytes.len) return error.Internal;
+        var raw: u64 = 0;
+        var idx: usize = 0;
+        while (idx < 8) : (idx += 1) raw |= @as(u64, code.bytes[ip.* + idx]) << @intCast(idx * 8);
+        ip.* = end;
+        return @bitCast(raw);
+    }
+
+    fn compactEvalArgSourceOwned(self: *Session, code: *const CompactKCode, state: *CompactKState, ip: *usize) KError!Value {
+        const encoded = try compactReadByte(code, ip);
+        const consume = (encoded & global_call_arg_consume_bit) != 0;
+        const kind: GlobalCallArgKind = std.meta.intToEnum(GlobalCallArgKind, encoded & ~global_call_arg_consume_bit) catch return error.Internal;
+        return switch (kind) {
+            .local => blk: {
+                const slot = try compactReadByte(code, ip);
+                break :blk if (consume) try compactTakeLocal(state, slot) else try self.compactReadLocal(state, slot);
+            },
+            .const_int => try self.intValue(try compactReadI64(code, ip)),
+            .const_false => Value.fromBool(false),
+            .const_true => Value.fromBool(true),
+            .local_add_const, .local_sub_const, .local_mul_const => blk: {
+                const slot = try compactReadByte(code, ip);
+                const rhs = try compactReadI64(code, ip);
+                const left = if (consume) try compactTakeLocal(state, slot) else try self.compactReadLocal(state, slot);
+                errdefer self.releaseValue(left);
+                const op: BuiltinId = switch (kind) {
+                    .local_add_const => .add,
+                    .local_sub_const => .sub,
+                    .local_mul_const => .mul,
+                    else => unreachable,
+                };
+                const result = if (try self.compactTryInlineLocalConstDyad(left, op, rhs, false)) |direct|
+                    direct
+                else
+                    try self.applyLocalConstOpValue(left, op, rhs);
+                self.releaseValue(left);
+                break :blk result;
+            },
+            .local_local_op => blk: {
+                if (consume) return error.Internal;
+                const op: BuiltinId = @enumFromInt(try compactReadByte(code, ip));
+                const left_slot = try compactReadByte(code, ip);
+                const right_slot = try compactReadByte(code, ip);
+                break :blk try self.intValue(try checkedSelectorDyad(
+                    op,
+                    scalarIntLikeValue(try compactBorrowLocal(state, left_slot)) orelse return error.Type,
+                    scalarIntLikeValue(try compactBorrowLocal(state, right_slot)) orelse return error.Type,
+                ));
+            },
+            .local_local_const_op => blk: {
+                if (consume) return error.Internal;
+                const op: BuiltinId = @enumFromInt(try compactReadByte(code, ip));
+                const left_slot = try compactReadByte(code, ip);
+                const right_slot = try compactReadByte(code, ip);
+                const const_op: BuiltinId = @enumFromInt(try compactReadByte(code, ip));
+                const const_value = try compactReadI64(code, ip);
+                const base = try checkedSelectorDyad(
+                    op,
+                    scalarIntLikeValue(try compactBorrowLocal(state, left_slot)) orelse return error.Type,
+                    scalarIntLikeValue(try compactBorrowLocal(state, right_slot)) orelse return error.Type,
+                );
+                break :blk try self.intValue(try checkedSelectorDyad(const_op, base, const_value));
+            },
+        };
+    }
+
+    fn compactReadOwnedArgs(self: *Session, code: *const CompactKCode, state: *CompactKState, ip: *usize, argc: u8, out: *[max_shaped_call_args]Value) KError![]const Value {
+        if (argc == 0 or argc > max_shaped_call_args) return error.Internal;
+        var loaded: usize = 0;
+        errdefer self.releaseOwnedValues(out[0..loaded]);
+        while (loaded < argc) : (loaded += 1) out[loaded] = try self.compactEvalArgSourceOwned(code, state, ip);
+        return out[0..argc];
+    }
+
+    fn compactPopOwnedStackArgs(state: *CompactKState, argc: u8, out: *[max_explicit_params]Value) KError![]const Value {
+        if (argc == 0 or argc > max_explicit_params or state.stack_len < argc) return error.Internal;
+        const start = state.stack_len - argc;
+        var idx: usize = 0;
+        while (idx < argc) : (idx += 1) out[idx] = state.stack[start + idx];
+        state.stack_len = start;
+        return out[0..argc];
+    }
+
+    fn compactInitOwnedStackArgs(target: *CompactKState, target_code: *const CompactKCode, state: *CompactKState, argc: u8) KError!void {
+        if (argc != target_code.arity or argc == 0 or argc > max_explicit_params or target_code.local_count > max_explicit_params or state.stack_len < argc) return error.Arity;
+        target.local_live = 0;
+        target.stack_len = 0;
+        const start = state.stack_len - argc;
+        var idx: usize = 0;
+        while (idx < argc) : (idx += 1) {
+            target.locals[idx] = state.stack[start + idx];
+            target.local_live |= compactLocalBit(idx);
+        }
+        state.stack_len = start;
+    }
+
+    fn compactInitOwnedArgSources(self: *Session, target: *CompactKState, target_code: *const CompactKCode, caller_code: *const CompactKCode, caller_state: *CompactKState, ip: *usize, argc: u8) KError!void {
+        if (argc != target_code.arity or argc == 0 or argc > max_shaped_call_args or argc > max_explicit_params or target_code.local_count > max_explicit_params) return error.Arity;
+        target.local_live = 0;
+        target.stack_len = 0;
+        var loaded: usize = 0;
+        errdefer {
+            while (loaded > 0) {
+                loaded -= 1;
+                self.releaseValue(target.locals[loaded]);
+            }
+            target.local_live = 0;
+        }
+        while (loaded < argc) : (loaded += 1) {
+            target.locals[loaded] = try self.compactEvalArgSourceOwned(caller_code, caller_state, ip);
+            target.local_live |= compactLocalBit(loaded);
+        }
+    }
+
+    fn compactMoveState(dst: *CompactKState, src: *CompactKState) void {
+        dst.local_live = src.local_live;
+        dst.stack_len = 0;
+        var slot: usize = 0;
+        while (slot < max_explicit_params) : (slot += 1) {
+            const bit = compactLocalBit(slot);
+            if ((src.local_live & bit) != 0) dst.locals[slot] = src.locals[slot];
+        }
+        src.local_live = 0;
+        src.stack_len = 0;
+    }
+
+    fn runNestedOwnedClosureArgs(self: *Session, callee: Value, closure: *const Closure, callable_slot: u16, args: []const Value) KError!Value {
+        if (closure.code.arity != args.len) return error.Arity;
+        if (comptime enable_probe_instrumentation) self.debug_compact_k_frame_fallback_count += 1;
+        const target_frame_len = self.frame_len;
+        const result_base = self.stack_len;
+        try self.pushOwnedClosureArgs(callee, closure, callable_slot, args, .stack);
+        if (try self.runFramesUntil(target_frame_len)) |final| return final;
+        if (self.stack_len != result_base + 1) return error.Internal;
+        return self.pop();
+    }
+
+    fn compactApplyGlobalCallOwned(self: *Session, slot: u8, args: []const Value) KError!Value {
+        if (comptime enable_probe_instrumentation) self.debug_compact_k_global_call_count += 1;
+        const cell = try self.loadGlobalCell(slot);
+        if (compactKCodeForGlobalCellCall(cell, @intCast(args.len))) |compact| {
+            if (comptime enable_probe_instrumentation) self.debug_compact_k_global_call_compact_count += 1;
+            return try self.runCompactKCodeOwned(compact, args);
+        }
+        if (comptime enable_probe_instrumentation) self.debug_compact_k_global_call_fallback_count += 1;
+        self.noteCompactKGlobalCallFallback(cell, @intCast(args.len));
+        switch (cell.value.tag()) {
+            .builtin => {
+                const result = try self.applyBuiltinCall(cell.value.asBuiltin(), args);
+                self.releaseOwnedValues(args);
+                return result;
+            },
+            .closure => {
+                const closure = cell.value.asClosure();
+                if (try self.tryApplyOwnedClosureArgs(closure, args)) |result| {
+                    self.releaseOwnedValues(args);
+                    return result;
+                }
+                return try self.runNestedOwnedClosureArgs(cell.value, closure, slot, args);
+            },
+            .array => {
+                const result = try self.applyArrayCall(cell.value, args);
+                self.releaseOwnedValues(args);
+                return result;
+            },
+            else => return error.Type,
+        }
+    }
+
+    fn compactTryApplyGlobalCompactCallSources(self: *Session, slot: u8, caller_code: *const CompactKCode, caller_state: *CompactKState, ip: *usize, argc: u8) KError!?Value {
+        const cell = try self.loadGlobalCell(slot);
+        const compact = compactKCodeForGlobalCellCall(cell, argc) orelse return null;
+        if (comptime enable_probe_instrumentation) {
+            self.debug_compact_k_global_call_count += 1;
+            self.debug_compact_k_global_call_compact_count += 1;
+        }
+        var callee_state = CompactKState{};
+        try self.compactInitOwnedArgSources(&callee_state, compact, caller_code, caller_state, ip, argc);
+        return try self.runCompactKCodeWithState(compact, &callee_state);
+    }
+
+    fn compactTryTailContinueGlobalCompactCallSources(self: *Session, slot: u8, next_code_out: **const CompactKCode, code: *const CompactKCode, state: *CompactKState, ip: *usize, argc: u8) KError!bool {
+        const cell = try self.loadGlobalCell(slot);
+        const next_code = cell.compact_k orelse return false;
+        if (next_code.arity != argc) return false;
+        var next_state = CompactKState{};
+        try self.compactInitOwnedArgSources(&next_state, next_code, code, state, ip, argc);
+        if (comptime enable_probe_instrumentation) {
+            self.debug_compact_k_global_call_count += 1;
+            self.debug_compact_k_global_call_compact_count += 1;
+            self.debug_compact_k_tail_continue_count += 1;
+        }
+        self.compactReleaseState(state);
+        compactMoveState(state, &next_state);
+        next_code_out.* = next_code;
+        return true;
+    }
+
+    fn compactApplyGlobalIndexOwned(self: *Session, slot: u8, selector: Value) KError!Value {
+        const cell = try self.loadGlobalCell(slot);
+        const callee = cell.value;
+        if (cell.class.isArray()) {
+            if (try self.compactTryFastGlobalDenseScalarIndex(cell, selector)) |result| {
+                self.releaseValue(selector);
+                return result;
+            }
+            if (try self.applyGlobalIndexArrayValue(callee, selector)) |result| {
+                self.releaseValue(selector);
+                return result;
+            }
+        }
+        var args = [_]Value{selector};
+        return try self.compactApplyGlobalCallOwned(slot, args[0..]);
+    }
+
+    fn compactApplyLocalIndexOwned(self: *Session, state: *CompactKState, slot: u8, selector: Value) KError!Value {
+        defer self.releaseValue(selector);
+        const callee = try compactBorrowLocal(state, slot);
+        if (callee.tag() == .array) {
+            if (scalarIntLikeValue(selector)) |raw_index| return try self.applyArrayCall1Scalar(callee, raw_index);
+            return try self.applyArrayCall1(callee, selector);
+        }
+        return try self.applyValue(callee, &[_]Value{selector});
+    }
+
+    fn compactTryFastGlobalDenseScalarIndex(self: *Session, cell: *const GlobalCell, selector: Value) KError!?Value {
+        const raw_index = scalarIntLikeValue(selector) orelse return null;
+        const base = cell.value;
+        if (base.tag() != .array or !cell.class.isArray() or valueNonVectorNumericShape(base) != null) return null;
+        const array = hostDenseIfPresent(base) orelse return null;
+        if (hostDenseShapeHandle(array)) |handle| {
+            if (handle.rank > 1) return null;
+        }
+        const idx = try normalizeIndex(raw_index, array.len());
+        return switch (array.storage) {
+            .bit => |words| Value.fromBool(bitGet(words, idx)),
+            .int8, .int16, .int32, .int64 => try self.intValue(hostIntViewItem(hostIntArrayView(array).?, idx)),
+            .float64 => |items| try self.floatValue(items[idx]),
+        };
+    }
+
+    fn compactModifyGlobalConst(self: *Session, slot: u8, builtin: BuiltinId, want_result: bool, rhs: i64) KError!?Value {
+        const left = try self.loadGlobalSlot(slot);
+        const result = try self.applyLocalConstDyadValue(left, builtin, rhs);
+        var stored = false;
+        errdefer if (!stored) self.releaseCanonicalManagedNumericValue(result);
+        try self.storeGlobalSlot(slot, result);
+        stored = true;
+        if (want_result) return result;
+        self.releaseCanonicalManagedNumericValue(result);
+        return null;
+    }
+
+    fn compactIndexedAssignGlobalSources(self: *Session, code: *const CompactKCode, state: *CompactKState, ip: *usize, slot: u8, mode: AmendMode, builtin: BuiltinId, want_result: bool) KError!?Value {
+        if (comptime enable_probe_instrumentation) self.debug_compact_k_indexed_assign_sources_count += 1;
+        if (mode == .unary) return error.Internal;
+        const selector = try self.compactEvalArgSourceOwned(code, state, ip);
+        defer self.releaseValue(selector);
+        const rhs = try self.compactEvalArgSourceOwned(code, state, ip);
+        defer self.releaseValue(rhs);
+        return try self.compactIndexedAssignGlobalValues(slot, mode, builtin, want_result, selector, rhs);
+    }
+
+    fn compactIndexedAssignGlobalValues(self: *Session, slot: u8, mode: AmendMode, builtin: BuiltinId, want_result: bool, selector: Value, rhs: Value) KError!?Value {
+        if (mode == .unary) return error.Internal;
+        self.recordIndexedAssign(.{ .global = slot });
+        if (try self.compactTryFastGlobalIntScalarAssignInPlace(slot, mode, selector, rhs, want_result)) |direct| {
+            return direct.result;
+        }
+        var dummy_frame: CallFrame = undefined;
+        return try self.execIndexedAssignWithValues(&dummy_frame, .{ .global = slot }, mode, builtin, want_result, selector, rhs);
+    }
+
+    fn compactIndexedAssignLocalSources(self: *Session, code: *const CompactKCode, state: *CompactKState, ip: *usize, slot: u8, mode: AmendMode, builtin: BuiltinId, want_result: bool) KError!?Value {
+        if (comptime enable_probe_instrumentation) self.debug_compact_k_indexed_assign_sources_count += 1;
+        if (mode == .unary) return error.Internal;
+        const selector = try self.compactEvalArgSourceOwned(code, state, ip);
+        defer self.releaseValue(selector);
+        const rhs = try self.compactEvalArgSourceOwned(code, state, ip);
+        defer self.releaseValue(rhs);
+        return try self.compactIndexedAssignLocalValues(state, slot, mode, builtin, want_result, selector, rhs);
+    }
+
+    fn compactIndexedAssignLocalValues(self: *Session, state: *CompactKState, slot: u8, mode: AmendMode, builtin: BuiltinId, want_result: bool, selector: Value, rhs: Value) KError!?Value {
+        if (mode == .unary) return error.Internal;
+        self.recordIndexedAssign(.{ .local = slot });
+        const base = try compactTakeLocal(state, slot);
+        const amended = switch (mode) {
+            .assign => (try self.tryFastIndexedDenseScalarAssignOwned(base, selector, rhs)) orelse
+                try self.applyAmendOwned(base, selector, .assign, rhs, Value.fromBool(false)),
+            .binary => try self.applyAmendOwned(base, selector, .binary, Value.builtin(builtin), rhs),
+            .unary => unreachable,
+        };
+        var amended_stored = false;
+        errdefer if (!amended_stored) self.releaseCanonicalManagedNumericValue(amended);
+
+        const result: ?Value = if (want_result) try self.applyArrayCall1(amended, selector) else null;
+        errdefer if (result) |value| self.releaseValue(value);
+
+        try self.compactStoreLocal(state, slot, amended);
+        amended_stored = true;
+        return result;
+    }
+
+    fn compactTryFastGlobalIntScalarAssignInPlace(
+        self: *Session,
+        slot: u8,
+        mode: AmendMode,
+        selector: Value,
+        rhs: Value,
+        want_result: bool,
+    ) KError!?DirectGlobalIndexedAssignResult {
+        if (mode != .assign) return null;
+        const raw_index = scalarIntLikeValue(selector) orelse return null;
+        const rhs_int = scalarIntLikeValue(rhs) orelse return null;
+        const cell = try self.loadGlobalCell(slot);
+        const base = cell.value;
+        if (!cell.class.isArray() or valueNonVectorNumericShape(base) != null) return null;
+        const base_array = hostDenseIfPresent(base) orelse return null;
+        const view = hostIntArrayView(base_array) orelse return null;
+        const kind = hostIntArrayViewKind(view);
+        if (!hostIntKindCanRepresent(kind, rhs_int)) return null;
+        var out = self.tryReuseHostIntArrayResult(base, kind) orelse return null;
+        if (comptime enable_probe_instrumentation) self.debug_fast_dense_assign_attempt_count += 1;
+        if (!self.prepareReusableHostDenseForMutation(base)) {
+            self.recordFastDenseAssignMiss();
+            return null;
+        }
+        const target_idx = try normalizeIndex(raw_index, base_array.len());
+        try out.set(target_idx, rhs_int);
+        const host = out.arrayPtr();
+        hostDenseSetFlags(host, host_dense_flag_normalized);
+        self.invalidateHostDenseCachesForMutation(host);
+        cell.class = classifyGlobalValue(base);
+        if (comptime enable_probe_instrumentation) {
+            self.recordFastDenseAssignHit(.{ .scalar = target_idx }, .{ .int_scalar = rhs_int }, true);
+            self.debug_owned_amend_count += 1;
+        }
+        return .{
+            .result = if (want_result) try self.applyArrayCall1Scalar(base, raw_index) else null,
+        };
+    }
+
+    fn compactDyadBorrowed(self: *Session, op: BuiltinId, left: Value, right: Value) KError!Value {
+        if (try self.compactTryInlineIntBoolDyad(op, left, right)) |result| return result;
+        return switch (op) {
+            .add => try self.addValues(left, right),
+            .sub => try self.subValues(left, right),
+            .mul => try self.mulValues(left, right),
+            .div => try self.divValues(left, right),
+            .minimum => try self.minimumValues(left, right),
+            .maximum => try self.maximumValues(left, right),
+            .less, .more, .equal => try self.applyShapedBorrowedDyadValue(op, left, right),
+            else => error.Internal,
+        };
+    }
+
+    fn compactTryInlineIntBoolDyad(self: *Session, op: BuiltinId, left: Value, right: Value) KError!?Value {
+        const lhs = inlineIntBoolValue(left) orelse return null;
+        const rhs = inlineIntBoolValue(right) orelse return null;
+        return try self.compactInlineIntDyadResult(op, lhs, rhs, left.tag() == .bool and right.tag() == .bool);
+    }
+
+    fn compactTryInlineLocalConstDyad(self: *Session, left: Value, op: BuiltinId, rhs_const: i64, const_first: bool) KError!?Value {
+        const left_value = inlineIntBoolValue(left) orelse return null;
+        const lhs = if (const_first) rhs_const else left_value;
+        const rhs = if (const_first) left_value else rhs_const;
+        return try self.compactInlineIntDyadResult(op, lhs, rhs, false);
+    }
+
+    fn compactInlineIntDyadResult(self: *Session, op: BuiltinId, lhs: i64, rhs: i64, both_bool: bool) KError!?Value {
+        if (comptime enable_probe_instrumentation) self.debug_inline_scalar_dyad_attempt_count += 1;
+        const result: ?Value = switch (op) {
+            .add => blk: {
+                const added = @addWithOverflow(lhs, rhs);
+                if (added[1] != 0) break :blk null;
+                break :blk try self.intValue(added[0]);
+            },
+            .sub => blk: {
+                const subbed = @subWithOverflow(lhs, rhs);
+                if (subbed[1] != 0) break :blk null;
+                break :blk try self.intValue(subbed[0]);
+            },
+            .mul => blk: {
+                const multiplied = @mulWithOverflow(lhs, rhs);
+                if (multiplied[1] != 0) break :blk null;
+                break :blk try self.intValue(multiplied[0]);
+            },
+            .less => Value.fromBool(lhs < rhs),
+            .more => Value.fromBool(lhs > rhs),
+            .equal => Value.fromBool(lhs == rhs),
+            .minimum => if (both_bool) Value.fromBool(lhs != 0 and rhs != 0) else try self.intValue(@min(lhs, rhs)),
+            .maximum => if (both_bool) Value.fromBool(lhs != 0 or rhs != 0) else try self.intValue(@max(lhs, rhs)),
+            else => null,
+        };
+        if (comptime enable_probe_instrumentation) {
+            if (result != null) self.debug_inline_scalar_dyad_hit_count += 1 else self.debug_inline_scalar_dyad_fallback_count += 1;
+        }
+        return result;
+    }
+
+    fn runCompactKCodeBorrowed(self: *Session, code: *const CompactKCode, args: []const Value) KError!Value {
+        var state = CompactKState{};
+        try self.compactInitBorrowedArgs(&state, code, args);
+        return try self.runCompactKCodeWithState(code, &state);
+    }
+
+    fn runCompactKCodeOwned(self: *Session, code: *const CompactKCode, args: []const Value) KError!Value {
+        var state = CompactKState{};
+        try compactInitOwnedArgs(&state, code, args);
+        return try self.runCompactKCodeWithState(code, &state);
+    }
+
+    fn runCompactKCodeWithState(self: *Session, initial_code: *const CompactKCode, state: *CompactKState) KError!Value {
+        if (comptime enable_probe_instrumentation) self.debug_compact_k_run_count += 1;
+        var code = initial_code;
+        var ip: usize = 0;
+        errdefer self.compactReleaseState(state);
+
+        while (true) {
+            if (ip >= code.bytes.len) return error.Internal;
+            const raw = code.bytes[ip];
+            ip += 1;
+
+            if (comptime enable_sampling_profile) {
+                if (self.profile_sampling_enabled.load(.unordered) != 0) {
+                    self.profile_current_label.store(@intFromEnum(SamplingProfileLabel.vm_dispatch), .unordered);
+                    self.profile_current_op.store(sampling_profile_no_op, .unordered);
+                    self.profile_current_code_id.store(code.profile_id, .unordered);
+                    self.profile_current_callable_slot.store(sampling_profile_no_callable_slot, .unordered);
+                }
+            }
+
+            if (raw >= ck_load_local_base and raw < ck_load_local_base + ck_range_width) {
+                try compactPush(state, try self.compactReadLocal(state, raw - ck_load_local_base));
+                continue;
+            }
+            if (raw >= ck_store_local_base and raw < ck_store_local_base + ck_range_width) {
+                try self.compactStoreLocal(state, raw - ck_store_local_base, try compactPop(state));
+                continue;
+            }
+            if (raw >= ck_take_local_base and raw < ck_take_local_base + ck_range_width) {
+                try compactPush(state, try compactTakeLocal(state, raw - ck_take_local_base));
+                continue;
+            }
+            if (raw >= ck_const_value_base and raw < ck_const_value_base + ck_const_range_width) {
+                const slot = raw - ck_const_value_base;
+                if (slot >= code.constants.len) return error.Internal;
+                try compactPush(state, self.shareValue(code.constants[slot]));
+                continue;
+            }
+
+            switch (raw) {
+                ck_const_i8 => try compactPush(state, try self.intValue(@as(i8, @bitCast(try compactReadByte(code, &ip))))),
+                ck_const_i64 => try compactPush(state, try self.intValue(try compactReadI64(code, &ip))),
+                ck_const_value_u8 => {
+                    const slot = try compactReadByte(code, &ip);
+                    if (slot >= code.constants.len) return error.Internal;
+                    try compactPush(state, self.shareValue(code.constants[slot]));
+                },
+                ck_const_false => try compactPush(state, Value.fromBool(false)),
+                ck_const_true => try compactPush(state, Value.fromBool(true)),
+                ck_discard => self.releaseValue(try compactPop(state)),
+                ck_return => {
+                    const result = try compactPop(state);
+                    self.compactReleaseState(state);
+                    return result;
+                },
+                ck_jump_u8 => ip = try compactReadByte(code, &ip),
+                ck_jump_if_false_u8 => {
+                    const target = try compactReadByte(code, &ip);
+                    const condition = try compactPop(state);
+                    if (comptime enable_probe_instrumentation) {
+                        self.debug_jump_if_false_count += 1;
+                        switch (condition.tag()) {
+                            .bool, .int, .float => self.debug_jump_if_false_scalar_count += 1,
+                            else => {},
+                        }
+                    }
+                    const truthy = boolLikeValue(condition) orelse return error.Type;
+                    self.releaseValue(condition);
+                    if (!truthy) ip = target;
+                },
+                ck_jump_if_false_equal_local_const_i64, ck_jump_if_false_less_local_const_i64, ck_jump_if_false_more_local_const_i64 => {
+                    const slot = try compactReadByte(code, &ip);
+                    const rhs = try compactReadI64(code, &ip);
+                    const target = try compactReadByte(code, &ip);
+                    if (comptime enable_probe_instrumentation) {
+                        self.debug_jump_if_false_count += 1;
+                        self.debug_shaped_scalar_dyad_count += 1;
+                    }
+                    const left = try compactBorrowLocal(state, slot);
+                    const lhs = scalarIntLikeValue(left) orelse return error.Type;
+                    const condition = switch (raw) {
+                        ck_jump_if_false_equal_local_const_i64 => lhs == rhs,
+                        ck_jump_if_false_less_local_const_i64 => lhs < rhs,
+                        ck_jump_if_false_more_local_const_i64 => lhs > rhs,
+                        else => unreachable,
+                    };
+                    if (comptime enable_probe_instrumentation) self.debug_jump_if_false_scalar_count += 1;
+                    if (!condition) ip = target;
+                },
+                ck_load_global_u8 => try compactPush(state, self.retainValue(try self.loadGlobalSlot(try compactReadByte(code, &ip)))),
+                ck_store_global_u8 => try self.storeGlobalSlot(try compactReadByte(code, &ip), try compactPeek(state)),
+                ck_modify_global_const_i64 => {
+                    const slot = try compactReadByte(code, &ip);
+                    const builtin: BuiltinId = @enumFromInt(try compactReadByte(code, &ip));
+                    const want_result = (try compactReadByte(code, &ip)) != 0;
+                    const rhs = try compactReadI64(code, &ip);
+                    if (try self.compactModifyGlobalConst(slot, builtin, want_result, rhs)) |result| try compactPush(state, result);
+                },
+                ck_assign_index_global_sources_u8 => {
+                    const slot = try compactReadByte(code, &ip);
+                    const mode: AmendMode = @enumFromInt(try compactReadByte(code, &ip));
+                    const builtin: BuiltinId = @enumFromInt(try compactReadByte(code, &ip));
+                    const want_result = (try compactReadByte(code, &ip)) != 0;
+                    if (try self.compactIndexedAssignGlobalSources(code, state, &ip, slot, mode, builtin, want_result)) |result| try compactPush(state, result);
+                },
+                ck_assign_index_local_sources_u8 => {
+                    const slot = try compactReadByte(code, &ip);
+                    const mode: AmendMode = @enumFromInt(try compactReadByte(code, &ip));
+                    const builtin: BuiltinId = @enumFromInt(try compactReadByte(code, &ip));
+                    const want_result = (try compactReadByte(code, &ip)) != 0;
+                    if (try self.compactIndexedAssignLocalSources(code, state, &ip, slot, mode, builtin, want_result)) |result| try compactPush(state, result);
+                },
+                ck_assign_index_global_stack_u8 => {
+                    if (comptime enable_probe_instrumentation) self.debug_compact_k_indexed_assign_stack_count += 1;
+                    const slot = try compactReadByte(code, &ip);
+                    const mode: AmendMode = @enumFromInt(try compactReadByte(code, &ip));
+                    const builtin: BuiltinId = @enumFromInt(try compactReadByte(code, &ip));
+                    const want_result = (try compactReadByte(code, &ip)) != 0;
+                    const rhs = try compactPop(state);
+                    defer self.releaseValue(rhs);
+                    const selector = try compactPop(state);
+                    defer self.releaseValue(selector);
+                    if (try self.compactIndexedAssignGlobalValues(slot, mode, builtin, want_result, selector, rhs)) |result| try compactPush(state, result);
+                },
+                ck_assign_index_local_stack_u8 => {
+                    if (comptime enable_probe_instrumentation) self.debug_compact_k_indexed_assign_stack_count += 1;
+                    const slot = try compactReadByte(code, &ip);
+                    const mode: AmendMode = @enumFromInt(try compactReadByte(code, &ip));
+                    const builtin: BuiltinId = @enumFromInt(try compactReadByte(code, &ip));
+                    const want_result = (try compactReadByte(code, &ip)) != 0;
+                    const rhs = try compactPop(state);
+                    defer self.releaseValue(rhs);
+                    const selector = try compactPop(state);
+                    defer self.releaseValue(selector);
+                    if (try self.compactIndexedAssignLocalValues(state, slot, mode, builtin, want_result, selector, rhs)) |result| try compactPush(state, result);
+                },
+                ck_index_global_source_u8, ck_tail_index_global_source_u8 => {
+                    const slot = try compactReadByte(code, &ip);
+                    const selector = try self.compactEvalArgSourceOwned(code, state, &ip);
+                    const result = try self.compactApplyGlobalIndexOwned(slot, selector);
+                    if (raw == ck_tail_index_global_source_u8) {
+                        self.compactReleaseState(state);
+                        return result;
+                    }
+                    try compactPush(state, result);
+                },
+                ck_index_global_source_store_local_u8 => {
+                    const slot = try compactReadByte(code, &ip);
+                    const selector = try self.compactEvalArgSourceOwned(code, state, &ip);
+                    const result = try self.compactApplyGlobalIndexOwned(slot, selector);
+                    try self.compactStoreLocal(state, try compactReadByte(code, &ip), result);
+                },
+                ck_index_local_source_u8, ck_tail_index_local_source_u8 => {
+                    const slot = try compactReadByte(code, &ip);
+                    const selector = try self.compactEvalArgSourceOwned(code, state, &ip);
+                    const result = try self.compactApplyLocalIndexOwned(state, slot, selector);
+                    if (raw == ck_tail_index_local_source_u8) {
+                        self.compactReleaseState(state);
+                        return result;
+                    }
+                    try compactPush(state, result);
+                },
+                ck_call_global_slots_u8, ck_call_global_slots_store_local_u8, ck_tail_call_global_slots_u8 => {
+                    const slot = try compactReadByte(code, &ip);
+                    const argc = try compactReadByte(code, &ip);
+                    if (raw == ck_tail_call_global_slots_u8) {
+                        var next_code: *const CompactKCode = undefined;
+                        if (try self.compactTryTailContinueGlobalCompactCallSources(slot, &next_code, code, state, &ip, argc)) {
+                            code = next_code;
+                            ip = 0;
+                            continue;
+                        }
+                        var args_buf: [max_shaped_call_args]Value = undefined;
+                        const args = try self.compactReadOwnedArgs(code, state, &ip, argc, &args_buf);
+                        const result = try self.compactApplyGlobalCallOwned(slot, args);
+                        self.compactReleaseState(state);
+                        return result;
+                    }
+                    const result = if (try self.compactTryApplyGlobalCompactCallSources(slot, code, state, &ip, argc)) |direct|
+                        direct
+                    else blk: {
+                        var args_buf: [max_shaped_call_args]Value = undefined;
+                        const args = try self.compactReadOwnedArgs(code, state, &ip, argc, &args_buf);
+                        break :blk try self.compactApplyGlobalCallOwned(slot, args);
+                    };
+                    if (raw == ck_call_global_slots_store_local_u8) {
+                        try self.compactStoreLocal(state, try compactReadByte(code, &ip), result);
+                    } else {
+                        try compactPush(state, result);
+                    }
+                },
+                ck_call_global_stack_u8, ck_tail_call_global_stack_u8 => {
+                    const slot = try compactReadByte(code, &ip);
+                    const argc = try compactReadByte(code, &ip);
+                    if (raw == ck_tail_call_global_stack_u8) {
+                        const cell = try self.loadGlobalCell(slot);
+                        if (compactKCodeForGlobalCellCall(cell, argc)) |next_code| {
+                            var next_state = CompactKState{};
+                            try compactInitOwnedStackArgs(&next_state, next_code, state, argc);
+                            if (comptime enable_probe_instrumentation) {
+                                self.debug_compact_k_global_call_count += 1;
+                                self.debug_compact_k_global_call_compact_count += 1;
+                                self.debug_compact_k_tail_continue_count += 1;
+                            }
+                            self.compactReleaseState(state);
+                            compactMoveState(state, &next_state);
+                            code = next_code;
+                            ip = 0;
+                            continue;
+                        }
+                        var args_buf: [max_explicit_params]Value = undefined;
+                        const args = try compactPopOwnedStackArgs(state, argc, &args_buf);
+                        const result = try self.compactApplyGlobalCallOwned(slot, args);
+                        self.compactReleaseState(state);
+                        return result;
+                    }
+                    var args_buf: [max_explicit_params]Value = undefined;
+                    const args = try compactPopOwnedStackArgs(state, argc, &args_buf);
+                    try compactPush(state, try self.compactApplyGlobalCallOwned(slot, args));
+                },
+                ck_add_local_local, ck_sub_local_local, ck_mul_local_local, ck_minimum_local_local, ck_maximum_local_local, ck_less_local_local, ck_more_local_local, ck_equal_local_local => {
+                    const left = try compactBorrowLocal(state, try compactReadByte(code, &ip));
+                    const right = try compactBorrowLocal(state, try compactReadByte(code, &ip));
+                    try compactPush(state, try self.compactDyadBorrowed(switch (raw) {
+                        ck_add_local_local => .add,
+                        ck_sub_local_local => .sub,
+                        ck_mul_local_local => .mul,
+                        ck_minimum_local_local => .minimum,
+                        ck_maximum_local_local => .maximum,
+                        ck_less_local_local => .less,
+                        ck_more_local_local => .more,
+                        ck_equal_local_local => .equal,
+                        else => unreachable,
+                    }, left, right));
+                },
+                ck_add_local_const_i64, ck_sub_local_const_i64, ck_mul_local_const_i64, ck_minimum_local_const_i64, ck_maximum_local_const_i64, ck_less_local_const_i64, ck_more_local_const_i64, ck_equal_local_const_i64 => {
+                    const slot = try compactReadByte(code, &ip);
+                    const rhs = try compactReadI64(code, &ip);
+                    const left = try compactBorrowLocal(state, slot);
+                    const op: BuiltinId = switch (raw) {
+                        ck_add_local_const_i64 => .add,
+                        ck_sub_local_const_i64 => .sub,
+                        ck_mul_local_const_i64 => .mul,
+                        ck_minimum_local_const_i64 => .minimum,
+                        ck_maximum_local_const_i64 => .maximum,
+                        ck_less_local_const_i64 => .less,
+                        ck_more_local_const_i64 => .more,
+                        ck_equal_local_const_i64 => .equal,
+                        else => unreachable,
+                    };
+                    const result = if (try self.compactTryInlineLocalConstDyad(left, op, rhs, false)) |direct|
+                        direct
+                    else switch (raw) {
+                        ck_add_local_const_i64, ck_sub_local_const_i64, ck_mul_local_const_i64 => try self.applyLocalConstOpValue(left, op, rhs),
+                        ck_minimum_local_const_i64, ck_maximum_local_const_i64, ck_less_local_const_i64, ck_more_local_const_i64, ck_equal_local_const_i64 => try self.applyLocalConstDyadValue(left, op, rhs),
+                        else => unreachable,
+                    };
+                    try compactPush(state, result);
+                },
+                ck_add_const_local_i64, ck_sub_const_local_i64, ck_minimum_const_local_i64, ck_maximum_const_local_i64, ck_less_const_local_i64, ck_more_const_local_i64, ck_equal_const_local_i64 => {
+                    const lhs = try compactReadI64(code, &ip);
+                    const right = try compactBorrowLocal(state, try compactReadByte(code, &ip));
+                    const op: BuiltinId = switch (raw) {
+                        ck_add_const_local_i64 => .add,
+                        ck_sub_const_local_i64 => .sub,
+                        ck_minimum_const_local_i64 => .minimum,
+                        ck_maximum_const_local_i64 => .maximum,
+                        ck_less_const_local_i64 => .less,
+                        ck_more_const_local_i64 => .more,
+                        ck_equal_const_local_i64 => .equal,
+                        else => unreachable,
+                    };
+                    const result = if (try self.compactTryInlineLocalConstDyad(right, op, lhs, true)) |direct|
+                        direct
+                    else switch (raw) {
+                        ck_add_const_local_i64, ck_sub_const_local_i64 => try self.applyConstLocalOpValue(lhs, op, right),
+                        ck_minimum_const_local_i64, ck_maximum_const_local_i64, ck_less_const_local_i64, ck_more_const_local_i64, ck_equal_const_local_i64 => try self.applyConstLocalDyadValue(lhs, op, right),
+                        else => unreachable,
+                    };
+                    try compactPush(state, result);
+                },
+                ck_store_local_add_local_const_i64, ck_store_local_sub_local_const_i64, ck_store_local_mul_local_const_i64 => {
+                    const dst = try compactReadByte(code, &ip);
+                    const src = try compactReadByte(code, &ip);
+                    const rhs = try compactReadI64(code, &ip);
+                    const left = try compactBorrowLocal(state, src);
+                    const op: BuiltinId = switch (raw) {
+                        ck_store_local_add_local_const_i64 => .add,
+                        ck_store_local_sub_local_const_i64 => .sub,
+                        ck_store_local_mul_local_const_i64 => .mul,
+                        else => unreachable,
+                    };
+                    const result = if (try self.compactTryInlineLocalConstDyad(left, op, rhs, false)) |direct|
+                        direct
+                    else
+                        try self.applyLocalConstOpValue(left, op, rhs);
+                    try self.compactStoreLocal(state, dst, result);
+                },
+                ck_less, ck_more, ck_equal, ck_add, ck_sub, ck_mul, ck_div, ck_minimum, ck_maximum => {
+                    const right = try compactPop(state);
+                    defer self.releaseValue(right);
+                    const left = try compactPop(state);
+                    defer self.releaseValue(left);
+                    try compactPush(state, try self.compactDyadBorrowed(switch (raw) {
+                        ck_less => .less,
+                        ck_more => .more,
+                        ck_equal => .equal,
+                        ck_add => .add,
+                        ck_sub => .sub,
+                        ck_mul => .mul,
+                        ck_div => .div,
+                        ck_minimum => .minimum,
+                        ck_maximum => .maximum,
+                        else => unreachable,
+                    }, left, right));
+                },
+                ck_floor, ck_iota => {
+                    const value = try compactPop(state);
+                    defer self.releaseValue(value);
+                    try compactPush(state, switch (raw) {
+                        ck_floor => try self.floorValue(value),
+                        ck_iota => try self.iotaValue(value),
+                        else => unreachable,
+                    });
+                },
+                else => return error.Internal,
+            }
+        }
+    }
+
+    fn dropFrameStack(self: *Session, frame: *const CallFrame) void {
+        const local_end = frame.base + frameSlotCount(frame.code);
+        if (!frameHasManagedLocals(frame) and self.stack_len <= local_end) {
+            if (comptime enable_probe_instrumentation) self.debug_frame_drop_fast_count += 1;
+            self.stack_len = frame.base;
+            return;
+        }
+        if (comptime enable_probe_instrumentation) self.debug_frame_drop_fallback_count += 1;
+        self.dropFrameStackFrom(frame.base);
+    }
+
     fn runCode(self: *Session, code: *const Code, args: []const Value) KError!Value {
         return try self.runCodeMode(code, args, true);
     }
@@ -8573,7 +11703,6 @@ pub const Session = struct {
             .code = code,
             .ip = 0,
             .base = 0,
-            .captures = &[_]Value{},
             .owner = null,
             .callable_global_slot = sampling_profile_no_callable_slot,
         }, root_results);
@@ -8582,11 +11711,14 @@ pub const Session = struct {
     fn runClosureMode(self: *Session, closure: *const Closure, args: []const Value, root_results: bool) KError!Value {
         if (self.debugDetailedProbeActive()) self.debug_run_closure_mode_count += 1;
         if (args.len != closure.code.arity) return error.Arity;
+        if (compactKCodeForPlainClosure(closure, args.len)) |compact| {
+            const result = try self.runCompactKCodeBorrowed(compact, args);
+            return if (root_results) try self.finishResult(result) else result;
+        }
         return try self.runEntryMode(args, .{
             .code = closure.code,
             .ip = 0,
             .base = 0,
-            .captures = closure.captures,
             .owner = null,
             .callable_global_slot = sampling_profile_no_callable_slot,
         }, root_results);
@@ -8662,6 +11794,19 @@ pub const Session = struct {
                     const slot = try readGlobalSlot(frame);
                     try self.storeGlobalSlot(slot, self.peek());
                 },
+                .modify_global => {
+                    const slot = try readGlobalSlot(frame);
+                    const builtin: BuiltinId = @enumFromInt(try readByte(frame));
+                    const want_result = (try readByte(frame)) != 0;
+                    try self.execModifiedAssign(frame, .{ .global = slot }, builtin, want_result);
+                },
+                .modify_global_const => {
+                    const slot = try readGlobalSlot(frame);
+                    const builtin: BuiltinId = @enumFromInt(try readByte(frame));
+                    const want_result = (try readByte(frame)) != 0;
+                    const rhs = try readI64(frame);
+                    try self.execModifiedAssignConst(frame, .{ .global = slot }, builtin, want_result, rhs);
+                },
                 .load_local => {
                     const slot = try readByte(frame);
                     const index = frame.base + slot;
@@ -8671,6 +11816,54 @@ pub const Session = struct {
                 .store_local => {
                     const slot = try readByte(frame);
                     try self.storeLocal(frame, slot);
+                },
+                .modify_local => {
+                    const slot = try readByte(frame);
+                    const builtin: BuiltinId = @enumFromInt(try readByte(frame));
+                    const want_result = (try readByte(frame)) != 0;
+                    try self.execModifiedAssign(frame, .{ .local = slot }, builtin, want_result);
+                },
+                .modify_local_const => {
+                    const slot = try readByte(frame);
+                    const builtin: BuiltinId = @enumFromInt(try readByte(frame));
+                    const want_result = (try readByte(frame)) != 0;
+                    const rhs = try readI64(frame);
+                    try self.execModifiedAssignConst(frame, .{ .local = slot }, builtin, want_result, rhs);
+                },
+                .assign_index_global => {
+                    const slot = try readGlobalSlot(frame);
+                    const mode: AmendMode = @enumFromInt(try readByte(frame));
+                    const builtin: BuiltinId = @enumFromInt(try readByte(frame));
+                    const want_result = (try readByte(frame)) != 0;
+                    try self.execIndexedAssign(frame, .{ .global = slot }, mode, builtin, want_result);
+                },
+                .assign_index_global_sources => {
+                    const slot = try readGlobalSlot(frame);
+                    const mode: AmendMode = @enumFromInt(try readByte(frame));
+                    const builtin: BuiltinId = @enumFromInt(try readByte(frame));
+                    const want_result = (try readByte(frame)) != 0;
+                    try self.execIndexedAssignSources(frame, .{ .global = slot }, mode, builtin, want_result);
+                },
+                .assign_index_local => {
+                    const slot = try readByte(frame);
+                    const mode: AmendMode = @enumFromInt(try readByte(frame));
+                    const builtin: BuiltinId = @enumFromInt(try readByte(frame));
+                    const want_result = (try readByte(frame)) != 0;
+                    try self.execIndexedAssign(frame, .{ .local = slot }, mode, builtin, want_result);
+                },
+                .assign_index_local_sources => {
+                    const slot = try readByte(frame);
+                    const mode: AmendMode = @enumFromInt(try readByte(frame));
+                    const builtin: BuiltinId = @enumFromInt(try readByte(frame));
+                    const want_result = (try readByte(frame)) != 0;
+                    try self.execIndexedAssignSources(frame, .{ .local = slot }, mode, builtin, want_result);
+                },
+                .assign_index_inline_local => {
+                    const slot = try readByte(frame);
+                    const mode: AmendMode = @enumFromInt(try readByte(frame));
+                    const builtin: BuiltinId = @enumFromInt(try readByte(frame));
+                    const want_result = (try readByte(frame)) != 0;
+                    try self.execIndexedAssign(frame, .{ .inline_local = slot }, mode, builtin, want_result);
                 },
                 .store_local_add_local_const => {
                     const dst_slot = try readByte(frame);
@@ -8711,10 +11904,11 @@ pub const Session = struct {
                     const slot = try readByte(frame);
                     try self.push(try self.takeInlineLocal(slot));
                 },
-                .load_capture => {
+                .modify_inline_local => {
                     const slot = try readByte(frame);
-                    if (slot >= frame.captures.len) return error.Internal;
-                    try self.push(self.retainValue(frame.captures[slot]));
+                    const builtin: BuiltinId = @enumFromInt(try readByte(frame));
+                    const want_result = (try readByte(frame)) != 0;
+                    try self.execModifiedAssign(frame, .{ .inline_local = slot }, builtin, want_result);
                 },
                 .add_local_local => {
                     const left = try self.readLocal(frame, try readByte(frame));
@@ -8726,55 +11920,25 @@ pub const Session = struct {
                     const right = try self.readInlineLocal(try readByte(frame));
                     try self.push(try self.addValues(left, right));
                 },
-                .add_capture_local => {
-                    const left = try self.readCapture(frame, try readByte(frame));
-                    const right = try self.readLocal(frame, try readByte(frame));
-                    try self.push(try self.addValues(left, right));
-                },
-                .add_local_capture => {
-                    const left = try self.readLocal(frame, try readByte(frame));
-                    const right = try self.readCapture(frame, try readByte(frame));
-                    try self.push(try self.addValues(left, right));
-                },
-                .add_capture_inline_local => {
-                    const left = try self.readCapture(frame, try readByte(frame));
-                    const right = try self.readInlineLocal(try readByte(frame));
-                    try self.push(try self.addValues(left, right));
-                },
-                .add_inline_local_capture => {
-                    const left = try self.readInlineLocal(try readByte(frame));
-                    const right = try self.readCapture(frame, try readByte(frame));
-                    try self.push(try self.addValues(left, right));
-                },
                 .add_const_local => {
                     const left = try readI64(frame);
                     const right = try self.readLocal(frame, try readByte(frame));
-                    try self.push(try self.addValues(try self.intValue(left), right));
+                    try self.push(try self.applyConstLocalOpValue(left, .add, right));
                 },
                 .add_local_const => {
                     const left = try self.readLocal(frame, try readByte(frame));
                     const right = try readI64(frame);
-                    try self.push(try self.addValues(left, try self.intValue(right)));
+                    try self.push(try self.applyLocalConstOpValue(left, .add, right));
                 },
                 .add_const_inline_local => {
                     const left = try readI64(frame);
                     const right = try self.readInlineLocal(try readByte(frame));
-                    try self.push(try self.addValues(try self.intValue(left), right));
+                    try self.push(try self.applyConstLocalOpValue(left, .add, right));
                 },
                 .add_inline_local_const => {
                     const left = try self.readInlineLocal(try readByte(frame));
                     const right = try readI64(frame);
-                    try self.push(try self.addValues(left, try self.intValue(right)));
-                },
-                .add_const_capture => {
-                    const left = try readI64(frame);
-                    const right = try self.readCapture(frame, try readByte(frame));
-                    try self.push(try self.addValues(try self.intValue(left), right));
-                },
-                .add_capture_const => {
-                    const left = try self.readCapture(frame, try readByte(frame));
-                    const right = try readI64(frame);
-                    try self.push(try self.addValues(left, try self.intValue(right)));
+                    try self.push(try self.applyLocalConstOpValue(left, .add, right));
                 },
                 .sub_local_local => {
                     const left = try self.readLocal(frame, try readByte(frame));
@@ -8786,55 +11950,25 @@ pub const Session = struct {
                     const right = try self.readInlineLocal(try readByte(frame));
                     try self.push(try self.subValues(left, right));
                 },
-                .sub_capture_local => {
-                    const left = try self.readCapture(frame, try readByte(frame));
-                    const right = try self.readLocal(frame, try readByte(frame));
-                    try self.push(try self.subValues(left, right));
-                },
-                .sub_local_capture => {
-                    const left = try self.readLocal(frame, try readByte(frame));
-                    const right = try self.readCapture(frame, try readByte(frame));
-                    try self.push(try self.subValues(left, right));
-                },
-                .sub_capture_inline_local => {
-                    const left = try self.readCapture(frame, try readByte(frame));
-                    const right = try self.readInlineLocal(try readByte(frame));
-                    try self.push(try self.subValues(left, right));
-                },
-                .sub_inline_local_capture => {
-                    const left = try self.readInlineLocal(try readByte(frame));
-                    const right = try self.readCapture(frame, try readByte(frame));
-                    try self.push(try self.subValues(left, right));
-                },
                 .sub_const_local => {
                     const left = try readI64(frame);
                     const right = try self.readLocal(frame, try readByte(frame));
-                    try self.push(try self.subValues(try self.intValue(left), right));
+                    try self.push(try self.applyConstLocalOpValue(left, .sub, right));
                 },
                 .sub_local_const => {
                     const left = try self.readLocal(frame, try readByte(frame));
                     const right = try readI64(frame);
-                    try self.push(try self.subValues(left, try self.intValue(right)));
+                    try self.push(try self.applyLocalConstOpValue(left, .sub, right));
                 },
                 .sub_const_inline_local => {
                     const left = try readI64(frame);
                     const right = try self.readInlineLocal(try readByte(frame));
-                    try self.push(try self.subValues(try self.intValue(left), right));
+                    try self.push(try self.applyConstLocalOpValue(left, .sub, right));
                 },
                 .sub_inline_local_const => {
                     const left = try self.readInlineLocal(try readByte(frame));
                     const right = try readI64(frame);
-                    try self.push(try self.subValues(left, try self.intValue(right)));
-                },
-                .sub_const_capture => {
-                    const left = try readI64(frame);
-                    const right = try self.readCapture(frame, try readByte(frame));
-                    try self.push(try self.subValues(try self.intValue(left), right));
-                },
-                .sub_capture_const => {
-                    const left = try self.readCapture(frame, try readByte(frame));
-                    const right = try readI64(frame);
-                    try self.push(try self.subValues(left, try self.intValue(right)));
+                    try self.push(try self.applyLocalConstOpValue(left, .sub, right));
                 },
                 .mul_local_local => {
                     const left = try self.readLocal(frame, try readByte(frame));
@@ -8846,55 +11980,95 @@ pub const Session = struct {
                     const right = try self.readInlineLocal(try readByte(frame));
                     try self.push(try self.mulValues(left, right));
                 },
-                .mul_capture_local => {
-                    const left = try self.readCapture(frame, try readByte(frame));
-                    const right = try self.readLocal(frame, try readByte(frame));
-                    try self.push(try self.mulValues(left, right));
-                },
-                .mul_local_capture => {
-                    const left = try self.readLocal(frame, try readByte(frame));
-                    const right = try self.readCapture(frame, try readByte(frame));
-                    try self.push(try self.mulValues(left, right));
-                },
-                .mul_capture_inline_local => {
-                    const left = try self.readCapture(frame, try readByte(frame));
-                    const right = try self.readInlineLocal(try readByte(frame));
-                    try self.push(try self.mulValues(left, right));
-                },
-                .mul_inline_local_capture => {
-                    const left = try self.readInlineLocal(try readByte(frame));
-                    const right = try self.readCapture(frame, try readByte(frame));
-                    try self.push(try self.mulValues(left, right));
-                },
                 .mul_const_local => {
                     const left = try readI64(frame);
                     const right = try self.readLocal(frame, try readByte(frame));
-                    try self.push(try self.mulValues(try self.intValue(left), right));
+                    try self.push(try self.applyConstLocalOpValue(left, .mul, right));
                 },
                 .mul_local_const => {
                     const left = try self.readLocal(frame, try readByte(frame));
                     const right = try readI64(frame);
-                    try self.push(try self.mulValues(left, try self.intValue(right)));
+                    try self.push(try self.applyLocalConstOpValue(left, .mul, right));
                 },
                 .mul_const_inline_local => {
                     const left = try readI64(frame);
                     const right = try self.readInlineLocal(try readByte(frame));
-                    try self.push(try self.mulValues(try self.intValue(left), right));
+                    try self.push(try self.applyConstLocalOpValue(left, .mul, right));
                 },
                 .mul_inline_local_const => {
                     const left = try self.readInlineLocal(try readByte(frame));
                     const right = try readI64(frame);
-                    try self.push(try self.mulValues(left, try self.intValue(right)));
+                    try self.push(try self.applyLocalConstOpValue(left, .mul, right));
                 },
-                .mul_const_capture => {
+                .minimum_local_local => {
+                    const left = try self.readLocal(frame, try readByte(frame));
+                    const right = try self.readLocal(frame, try readByte(frame));
+                    try self.push(try self.applyShapedBorrowedDyadValue(.minimum, left, right));
+                },
+                .maximum_local_local => {
+                    const left = try self.readLocal(frame, try readByte(frame));
+                    const right = try self.readLocal(frame, try readByte(frame));
+                    try self.push(try self.applyShapedBorrowedDyadValue(.maximum, left, right));
+                },
+                .less_local_local => {
+                    const left = try self.readLocal(frame, try readByte(frame));
+                    const right = try self.readLocal(frame, try readByte(frame));
+                    try self.push(try self.applyShapedBorrowedDyadValue(.less, left, right));
+                },
+                .more_local_local => {
+                    const left = try self.readLocal(frame, try readByte(frame));
+                    const right = try self.readLocal(frame, try readByte(frame));
+                    try self.push(try self.applyShapedBorrowedDyadValue(.more, left, right));
+                },
+                .equal_local_local => {
+                    const left = try self.readLocal(frame, try readByte(frame));
+                    const right = try self.readLocal(frame, try readByte(frame));
+                    try self.push(try self.applyShapedBorrowedDyadValue(.equal, left, right));
+                },
+                .minimum_local_const => {
+                    const left = try self.readLocal(frame, try readByte(frame));
+                    try self.push(try self.applyLocalConstDyadValue(left, .minimum, try readI64(frame)));
+                },
+                .maximum_local_const => {
+                    const left = try self.readLocal(frame, try readByte(frame));
+                    try self.push(try self.applyLocalConstDyadValue(left, .maximum, try readI64(frame)));
+                },
+                .less_local_const => {
+                    const left = try self.readLocal(frame, try readByte(frame));
+                    try self.push(try self.applyLocalConstDyadValue(left, .less, try readI64(frame)));
+                },
+                .more_local_const => {
+                    const left = try self.readLocal(frame, try readByte(frame));
+                    try self.push(try self.applyLocalConstDyadValue(left, .more, try readI64(frame)));
+                },
+                .equal_local_const => {
+                    const left = try self.readLocal(frame, try readByte(frame));
+                    try self.push(try self.applyLocalConstDyadValue(left, .equal, try readI64(frame)));
+                },
+                .minimum_const_local => {
                     const left = try readI64(frame);
-                    const right = try self.readCapture(frame, try readByte(frame));
-                    try self.push(try self.mulValues(try self.intValue(left), right));
+                    const right = try self.readLocal(frame, try readByte(frame));
+                    try self.push(try self.applyConstLocalDyadValue(left, .minimum, right));
                 },
-                .mul_capture_const => {
-                    const left = try self.readCapture(frame, try readByte(frame));
-                    const right = try readI64(frame);
-                    try self.push(try self.mulValues(left, try self.intValue(right)));
+                .maximum_const_local => {
+                    const left = try readI64(frame);
+                    const right = try self.readLocal(frame, try readByte(frame));
+                    try self.push(try self.applyConstLocalDyadValue(left, .maximum, right));
+                },
+                .less_const_local => {
+                    const left = try readI64(frame);
+                    const right = try self.readLocal(frame, try readByte(frame));
+                    try self.push(try self.applyConstLocalDyadValue(left, .less, right));
+                },
+                .more_const_local => {
+                    const left = try readI64(frame);
+                    const right = try self.readLocal(frame, try readByte(frame));
+                    try self.push(try self.applyConstLocalDyadValue(left, .more, right));
+                },
+                .equal_const_local => {
+                    const left = try readI64(frame);
+                    const right = try self.readLocal(frame, try readByte(frame));
+                    try self.push(try self.applyConstLocalDyadValue(left, .equal, right));
                 },
                 .neg_local => {
                     const value = try self.readLocal(frame, try readByte(frame));
@@ -8902,10 +12076,6 @@ pub const Session = struct {
                 },
                 .neg_inline_local => {
                     const value = try self.readInlineLocal(try readByte(frame));
-                    try self.push(try self.negateValue(value));
-                },
-                .neg_capture => {
-                    const value = try self.readCapture(frame, try readByte(frame));
                     try self.push(try self.negateValue(value));
                 },
                 .sqrt_local => {
@@ -8916,19 +12086,57 @@ pub const Session = struct {
                     const value = try self.readInlineLocal(try readByte(frame));
                     try self.push(try self.sqrtValue(value));
                 },
-                .sqrt_capture => {
-                    const value = try self.readCapture(frame, try readByte(frame));
-                    try self.push(try self.sqrtValue(value));
-                },
                 .call1_local_local => {
+                    self.noteVmCall1Local(.local_local);
                     const callee = try self.readLocal(frame, try readByte(frame));
                     const arg0 = try self.readLocal(frame, try readByte(frame));
                     try self.execBorrowedCall1(callee, arg0);
                 },
                 .tail_call1_local_local => {
+                    self.noteVmCall1Local(.tail_local_local);
                     const callee = try self.readLocal(frame, try readByte(frame));
                     const arg0 = try self.readLocal(frame, try readByte(frame));
                     if (try self.execBorrowedTailCall1(frame_index, callee, arg0)) |final| return final;
+                },
+                .call1_local_local_op => {
+                    self.noteVmCall1Local(.local_local_op);
+                    const callee = try self.readLocal(frame, try readByte(frame));
+                    const selector_op: BuiltinId = @enumFromInt(try readByte(frame));
+                    const left_slot = try readByte(frame);
+                    const right_slot = try readByte(frame);
+                    const raw_index = try self.evalLocalLocalSelector(frame, selector_op, left_slot, right_slot);
+                    try self.execBorrowedCall1ScalarIndex(callee, raw_index);
+                },
+                .tail_call1_local_local_op => {
+                    self.noteVmCall1Local(.tail_local_local_op);
+                    const callee = try self.readLocal(frame, try readByte(frame));
+                    const selector_op: BuiltinId = @enumFromInt(try readByte(frame));
+                    const left_slot = try readByte(frame);
+                    const right_slot = try readByte(frame);
+                    const raw_index = try self.evalLocalLocalSelector(frame, selector_op, left_slot, right_slot);
+                    if (try self.execBorrowedTailCall1ScalarIndex(frame_index, callee, raw_index)) |final| return final;
+                },
+                .call1_local_local_op_const => {
+                    self.noteVmCall1Local(.local_local_op_const);
+                    const callee = try self.readLocal(frame, try readByte(frame));
+                    const selector_op: BuiltinId = @enumFromInt(try readByte(frame));
+                    const left_slot = try readByte(frame);
+                    const right_slot = try readByte(frame);
+                    const const_op: BuiltinId = @enumFromInt(try readByte(frame));
+                    const const_value = try readI64(frame);
+                    const raw_index = try self.evalLocalLocalConstSelector(frame, selector_op, left_slot, right_slot, const_op, const_value);
+                    try self.execBorrowedCall1ScalarIndex(callee, raw_index);
+                },
+                .tail_call1_local_local_op_const => {
+                    self.noteVmCall1Local(.tail_local_local_op_const);
+                    const callee = try self.readLocal(frame, try readByte(frame));
+                    const selector_op: BuiltinId = @enumFromInt(try readByte(frame));
+                    const left_slot = try readByte(frame);
+                    const right_slot = try readByte(frame);
+                    const const_op: BuiltinId = @enumFromInt(try readByte(frame));
+                    const const_value = try readI64(frame);
+                    const raw_index = try self.evalLocalLocalConstSelector(frame, selector_op, left_slot, right_slot, const_op, const_value);
+                    if (try self.execBorrowedTailCall1ScalarIndex(frame_index, callee, raw_index)) |final| return final;
                 },
                 .call1_inline_local_local => {
                     const callee = try self.readInlineLocal(try readByte(frame));
@@ -8944,14 +12152,6 @@ pub const Session = struct {
                     const slot = try readGlobalSlot(frame);
                     try self.execInlineCallAddArgGlobal(slot);
                 },
-                .inline_call_add_capture => {
-                    const slot = try readByte(frame);
-                    try self.execInlineCallAddCapture(frame, slot);
-                },
-                .inline_call_add_arg_capture => {
-                    const slot = try readByte(frame);
-                    try self.execInlineCallAddArgCapture(frame, slot);
-                },
                 .inline_call_sub2 => try self.execInlineCallBinary2(.sub),
                 .inline_call_sub_global => {
                     const slot = try readGlobalSlot(frame);
@@ -8960,14 +12160,6 @@ pub const Session = struct {
                 .inline_call_sub_arg_global => {
                     const slot = try readGlobalSlot(frame);
                     try self.execInlineCallBinaryGlobal(.sub, slot, true);
-                },
-                .inline_call_sub_capture => {
-                    const slot = try readByte(frame);
-                    try self.execInlineCallBinaryCapture(.sub, frame, slot, false);
-                },
-                .inline_call_sub_arg_capture => {
-                    const slot = try readByte(frame);
-                    try self.execInlineCallBinaryCapture(.sub, frame, slot, true);
                 },
                 .inline_call_mul2 => try self.execInlineCallBinary2(.mul),
                 .inline_call_mul_global => {
@@ -8978,31 +12170,15 @@ pub const Session = struct {
                     const slot = try readGlobalSlot(frame);
                     try self.execInlineCallBinaryGlobal(.mul, slot, true);
                 },
-                .inline_call_mul_capture => {
-                    const slot = try readByte(frame);
-                    try self.execInlineCallBinaryCapture(.mul, frame, slot, false);
-                },
-                .inline_call_mul_arg_capture => {
-                    const slot = try readByte(frame);
-                    try self.execInlineCallBinaryCapture(.mul, frame, slot, true);
-                },
                 .inline_call_negate1 => try self.execInlineCallUnary(.negate),
                 .inline_call_negate_global => {
                     const slot = try readGlobalSlot(frame);
                     try self.execInlineCallUnaryGlobal(.negate, slot);
                 },
-                .inline_call_negate_capture => {
-                    const slot = try readByte(frame);
-                    try self.execInlineCallUnaryCapture(.negate, frame, slot);
-                },
                 .inline_call_sqrt1 => try self.execInlineCallUnary(.sqrt),
                 .inline_call_sqrt_global => {
                     const slot = try readGlobalSlot(frame);
                     try self.execInlineCallUnaryGlobal(.sqrt, slot);
-                },
-                .inline_call_sqrt_capture => {
-                    const slot = try readByte(frame);
-                    try self.execInlineCallUnaryCapture(.sqrt, frame, slot);
                 },
                 .inline_call_argmax1 => try self.execInlineCallArgmax1(),
                 .add => try self.execDyad(.add),
@@ -9085,11 +12261,6 @@ pub const Session = struct {
                 .enter_inline => try self.pushInlineBase(try readByte(frame)),
                 .leave_inline => try self.leaveInline(try readByte(frame)),
                 .make_vector => try self.execMakeVector(try readByte(frame)),
-                .make_lambda => {
-                    const template = try readTemplate(frame);
-                    const closure = try self.instantiateLambda(template, frame);
-                    try self.push(Value.closure(closure));
-                },
                 .make_adverb => {
                     const kind: DerivedVerbKind = @enumFromInt(try readByte(frame));
                     try self.execMakeAdverb(kind);
@@ -9108,9 +12279,52 @@ pub const Session = struct {
                     const target = try readU16(frame);
                     if (target > frame.code.bytes.len) return error.Internal;
                     const condition = self.pop();
+                    if (comptime enable_probe_instrumentation) {
+                        self.debug_jump_if_false_count += 1;
+                        switch (condition.tag()) {
+                            .bool, .int, .float => self.debug_jump_if_false_scalar_count += 1,
+                            else => {},
+                        }
+                    }
                     const truthy = boolLikeValue(condition) orelse return error.Type;
                     self.releaseValue(condition);
                     if (!truthy) frame.ip = target;
+                },
+                .jump_if_false_equal_local_const => {
+                    const slot = try readByte(frame);
+                    const rhs = try readI64(frame);
+                    const target = try readU16(frame);
+                    if (target > frame.code.bytes.len) return error.Internal;
+                    if (comptime enable_probe_instrumentation) self.debug_jump_if_false_count += 1;
+                    const condition = try self.compareLocalConstBranch(frame, slot, .equal, rhs);
+                    if (comptime enable_probe_instrumentation) {
+                        if (condition.scalar) self.debug_jump_if_false_scalar_count += 1;
+                    }
+                    if (!condition.truthy) frame.ip = target;
+                },
+                .jump_if_false_less_local_const => {
+                    const slot = try readByte(frame);
+                    const rhs = try readI64(frame);
+                    const target = try readU16(frame);
+                    if (target > frame.code.bytes.len) return error.Internal;
+                    if (comptime enable_probe_instrumentation) self.debug_jump_if_false_count += 1;
+                    const condition = try self.compareLocalConstBranch(frame, slot, .less, rhs);
+                    if (comptime enable_probe_instrumentation) {
+                        if (condition.scalar) self.debug_jump_if_false_scalar_count += 1;
+                    }
+                    if (!condition.truthy) frame.ip = target;
+                },
+                .jump_if_false_more_local_const => {
+                    const slot = try readByte(frame);
+                    const rhs = try readI64(frame);
+                    const target = try readU16(frame);
+                    if (target > frame.code.bytes.len) return error.Internal;
+                    if (comptime enable_probe_instrumentation) self.debug_jump_if_false_count += 1;
+                    const condition = try self.compareLocalConstBranch(frame, slot, .more, rhs);
+                    if (comptime enable_probe_instrumentation) {
+                        if (condition.scalar) self.debug_jump_if_false_scalar_count += 1;
+                    }
+                    if (!condition.truthy) frame.ip = target;
                 },
                 .call_global => {
                     const slot = try readGlobalSlot(frame);
@@ -9140,6 +12354,14 @@ pub const Session = struct {
                     const slot = try readGlobalSlot(frame);
                     try self.execGlobalCallSlotsStoreLocal(frame, slot, try readByte(frame));
                 },
+                .index_global_source => {
+                    const slot = try readGlobalSlot(frame);
+                    try self.execGlobalIndexSource(frame, slot);
+                },
+                .index_global_source_store_local => {
+                    const slot = try readGlobalSlot(frame);
+                    try self.execGlobalIndexSourceStoreLocal(frame, slot);
+                },
                 .tail_call_global1 => {
                     const slot = try readGlobalSlot(frame);
                     if (try self.execTailGlobalCall1(frame_index, slot)) |final| return final;
@@ -9159,6 +12381,10 @@ pub const Session = struct {
                 .tail_call_global_slots => {
                     const slot = try readGlobalSlot(frame);
                     if (try self.execTailGlobalCallSlots(frame_index, frame, slot, try readByte(frame))) |final| return final;
+                },
+                .tail_index_global_source => {
+                    const slot = try readGlobalSlot(frame);
+                    if (try self.execTailGlobalIndexSource(frame_index, frame, slot)) |final| return final;
                 },
                 .call1 => try self.execCall1(),
                 .call2 => try self.execCall2(),
@@ -9222,15 +12448,7 @@ pub const Session = struct {
     }
 
     inline fn readGlobalSlot(frame: *CallFrame) KError!u16 {
-        const slot = try readByte(frame);
-        if (slot >= frame.code.globals.len) return error.Internal;
-        return frame.code.globals[slot];
-    }
-
-    inline fn readTemplate(frame: *CallFrame) KError!*const LambdaTemplate {
-        const slot = try readByte(frame);
-        if (slot >= frame.code.templates.len) return error.Internal;
-        return frame.code.templates[slot];
+        return @intCast(try readU16(frame));
     }
 
     inline fn readConstant(frame: *CallFrame) KError!Value {
@@ -9254,8 +12472,15 @@ pub const Session = struct {
     fn writeLocalValue(self: *Session, frame: *const CallFrame, slot: u8, value: Value) KError!void {
         const index = frame.base + slot;
         if (index >= self.stack_len) return error.Internal;
-        self.releaseCanonicalManagedNumericValue(self.stack[index]);
+        const mutable_frame = @constCast(frame);
+        if (frameLocalMayNeedRelease(frame, slot)) {
+            if (comptime enable_probe_instrumentation) self.debug_local_release_taken_count += 1;
+            self.releaseCanonicalManagedNumericValue(self.stack[index]);
+        } else if (comptime enable_probe_instrumentation) {
+            self.debug_local_release_skip_count += 1;
+        }
         self.stack[index] = value;
+        updateFrameLocalReleaseState(mutable_frame, slot, value);
     }
 
     fn takeLocal(self: *Session, frame: *const CallFrame, slot: u8) KError!Value {
@@ -9263,7 +12488,16 @@ pub const Session = struct {
         if (index >= self.stack_len) return error.Internal;
         const value = self.stack[index];
         self.stack[index] = Value.fromBool(false);
+        clearFrameLocalReleaseState(@constCast(frame), slot);
         return value;
+    }
+
+    fn writeInlineLocalValue(self: *Session, slot: u8, value: Value) KError!void {
+        const base = self.currentInlineBase() orelse return error.Internal;
+        const index = base + slot;
+        if (index >= self.stack_len) return error.Internal;
+        self.releaseCanonicalManagedNumericValue(self.stack[index]);
+        self.stack[index] = value;
     }
 
     fn readInlineLocal(self: *Session, slot: u8) KError!Value {
@@ -9282,7 +12516,66 @@ pub const Session = struct {
         return value;
     }
 
+    fn tryFastLocalConstDyadValue(self: *Session, left: Value, op: BuiltinId, rhs_const: i64, const_first: bool) KError!?Value {
+        if (inlineIntBoolValue(left)) |left_value| {
+            if (comptime enable_probe_instrumentation) self.debug_inline_scalar_dyad_attempt_count += 1;
+            const lhs = if (const_first) rhs_const else left_value;
+            const rhs = if (const_first) left_value else rhs_const;
+            const result: ?Value = switch (op) {
+                .add => blk: {
+                    const added = @addWithOverflow(lhs, rhs);
+                    if (added[1] != 0) break :blk null;
+                    break :blk try self.intValue(added[0]);
+                },
+                .sub => blk: {
+                    const subbed = @subWithOverflow(lhs, rhs);
+                    if (subbed[1] != 0) break :blk null;
+                    break :blk try self.intValue(subbed[0]);
+                },
+                .mul => blk: {
+                    const multiplied = @mulWithOverflow(lhs, rhs);
+                    if (multiplied[1] != 0) break :blk null;
+                    break :blk try self.intValue(multiplied[0]);
+                },
+                .div => try self.floatValue(@as(f64, @floatFromInt(lhs)) / @as(f64, @floatFromInt(rhs))),
+                .minimum => try self.intValue(@min(lhs, rhs)),
+                .maximum => try self.intValue(@max(lhs, rhs)),
+                .less => Value.fromBool(lhs < rhs),
+                .more => Value.fromBool(lhs > rhs),
+                .equal => Value.fromBool(lhs == rhs),
+                else => null,
+            };
+            if (comptime enable_probe_instrumentation) {
+                if (result != null) self.debug_inline_scalar_dyad_hit_count += 1 else self.debug_inline_scalar_dyad_fallback_count += 1;
+            }
+            return result;
+        }
+
+        const left_float = inlineNumericFloatValue(left) orelse return null;
+        if (comptime enable_probe_instrumentation) self.debug_inline_scalar_dyad_attempt_count += 1;
+        const rhs_float: f64 = @floatFromInt(rhs_const);
+        const lhs = if (const_first) rhs_float else left_float;
+        const rhs = if (const_first) left_float else rhs_float;
+        const result: ?Value = switch (op) {
+            .add => try self.floatValue(lhs + rhs),
+            .sub => try self.floatValue(lhs - rhs),
+            .mul => try self.floatValue(lhs * rhs),
+            .div => try self.floatValue(lhs / rhs),
+            .minimum => try self.floatValue(@min(lhs, rhs)),
+            .maximum => try self.floatValue(@max(lhs, rhs)),
+            .less => Value.fromBool(lhs < rhs),
+            .more => Value.fromBool(lhs > rhs),
+            .equal => Value.fromBool(lhs == rhs),
+            else => null,
+        };
+        if (comptime enable_probe_instrumentation) {
+            if (result != null) self.debug_inline_scalar_dyad_hit_count += 1 else self.debug_inline_scalar_dyad_fallback_count += 1;
+        }
+        return result;
+    }
+
     fn applyLocalConstOpValue(self: *Session, left: Value, op: BuiltinId, rhs: i64) KError!Value {
+        if (try self.tryFastLocalConstDyadValue(left, op, rhs, false)) |result| return result;
         if (scalarIntLikeValue(left)) |lhs| {
             switch (op) {
                 .add => {
@@ -9311,10 +12604,75 @@ pub const Session = struct {
         };
     }
 
-    fn readCapture(self: *Session, frame: *const CallFrame, slot: u8) KError!Value {
-        _ = self;
-        if (slot >= frame.captures.len) return error.Internal;
-        return frame.captures[slot];
+    fn applyConstLocalOpValue(self: *Session, lhs: i64, op: BuiltinId, right: Value) KError!Value {
+        if (try self.tryFastLocalConstDyadValue(right, op, lhs, true)) |result| return result;
+        const left = try self.intValue(lhs);
+        defer self.releaseValue(left);
+        return switch (op) {
+            .add => try self.addValues(left, right),
+            .sub => try self.subValues(left, right),
+            .mul => try self.mulValues(left, right),
+            else => error.Unsupported,
+        };
+    }
+
+    fn applyBorrowedDyadValue(self: *Session, op: BuiltinId, left: Value, right: Value) KError!Value {
+        if (try self.tryFastInlineScalarDyad(op, left, right)) |result| return result;
+        return switch (op) {
+            .add => try self.addValues(left, right),
+            .sub => try self.subValues(left, right),
+            .mul => try self.mulValues(left, right),
+            .div => try self.divValues(left, right),
+            .minimum => try self.minimumValues(left, right),
+            .maximum => try self.maximumValues(left, right),
+            .less => try self.lessValues(left, right),
+            .more => try self.moreValues(left, right),
+            .equal => try self.equalValues(left, right),
+            else => error.Unsupported,
+        };
+    }
+
+    fn applyShapedBorrowedDyadValue(self: *Session, op: BuiltinId, left: Value, right: Value) KError!Value {
+        if (comptime enable_probe_instrumentation) self.debug_shaped_scalar_dyad_count += 1;
+        return try self.applyBorrowedDyadValue(op, left, right);
+    }
+
+    fn applyLocalConstDyadValue(self: *Session, left: Value, op: BuiltinId, rhs: i64) KError!Value {
+        if (comptime enable_probe_instrumentation) self.debug_shaped_scalar_dyad_count += 1;
+        if (try self.tryFastLocalConstDyadValue(left, op, rhs, false)) |result| return result;
+        const right = try self.intValue(rhs);
+        defer self.releaseValue(right);
+        return try self.applyBorrowedDyadValue(op, left, right);
+    }
+
+    fn applyConstLocalDyadValue(self: *Session, lhs: i64, op: BuiltinId, right: Value) KError!Value {
+        if (comptime enable_probe_instrumentation) self.debug_shaped_scalar_dyad_count += 1;
+        if (try self.tryFastLocalConstDyadValue(right, op, lhs, true)) |result| return result;
+        const left = try self.intValue(lhs);
+        defer self.releaseValue(left);
+        return try self.applyBorrowedDyadValue(op, left, right);
+    }
+
+    fn compareLocalConstBranch(self: *Session, frame: *const CallFrame, slot: u8, op: BuiltinId, rhs: i64) KError!FusedBranchResult {
+        const left = try self.readLocal(frame, slot);
+        if (comptime enable_probe_instrumentation) self.debug_shaped_scalar_dyad_count += 1;
+        if (try self.tryFastLocalConstDyadValue(left, op, rhs, false)) |condition| {
+            const truthy = boolLikeValue(condition) orelse return error.Type;
+            return .{ .truthy = truthy, .scalar = true };
+        }
+
+        const right = try self.intValue(rhs);
+        defer self.releaseValue(right);
+        const condition = try self.applyBorrowedDyadValue(op, left, right);
+        defer self.releaseValue(condition);
+        const truthy = boolLikeValue(condition) orelse return error.Type;
+        return .{
+            .truthy = truthy,
+            .scalar = switch (condition.tag()) {
+                .bool, .int, .float => true,
+                else => false,
+            },
+        };
     }
 
     fn currentInlineBase(self: *const Session) ?usize {
@@ -9323,7 +12681,7 @@ pub const Session = struct {
     }
 
     fn retainedFrameOwner(self: *Session, value: Value) ?Value {
-        if (value.tag() == .closure and value.asClosure().captures.len == 0) return null;
+        if (value.tag() == .closure and value.asClosure().kind == .plain) return null;
         return if (isManagedValue(value)) self.retainValue(value) else null;
     }
 
@@ -9342,45 +12700,8 @@ pub const Session = struct {
         self.inline_len -= 1;
         const result = self.pop();
         if (base > self.stack_len) return error.Internal;
-        self.dropStackFrom(base);
+        self.dropFrameStackFrom(base);
         try self.push(result);
-    }
-
-    fn instantiateLambda(self: *Session, template: *const LambdaTemplate, frame: *const CallFrame) KError!*const Closure {
-        return try self.allocManagedClosure(template.code, try self.resolveTemplateCaptures(template, frame, true));
-    }
-
-    fn resolveTemplateCaptures(
-        self: *Session,
-        template: *const LambdaTemplate,
-        frame: *const CallFrame,
-        comptime stabilize: bool,
-    ) KError![]const Value {
-        if (template.captures.len == 0) return &[_]Value{};
-
-        const owned_allocator = if (stabilize) self.allocator else self.scratch_arena.allocator();
-        const captures = try owned_allocator.alloc(Value, template.captures.len);
-        for (template.captures, 0..) |capture, idx| {
-            const value = switch (capture) {
-                .local => |slot| blk: {
-                    const stack_index = frame.base + slot;
-                    if (stack_index >= self.stack_len) return error.Internal;
-                    break :blk self.stack[stack_index];
-                },
-                .inline_local => |slot| blk: {
-                    const base = self.currentInlineBase() orelse return error.Internal;
-                    const stack_index = base + slot;
-                    if (stack_index >= self.stack_len) return error.Internal;
-                    break :blk self.stack[stack_index];
-                },
-                .capture => |slot| blk: {
-                    if (slot >= frame.captures.len) return error.Internal;
-                    break :blk frame.captures[slot];
-                },
-            };
-            captures[idx] = if (stabilize) try self.retainEscapedValue(value) else value;
-        }
-        return captures;
     }
 
     fn replaceCurrentFrameWithClosure1(self: *Session, frame_index: usize, owner: Value, closure: *const Closure, arg0: Value) KError!void {
@@ -9389,7 +12710,7 @@ pub const Session = struct {
         const base = self.frames[frame_index].base;
         const old_owner = self.frames[frame_index].owner;
         const result_target = self.frames[frame_index].result_target;
-        self.dropStackFrom(base);
+        self.dropFrameStackFrom(base);
         if (old_owner) |owned| self.releaseValue(owned);
         self.stack_len = base;
         try self.push(retained_arg0);
@@ -9397,247 +12718,70 @@ pub const Session = struct {
             .code = closure.code,
             .ip = 0,
             .base = base,
-            .captures = closure.captures,
             .owner = retained_owner,
             .callable_global_slot = sampling_profile_no_callable_slot,
             .result_target = result_target,
         };
-        try self.ensureFrameLocalSlots(closure.code, base);
+        var state = FrameLocalReleaseState{};
+        noteLocalReleaseState(&state, 0, retained_arg0);
+        try self.prepareReusedFrameActivationWithReleaseState(frame_index, state, true);
     }
 
-    fn replaceCurrentFrameWithBorrowedClosure1(self: *Session, frame_index: usize, callee: Value, closure: *const Closure, callable_slot: u16) KError!void {
-        if (self.stack_len < 1) return error.Internal;
+    const TailClosureOwnerMode = enum {
+        borrowed_global,
+        consumed_stack,
+    };
+
+    fn replaceCurrentFrameWithTrailingClosureArgs(
+        self: *Session,
+        frame_index: usize,
+        callee: Value,
+        closure: *const Closure,
+        callable_slot: u16,
+        arg_count: usize,
+        owner_mode: TailClosureOwnerMode,
+    ) KError!void {
+        if (arg_count == 0 or arg_count > max_shaped_call_args) return error.Unsupported;
+        const consumed_callee_count: usize = if (owner_mode == .consumed_stack) 1 else 0;
+        if (self.stack_len < arg_count + consumed_callee_count) return error.Internal;
 
         const base = self.frames[frame_index].base;
-        const arg0_index = self.stack_len - 1;
-        const arg0 = self.stack[arg0_index];
+        const args_start = self.stack_len - arg_count;
+        const consumed_callee_index = if (owner_mode == .consumed_stack) args_start - 1 else std.math.maxInt(usize);
         const old_owner = self.frames[frame_index].owner;
         const result_target = self.frames[frame_index].result_target;
+
+        var args_buf: [max_shaped_call_args]Value = undefined;
+        var arg_idx: usize = 0;
+        while (arg_idx < arg_count) : (arg_idx += 1) {
+            args_buf[arg_idx] = self.stack[args_start + arg_idx];
+        }
+        const state = frameReleaseStateFromValues(args_buf[0..arg_count]);
 
         var idx = self.stack_len;
         while (idx > base) {
             idx -= 1;
-            if (idx == arg0_index) continue;
+            if ((idx >= args_start and idx < args_start + arg_count) or idx == consumed_callee_index) continue;
             self.releaseValue(self.stack[idx]);
         }
 
-        self.stack[base] = arg0;
-        self.stack_len = base + 1;
+        for (args_buf[0..arg_count], 0..) |arg, idx_out| self.stack[base + idx_out] = arg;
+        self.stack_len = base + arg_count;
         if (old_owner) |owned| self.releaseValue(owned);
+
+        const owner = switch (owner_mode) {
+            .borrowed_global => self.retainedFrameOwner(callee),
+            .consumed_stack => callee,
+        };
         self.frames[frame_index] = .{
             .code = closure.code,
             .ip = 0,
             .base = base,
-            .captures = closure.captures,
-            .owner = self.retainedFrameOwner(callee),
-            .callable_global_slot = callable_slot,
+            .owner = owner,
+            .callable_global_slot = if (owner_mode == .borrowed_global) callable_slot else sampling_profile_no_callable_slot,
             .result_target = result_target,
         };
-        try self.ensureFrameLocalSlots(closure.code, base);
-    }
-
-    fn replaceCurrentFrameWithClosure2(self: *Session, frame_index: usize, owner: Value, closure: *const Closure, arg0: Value, arg1: Value) KError!void {
-        const retained_owner = self.retainValue(owner);
-        const retained_arg0 = self.retainValue(arg0);
-        const retained_arg1 = self.retainValue(arg1);
-        const base = self.frames[frame_index].base;
-        const old_owner = self.frames[frame_index].owner;
-        const result_target = self.frames[frame_index].result_target;
-        self.dropStackFrom(base);
-        if (old_owner) |owned| self.releaseValue(owned);
-        self.stack_len = base;
-        try self.push(retained_arg0);
-        try self.push(retained_arg1);
-        self.frames[frame_index] = .{
-            .code = closure.code,
-            .ip = 0,
-            .base = base,
-            .captures = closure.captures,
-            .owner = retained_owner,
-            .callable_global_slot = sampling_profile_no_callable_slot,
-            .result_target = result_target,
-        };
-        try self.ensureFrameLocalSlots(closure.code, base);
-    }
-
-    // Tail global calls can keep current-frame args in place and only borrow the callee.
-    fn replaceCurrentFrameWithBorrowedClosure2(self: *Session, frame_index: usize, callee: Value, closure: *const Closure, callable_slot: u16) KError!void {
-        if (self.stack_len < 2) return error.Internal;
-
-        const base = self.frames[frame_index].base;
-        const arg0_index = self.stack_len - 2;
-        const arg1_index = self.stack_len - 1;
-        const arg0 = self.stack[arg0_index];
-        const arg1 = self.stack[arg1_index];
-        const old_owner = self.frames[frame_index].owner;
-        const result_target = self.frames[frame_index].result_target;
-
-        var idx = self.stack_len;
-        while (idx > base) {
-            idx -= 1;
-            if (idx == arg0_index or idx == arg1_index) continue;
-            self.releaseValue(self.stack[idx]);
-        }
-
-        self.stack[base] = arg0;
-        self.stack[base + 1] = arg1;
-        self.stack_len = base + 2;
-        if (old_owner) |owned| self.releaseValue(owned);
-        self.frames[frame_index] = .{
-            .code = closure.code,
-            .ip = 0,
-            .base = base,
-            .captures = closure.captures,
-            .owner = self.retainedFrameOwner(callee),
-            .callable_global_slot = callable_slot,
-            .result_target = result_target,
-        };
-        try self.ensureFrameLocalSlots(closure.code, base);
-    }
-
-    fn replaceCurrentFrameWithBorrowedClosure3(self: *Session, frame_index: usize, callee: Value, closure: *const Closure, callable_slot: u16) KError!void {
-        if (self.stack_len < 3) return error.Internal;
-
-        const base = self.frames[frame_index].base;
-        const arg0_index = self.stack_len - 3;
-        const arg1_index = self.stack_len - 2;
-        const arg2_index = self.stack_len - 1;
-        const arg0 = self.stack[arg0_index];
-        const arg1 = self.stack[arg1_index];
-        const arg2 = self.stack[arg2_index];
-        const old_owner = self.frames[frame_index].owner;
-        const result_target = self.frames[frame_index].result_target;
-
-        var idx = self.stack_len;
-        while (idx > base) {
-            idx -= 1;
-            if (idx == arg0_index or idx == arg1_index or idx == arg2_index) continue;
-            self.releaseValue(self.stack[idx]);
-        }
-
-        self.stack[base] = arg0;
-        self.stack[base + 1] = arg1;
-        self.stack[base + 2] = arg2;
-        self.stack_len = base + 3;
-        if (old_owner) |owned| self.releaseValue(owned);
-        self.frames[frame_index] = .{
-            .code = closure.code,
-            .ip = 0,
-            .base = base,
-            .captures = closure.captures,
-            .owner = self.retainedFrameOwner(callee),
-            .callable_global_slot = callable_slot,
-            .result_target = result_target,
-        };
-        try self.ensureFrameLocalSlots(closure.code, base);
-    }
-
-    fn replaceCurrentFrameWithBorrowedClosure4(self: *Session, frame_index: usize, callee: Value, closure: *const Closure, callable_slot: u16) KError!void {
-        if (self.stack_len < 4) return error.Internal;
-
-        const base = self.frames[frame_index].base;
-        const arg0_index = self.stack_len - 4;
-        const arg1_index = self.stack_len - 3;
-        const arg2_index = self.stack_len - 2;
-        const arg3_index = self.stack_len - 1;
-        const arg0 = self.stack[arg0_index];
-        const arg1 = self.stack[arg1_index];
-        const arg2 = self.stack[arg2_index];
-        const arg3 = self.stack[arg3_index];
-        const old_owner = self.frames[frame_index].owner;
-        const result_target = self.frames[frame_index].result_target;
-
-        var idx = self.stack_len;
-        while (idx > base) {
-            idx -= 1;
-            if (idx == arg0_index or idx == arg1_index or idx == arg2_index or idx == arg3_index) continue;
-            self.releaseValue(self.stack[idx]);
-        }
-
-        self.stack[base] = arg0;
-        self.stack[base + 1] = arg1;
-        self.stack[base + 2] = arg2;
-        self.stack[base + 3] = arg3;
-        self.stack_len = base + 4;
-        if (old_owner) |owned| self.releaseValue(owned);
-        self.frames[frame_index] = .{
-            .code = closure.code,
-            .ip = 0,
-            .base = base,
-            .captures = closure.captures,
-            .owner = self.retainedFrameOwner(callee),
-            .callable_global_slot = callable_slot,
-            .result_target = result_target,
-        };
-        try self.ensureFrameLocalSlots(closure.code, base);
-    }
-
-    // Tail stack calls consume the callee slot into frame ownership instead of re-retaining it.
-    fn replaceCurrentFrameWithConsumedClosure1(self: *Session, frame_index: usize, callee: Value, closure: *const Closure) KError!void {
-        if (self.stack_len < 2) return error.Internal;
-
-        const base = self.frames[frame_index].base;
-        const callee_index = self.stack_len - 2;
-        const arg0_index = self.stack_len - 1;
-        const arg0 = self.stack[arg0_index];
-        const old_owner = self.frames[frame_index].owner;
-        const result_target = self.frames[frame_index].result_target;
-
-        var idx = self.stack_len;
-        while (idx > base) {
-            idx -= 1;
-            if (idx == callee_index or idx == arg0_index) continue;
-            self.releaseValue(self.stack[idx]);
-        }
-
-        self.stack[base] = arg0;
-        self.stack_len = base + 1;
-        if (old_owner) |owned| self.releaseValue(owned);
-        self.frames[frame_index] = .{
-            .code = closure.code,
-            .ip = 0,
-            .base = base,
-            .captures = closure.captures,
-            .owner = callee,
-            .callable_global_slot = sampling_profile_no_callable_slot,
-            .result_target = result_target,
-        };
-        try self.ensureFrameLocalSlots(closure.code, base);
-    }
-
-    fn replaceCurrentFrameWithConsumedClosure2(self: *Session, frame_index: usize, callee: Value, closure: *const Closure) KError!void {
-        if (self.stack_len < 3) return error.Internal;
-
-        const base = self.frames[frame_index].base;
-        const callee_index = self.stack_len - 3;
-        const arg0_index = self.stack_len - 2;
-        const arg1_index = self.stack_len - 1;
-        const arg0 = self.stack[arg0_index];
-        const arg1 = self.stack[arg1_index];
-        const old_owner = self.frames[frame_index].owner;
-        const result_target = self.frames[frame_index].result_target;
-
-        var idx = self.stack_len;
-        while (idx > base) {
-            idx -= 1;
-            if (idx == callee_index or idx == arg0_index or idx == arg1_index) continue;
-            self.releaseValue(self.stack[idx]);
-        }
-
-        self.stack[base] = arg0;
-        self.stack[base + 1] = arg1;
-        self.stack_len = base + 2;
-        if (old_owner) |owned| self.releaseValue(owned);
-        self.frames[frame_index] = .{
-            .code = closure.code,
-            .ip = 0,
-            .base = base,
-            .captures = closure.captures,
-            .owner = callee,
-            .callable_global_slot = sampling_profile_no_callable_slot,
-            .result_target = result_target,
-        };
-        try self.ensureFrameLocalSlots(closure.code, base);
+        try self.prepareReusedFrameActivationWithReleaseState(frame_index, state, true);
     }
 
     inline fn directBinaryArg(arg0: Value, arg1: Value, slot: u8) ?Value {
@@ -9766,6 +12910,12 @@ pub const Session = struct {
         zero,
     };
 
+    const DirectConditionalCompare = struct {
+        lhs: DirectConditionalAtom,
+        rhs: DirectConditionalAtom,
+        cmp: Op,
+    };
+
     const DenseElementwiseKind = union(enum) {
         dyad: struct {
             op: BuiltinId,
@@ -9890,17 +13040,47 @@ pub const Session = struct {
         }
     }
 
+    fn directConditionalAtomFromSlot(slot: u8) ?DirectConditionalAtom {
+        return switch (slot) {
+            0 => .arg0,
+            1 => .arg1,
+            else => null,
+        };
+    }
+
+    fn directReadConditionalCompare(bytes: []const u8, idx: *usize) ?DirectConditionalCompare {
+        if (idx.* >= bytes.len) return null;
+        const op: Op = std.meta.intToEnum(Op, bytes[idx.*]) catch return null;
+        switch (op) {
+            .more_local_local, .less_local_local => {
+                if (idx.* + 3 > bytes.len) return null;
+                const lhs = directConditionalAtomFromSlot(bytes[idx.* + 1]) orelse return null;
+                const rhs = directConditionalAtomFromSlot(bytes[idx.* + 2]) orelse return null;
+                idx.* += 3;
+                return .{
+                    .lhs = lhs,
+                    .rhs = rhs,
+                    .cmp = if (op == .more_local_local) .more else .less,
+                };
+            },
+            else => {
+                const lhs = directReadConditionalAtom(bytes, idx) orelse return null;
+                const rhs = directReadConditionalAtom(bytes, idx) orelse return null;
+                if (idx.* >= bytes.len) return null;
+                const cmp: Op = std.meta.intToEnum(Op, bytes[idx.*]) catch return null;
+                if (cmp != .more and cmp != .less) return null;
+                idx.* += 1;
+                return .{ .lhs = lhs, .rhs = rhs, .cmp = cmp };
+            },
+        }
+    }
+
     fn tryApplyDirectConditionalClosure2(self: *Session, bytes: []const u8, arg0: Value, arg1: Value) KError!?Value {
         if (bytes.len < 2 or bytes[bytes.len - 1] != @intFromEnum(Op.@"return")) return null;
 
         var idx: usize = 0;
-        const lhs = directReadConditionalAtom(bytes, &idx) orelse return null;
-        const rhs = directReadConditionalAtom(bytes, &idx) orelse return null;
-        if (lhs != .arg0 or rhs != .arg1 or idx >= bytes.len) return null;
-
-        const cmp: Op = std.meta.intToEnum(Op, bytes[idx]) catch return null;
-        if (cmp != .more and cmp != .less) return null;
-        idx += 1;
+        const compare = directReadConditionalCompare(bytes, &idx) orelse return null;
+        if (compare.lhs != .arg0 or compare.rhs != .arg1) return null;
 
         if (idx + 3 > bytes.len or bytes[idx] != @intFromEnum(Op.jump_if_false)) return null;
         const false_target = directReadU16(bytes, idx + 1) orelse return null;
@@ -9918,7 +13098,7 @@ pub const Session = struct {
         return switch (when_true) {
             .arg0 => switch (when_false) {
                 .arg1 => blk: {
-                    const mask = switch (cmp) {
+                    const mask = switch (compare.cmp) {
                         .more => try self.moreValues(arg0, arg1),
                         .less => try self.lessValues(arg0, arg1),
                         else => unreachable,
@@ -9930,7 +13110,7 @@ pub const Session = struct {
                     defer self.releaseValue(kept);
                     break :blk try self.addValues(arg1, kept);
                 },
-                .zero => if (cmp == .more) blk: {
+                .zero => if (compare.cmp == .more) blk: {
                     const mask = try self.moreValues(arg0, arg1);
                     defer self.releaseValue(mask);
                     break :blk try self.mulValues(arg0, mask);
@@ -9945,13 +13125,8 @@ pub const Session = struct {
         if (bytes.len < 2 or bytes[bytes.len - 1] != @intFromEnum(Op.@"return")) return null;
 
         var idx: usize = 0;
-        const lhs = directReadConditionalAtom(bytes, &idx) orelse return null;
-        const rhs = directReadConditionalAtom(bytes, &idx) orelse return null;
-        if (lhs != .arg0 or rhs != .arg1 or idx >= bytes.len) return null;
-
-        const cmp: Op = std.meta.intToEnum(Op, bytes[idx]) catch return null;
-        if (cmp != .more and cmp != .less) return null;
-        idx += 1;
+        const compare = directReadConditionalCompare(bytes, &idx) orelse return null;
+        if (compare.lhs != .arg0 or compare.rhs != .arg1) return null;
 
         if (idx + 3 > bytes.len or bytes[idx] != @intFromEnum(Op.jump_if_false)) return null;
         const false_target = directReadU16(bytes, idx + 1) orelse return null;
@@ -9968,12 +13143,12 @@ pub const Session = struct {
 
         return switch (when_true) {
             .arg0 => switch (when_false) {
-                .arg1 => switch (cmp) {
+                .arg1 => switch (compare.cmp) {
                     .more => .{ .dyad = .{ .op = .maximum, .swap = false } },
                     .less => .{ .dyad = .{ .op = .minimum, .swap = false } },
                     else => null,
                 },
-                .zero => if (cmp == .more) .keep_left_if_more else null,
+                .zero => if (compare.cmp == .more) .keep_left_if_more else null,
                 else => null,
             },
             else => null,
@@ -9991,8 +13166,11 @@ pub const Session = struct {
 
         const op: Op = std.meta.intToEnum(Op, bytes[0]) catch return null;
         switch (op) {
-            .add_local_local, .sub_local_local, .mul_local_local => {
-                if (bytes.len != 4) return null;
+            .add_local_local, .sub_local_local, .mul_local_local, .minimum_local_local, .maximum_local_local, .less_local_local, .more_local_local => {
+                if (bytes.len != 4) return switch (op) {
+                    .less_local_local, .more_local_local => classifyDenseConditionalClosure2(bytes),
+                    else => null,
+                };
                 const left_slot = bytes[1];
                 const right_slot = bytes[2];
                 if (!((left_slot == 0 and right_slot == 1) or (left_slot == 1 and right_slot == 0))) return null;
@@ -10001,6 +13179,10 @@ pub const Session = struct {
                         .add_local_local => .add,
                         .sub_local_local => .sub,
                         .mul_local_local => .mul,
+                        .minimum_local_local => .minimum,
+                        .maximum_local_local => .maximum,
+                        .less_local_local => .less,
+                        .more_local_local => .more,
                         else => unreachable,
                     },
                     .swap = left_slot == 1,
@@ -10055,11 +13237,10 @@ pub const Session = struct {
                     break :blk closure.code.constants[slot];
                 },
                 .load_global => {
-                    if (idx + 2 > bytes.len) return null;
-                    const slot_idx = bytes[idx + 1];
-                    if (slot_idx >= closure.code.globals.len) return null;
-                    idx += 2;
-                    break :blk try self.loadGlobalSlot(closure.code.globals[slot_idx]);
+                    if (idx + 3 > bytes.len) return null;
+                    const slot = directReadU16(bytes, idx + 1) orelse return null;
+                    idx += 3;
+                    break :blk try self.loadGlobalSlot(slot);
                 },
                 else => return null,
             }
@@ -10112,11 +13293,10 @@ pub const Session = struct {
                 break :blk closure.code.constants[slot];
             },
             .load_global => blk: {
-                if (idx.* + 2 > bytes.len) return null;
-                const slot_idx = bytes[idx.* + 1];
-                if (slot_idx >= closure.code.globals.len) return null;
-                idx.* += 2;
-                break :blk try self.loadGlobalSlot(closure.code.globals[slot_idx]);
+                if (idx.* + 3 > bytes.len) return null;
+                const slot = directReadU16(bytes, idx.* + 1) orelse return null;
+                idx.* += 3;
+                break :blk try self.loadGlobalSlot(slot);
             },
             else => null,
         };
@@ -10287,7 +13467,7 @@ pub const Session = struct {
         const scale = (try self.directReadScalarValue(closure, bytes, &idx)) orelse return null;
 
         if (idx + 5 > bytes.len) return null;
-        const global_idx = blk: {
+        const global_slot = blk: {
             const next_op: Op = std.meta.intToEnum(Op, bytes[idx]) catch return null;
             switch (next_op) {
                 .load_local => {
@@ -10296,39 +13476,57 @@ pub const Session = struct {
                     const call_op: Op = std.meta.intToEnum(Op, bytes[idx]) catch return null;
                     switch (call_op) {
                         .call_global1, .tail_call_global1 => {
-                            const global_idx = bytes[idx + 1];
-                            idx += 2;
-                            break :blk global_idx;
+                            if (idx + 3 > bytes.len) return null;
+                            const slot = directReadU16(bytes, idx + 1) orelse return null;
+                            idx += 3;
+                            break :blk slot;
                         },
                         .call_global_slots, .tail_call_global_slots => {
+                            if (idx + 6 > bytes.len) return null;
+                            const slot = directReadU16(bytes, idx + 1) orelse return null;
+                            if (bytes[idx + 3] != 1) return null;
+                            const arg_kind = bytes[idx + 4] & ~global_call_arg_consume_bit;
+                            if (arg_kind != @intFromEnum(GlobalCallArgKind.local) or bytes[idx + 5] != 0) return null;
+                            idx += 6;
+                            break :blk slot;
+                        },
+                        .index_global_source, .tail_index_global_source => {
                             if (idx + 5 > bytes.len) return null;
-                            if (bytes[idx + 2] != 1) return null;
+                            const slot = directReadU16(bytes, idx + 1) orelse return null;
                             const arg_kind = bytes[idx + 3] & ~global_call_arg_consume_bit;
                             if (arg_kind != @intFromEnum(GlobalCallArgKind.local) or bytes[idx + 4] != 0) return null;
-                            const global_idx = bytes[idx + 1];
                             idx += 5;
-                            break :blk global_idx;
+                            break :blk slot;
                         },
                         else => return null,
                     }
                 },
                 .call_global1, .tail_call_global1 => {
-                    const global_idx = bytes[idx + 1];
-                    idx += 2;
-                    break :blk global_idx;
+                    if (idx + 3 > bytes.len) return null;
+                    const slot = directReadU16(bytes, idx + 1) orelse return null;
+                    idx += 3;
+                    break :blk slot;
                 },
                 .call_global_slots, .tail_call_global_slots => {
-                    if (bytes[idx + 2] != 1) return null;
+                    if (idx + 6 > bytes.len) return null;
+                    const slot = directReadU16(bytes, idx + 1) orelse return null;
+                    if (bytes[idx + 3] != 1) return null;
+                    const arg_kind = bytes[idx + 4] & ~global_call_arg_consume_bit;
+                    if (arg_kind != @intFromEnum(GlobalCallArgKind.local) or bytes[idx + 5] != 0) return null;
+                    idx += 6;
+                    break :blk slot;
+                },
+                .index_global_source, .tail_index_global_source => {
+                    if (idx + 5 > bytes.len) return null;
+                    const slot = directReadU16(bytes, idx + 1) orelse return null;
                     const arg_kind = bytes[idx + 3] & ~global_call_arg_consume_bit;
                     if (arg_kind != @intFromEnum(GlobalCallArgKind.local) or bytes[idx + 4] != 0) return null;
-                    const global_idx = bytes[idx + 1];
                     idx += 5;
-                    break :blk global_idx;
+                    break :blk slot;
                 },
                 else => return null,
             }
         };
-        if (global_idx >= closure.code.globals.len) return error.Internal;
         if (idx + 3 != bytes.len) return null;
 
         const mul_op: Op = std.meta.intToEnum(Op, bytes[idx]) catch return null;
@@ -10338,7 +13536,7 @@ pub const Session = struct {
         const final_op: Op = std.meta.intToEnum(Op, bytes[idx]) catch return null;
         if (final_op != .add and final_op != .sub) return null;
 
-        const called = (try self.tryApplyDirectGlobalCall1(closure.code.globals[global_idx], arg0)) orelse return null;
+        const called = (try self.tryApplyDirectGlobalCall1(global_slot, arg0)) orelse return null;
         defer self.releaseValue(called);
         const scaled = try self.mulValues(scale, called);
         defer self.releaseValue(scaled);
@@ -10384,6 +13582,7 @@ pub const Session = struct {
     }
 
     fn tryApplyDirectClosure1(self: *Session, closure: *const Closure, arg0: Value) KError!?Value {
+        if (closure.kind != .plain) return null;
         if (closure.header.owner != .frozen) {
             if (self.debugDetailedProbeActive()) self.debug_direct_closure_miss_not_frozen_count += 1;
             return null;
@@ -10415,33 +13614,51 @@ pub const Session = struct {
                 if (bytes.len != 3 or bytes[1] != 0) break :blk null;
                 break :blk try self.sqrtValue(arg0);
             },
-            .add_local_const, .sub_local_const, .mul_local_const => blk: {
+            .add_local_const, .sub_local_const, .mul_local_const, .minimum_local_const, .maximum_local_const, .less_local_const, .more_local_const, .equal_local_const => blk: {
                 if (bytes.len != 11 or bytes[1] != 0) break :blk null;
                 const rhs = directReadI64(bytes, 2) orelse break :blk null;
                 const right = try self.intValue(rhs);
+                defer self.releaseValue(right);
                 break :blk switch (op) {
-                    .add_local_const => try self.addValues(arg0, right),
-                    .sub_local_const => try self.subValues(arg0, right),
-                    .mul_local_const => try self.mulValues(arg0, right),
+                    .add_local_const => try self.applyShapedBorrowedDyadValue(.add, arg0, right),
+                    .sub_local_const => try self.applyShapedBorrowedDyadValue(.sub, arg0, right),
+                    .mul_local_const => try self.applyShapedBorrowedDyadValue(.mul, arg0, right),
+                    .minimum_local_const => try self.applyShapedBorrowedDyadValue(.minimum, arg0, right),
+                    .maximum_local_const => try self.applyShapedBorrowedDyadValue(.maximum, arg0, right),
+                    .less_local_const => try self.applyShapedBorrowedDyadValue(.less, arg0, right),
+                    .more_local_const => try self.applyShapedBorrowedDyadValue(.more, arg0, right),
+                    .equal_local_const => try self.applyShapedBorrowedDyadValue(.equal, arg0, right),
                     else => unreachable,
                 };
             },
-            .add_const_local, .sub_const_local, .mul_const_local => blk: {
+            .add_const_local, .sub_const_local, .mul_const_local, .minimum_const_local, .maximum_const_local, .less_const_local, .more_const_local, .equal_const_local => blk: {
                 if (bytes.len != 11 or bytes[9] != 0) break :blk null;
                 const lhs = directReadI64(bytes, 1) orelse break :blk null;
                 const left = try self.intValue(lhs);
+                defer self.releaseValue(left);
                 break :blk switch (op) {
-                    .add_const_local => try self.addValues(left, arg0),
-                    .sub_const_local => try self.subValues(left, arg0),
-                    .mul_const_local => try self.mulValues(left, arg0),
+                    .add_const_local => try self.applyShapedBorrowedDyadValue(.add, left, arg0),
+                    .sub_const_local => try self.applyShapedBorrowedDyadValue(.sub, left, arg0),
+                    .mul_const_local => try self.applyShapedBorrowedDyadValue(.mul, left, arg0),
+                    .minimum_const_local => try self.applyShapedBorrowedDyadValue(.minimum, left, arg0),
+                    .maximum_const_local => try self.applyShapedBorrowedDyadValue(.maximum, left, arg0),
+                    .less_const_local => try self.applyShapedBorrowedDyadValue(.less, left, arg0),
+                    .more_const_local => try self.applyShapedBorrowedDyadValue(.more, left, arg0),
+                    .equal_const_local => try self.applyShapedBorrowedDyadValue(.equal, left, arg0),
                     else => unreachable,
                 };
             },
             .tail_call_global1 => blk: {
-                if (bytes.len != 3) break :blk null;
-                const global_idx = bytes[1];
-                if (global_idx >= closure.code.globals.len) return error.Internal;
-                break :blk try self.tryApplyDirectGlobalCall1(closure.code.globals[global_idx], arg0);
+                if (bytes.len != 4) break :blk null;
+                const slot = directReadU16(bytes, 1) orelse break :blk null;
+                break :blk try self.tryApplyDirectGlobalCall1(slot, arg0);
+            },
+            .tail_index_global_source => blk: {
+                if (bytes.len != 6) break :blk null;
+                const slot = directReadU16(bytes, 1) orelse break :blk null;
+                const arg_kind = bytes[3] & ~global_call_arg_consume_bit;
+                if (arg_kind != @intFromEnum(GlobalCallArgKind.local) or bytes[4] != 0) break :blk null;
+                break :blk try self.tryApplyDirectGlobalCall1(slot, arg0);
             },
             else => null,
         };
@@ -10465,6 +13682,7 @@ pub const Session = struct {
     }
 
     fn tryApplyDirectClosure2(self: *Session, closure: *const Closure, arg0: Value, arg1: Value) KError!?Value {
+        if (closure.kind != .plain) return null;
         if (closure.header.owner != .frozen) {
             if (self.debugDetailedProbeActive()) self.debug_direct_closure_miss_not_frozen_count += 1;
             return null;
@@ -10484,26 +13702,30 @@ pub const Session = struct {
         }
         const op: Op = std.meta.intToEnum(Op, bytes[0]) catch return null;
         var result: ?Value = switch (op) {
-            .add_local_local, .sub_local_local, .mul_local_local => blk: {
+            .add_local_local, .sub_local_local, .mul_local_local, .minimum_local_local, .maximum_local_local, .less_local_local, .more_local_local, .equal_local_local => blk: {
                 if (bytes.len != 4) break :blk null;
                 const left = directBinaryArg(arg0, arg1, bytes[1]) orelse break :blk null;
                 const right = directBinaryArg(arg0, arg1, bytes[2]) orelse break :blk null;
                 break :blk switch (op) {
-                    .add_local_local => try self.addValues(left, right),
-                    .sub_local_local => try self.subValues(left, right),
-                    .mul_local_local => try self.mulValues(left, right),
+                    .add_local_local => try self.applyShapedBorrowedDyadValue(.add, left, right),
+                    .sub_local_local => try self.applyShapedBorrowedDyadValue(.sub, left, right),
+                    .mul_local_local => try self.applyShapedBorrowedDyadValue(.mul, left, right),
+                    .minimum_local_local => try self.applyShapedBorrowedDyadValue(.minimum, left, right),
+                    .maximum_local_local => try self.applyShapedBorrowedDyadValue(.maximum, left, right),
+                    .less_local_local => try self.applyShapedBorrowedDyadValue(.less, left, right),
+                    .more_local_local => try self.applyShapedBorrowedDyadValue(.more, left, right),
+                    .equal_local_local => try self.applyShapedBorrowedDyadValue(.equal, left, right),
                     else => unreachable,
                 };
             },
             .tail_call_global2 => blk: {
-                if (bytes.len != 3) break :blk null;
-                const global_idx = bytes[1];
-                if (global_idx >= closure.code.globals.len) return error.Internal;
-                break :blk try self.tryApplyDirectGlobalCall2(closure.code.globals[global_idx], arg0, arg1);
+                if (bytes.len != 4) break :blk null;
+                const slot = directReadU16(bytes, 1) orelse break :blk null;
+                break :blk try self.tryApplyDirectGlobalCall2(slot, arg0, arg1);
             },
             else => null,
         };
-        if (result == null and op == .load_local) {
+        if (result == null and (op == .load_local or op == .more_local_local or op == .less_local_local)) {
             result = try self.tryApplyDirectConditionalClosure2(bytes, arg0, arg1);
             if (result == null) {
                 if (classifyDirectCompareClosure2(bytes)) |kind| {
@@ -10518,6 +13740,7 @@ pub const Session = struct {
     }
 
     fn tryApplyDirectClosure3(self: *Session, closure: *const Closure, arg0: Value, arg1: Value, arg2: Value) KError!?Value {
+        if (closure.kind != .plain) return null;
         if (closure.header.owner != .frozen) {
             if (self.debugDetailedProbeActive()) self.debug_direct_closure_miss_not_frozen_count += 1;
             return null;
@@ -10554,32 +13777,53 @@ pub const Session = struct {
 
     fn hostStringListItemValue(self: *Session, list: *const HostStringList, idx: usize) KError!Value {
         if (idx >= list.len) return error.Type;
+        if (comptime enable_probe_instrumentation) self.debug_host_string_list_item_value_count += 1;
         return switch (list.storage) {
             .eager => |items| switch (items[idx]) {
-                .owned => |text| try self.retainEscapedValue(Value.array(text)),
+                .owned => |text| blk: {
+                    if (comptime enable_probe_instrumentation) self.debug_host_string_list_item_eager_owned_count += 1;
+                    break :blk try self.retainEscapedValue(Value.array(text));
+                },
                 .view => |view| blk: {
+                    if (comptime enable_probe_instrumentation) self.debug_host_string_list_item_eager_view_count += 1;
                     const base = list.base orelse return error.Internal;
-                    break :blk try self.managedHostStringView(base, view);
+                    break :blk try self.managedHostStringViewWithReason(base, view, .string_list_eager_view);
                 },
             },
             .split_scalar => |lazy| blk: {
+                if (comptime enable_probe_instrumentation) self.debug_host_string_list_item_split_scalar_count += 1;
                 const base = list.base orelse return error.Internal;
                 const src = hostTextBytes(base);
                 var piece_idx: usize = 0;
                 var start: usize = 0;
+                var scanned_bytes: usize = 0;
+                var scanned_seps: usize = 0;
                 while (std.mem.indexOfScalarPos(u8, src, start, lazy.sep)) |sep_idx| {
-                    if (piece_idx == idx) break :blk try self.managedHostStringView(base, .{
-                        .start = start,
-                        .len = sep_idx - start,
-                    });
+                    scanned_bytes += sep_idx - start + 1;
+                    scanned_seps += 1;
+                    if (piece_idx == idx) {
+                        if (comptime enable_probe_instrumentation) {
+                            self.debug_host_string_list_item_split_scalar_scan_byte_count += scanned_bytes;
+                            self.debug_host_string_list_item_split_scalar_scan_sep_count += scanned_seps;
+                        }
+                        break :blk try self.managedHostStringViewWithReason(base, .{
+                            .start = start,
+                            .len = sep_idx - start,
+                        }, .string_list_split_scalar);
+                    }
                     piece_idx += 1;
                     start = sep_idx + 1;
                 }
                 if (piece_idx != idx) return error.Type;
-                break :blk try self.managedHostStringView(base, .{
+                scanned_bytes += src.len - start;
+                if (comptime enable_probe_instrumentation) {
+                    self.debug_host_string_list_item_split_scalar_scan_byte_count += scanned_bytes;
+                    self.debug_host_string_list_item_split_scalar_scan_sep_count += scanned_seps;
+                }
+                break :blk try self.managedHostStringViewWithReason(base, .{
                     .start = start,
                     .len = src.len - start,
-                });
+                }, .string_list_split_scalar);
             },
         };
     }
@@ -10703,8 +13947,33 @@ pub const Session = struct {
         return self.pop();
     }
 
+    fn invokeClosureInCurrentRun(self: *Session, callee: Value, closure: *const Closure, args: []const Value) KError!Value {
+        if (closure.code.arity != args.len) return error.Arity;
+
+        const call_base = self.stack_len;
+        const prior_frame_len = self.frame_len;
+
+        try self.pushRetainedClosureArgs(callee, closure, sampling_profile_no_callable_slot, args, .stack);
+
+        if (self.frame_len > prior_frame_len) {
+            if (try self.runFramesUntil(prior_frame_len)) |final| return final;
+        }
+
+        if (self.stack_len != call_base + 1) return error.Internal;
+        return self.pop();
+    }
+
     fn applyDerivedBase(self: *Session, callee: Value, args: []const Value) KError!Value {
-        return try self.invokeValueInCurrentRun(callee, args);
+        return switch (callee.tag()) {
+            .builtin => try self.applyBuiltinCall(callee.asBuiltin(), args),
+            .array => try self.applyArrayCall(callee, args),
+            .closure => blk: {
+                const closure = callee.asClosure();
+                if (try self.tryApplyOwnedClosureArgs(closure, args)) |result| break :blk result;
+                break :blk try self.invokeClosureInCurrentRun(callee, closure, args);
+            },
+            else => error.Type,
+        };
     }
 
     fn projectionInfoFromClosure(self: *Session, closure: *const Closure) KError!?ProjectionInfo {
@@ -10794,6 +14063,12 @@ pub const Session = struct {
         deep_binary,
     };
 
+    const IndexedAssignTarget = union(enum) {
+        global: u16,
+        local: u8,
+        inline_local: u8,
+    };
+
     fn applyAmend(self: *Session, base: Value, selector: Value, kind: AmendKind, func_or_value: Value, arg: Value) KError!Value {
         return switch (kind) {
             .unary => try self.applyShallowAmend(base, selector, .unary, func_or_value, arg),
@@ -10811,6 +14086,14 @@ pub const Session = struct {
                 break :blk try self.applyDeepAmend(base, selectors, mode, func_or_value, arg);
             },
         };
+    }
+
+    fn applyAmendOwned(self: *Session, base: Value, selector: Value, kind: AmendKind, func_or_value: Value, arg: Value) KError!Value {
+        if (comptime enable_probe_instrumentation) self.debug_owned_amend_count += 1;
+        errdefer self.releaseCanonicalManagedNumericValue(base);
+        const result = try self.applyAmend(base, selector, kind, func_or_value, arg);
+        self.releaseCanonicalManagedNumericValue(base);
+        return result;
     }
 
     const ShallowAmendMode = enum {
@@ -10934,6 +14217,21 @@ pub const Session = struct {
         };
     }
 
+    fn recordFastDenseAssignHit(self: *Session, targets: DenseAssignTargets, rhs: DenseAssignRhs, reused: bool) void {
+        if (comptime !enable_probe_instrumentation) return;
+        self.debug_fast_dense_assign_hit_count += 1;
+        if (reused) self.debug_fast_dense_assign_reuse_count += 1;
+        self.debug_fast_dense_assign_target_element_count += denseAssignTargetsLen(targets);
+        switch (targets) {
+            .scalar => self.debug_fast_dense_assign_scalar_target_count += 1,
+            .slice => self.debug_fast_dense_assign_vector_target_count += 1,
+        }
+        switch (rhs) {
+            .int_scalar, .float_scalar => self.debug_fast_dense_assign_scalar_rhs_count += 1,
+            .int_vector, .float_vector => self.debug_fast_dense_assign_vector_rhs_count += 1,
+        }
+    }
+
     fn denseAssignIntScalarValue(rhs: DenseAssignRhs) KError!i64 {
         return switch (rhs) {
             .int_scalar => |value| value,
@@ -10962,6 +14260,18 @@ pub const Session = struct {
                 break :blk items[0];
             },
         };
+    }
+
+    fn denseAssignScalarIntLike(rhs_source: Value) ?i64 {
+        if (scalarIntLikeValue(rhs_source)) |value| return value;
+        if (rhs_source.tag() == .float) return exactIntFromFloat(rhs_source.asFloat());
+        return null;
+    }
+
+    fn denseAssignScalarFloatLike(rhs_source: Value) ?f64 {
+        if (scalarIntLikeValue(rhs_source)) |value| return @floatFromInt(value);
+        if (rhs_source.tag() == .float) return rhs_source.asFloat();
+        return null;
     }
 
     fn applyDenseAssignIntScalar(out: *HostIntResult, target_idx: usize, item_value: i64) KError!void {
@@ -11080,6 +14390,105 @@ pub const Session = struct {
         self.debug_fast_dense_assign_clone_reason_counts[@intFromEnum(DebugFastDenseAssignCloneReason.other)] += 1;
     }
 
+    fn finishFastDenseScalarIntAssign(self: *Session, target_idx: usize, rhs: DenseAssignRhs, out: *HostIntResult, reused: bool) KError!Value {
+        const host = out.arrayPtr();
+        hostDenseSetFlags(host, host_dense_flag_normalized);
+        self.invalidateHostDenseCachesForMutation(host);
+        const value = try out.value(self);
+        self.recordFastDenseAssignHit(.{ .scalar = target_idx }, rhs, reused);
+        return if (reused) self.shareValue(value) else value;
+    }
+
+    fn finishFastDenseScalarFloatAssign(self: *Session, target_idx: usize, rhs: DenseAssignRhs, out: HostFloatResult, reused: bool) KError!Value {
+        hostDenseSetFlags(out.array, host_dense_flag_normalized);
+        self.invalidateHostDenseCachesForMutation(out.array);
+        const value = try out.value(self);
+        self.recordFastDenseAssignHit(.{ .scalar = target_idx }, rhs, reused);
+        return if (reused) self.shareValue(value) else value;
+    }
+
+    fn tryFastDenseScalarAssignDirect(self: *Session, base: Value, target_idx: usize, rhs_source: Value) KError!?Value {
+        if (valueNonVectorNumericShape(base) != null) return null;
+        const base_array = try numericHostArrayValue(self, base);
+
+        switch (base_array.storage) {
+            .bit => {
+                const rhs_int = denseAssignScalarIntLike(rhs_source) orelse return null;
+                if (rhs_int != 0 and rhs_int != 1) return null;
+                if (comptime enable_probe_instrumentation) self.debug_fast_dense_assign_attempt_count += 1;
+
+                var reused = false;
+                var out = if (self.tryReuseHostIntArrayResult(base, .bit)) |existing| blk: {
+                    if (!self.prepareReusableHostDenseForMutation(base)) {
+                        self.recordFastDenseAssignMiss();
+                        return null;
+                    }
+                    reused = true;
+                    break :blk existing;
+                } else blk: {
+                    self.recordFastDenseAssignClone(base);
+                    var allocated = try self.allocOwnedHostIntCloneResult(amendCloneOwner(base), .bit, base_array.len());
+                    errdefer self.releaseValue(Value.array(allocated.arrayPtr()));
+                    @memcpy(allocated.bit.words, hostDenseLogicalBitWords(base_array, base_array.storage.bit));
+                    break :blk allocated;
+                };
+                try applyDenseAssignIntScalar(&out, target_idx, rhs_int);
+                return try self.finishFastDenseScalarIntAssign(target_idx, .{ .int_scalar = rhs_int }, &out, reused);
+            },
+            .int8, .int16, .int32, .int64 => {
+                const rhs_int = denseAssignScalarIntLike(rhs_source) orelse return null;
+                const view = hostIntArrayView(base_array) orelse return null;
+                const kind = hostIntArrayViewKind(view);
+                if (!hostIntKindCanRepresent(kind, rhs_int)) return null;
+                if (comptime enable_probe_instrumentation) self.debug_fast_dense_assign_attempt_count += 1;
+
+                var reused = false;
+                var out = if (self.tryReuseHostIntArrayResult(base, kind)) |existing| blk: {
+                    if (!self.prepareReusableHostDenseForMutation(base)) {
+                        self.recordFastDenseAssignMiss();
+                        return null;
+                    }
+                    reused = true;
+                    break :blk existing;
+                } else blk: {
+                    self.recordFastDenseAssignClone(base);
+                    var allocated = try self.allocOwnedHostIntCloneResult(amendCloneOwner(base), kind, base_array.len());
+                    errdefer self.releaseValue(Value.array(allocated.arrayPtr()));
+                    try copyHostIntViewToResult(&allocated, view);
+                    break :blk allocated;
+                };
+                try applyDenseAssignIntScalar(&out, target_idx, rhs_int);
+                return try self.finishFastDenseScalarIntAssign(target_idx, .{ .int_scalar = rhs_int }, &out, reused);
+            },
+            .float64 => |base_items| {
+                const rhs_float = denseAssignScalarFloatLike(rhs_source) orelse return null;
+                const rhs: DenseAssignRhs = if (scalarIntLikeValue(rhs_source)) |rhs_int|
+                    .{ .int_scalar = rhs_int }
+                else
+                    .{ .float_scalar = rhs_float };
+                if (comptime enable_probe_instrumentation) self.debug_fast_dense_assign_attempt_count += 1;
+
+                var reused = false;
+                const out = if (self.tryReuseHostFloatArrayResult(base)) |existing| blk: {
+                    if (!self.prepareReusableHostDenseForMutation(base)) {
+                        self.recordFastDenseAssignMiss();
+                        return null;
+                    }
+                    reused = true;
+                    break :blk existing;
+                } else blk: {
+                    self.recordFastDenseAssignClone(base);
+                    const allocated = try self.allocOwnedHostFloatResult(amendCloneOwner(base), base_array.len());
+                    errdefer self.releaseValue(Value.array(allocated.array));
+                    @memcpy(allocated.items, base_items);
+                    break :blk allocated;
+                };
+                out.items[target_idx] = rhs_float;
+                return try self.finishFastDenseScalarFloatAssign(target_idx, rhs, out, reused);
+            },
+        }
+    }
+
     fn tryFastDenseAssignAmendImpl(self: *Session, base: Value, targets: DenseAssignTargets, rhs_source: Value) KError!?Value {
         const targets_len = denseAssignTargetsLen(targets);
         if (targets_len == 0) {
@@ -11119,7 +14528,7 @@ pub const Session = struct {
                     break :blk_out existing;
                 } else blk_out: {
                     self.recordFastDenseAssignClone(base);
-                    var allocated = try self.allocOwnedHostIntResult(amendCloneOwner(base), kind, base_array.len());
+                    var allocated = try self.allocOwnedHostIntCloneResult(amendCloneOwner(base), kind, base_array.len());
                     errdefer self.releaseValue(Value.array(allocated.arrayPtr()));
                     try copyHostIntViewToResult(&allocated, view);
                     break :blk_out allocated;
@@ -11127,12 +14536,9 @@ pub const Session = struct {
                 try applyDenseAssignIntRhs(&out, targets, rhs);
                 const host = out.arrayPtr();
                 hostDenseSetFlags(host, host_dense_flag_normalized);
-                hostDenseClearCachedIntRange(host);
+                self.invalidateHostDenseCachesForMutation(host);
                 const value = try out.value(self);
-                if (comptime enable_probe_instrumentation) {
-                    self.debug_fast_dense_assign_hit_count += 1;
-                    if (reused) self.debug_fast_dense_assign_reuse_count += 1;
-                }
+                self.recordFastDenseAssignHit(targets, rhs, reused);
                 break :blk if (reused) self.shareValue(value) else value;
             },
             .float => blk: {
@@ -11154,12 +14560,9 @@ pub const Session = struct {
                 };
                 applyDenseAssignFloatRhs(out.items, targets, rhs);
                 hostDenseSetFlags(out.array, host_dense_flag_normalized);
-                hostDenseClearCachedIntRange(out.array);
+                self.invalidateHostDenseCachesForMutation(out.array);
                 const value = try out.value(self);
-                if (comptime enable_probe_instrumentation) {
-                    self.debug_fast_dense_assign_hit_count += 1;
-                    if (reused) self.debug_fast_dense_assign_reuse_count += 1;
-                }
+                self.recordFastDenseAssignHit(targets, rhs, reused);
                 break :blk if (reused) self.shareValue(value) else value;
             },
         };
@@ -11168,6 +14571,101 @@ pub const Session = struct {
     fn tryFastDenseAssignScalarAmend(self: *Session, base: Value, target_idx: usize, rhs_source: Value) KError!?Value {
         if (comptime enable_probe_instrumentation) self.debug_fast_dense_assign_attempt_count += 1;
         return try self.tryFastDenseAssignAmendImpl(base, .{ .scalar = target_idx }, rhs_source);
+    }
+
+    fn tryFastIndexedDenseScalarAssignOwned(self: *Session, base: Value, selector: Value, rhs_source: Value) KError!?Value {
+        if (base.tag() != .array) return null;
+        const raw_index = scalarIntLikeValue(selector) orelse return null;
+        errdefer self.releaseCanonicalManagedNumericValue(base);
+        const target_idx = try normalizeIndex(raw_index, try self.topLevelLen(base));
+        if (try self.tryFastDenseScalarAssignDirect(base, target_idx, rhs_source)) |amended| {
+            if (comptime enable_probe_instrumentation) self.debug_owned_amend_count += 1;
+            self.releaseCanonicalManagedNumericValue(base);
+            return amended;
+        }
+        const amended = (try self.tryFastDenseAssignScalarAmend(base, target_idx, rhs_source)) orelse return null;
+        if (comptime enable_probe_instrumentation) self.debug_owned_amend_count += 1;
+        self.releaseCanonicalManagedNumericValue(base);
+        return amended;
+    }
+
+    const DirectGlobalIndexedAssignResult = struct {
+        result: ?Value = null,
+    };
+
+    fn tryFastGlobalDenseScalarAssignInPlace(
+        self: *Session,
+        slot: u16,
+        selector: Value,
+        rhs_source: Value,
+        want_result: bool,
+    ) KError!?DirectGlobalIndexedAssignResult {
+        const cell = try self.loadGlobalCell(slot);
+        const base = cell.value;
+        if (!cell.class.isArray()) return null;
+        const raw_index = scalarIntLikeValue(selector) orelse return null;
+        if (comptime enable_probe_instrumentation) self.debug_fast_dense_assign_attempt_count += 1;
+        if (valueNonVectorNumericShape(base) != null) {
+            self.recordFastDenseAssignMiss();
+            return null;
+        }
+        const base_array = hostDenseIfPresent(base) orelse {
+            self.recordFastDenseAssignMiss();
+            return null;
+        };
+        const target_idx = try normalizeIndex(raw_index, base_array.len());
+        const rhs = (try self.denseAssignRhs(rhs_source, 1)) orelse {
+            self.recordFastDenseAssignMiss();
+            return null;
+        };
+
+        switch (hostDenseNumericMode(base_array)) {
+            .int => {
+                const view = hostIntArrayView(base_array) orelse {
+                    self.recordFastDenseAssignMiss();
+                    return null;
+                };
+                const kind = hostIntArrayViewKind(view);
+                if (!denseAssignRhsFitsIntKind(kind, 1, rhs)) {
+                    self.recordFastDenseAssignMiss();
+                    return null;
+                }
+                var out = self.tryReuseHostIntArrayResult(base, kind) orelse {
+                    self.recordFastDenseAssignMiss();
+                    return null;
+                };
+                if (!self.prepareReusableHostDenseForMutation(base)) {
+                    self.recordFastDenseAssignMiss();
+                    return null;
+                }
+                try applyDenseAssignIntRhs(&out, .{ .scalar = target_idx }, rhs);
+                const host = out.arrayPtr();
+                hostDenseSetFlags(host, host_dense_flag_normalized);
+                self.invalidateHostDenseCachesForMutation(host);
+            },
+            .float => {
+                const out = self.tryReuseHostFloatArrayResult(base) orelse {
+                    self.recordFastDenseAssignMiss();
+                    return null;
+                };
+                if (!self.prepareReusableHostDenseForMutation(base)) {
+                    self.recordFastDenseAssignMiss();
+                    return null;
+                }
+                applyDenseAssignFloatRhs(out.items, .{ .scalar = target_idx }, rhs);
+                hostDenseSetFlags(out.array, host_dense_flag_normalized);
+                self.invalidateHostDenseCachesForMutation(out.array);
+            },
+        }
+
+        cell.class = classifyGlobalValue(base);
+        if (comptime enable_probe_instrumentation) {
+            self.recordFastDenseAssignHit(.{ .scalar = target_idx }, rhs, true);
+            self.debug_owned_amend_count += 1;
+        }
+        return .{
+            .result = if (want_result) try self.applyArrayCall1Scalar(base, raw_index) else null,
+        };
     }
 
     fn tryFastDenseAssignAmend(self: *Session, base: Value, selectors: []const usize, rhs_source: Value) KError!?Value {
@@ -11366,8 +14864,8 @@ pub const Session = struct {
     }
 
     fn applyDerivedClosure(self: *Session, closure: *const Closure, args: []const Value) KError!?Value {
-        if (self.debugDetailedProbeActive()) self.debug_apply_derived_closure_count += 1;
         if (!closureMayUseDerivedApply(closure)) return null;
+        if (self.debugDetailedProbeActive()) self.debug_apply_derived_closure_count += 1;
         if (try self.projectionInfoFromClosure(closure)) |info| {
             return try self.applyProjectionClosure(info, args);
         }
@@ -11462,10 +14960,31 @@ pub const Session = struct {
             .builtin => builtinSupportsMonad(base.asBuiltin()) and !builtinSupportsDyad(base.asBuiltin()),
             .closure => blk: {
                 const closure = base.asClosure();
+                if (projectionHoleCount(closure)) |hole_count| break :blk hole_count == 1;
                 if (closureDerivedKind(closure) != null) break :blk false;
                 break :blk closure.code.arity == 1;
             },
             .array => true,
+            else => false,
+        };
+    }
+
+    fn projectionHoleCount(closure: *const Closure) ?u8 {
+        if (!closureIsProjection(closure)) return null;
+        if (closure.captures.len < 3) return null;
+        const slot_count_i64 = scalarIntLikeValue(closure.captures[1]) orelse return null;
+        const hole_mask_i64 = scalarIntLikeValue(closure.captures[2]) orelse return null;
+        if (slot_count_i64 < 0 or slot_count_i64 > 63 or hole_mask_i64 < 0) return null;
+        const slot_count: u6 = @intCast(slot_count_i64);
+        const hole_mask: u64 = @intCast(hole_mask_i64);
+        if ((hole_mask >> slot_count) != 0) return null;
+        if (closure.captures.len != 3 + @as(usize, slot_count)) return null;
+        return @intCast(@popCount(hole_mask));
+    }
+
+    fn valueIsCallable(value: Value) bool {
+        return switch (value.tag()) {
+            .builtin, .closure, .array => true,
             else => false,
         };
     }
@@ -11649,6 +15168,91 @@ pub const Session = struct {
             current = next;
             if (collect) try results.append(self.allocator, self.shareValue(current));
         }
+    }
+
+    fn tryApplyControlledFoldDerived(self: *Session, base: Value, args: []const Value, collect: bool) KError!?Value {
+        if (args.len != 2 or !convergeUsesMonadicBase(base)) return null;
+        if (scalarIntLikeValue(args[0])) |count| {
+            return try self.applyCountedOverDerived(base, count, args[1], collect);
+        }
+        if (valueIsCallable(args[0])) {
+            return try self.applyWhileOverDerived(base, args[0], args[1], collect);
+        }
+        return null;
+    }
+
+    fn applyCountedOverDerived(self: *Session, base: Value, raw_count: i64, input: Value, collect: bool) KError!Value {
+        const count: usize = if (raw_count <= 0)
+            0
+        else
+            std.math.cast(usize, raw_count) orelse return error.Unsupported;
+
+        var current = self.shareValue(input);
+        var current_owned = true;
+        errdefer if (current_owned) self.releaseValue(current);
+
+        var results = std.ArrayList(Value).empty;
+        defer {
+            for (results.items) |value| self.releaseValue(value);
+            results.deinit(self.allocator);
+        }
+
+        if (collect) {
+            try results.ensureTotalCapacity(self.allocator, std.math.add(usize, count, 1) catch return error.Unsupported);
+            try results.append(self.allocator, self.shareValue(current));
+        }
+
+        for (0..count) |_| {
+            const next = try self.applyDerivedBase(base, &[_]Value{current});
+            self.releaseValue(current);
+            current = next;
+            if (collect) try results.append(self.allocator, self.shareValue(current));
+        }
+
+        if (collect) {
+            current_owned = false;
+            defer self.releaseValue(current);
+            return try self.createManagedArrayLikeFromValues(results.items);
+        }
+        current_owned = false;
+        return current;
+    }
+
+    fn applyWhileOverDerived(self: *Session, base: Value, predicate: Value, input: Value, collect: bool) KError!Value {
+        var current = self.shareValue(input);
+        var current_owned = true;
+        errdefer if (current_owned) self.releaseValue(current);
+
+        var results = std.ArrayList(Value).empty;
+        defer {
+            for (results.items) |value| self.releaseValue(value);
+            results.deinit(self.allocator);
+        }
+
+        if (collect) try results.append(self.allocator, self.shareValue(current));
+
+        while (true) {
+            const condition = try self.applyDerivedBase(predicate, &[_]Value{current});
+            const keep_going = boolLikeValue(condition) orelse {
+                self.releaseValue(condition);
+                return error.Type;
+            };
+            self.releaseValue(condition);
+            if (!keep_going) break;
+
+            const next = try self.applyDerivedBase(base, &[_]Value{current});
+            self.releaseValue(current);
+            current = next;
+            if (collect) try results.append(self.allocator, self.shareValue(current));
+        }
+
+        if (collect) {
+            current_owned = false;
+            defer self.releaseValue(current);
+            return try self.createManagedArrayLikeFromValues(results.items);
+        }
+        current_owned = false;
+        return current;
     }
 
     fn applyEachDerived(self: *Session, base: Value, args: []const Value) KError!Value {
@@ -11911,8 +15515,8 @@ pub const Session = struct {
         if (!collect) {
             const len_i128: i128 = @intCast(len);
             const last_idx_i128: i128 = @intCast(if (len == 0) 0 else len - 1);
-            const start_i128: i128 = handle.range_iota.start;
-            const step_i128: i128 = handle.range_iota.step;
+            const start_i128: i128 = numericArrayRangeIota(handle).start;
+            const step_i128: i128 = numericArrayRangeIota(handle).step;
             var total_i128 = start_i128 * len_i128;
             total_i128 += step_i128 * @divTrunc(len_i128 * last_idx_i128, 2);
             if (seed) |seed_value| total_i128 += seed_value;
@@ -11924,22 +15528,22 @@ pub const Session = struct {
         defer out.deinit(self.allocator);
         try out.ensureTotalCapacity(self.allocator, len);
 
-        var current = handle.range_iota.start;
+        var current = numericArrayRangeIota(handle).start;
         if (seed) |seed_value| {
             var acc = seed_value;
             for (0..len) |_| {
                 acc = try checkedIntOp(.add, acc, current);
                 try out.append(self.allocator, acc);
-                current = try checkedIntOp(.add, current, handle.range_iota.step);
+                current = try checkedIntOp(.add, current, numericArrayRangeIota(handle).step);
             }
         } else {
             var acc = current;
             try out.append(self.allocator, acc);
-            current = try checkedIntOp(.add, current, handle.range_iota.step);
+            current = try checkedIntOp(.add, current, numericArrayRangeIota(handle).step);
             for (1..len) |_| {
                 acc = try checkedIntOp(.add, acc, current);
                 try out.append(self.allocator, acc);
-                current = try checkedIntOp(.add, current, handle.range_iota.step);
+                current = try checkedIntOp(.add, current, numericArrayRangeIota(handle).step);
             }
         }
         return try self.createManagedHostIntArray(out.items);
@@ -11955,7 +15559,7 @@ pub const Session = struct {
             const handle = vector.asNumericArray();
             if (numericArrayIsVectorRangeIota(handle)) {
                 const len = numericArrayRangeLen(handle);
-                if (args.len == 1 and len == 0) return error.Type;
+                if (args.len == 1 and len == 0) return null;
 
                 if (len <= 1) return null;
 
@@ -11973,7 +15577,7 @@ pub const Session = struct {
         const array = hostDenseIfPresent(vector) orelse return null;
         const len = array.len();
 
-        if (args.len == 1 and len == 0) return error.Type;
+        if (args.len == 1 and len == 0) return null;
 
         if (len <= 1) return null;
 
@@ -12025,15 +15629,15 @@ pub const Session = struct {
         const len = numericArrayRangeLen(handle);
         if (seed == null and len == 0) return error.Type;
 
-        var acc = seed orelse handle.range_iota.start;
+        var acc = seed orelse numericArrayRangeIota(handle).start;
         var current = if (seed == null)
-            try checkedIntOp(.add, handle.range_iota.start, handle.range_iota.step)
+            try checkedIntOp(.add, numericArrayRangeIota(handle).start, numericArrayRangeIota(handle).step)
         else
-            handle.range_iota.start;
+            numericArrayRangeIota(handle).start;
         const start_idx: usize = if (seed == null) 1 else 0;
         for (start_idx..len) |_| {
             acc = try checkedIntOp(.sub, acc, current);
-            current = try checkedIntOp(.add, current, handle.range_iota.step);
+            current = try checkedIntOp(.add, current, numericArrayRangeIota(handle).step);
         }
         return try self.intValue(acc);
     }
@@ -12157,7 +15761,7 @@ pub const Session = struct {
         if (array.storage != .bit) return null;
 
         const len = array.len();
-        if (args.len == 1 and len == 0) return error.Type;
+        if (args.len == 1 and len == 0) return null;
 
         if (len <= 1) return null;
 
@@ -12251,7 +15855,12 @@ pub const Session = struct {
         if (planDenseRegionDecision(.reduce, denseReduceScanFacts(value)).backend != .host) return null;
 
         const outer_len: usize = @intCast(handle.shape[0]);
-        if (args.len == 1 and outer_len == 0) return error.Type;
+        if (args.len == 1 and outer_len == 0) {
+            return switch (op) {
+                .add, .mul => null,
+                else => error.Type,
+            };
+        }
 
         if (outer_len <= 1) return null;
 
@@ -12446,6 +16055,71 @@ pub const Session = struct {
         return try self.finishHostFloatOutput(plan, addScanIntFlags(hostIntArrayViewRange(view)));
     }
 
+    fn builtinFoldIdentityInt(op: BuiltinId) ?i64 {
+        return switch (op) {
+            .add => 0,
+            .mul => 1,
+            else => null,
+        };
+    }
+
+    fn emptyNumericFoldResult(self: *Session, op: BuiltinId, seed: ?Value, template: Value) KError!Value {
+        const identity = builtinFoldIdentityInt(op) orelse return error.Type;
+        const mode = valueNumericMode(template) orelse return error.Type;
+        const out_shape = if (valueNumericHandle(template)) |handle|
+            numericShapeTailSnapshot(handle)
+        else
+            null;
+        const want_float = mode == .float or if (seed) |seed_value|
+            scalarIntLikeValue(seed_value) == null
+        else
+            false;
+
+        if (want_float) {
+            const fill = if (seed) |seed_value|
+                try scalarNumericValue(seed_value)
+            else
+                @as(f64, @floatFromInt(identity));
+            if (out_shape) |shape| {
+                const len = try numericShapeSnapshotElementCount(shape);
+                const out = try self.allocator.alloc(f64, len);
+                defer self.allocator.free(out);
+                @memset(out, fill);
+                const value = try self.createManagedHostFloatArray(out);
+                return try applyNonVectorNumericShapeToValue(self, value, shape);
+            }
+            return try self.floatValue(fill);
+        }
+
+        const fill = if (seed) |seed_value|
+            scalarIntLikeValue(seed_value) orelse return error.Type
+        else
+            identity;
+        if (out_shape) |shape| {
+            const len = try numericShapeSnapshotElementCount(shape);
+            const out = try self.allocator.alloc(i64, len);
+            defer self.allocator.free(out);
+            @memset(out, fill);
+            const value = try self.createManagedHostIntArray(out);
+            return try applyNonVectorNumericShapeToValue(self, value, shape);
+        }
+        return try self.intValue(fill);
+    }
+
+    fn tryEmptyBuiltinFoldScanResult(self: *Session, base: Value, args: []const Value, collect: bool, template: Value) KError!?Value {
+        if (base.tag() != .builtin) return null;
+        const op = base.asBuiltin();
+        const identity = builtinFoldIdentityInt(op) orelse return null;
+
+        if (collect) return self.shareValue(template);
+
+        if (valueNumericMode(template) != null) {
+            return try self.emptyNumericFoldResult(op, if (args.len >= 2) args[0] else null, template);
+        }
+        if (args.len >= 2) return self.shareValue(args[0]);
+        return try self.intValue(identity);
+    }
+
     fn applyFoldDerived(self: *Session, base: Value, args: []const Value, collect: bool) KError!Value {
         var profile_scope = self.beginSamplingProfileScope(if (collect) .apply_scan else .apply_fold);
         defer profile_scope.end();
@@ -12458,6 +16132,7 @@ pub const Session = struct {
         if (base.tag() == .builtin) {
             self.noteHostFoldScanMiss(self.classifyHostFoldScanMiss(base.asBuiltin(), args, collect));
         }
+        if (try self.tryApplyControlledFoldDerived(base, args, collect)) |value| return value;
         if (comptime enable_probe_instrumentation) {
             if (collect) {
                 self.debug_apply_scan_generic_count += 1;
@@ -12472,7 +16147,10 @@ pub const Session = struct {
                 if (!collect) return self.shareValue(vector);
                 return error.Type;
             };
-            if (len == 0) return error.Type;
+            if (len == 0) {
+                if (try self.tryEmptyBuiltinFoldScanResult(base, args, collect, vector)) |value| return value;
+                return error.Type;
+            }
 
             var acc = try self.derivedSequenceItemValue(vector, 0);
             if (!collect) {
@@ -12510,6 +16188,7 @@ pub const Session = struct {
         }
 
         var len: ?usize = null;
+        var sequence_template: ?Value = null;
         for (args[1..]) |arg| {
             const arg_len = derivedSequenceLen(arg) orelse {
                 if (!collect and len == null) continue;
@@ -12519,11 +16198,18 @@ pub const Session = struct {
                 if (existing != arg_len) return error.Type;
             } else {
                 len = arg_len;
+                sequence_template = arg;
             }
         }
 
         if (len == null) {
             if (!collect) return try self.applyDerivedBase(base, args);
+            return error.Type;
+        }
+        if (len.? == 0) {
+            if (sequence_template) |template| {
+                if (try self.tryEmptyBuiltinFoldScanResult(base, args, collect, template)) |value| return value;
+            }
             return error.Type;
         }
 
@@ -12857,16 +16543,9 @@ pub const Session = struct {
                     self.stack[callee_index + i] = self.stack[callee_index + 1 + i];
                 }
                 self.stack_len -= 1;
+                const state = frameReleaseStateFromValues(self.stack[callee_index .. callee_index + argc]);
                 const owner = self.retainedFrameOwner(callee);
-                errdefer if (owner) |owned| self.releaseValue(owned);
-                try self.pushFrame(.{
-                    .code = closure.code,
-                    .ip = 0,
-                    .base = callee_index,
-                    .captures = closure.captures,
-                    .owner = owner,
-                    .callable_global_slot = sampling_profile_no_callable_slot,
-                });
+                try self.pushClosureFrameAtBaseWithReleaseState(closure.code, owner, sampling_profile_no_callable_slot, callee_index, state, .stack);
             },
             .array => {
                 const result = try self.applyArrayCall(callee, args);
@@ -12932,7 +16611,7 @@ pub const Session = struct {
                     return try self.finishFrame(frame_index, result);
                 }
                 if (closure.code.arity != 1) return error.Arity;
-                try self.replaceCurrentFrameWithConsumedClosure1(frame_index, callee, closure);
+                try self.replaceCurrentFrameWithTrailingClosureArgs(frame_index, callee, closure, sampling_profile_no_callable_slot, 1, .consumed_stack);
                 return null;
             },
             .array => {
@@ -12965,7 +16644,7 @@ pub const Session = struct {
                     return try self.finishFrame(frame_index, result);
                 }
                 if (closure.code.arity != 2) return error.Arity;
-                try self.replaceCurrentFrameWithConsumedClosure2(frame_index, callee, closure);
+                try self.replaceCurrentFrameWithTrailingClosureArgs(frame_index, callee, closure, sampling_profile_no_callable_slot, 2, .consumed_stack);
                 return null;
             },
             .array => {
@@ -13004,14 +16683,9 @@ pub const Session = struct {
                 }
                 self.stack[callee_index] = arg0;
                 self.stack_len -= 1;
-                try self.pushFrame(.{
-                    .code = closure.code,
-                    .ip = 0,
-                    .base = callee_index,
-                    .captures = closure.captures,
-                    .owner = callee,
-                    .callable_global_slot = sampling_profile_no_callable_slot,
-                });
+                var state = FrameLocalReleaseState{};
+                noteLocalReleaseState(&state, 0, arg0);
+                try self.pushClosureFrameAtBaseWithReleaseState(closure.code, callee, sampling_profile_no_callable_slot, callee_index, state, .stack);
             },
             .array => {
                 const result = try self.applyArrayCall1(callee, arg0);
@@ -13020,6 +16694,61 @@ pub const Session = struct {
             },
             else => return error.Type,
         }
+    }
+
+    fn checkedSelectorDyad(op: BuiltinId, left: i64, right: i64) KError!i64 {
+        const result = switch (op) {
+            .add => @addWithOverflow(left, right),
+            .sub => @subWithOverflow(left, right),
+            else => return error.Type,
+        };
+        if (result[1] != 0) return error.Type;
+        return result[0];
+    }
+
+    fn readLocalSelectorInt(self: *Session, frame: *const CallFrame, slot: u8) KError!i64 {
+        return scalarIntLikeValue(try self.readLocal(frame, slot)) orelse error.Type;
+    }
+
+    fn evalLocalLocalSelector(self: *Session, frame: *const CallFrame, op: BuiltinId, left_slot: u8, right_slot: u8) KError!i64 {
+        return try checkedSelectorDyad(
+            op,
+            try self.readLocalSelectorInt(frame, left_slot),
+            try self.readLocalSelectorInt(frame, right_slot),
+        );
+    }
+
+    fn evalLocalLocalConstSelector(
+        self: *Session,
+        frame: *const CallFrame,
+        op: BuiltinId,
+        left_slot: u8,
+        right_slot: u8,
+        const_op: BuiltinId,
+        const_value: i64,
+    ) KError!i64 {
+        const base = try self.evalLocalLocalSelector(frame, op, left_slot, right_slot);
+        return try checkedSelectorDyad(const_op, base, const_value);
+    }
+
+    fn execBorrowedCall1ScalarIndex(self: *Session, callee: Value, raw_index: i64) KError!void {
+        if (callee.tag() == .array) {
+            try self.push(try self.applyArrayCall1Scalar(callee, raw_index));
+            return;
+        }
+        const arg0 = try self.intValue(raw_index);
+        defer self.releaseValue(arg0);
+        try self.execBorrowedCall1(callee, arg0);
+    }
+
+    fn execBorrowedTailCall1ScalarIndex(self: *Session, frame_index: usize, callee: Value, raw_index: i64) KError!?Value {
+        if (callee.tag() == .array) {
+            const result = try self.applyArrayCall1Scalar(callee, raw_index);
+            return try self.finishFrame(frame_index, result);
+        }
+        const arg0 = try self.intValue(raw_index);
+        defer self.releaseValue(arg0);
+        return try self.execBorrowedTailCall1(frame_index, callee, arg0);
     }
 
     fn execBorrowedCall1(self: *Session, callee: Value, arg0: Value) KError!void {
@@ -13040,18 +16769,13 @@ pub const Session = struct {
                     return;
                 }
                 const base = self.stack_len;
-                try self.push(self.retainValue(arg0));
+                const retained_arg0 = self.retainValue(arg0);
+                try self.push(retained_arg0);
                 errdefer self.dropStackFrom(base);
+                var state = FrameLocalReleaseState{};
+                noteLocalReleaseState(&state, 0, retained_arg0);
                 const owner = self.retainedFrameOwner(callee);
-                errdefer if (owner) |owned| self.releaseValue(owned);
-                try self.pushFrame(.{
-                    .code = closure.code,
-                    .ip = 0,
-                    .base = base,
-                    .captures = closure.captures,
-                    .owner = owner,
-                    .callable_global_slot = sampling_profile_no_callable_slot,
-                });
+                try self.pushClosureFrameAtBaseWithReleaseState(closure.code, owner, sampling_profile_no_callable_slot, base, state, .stack);
             },
             .array => try self.push(try self.applyArrayCall1(callee, arg0)),
             else => return error.Type,
@@ -13119,14 +16843,8 @@ pub const Session = struct {
                 self.stack[callee_index] = arg0;
                 self.stack[callee_index + 1] = arg1;
                 self.stack_len -= 1;
-                try self.pushFrame(.{
-                    .code = closure.code,
-                    .ip = 0,
-                    .base = callee_index,
-                    .captures = closure.captures,
-                    .owner = callee,
-                    .callable_global_slot = sampling_profile_no_callable_slot,
-                });
+                const state = frameReleaseStateFromValues(self.stack[callee_index .. callee_index + 2]);
+                try self.pushClosureFrameAtBaseWithReleaseState(closure.code, callee, sampling_profile_no_callable_slot, callee_index, state, .stack);
             },
             .array => {
                 const result = try self.applyArrayCall(callee, &[_]Value{ arg0, arg1 });
@@ -13156,12 +16874,224 @@ pub const Session = struct {
         try self.push(result);
     }
 
+    fn recordIndexedAssign(self: *Session, target: IndexedAssignTarget) void {
+        if (comptime enable_probe_instrumentation) {
+            self.debug_indexed_assign_count += 1;
+            switch (target) {
+                .global => self.debug_indexed_assign_global_count += 1,
+                .local => self.debug_indexed_assign_local_count += 1,
+                .inline_local => self.debug_indexed_assign_inline_local_count += 1,
+            }
+        }
+    }
+
+    fn readAssignTargetValue(self: *Session, frame: *const CallFrame, target: IndexedAssignTarget) KError!Value {
+        return switch (target) {
+            .global => |slot| try self.loadGlobalSlot(slot),
+            .local => |slot| try self.readLocal(frame, slot),
+            .inline_local => |slot| try self.readInlineLocal(slot),
+        };
+    }
+
+    fn writeModifiedAssignResult(self: *Session, frame: *const CallFrame, target: IndexedAssignTarget, result: Value, want_result: bool) KError!void {
+        var result_owned = true;
+        errdefer if (result_owned) self.releaseCanonicalManagedNumericValue(result);
+
+        switch (target) {
+            .global => |slot| {
+                try self.storeGlobalSlot(slot, result);
+                if (want_result) {
+                    try self.push(result);
+                    result_owned = false;
+                } else {
+                    self.releaseCanonicalManagedNumericValue(result);
+                    result_owned = false;
+                }
+            },
+            .local => |slot| {
+                const returned = if (want_result) self.retainValue(result) else Value.fromBool(false);
+                var returned_owned = want_result;
+                errdefer if (returned_owned) self.releaseValue(returned);
+                try self.writeLocalValue(frame, slot, result);
+                result_owned = false;
+                if (want_result) {
+                    try self.push(returned);
+                    returned_owned = false;
+                }
+            },
+            .inline_local => |slot| {
+                const returned = if (want_result) self.retainValue(result) else Value.fromBool(false);
+                var returned_owned = want_result;
+                errdefer if (returned_owned) self.releaseValue(returned);
+                try self.writeInlineLocalValue(slot, result);
+                result_owned = false;
+                if (want_result) {
+                    try self.push(returned);
+                    returned_owned = false;
+                }
+            },
+        }
+    }
+
+    fn execModifiedAssignWithRhs(self: *Session, frame: *const CallFrame, target: IndexedAssignTarget, builtin: BuiltinId, want_result: bool, rhs: Value) KError!void {
+        const left = try self.readAssignTargetValue(frame, target);
+        const result = try self.applyShapedBorrowedDyadValue(builtin, left, rhs);
+        try self.writeModifiedAssignResult(frame, target, result, want_result);
+    }
+
+    fn execModifiedAssign(self: *Session, frame: *const CallFrame, target: IndexedAssignTarget, builtin: BuiltinId, want_result: bool) KError!void {
+        if (self.stack_len == 0) return error.Internal;
+        const rhs = self.pop();
+        defer self.releaseCanonicalManagedNumericValue(rhs);
+        try self.execModifiedAssignWithRhs(frame, target, builtin, want_result, rhs);
+    }
+
+    fn execModifiedAssignConst(self: *Session, frame: *const CallFrame, target: IndexedAssignTarget, builtin: BuiltinId, want_result: bool, rhs: i64) KError!void {
+        const left = try self.readAssignTargetValue(frame, target);
+        const result = try self.applyLocalConstDyadValue(left, builtin, rhs);
+        try self.writeModifiedAssignResult(frame, target, result, want_result);
+    }
+
+    fn execIndexedAssignWithValues(self: *Session, frame: *const CallFrame, target: IndexedAssignTarget, mode: AmendMode, builtin: BuiltinId, want_result: bool, selector: Value, rhs: Value) KError!?Value {
+        if (mode == .assign) {
+            switch (target) {
+                .global => |slot| {
+                    if (try self.tryFastGlobalDenseScalarAssignInPlace(slot, selector, rhs, want_result)) |direct| {
+                        return direct.result;
+                    }
+                },
+                else => {},
+            }
+        }
+
+        const base = switch (target) {
+            .global => |slot| try self.takeGlobalSlot(slot),
+            .local => |slot| try self.takeLocal(frame, slot),
+            .inline_local => |slot| try self.takeInlineLocal(slot),
+        };
+
+        const amended = switch (mode) {
+            .assign => (try self.tryFastIndexedDenseScalarAssignOwned(base, selector, rhs)) orelse
+                try self.applyAmendOwned(base, selector, .assign, rhs, Value.fromBool(false)),
+            .binary => try self.applyAmendOwned(base, selector, .binary, Value.builtin(builtin), rhs),
+            .unary => unreachable,
+        };
+        var amended_stored = false;
+        errdefer if (!amended_stored) self.releaseCanonicalManagedNumericValue(amended);
+
+        const result: ?Value = if (want_result) try self.applyArrayCall1(amended, selector) else null;
+        errdefer if (result) |value| self.releaseValue(value);
+
+        switch (target) {
+            .global => |slot| {
+                try self.storeGlobalSlot(slot, amended);
+                self.releaseCanonicalManagedNumericValue(amended);
+                amended_stored = true;
+            },
+            .local => |slot| {
+                try self.writeLocalValue(frame, slot, amended);
+                amended_stored = true;
+            },
+            .inline_local => |slot| {
+                try self.writeInlineLocalValue(slot, amended);
+                amended_stored = true;
+            },
+        }
+
+        return result;
+    }
+
+    fn execIndexedAssign(self: *Session, frame: *const CallFrame, target: IndexedAssignTarget, mode: AmendMode, builtin: BuiltinId, want_result: bool) KError!void {
+        if (mode == .unary) return error.Internal;
+        if (self.stack_len < 2) return error.Internal;
+
+        self.recordIndexedAssign(target);
+
+        const selector_index = self.stack_len - 2;
+        const selector = self.stack[selector_index];
+        const rhs = self.stack[selector_index + 1];
+        const result = try self.execIndexedAssignWithValues(frame, target, mode, builtin, want_result, selector, rhs);
+        var result_pushed = false;
+        errdefer if (!result_pushed) if (result) |value| self.releaseValue(value);
+        self.dropStackFrom(selector_index);
+        if (result) |value| {
+            try self.push(value);
+            result_pushed = true;
+        }
+    }
+
+    fn execIndexedAssignSources(self: *Session, frame: *CallFrame, target: IndexedAssignTarget, mode: AmendMode, builtin: BuiltinId, want_result: bool) KError!void {
+        if (mode == .unary) return error.Internal;
+
+        const selector_source = try readGlobalCallArgSource(frame);
+        const rhs_source = try readGlobalCallArgSource(frame);
+        const selector = try self.evalGlobalCallArgSource(frame, selector_source);
+        defer self.releaseValue(selector);
+        const rhs = try self.evalGlobalCallArgSource(frame, rhs_source);
+        defer self.releaseValue(rhs);
+
+        self.recordIndexedAssign(target);
+        const result = try self.execIndexedAssignWithValues(frame, target, mode, builtin, want_result, selector, rhs);
+        var result_pushed = false;
+        errdefer if (!result_pushed) if (result) |value| self.releaseValue(value);
+        if (result) |value| {
+            try self.push(value);
+            result_pushed = true;
+        }
+    }
+
     fn readLocalTransfer(self: *Session, frame: *const CallFrame, slot: u8, consume: bool) KError!Value {
         return if (consume) try self.takeLocal(frame, slot) else self.retainValue(try self.readLocal(frame, slot));
     }
 
     fn releaseOwnedValues(self: *Session, values: []const Value) void {
         for (values) |value| self.releaseValue(value);
+    }
+
+    fn pushClosureFrameAtBaseWithReleaseState(
+        self: *Session,
+        code: *const Code,
+        owner: ?Value,
+        callable_slot: u16,
+        base: usize,
+        state: FrameLocalReleaseState,
+        result_target: CallResultTarget,
+    ) KError!void {
+        errdefer if (owner) |owned| self.releaseValue(owned);
+        try self.pushFrameWithReleaseState(.{
+            .code = code,
+            .ip = 0,
+            .base = base,
+            .owner = owner,
+            .callable_global_slot = callable_slot,
+            .result_target = PackedCallResultTarget.init(result_target),
+        }, state, true);
+    }
+
+    fn retainedCurrentFrameOwner(self: *Session, frame: *const CallFrame) ?Value {
+        return if (frame.owner) |owner| self.retainValue(owner) else null;
+    }
+
+    fn pushRetainedClosureArgs(
+        self: *Session,
+        callee: Value,
+        closure: *const Closure,
+        callable_slot: u16,
+        args: []const Value,
+        result_target: CallResultTarget,
+    ) KError!void {
+        if (closure.code.arity != args.len) return error.Arity;
+
+        const base = self.stack_len;
+        errdefer self.dropStackFrom(base);
+        var state = FrameLocalReleaseState{};
+        for (args, 0..) |arg, slot| {
+            const retained = self.retainValue(arg);
+            try self.push(retained);
+            noteLocalReleaseState(&state, slot, retained);
+        }
+        const owner = self.retainedFrameOwner(callee);
+        try self.pushClosureFrameAtBaseWithReleaseState(closure.code, owner, callable_slot, base, state, result_target);
     }
 
     fn pushOwnedClosureArgs(
@@ -13172,20 +17102,17 @@ pub const Session = struct {
         args: []const Value,
         result_target: CallResultTarget,
     ) KError!void {
+        if (closure.code.arity != args.len) return error.Arity;
+
         const base = self.stack_len;
         errdefer self.dropStackFrom(base);
-        for (args) |arg| try self.push(arg);
+        var state = FrameLocalReleaseState{};
+        for (args, 0..) |arg, slot| {
+            try self.push(arg);
+            noteLocalReleaseState(&state, slot, arg);
+        }
         const owner = self.retainedFrameOwner(callee);
-        errdefer if (owner) |owned| self.releaseValue(owned);
-        try self.pushFrame(.{
-            .code = closure.code,
-            .ip = 0,
-            .base = base,
-            .captures = closure.captures,
-            .owner = owner,
-            .callable_global_slot = callable_slot,
-            .result_target = result_target,
-        });
+        try self.pushClosureFrameAtBaseWithReleaseState(closure.code, owner, callable_slot, base, state, result_target);
     }
 
     fn readGlobalCallArgSource(frame: *CallFrame) KError!GlobalCallArgSource {
@@ -13199,6 +17126,8 @@ pub const Session = struct {
                 .consume = consume,
             } },
             .const_int => .{ .const_int = try readI64(frame) },
+            .const_false => .{ .const_bool = false },
+            .const_true => .{ .const_bool = true },
             .local_add_const, .local_sub_const, .local_mul_const => .{ .local_const_op = .{
                 .slot = try readByte(frame),
                 .consume = consume,
@@ -13210,10 +17139,28 @@ pub const Session = struct {
                 },
                 .const_value = try readI64(frame),
             } },
+            .local_local_op => blk: {
+                if (consume) return error.Internal;
+                break :blk .{ .local_local_op = .{
+                    .op = @enumFromInt(try readByte(frame)),
+                    .left_slot = try readByte(frame),
+                    .right_slot = try readByte(frame),
+                } };
+            },
+            .local_local_const_op => blk: {
+                if (consume) return error.Internal;
+                break :blk .{ .local_local_const_op = .{
+                    .op = @enumFromInt(try readByte(frame)),
+                    .left_slot = try readByte(frame),
+                    .right_slot = try readByte(frame),
+                    .const_op = @enumFromInt(try readByte(frame)),
+                    .const_value = try readI64(frame),
+                } };
+            },
         };
     }
 
-    fn readGlobalCallArgSources(frame: *CallFrame, argc: u8, out: *[4]GlobalCallArgSource) KError![]const GlobalCallArgSource {
+    fn readGlobalCallArgSources(frame: *CallFrame, argc: u8, out: *[max_shaped_call_args]GlobalCallArgSource) KError![]const GlobalCallArgSource {
         if (argc == 0 or argc > out.len) return error.Internal;
         var loaded: usize = 0;
         while (loaded < argc) : (loaded += 1) out[loaded] = try readGlobalCallArgSource(frame);
@@ -13224,12 +17171,26 @@ pub const Session = struct {
         return switch (source) {
             .local => |value| try self.readLocalTransfer(frame, value.slot, value.consume),
             .const_int => |value| try self.intValue(value),
+            .const_bool => |value| Value.fromBool(value),
             .local_const_op => |value| blk: {
                 const left = try self.readLocalTransfer(frame, value.slot, value.consume);
                 errdefer self.releaseValue(left);
                 const result = try self.applyLocalConstOpValue(left, value.op, value.const_value);
                 self.releaseValue(left);
                 break :blk result;
+            },
+            .local_local_op => |value| try self.intValue(try checkedSelectorDyad(
+                value.op,
+                scalarIntLikeValue(try self.readLocal(frame, value.left_slot)) orelse return error.Type,
+                scalarIntLikeValue(try self.readLocal(frame, value.right_slot)) orelse return error.Type,
+            )),
+            .local_local_const_op => |value| blk: {
+                const base = try checkedSelectorDyad(
+                    value.op,
+                    scalarIntLikeValue(try self.readLocal(frame, value.left_slot)) orelse return error.Type,
+                    scalarIntLikeValue(try self.readLocal(frame, value.right_slot)) orelse return error.Type,
+                );
+                break :blk try self.intValue(try checkedSelectorDyad(value.const_op, base, value.const_value));
             },
         };
     }
@@ -13239,7 +17200,7 @@ pub const Session = struct {
         for (sources) |source| switch (source) {
             .local => |value| counts[value.slot] +|= 1,
             .local_const_op => |value| counts[value.slot] +|= 1,
-            .const_int => {},
+            .const_int, .const_bool, .local_local_op, .local_local_const_op => {},
         };
     }
 
@@ -13254,6 +17215,7 @@ pub const Session = struct {
                     self.retainValue(try self.readLocal(frame, value.slot));
             },
             .const_int => |value| try self.intValue(value),
+            .const_bool => |value| Value.fromBool(value),
             .local_const_op => |value| blk: {
                 if (counts[value.slot] == 0) return error.Internal;
                 counts[value.slot] -= 1;
@@ -13265,6 +17227,19 @@ pub const Session = struct {
                 const result = try self.applyLocalConstOpValue(left, value.op, value.const_value);
                 self.releaseValue(left);
                 break :blk result;
+            },
+            .local_local_op => |value| try self.intValue(try checkedSelectorDyad(
+                value.op,
+                scalarIntLikeValue(try self.readLocal(frame, value.left_slot)) orelse return error.Type,
+                scalarIntLikeValue(try self.readLocal(frame, value.right_slot)) orelse return error.Type,
+            )),
+            .local_local_const_op => |value| blk: {
+                const base = try checkedSelectorDyad(
+                    value.op,
+                    scalarIntLikeValue(try self.readLocal(frame, value.left_slot)) orelse return error.Type,
+                    scalarIntLikeValue(try self.readLocal(frame, value.right_slot)) orelse return error.Type,
+                );
+                break :blk try self.intValue(try checkedSelectorDyad(value.const_op, base, value.const_value));
             },
         };
     }
@@ -13293,6 +17268,7 @@ pub const Session = struct {
                     self.retainValue(try self.readLocal(frame, value.slot));
             },
             .const_int => |value| try self.intValue(value),
+            .const_bool => |value| Value.fromBool(value),
             .local_const_op => |value| blk: {
                 if (counts[value.slot] == 0) return error.Internal;
                 counts[value.slot] -= 1;
@@ -13306,6 +17282,25 @@ pub const Session = struct {
                 const result = try self.applyLocalConstOpValue(left, value.op, value.const_value);
                 self.releaseValue(left);
                 break :blk result;
+            },
+            .local_local_op => |value| blk: {
+                const left = if (value.left_slot == override_slot) override_value else try self.readLocal(frame, value.left_slot);
+                const right = if (value.right_slot == override_slot) override_value else try self.readLocal(frame, value.right_slot);
+                break :blk try self.intValue(try checkedSelectorDyad(
+                    value.op,
+                    scalarIntLikeValue(left) orelse return error.Type,
+                    scalarIntLikeValue(right) orelse return error.Type,
+                ));
+            },
+            .local_local_const_op => |value| blk: {
+                const left = if (value.left_slot == override_slot) override_value else try self.readLocal(frame, value.left_slot);
+                const right = if (value.right_slot == override_slot) override_value else try self.readLocal(frame, value.right_slot);
+                const base = try checkedSelectorDyad(
+                    value.op,
+                    scalarIntLikeValue(left) orelse return error.Type,
+                    scalarIntLikeValue(right) orelse return error.Type,
+                );
+                break :blk try self.intValue(try checkedSelectorDyad(value.const_op, base, value.const_value));
             },
         };
     }
@@ -13323,23 +17318,17 @@ pub const Session = struct {
 
         const base = self.stack_len;
         errdefer self.dropStackFrom(base);
-        for (sources) |source| {
+        var state = FrameLocalReleaseState{};
+        for (sources, 0..) |source, slot| {
             if (self.stack_len >= self.stack.len) return error.Unsupported;
-            self.stack[self.stack_len] = try self.evalGlobalCallArgSource(frame, source);
+            const value = try self.evalGlobalCallArgSource(frame, source);
+            self.stack[self.stack_len] = value;
             self.stack_len += 1;
+            noteLocalReleaseState(&state, slot, value);
         }
 
         const owner = self.retainedFrameOwner(callee);
-        errdefer if (owner) |owned| self.releaseValue(owned);
-        try self.pushFrame(.{
-            .code = closure.code,
-            .ip = 0,
-            .base = base,
-            .captures = closure.captures,
-            .owner = owner,
-            .callable_global_slot = callable_slot,
-            .result_target = result_target,
-        });
+        try self.pushClosureFrameAtBaseWithReleaseState(closure.code, owner, callable_slot, base, state, result_target);
     }
 
     fn replaceCurrentFrameWithCompactPlainClosureFromGlobalCallSources(
@@ -13356,7 +17345,7 @@ pub const Session = struct {
         var local_uses: [256]u8 = [_]u8{0} ** 256;
         countGlobalCallArgLocalUses(sources, &local_uses);
 
-        var args_buf: [4]Value = undefined;
+        var args_buf: [max_shaped_call_args]Value = undefined;
         var loaded: usize = 0;
         errdefer self.releaseOwnedValues(args_buf[0..loaded]);
         for (sources) |source| {
@@ -13364,13 +17353,7 @@ pub const Session = struct {
             loaded += 1;
         }
 
-        switch (sources.len) {
-            1 => try self.replaceCurrentFrameWithOwnedClosure1(frame_index, callee, closure, callable_slot, args_buf[0]),
-            2 => try self.replaceCurrentFrameWithOwnedClosure2(frame_index, callee, closure, callable_slot, args_buf[0], args_buf[1]),
-            3 => try self.replaceCurrentFrameWithOwnedClosure3(frame_index, callee, closure, callable_slot, args_buf[0], args_buf[1], args_buf[2]),
-            4 => try self.replaceCurrentFrameWithOwnedClosure4(frame_index, callee, closure, callable_slot, args_buf[0], args_buf[1], args_buf[2], args_buf[3]),
-            else => return error.Internal,
-        }
+        try self.replaceCurrentFrameWithOwnedClosure(frame_index, callee, closure, callable_slot, args_buf[0..loaded]);
     }
 
     fn replaceCurrentFrameWithCompactPlainClosureFromGlobalCallSourcesWithOverride(
@@ -13389,7 +17372,7 @@ pub const Session = struct {
         var local_uses: [256]u8 = [_]u8{0} ** 256;
         countGlobalCallArgLocalUses(sources, &local_uses);
 
-        var args_buf: [4]Value = undefined;
+        var args_buf: [max_shaped_call_args]Value = undefined;
         var loaded: usize = 0;
         errdefer self.releaseOwnedValues(args_buf[0..loaded]);
         for (sources) |source| {
@@ -13397,13 +17380,31 @@ pub const Session = struct {
             loaded += 1;
         }
 
-        switch (sources.len) {
-            1 => try self.replaceCurrentFrameWithOwnedClosure1(frame_index, callee, closure, callable_slot, args_buf[0]),
-            2 => try self.replaceCurrentFrameWithOwnedClosure2(frame_index, callee, closure, callable_slot, args_buf[0], args_buf[1]),
-            3 => try self.replaceCurrentFrameWithOwnedClosure3(frame_index, callee, closure, callable_slot, args_buf[0], args_buf[1], args_buf[2]),
-            4 => try self.replaceCurrentFrameWithOwnedClosure4(frame_index, callee, closure, callable_slot, args_buf[0], args_buf[1], args_buf[2], args_buf[3]),
-            else => return error.Internal,
+        try self.replaceCurrentFrameWithOwnedClosure(frame_index, callee, closure, callable_slot, args_buf[0..loaded]);
+    }
+
+    const GlobalCallSlotResultMode = enum {
+        stack,
+        parent_local,
+    };
+
+    fn appendOwnedGlobalCallSlotArgs(self: *Session, frame: *CallFrame, argc: u8) KError!FrameLocalReleaseState {
+        if (argc == 0 or argc > max_shaped_call_args) return error.Internal;
+        var state = FrameLocalReleaseState{};
+        var arg_idx: u8 = 0;
+        while (arg_idx < argc) : (arg_idx += 1) {
+            const value = try self.readOwnedGlobalCallArg(frame);
+            try self.push(value);
+            noteLocalReleaseState(&state, arg_idx, value);
         }
+        return state;
+    }
+
+    fn globalCallSlotResultTarget(frame: *CallFrame, mode: GlobalCallSlotResultMode) KError!CallResultTarget {
+        return switch (mode) {
+            .stack => .stack,
+            .parent_local => .{ .parent_local = try readByte(frame) },
+        };
     }
 
     fn pushPlainClosureFromGlobalCallSlots(
@@ -13413,165 +17414,27 @@ pub const Session = struct {
         closure: *const Closure,
         callable_slot: u16,
         argc: u8,
+        result_mode: GlobalCallSlotResultMode,
     ) KError!void {
         if (closure.code.arity != argc) return error.Arity;
 
         const base = self.stack_len;
         errdefer self.dropStackFrom(base);
-        switch (argc) {
-            1 => try self.push(try self.readOwnedGlobalCallArg(frame)),
-            2 => {
-                try self.push(try self.readOwnedGlobalCallArg(frame));
-                try self.push(try self.readOwnedGlobalCallArg(frame));
-            },
-            3 => {
-                try self.push(try self.readOwnedGlobalCallArg(frame));
-                try self.push(try self.readOwnedGlobalCallArg(frame));
-                try self.push(try self.readOwnedGlobalCallArg(frame));
-            },
-            4 => {
-                try self.push(try self.readOwnedGlobalCallArg(frame));
-                try self.push(try self.readOwnedGlobalCallArg(frame));
-                try self.push(try self.readOwnedGlobalCallArg(frame));
-                try self.push(try self.readOwnedGlobalCallArg(frame));
-            },
-            else => return error.Internal,
-        }
-
+        const state = try self.appendOwnedGlobalCallSlotArgs(frame, argc);
+        const result_target = try globalCallSlotResultTarget(frame, result_mode);
         const owner = self.retainedFrameOwner(callee);
-        errdefer if (owner) |owned| self.releaseValue(owned);
-        try self.pushFrame(.{
-            .code = closure.code,
-            .ip = 0,
-            .base = base,
-            .captures = closure.captures,
-            .owner = owner,
-            .callable_global_slot = callable_slot,
-            .result_target = .stack,
-        });
+        try self.pushClosureFrameAtBaseWithReleaseState(closure.code, owner, callable_slot, base, state, result_target);
     }
 
-    fn pushPlainClosureFromGlobalCallSlotsToLocal(
-        self: *Session,
-        frame: *CallFrame,
-        callee: Value,
-        closure: *const Closure,
-        callable_slot: u16,
-        argc: u8,
-    ) KError!void {
+    fn pushCurrentFrameSelfClosureFromGlobalCallSlots(self: *Session, frame: *CallFrame, closure: *const Closure, argc: u8, result_mode: GlobalCallSlotResultMode) KError!void {
         if (closure.code.arity != argc) return error.Arity;
 
         const base = self.stack_len;
         errdefer self.dropStackFrom(base);
-        switch (argc) {
-            1 => try self.push(try self.readOwnedGlobalCallArg(frame)),
-            2 => {
-                try self.push(try self.readOwnedGlobalCallArg(frame));
-                try self.push(try self.readOwnedGlobalCallArg(frame));
-            },
-            3 => {
-                try self.push(try self.readOwnedGlobalCallArg(frame));
-                try self.push(try self.readOwnedGlobalCallArg(frame));
-                try self.push(try self.readOwnedGlobalCallArg(frame));
-            },
-            4 => {
-                try self.push(try self.readOwnedGlobalCallArg(frame));
-                try self.push(try self.readOwnedGlobalCallArg(frame));
-                try self.push(try self.readOwnedGlobalCallArg(frame));
-                try self.push(try self.readOwnedGlobalCallArg(frame));
-            },
-            else => return error.Internal,
-        }
-
-        const dst_slot = try readByte(frame);
-        const owner = self.retainedFrameOwner(callee);
-        errdefer if (owner) |owned| self.releaseValue(owned);
-        try self.pushFrame(.{
-            .code = closure.code,
-            .ip = 0,
-            .base = base,
-            .captures = closure.captures,
-            .owner = owner,
-            .callable_global_slot = callable_slot,
-            .result_target = .{ .parent_local = dst_slot },
-        });
-    }
-
-    fn pushCurrentFrameSelfClosureFromGlobalCallSlots(self: *Session, frame: *CallFrame, closure: *const Closure, argc: u8) KError!void {
-        if (closure.code.arity != argc) return error.Arity;
-
-        const base = self.stack_len;
-        errdefer self.dropStackFrom(base);
-        switch (argc) {
-            1 => try self.push(try self.readOwnedGlobalCallArg(frame)),
-            2 => {
-                try self.push(try self.readOwnedGlobalCallArg(frame));
-                try self.push(try self.readOwnedGlobalCallArg(frame));
-            },
-            3 => {
-                try self.push(try self.readOwnedGlobalCallArg(frame));
-                try self.push(try self.readOwnedGlobalCallArg(frame));
-                try self.push(try self.readOwnedGlobalCallArg(frame));
-            },
-            4 => {
-                try self.push(try self.readOwnedGlobalCallArg(frame));
-                try self.push(try self.readOwnedGlobalCallArg(frame));
-                try self.push(try self.readOwnedGlobalCallArg(frame));
-                try self.push(try self.readOwnedGlobalCallArg(frame));
-            },
-            else => return error.Internal,
-        }
-
-        const retained_owner = if (frame.owner) |owner| self.retainValue(owner) else null;
-        errdefer if (retained_owner) |owned| self.releaseValue(owned);
-        try self.pushFrame(.{
-            .code = closure.code,
-            .ip = 0,
-            .base = base,
-            .captures = closure.captures,
-            .owner = retained_owner,
-            .callable_global_slot = frame.callable_global_slot,
-            .result_target = .stack,
-        });
-    }
-
-    fn pushCurrentFrameSelfClosureFromGlobalCallSlotsToLocal(self: *Session, frame: *CallFrame, closure: *const Closure, argc: u8) KError!void {
-        if (closure.code.arity != argc) return error.Arity;
-
-        const base = self.stack_len;
-        errdefer self.dropStackFrom(base);
-        switch (argc) {
-            1 => try self.push(try self.readOwnedGlobalCallArg(frame)),
-            2 => {
-                try self.push(try self.readOwnedGlobalCallArg(frame));
-                try self.push(try self.readOwnedGlobalCallArg(frame));
-            },
-            3 => {
-                try self.push(try self.readOwnedGlobalCallArg(frame));
-                try self.push(try self.readOwnedGlobalCallArg(frame));
-                try self.push(try self.readOwnedGlobalCallArg(frame));
-            },
-            4 => {
-                try self.push(try self.readOwnedGlobalCallArg(frame));
-                try self.push(try self.readOwnedGlobalCallArg(frame));
-                try self.push(try self.readOwnedGlobalCallArg(frame));
-                try self.push(try self.readOwnedGlobalCallArg(frame));
-            },
-            else => return error.Internal,
-        }
-
-        const dst_slot = try readByte(frame);
-        const retained_owner = if (frame.owner) |owner| self.retainValue(owner) else null;
-        errdefer if (retained_owner) |owned| self.releaseValue(owned);
-        try self.pushFrame(.{
-            .code = closure.code,
-            .ip = 0,
-            .base = base,
-            .captures = closure.captures,
-            .owner = retained_owner,
-            .callable_global_slot = frame.callable_global_slot,
-            .result_target = .{ .parent_local = dst_slot },
-        });
+        const state = try self.appendOwnedGlobalCallSlotArgs(frame, argc);
+        const result_target = try globalCallSlotResultTarget(frame, result_mode);
+        const retained_owner = self.retainedCurrentFrameOwner(frame);
+        try self.pushClosureFrameAtBaseWithReleaseState(closure.code, retained_owner, frame.callable_global_slot, base, state, result_target);
     }
 
     fn replaceCurrentFrameWithOwnedClosure(
@@ -13585,121 +17448,23 @@ pub const Session = struct {
         const base = self.frames[frame_index].base;
         const old_owner = self.frames[frame_index].owner;
         const result_target = self.frames[frame_index].result_target;
-        self.dropStackFrom(base);
+        self.dropFrameStackFrom(base);
         if (old_owner) |owned| self.releaseValue(owned);
         self.stack_len = base + args.len;
         errdefer self.dropStackFrom(base);
         for (args, 0..) |arg, idx| self.stack[base + idx] = arg;
+        const state = frameReleaseStateFromValues(args);
         const owner = self.retainedFrameOwner(callee);
         errdefer if (owner) |owned| self.releaseValue(owned);
         self.frames[frame_index] = .{
             .code = closure.code,
             .ip = 0,
             .base = base,
-            .captures = closure.captures,
             .owner = owner,
             .callable_global_slot = callable_slot,
             .result_target = result_target,
         };
-        try self.ensureFrameLocalSlots(closure.code, base);
-    }
-
-    fn replaceCurrentFrameWithOwnedClosure1(self: *Session, frame_index: usize, callee: Value, closure: *const Closure, callable_slot: u16, arg0: Value) KError!void {
-        const base = self.frames[frame_index].base;
-        const old_owner = self.frames[frame_index].owner;
-        const result_target = self.frames[frame_index].result_target;
-        self.dropStackFrom(base);
-        if (old_owner) |owned| self.releaseValue(owned);
-        self.stack_len = base + 1;
-        errdefer self.dropStackFrom(base);
-        self.stack[base] = arg0;
-        const owner = self.retainedFrameOwner(callee);
-        errdefer if (owner) |owned| self.releaseValue(owned);
-        self.frames[frame_index] = .{
-            .code = closure.code,
-            .ip = 0,
-            .base = base,
-            .captures = closure.captures,
-            .owner = owner,
-            .callable_global_slot = callable_slot,
-            .result_target = result_target,
-        };
-        try self.ensureFrameLocalSlots(closure.code, base);
-    }
-
-    fn replaceCurrentFrameWithOwnedClosure2(self: *Session, frame_index: usize, callee: Value, closure: *const Closure, callable_slot: u16, arg0: Value, arg1: Value) KError!void {
-        const base = self.frames[frame_index].base;
-        const old_owner = self.frames[frame_index].owner;
-        const result_target = self.frames[frame_index].result_target;
-        self.dropStackFrom(base);
-        if (old_owner) |owned| self.releaseValue(owned);
-        self.stack_len = base + 2;
-        errdefer self.dropStackFrom(base);
-        self.stack[base] = arg0;
-        self.stack[base + 1] = arg1;
-        const owner = self.retainedFrameOwner(callee);
-        errdefer if (owner) |owned| self.releaseValue(owned);
-        self.frames[frame_index] = .{
-            .code = closure.code,
-            .ip = 0,
-            .base = base,
-            .captures = closure.captures,
-            .owner = owner,
-            .callable_global_slot = callable_slot,
-            .result_target = result_target,
-        };
-        try self.ensureFrameLocalSlots(closure.code, base);
-    }
-
-    fn replaceCurrentFrameWithOwnedClosure3(self: *Session, frame_index: usize, callee: Value, closure: *const Closure, callable_slot: u16, arg0: Value, arg1: Value, arg2: Value) KError!void {
-        const base = self.frames[frame_index].base;
-        const old_owner = self.frames[frame_index].owner;
-        const result_target = self.frames[frame_index].result_target;
-        self.dropStackFrom(base);
-        if (old_owner) |owned| self.releaseValue(owned);
-        self.stack_len = base + 3;
-        errdefer self.dropStackFrom(base);
-        self.stack[base] = arg0;
-        self.stack[base + 1] = arg1;
-        self.stack[base + 2] = arg2;
-        const owner = self.retainedFrameOwner(callee);
-        errdefer if (owner) |owned| self.releaseValue(owned);
-        self.frames[frame_index] = .{
-            .code = closure.code,
-            .ip = 0,
-            .base = base,
-            .captures = closure.captures,
-            .owner = owner,
-            .callable_global_slot = callable_slot,
-            .result_target = result_target,
-        };
-        try self.ensureFrameLocalSlots(closure.code, base);
-    }
-
-    fn replaceCurrentFrameWithOwnedClosure4(self: *Session, frame_index: usize, callee: Value, closure: *const Closure, callable_slot: u16, arg0: Value, arg1: Value, arg2: Value, arg3: Value) KError!void {
-        const base = self.frames[frame_index].base;
-        const old_owner = self.frames[frame_index].owner;
-        const result_target = self.frames[frame_index].result_target;
-        self.dropStackFrom(base);
-        if (old_owner) |owned| self.releaseValue(owned);
-        self.stack_len = base + 4;
-        errdefer self.dropStackFrom(base);
-        self.stack[base] = arg0;
-        self.stack[base + 1] = arg1;
-        self.stack[base + 2] = arg2;
-        self.stack[base + 3] = arg3;
-        const owner = self.retainedFrameOwner(callee);
-        errdefer if (owner) |owned| self.releaseValue(owned);
-        self.frames[frame_index] = .{
-            .code = closure.code,
-            .ip = 0,
-            .base = base,
-            .captures = closure.captures,
-            .owner = owner,
-            .callable_global_slot = callable_slot,
-            .result_target = result_target,
-        };
-        try self.ensureFrameLocalSlots(closure.code, base);
+        try self.prepareReusedFrameActivationWithReleaseState(frame_index, state, true);
     }
 
     fn replaceCurrentFrameWithOwnedPlainClosureFromGlobalCallSlots(
@@ -13713,33 +17478,37 @@ pub const Session = struct {
     ) KError!void {
         if (closure.code.arity != argc) return error.Arity;
 
-        var args_buf: [4]Value = undefined;
+        var args_buf: [max_shaped_call_args]Value = undefined;
         const args = try self.readOwnedGlobalCallSlots(frame, argc, &args_buf);
-        switch (args.len) {
-            1 => try self.replaceCurrentFrameWithOwnedClosure1(frame_index, callee, closure, callable_slot, args[0]),
-            2 => try self.replaceCurrentFrameWithOwnedClosure2(frame_index, callee, closure, callable_slot, args[0], args[1]),
-            3 => try self.replaceCurrentFrameWithOwnedClosure3(frame_index, callee, closure, callable_slot, args[0], args[1], args[2]),
-            4 => try self.replaceCurrentFrameWithOwnedClosure4(frame_index, callee, closure, callable_slot, args[0], args[1], args[2], args[3]),
-            else => return error.Internal,
-        }
+        try self.replaceCurrentFrameWithOwnedClosure(frame_index, callee, closure, callable_slot, args);
     }
 
     fn tryApplyOwnedClosureArgs(self: *Session, closure: *const Closure, args: []const Value) KError!?Value {
+        const may_derived = closureMayUseDerivedApply(closure);
         switch (args.len) {
             1 => {
-                if (try self.applyDerivedClosure(closure, args)) |result| return result;
+                if (may_derived) {
+                    if (try self.applyDerivedClosure(closure, args)) |result| return result;
+                }
+                if ((closure.code.direct_closure_mask & directClosureMaskBit(1)) == 0) return null;
                 return try self.tryApplyDirectClosure1(closure, args[0]);
             },
             2 => {
-                if (try self.tryApplyDirectDerivedClosure2(closure, args[0], args[1])) |result| return result;
-                if (try self.applyDerivedClosure(closure, args)) |result| return result;
+                if (may_derived) {
+                    if (try self.tryApplyDirectDerivedClosure2(closure, args[0], args[1])) |result| return result;
+                    if (try self.applyDerivedClosure(closure, args)) |result| return result;
+                }
+                if ((closure.code.direct_closure_mask & directClosureMaskBit(2)) == 0) return null;
                 return try self.tryApplyDirectClosure2(closure, args[0], args[1]);
             },
             3 => {
-                if (try self.applyDerivedClosure(closure, args)) |result| return result;
+                if (may_derived) {
+                    if (try self.applyDerivedClosure(closure, args)) |result| return result;
+                }
+                if ((closure.code.direct_closure_mask & directClosureMaskBit(3)) == 0) return null;
                 return try self.tryApplyDirectClosure3(closure, args[0], args[1], args[2]);
             },
-            else => return try self.applyDerivedClosure(closure, args),
+            else => return if (may_derived) try self.applyDerivedClosure(closure, args) else null,
         }
     }
 
@@ -13752,6 +17521,11 @@ pub const Session = struct {
             },
             .closure => {
                 const closure = callee.asClosure();
+                if (compactKCodeForPlainClosure(closure, args.len)) |compact| {
+                    const result = try self.runCompactKCodeOwned(compact, args);
+                    try self.push(result);
+                    return;
+                }
                 if (try self.tryApplyOwnedClosureArgs(closure, args)) |result| {
                     self.releaseOwnedValues(args);
                     try self.push(result);
@@ -13778,6 +17552,11 @@ pub const Session = struct {
             },
             .closure => {
                 const closure = callee.asClosure();
+                if (compactKCodeForPlainClosure(closure, args.len)) |compact| {
+                    const result = try self.runCompactKCodeOwned(compact, args);
+                    try self.writeLocalValue(frame, dst_slot, result);
+                    return;
+                }
                 if (try self.tryApplyOwnedClosureArgs(closure, args)) |result| {
                     self.releaseOwnedValues(args);
                     try self.writeLocalValue(frame, dst_slot, result);
@@ -13804,6 +17583,10 @@ pub const Session = struct {
             },
             .closure => {
                 const closure = callee.asClosure();
+                if (compactKCodeForPlainClosure(closure, args.len)) |compact| {
+                    const result = try self.runCompactKCodeOwned(compact, args);
+                    return try self.finishFrame(frame_index, result);
+                }
                 if (try self.tryApplyOwnedClosureArgs(closure, args)) |result| {
                     self.releaseOwnedValues(args);
                     return try self.finishFrame(frame_index, result);
@@ -13825,53 +17608,62 @@ pub const Session = struct {
         if (frame.callable_global_slot != slot) return null;
         if (callee.tag() != .closure) return null;
         const closure = callee.asClosure();
+        if (closure.kind != .plain) return null;
         if (closure.code != frame.code) return null;
         if (frame.owner) |owner| {
             if (owner.raw != callee.raw or owner.tag() != .closure) return null;
             return closure;
         }
-        if (frame.captures.len != 0 or closure.captures.len != 0) return null;
+        if (closure.captures.len != 0) return null;
         return closure;
     }
 
-    fn pushCurrentFrameSelfClosureArgs(self: *Session, frame: *const CallFrame, closure: *const Closure, args: []const Value) KError!void {
-        if (closure.code.arity != args.len) return error.Arity;
+    fn pushCurrentFrameSelfFromGlobalCallSlots(self: *Session, frame: *CallFrame, argc: u8, result_mode: GlobalCallSlotResultMode) KError!void {
+        if (frame.code.arity != argc) return error.Arity;
 
         const base = self.stack_len;
         errdefer self.dropStackFrom(base);
-        for (args) |arg| try self.push(arg);
-
-        const retained_owner = if (frame.owner) |owner| self.retainValue(owner) else null;
-        errdefer if (retained_owner) |owned| self.releaseValue(owned);
-        try self.pushFrame(.{
-            .code = closure.code,
-            .ip = 0,
-            .base = base,
-            .captures = closure.captures,
-            .owner = retained_owner,
-            .callable_global_slot = frame.callable_global_slot,
-            .result_target = .stack,
-        });
+        const state = try self.appendOwnedGlobalCallSlotArgs(frame, argc);
+        const result_target = try globalCallSlotResultTarget(frame, result_mode);
+        const retained_owner = self.retainedCurrentFrameOwner(frame);
+        try self.pushClosureFrameAtBaseWithReleaseState(frame.code, retained_owner, frame.callable_global_slot, base, state, result_target);
     }
 
-    fn pushCurrentFrameSelfClosureArgsToLocal(self: *Session, frame: *const CallFrame, closure: *const Closure, args: []const Value, dst_slot: u8) KError!void {
+    fn replaceCurrentFrameWithCurrentSelfArgs(self: *Session, frame_index: usize, args: []const Value) KError!void {
+        const current = self.frames[frame_index];
+        if (current.code.arity != args.len) return error.Arity;
+
+        const base = current.base;
+        self.dropFrameStackFrom(base);
+        self.stack_len = base + args.len;
+        errdefer self.dropStackFrom(base);
+        for (args, 0..) |arg, idx| self.stack[base + idx] = arg;
+        const state = frameReleaseStateFromValues(args);
+
+        self.frames[frame_index] = .{
+            .code = current.code,
+            .ip = 0,
+            .base = base,
+            .owner = current.owner,
+            .callable_global_slot = current.callable_global_slot,
+            .result_target = current.result_target,
+        };
+        try self.prepareReusedFrameActivationWithReleaseState(frame_index, state, true);
+    }
+
+    fn pushCurrentFrameSelfClosureArgs(self: *Session, frame: *const CallFrame, closure: *const Closure, args: []const Value, result_target: CallResultTarget) KError!void {
         if (closure.code.arity != args.len) return error.Arity;
 
         const base = self.stack_len;
         errdefer self.dropStackFrom(base);
-        for (args) |arg| try self.push(arg);
+        var state = FrameLocalReleaseState{};
+        for (args, 0..) |arg, slot| {
+            try self.push(arg);
+            noteLocalReleaseState(&state, slot, arg);
+        }
 
-        const retained_owner = if (frame.owner) |owner| self.retainValue(owner) else null;
-        errdefer if (retained_owner) |owned| self.releaseValue(owned);
-        try self.pushFrame(.{
-            .code = closure.code,
-            .ip = 0,
-            .base = base,
-            .captures = closure.captures,
-            .owner = retained_owner,
-            .callable_global_slot = frame.callable_global_slot,
-            .result_target = .{ .parent_local = dst_slot },
-        });
+        const retained_owner = self.retainedCurrentFrameOwner(frame);
+        try self.pushClosureFrameAtBaseWithReleaseState(closure.code, retained_owner, frame.callable_global_slot, base, state, result_target);
     }
 
     fn replaceCurrentFrameWithSelfClosureArgs(self: *Session, frame_index: usize, closure: *const Closure, args: []const Value) KError!void {
@@ -13879,21 +17671,21 @@ pub const Session = struct {
         if (closure.code.arity != args.len) return error.Arity;
 
         const base = current.base;
-        self.dropStackFrom(base);
+        self.dropFrameStackFrom(base);
         self.stack_len = base + args.len;
         errdefer self.dropStackFrom(base);
         for (args, 0..) |arg, idx| self.stack[base + idx] = arg;
+        const state = frameReleaseStateFromValues(args);
 
         self.frames[frame_index] = .{
             .code = closure.code,
             .ip = 0,
             .base = base,
-            .captures = closure.captures,
             .owner = current.owner,
             .callable_global_slot = current.callable_global_slot,
             .result_target = current.result_target,
         };
-        try self.ensureFrameLocalSlots(closure.code, base);
+        try self.prepareReusedFrameActivationWithReleaseState(frame_index, state, true);
     }
 
     fn readOwnedGlobalCallArg(self: *Session, frame: *CallFrame) KError!Value {
@@ -13906,6 +17698,10 @@ pub const Session = struct {
             .const_int => blk: {
                 if (consume) return error.Internal;
                 break :blk try self.intValue(try readI64(frame));
+            },
+            .const_false, .const_true => blk: {
+                if (consume) return error.Internal;
+                break :blk Value.fromBool(kind == .const_true);
             },
             .local_add_const, .local_sub_const, .local_mul_const => blk: {
                 const slot = try readByte(frame);
@@ -13922,10 +17718,35 @@ pub const Session = struct {
                 self.releaseValue(left);
                 break :blk result;
             },
+            .local_local_op => blk: {
+                if (consume) return error.Internal;
+                const op: BuiltinId = @enumFromInt(try readByte(frame));
+                const left_slot = try readByte(frame);
+                const right_slot = try readByte(frame);
+                break :blk try self.intValue(try checkedSelectorDyad(
+                    op,
+                    scalarIntLikeValue(try self.readLocal(frame, left_slot)) orelse return error.Type,
+                    scalarIntLikeValue(try self.readLocal(frame, right_slot)) orelse return error.Type,
+                ));
+            },
+            .local_local_const_op => blk: {
+                if (consume) return error.Internal;
+                const op: BuiltinId = @enumFromInt(try readByte(frame));
+                const left_slot = try readByte(frame);
+                const right_slot = try readByte(frame);
+                const const_op: BuiltinId = @enumFromInt(try readByte(frame));
+                const const_value = try readI64(frame);
+                const base = try checkedSelectorDyad(
+                    op,
+                    scalarIntLikeValue(try self.readLocal(frame, left_slot)) orelse return error.Type,
+                    scalarIntLikeValue(try self.readLocal(frame, right_slot)) orelse return error.Type,
+                );
+                break :blk try self.intValue(try checkedSelectorDyad(const_op, base, const_value));
+            },
         };
     }
 
-    fn readOwnedGlobalCallSlots(self: *Session, frame: *CallFrame, argc: u8, out: *[4]Value) KError![]const Value {
+    fn readOwnedGlobalCallSlots(self: *Session, frame: *CallFrame, argc: u8, out: *[max_shaped_call_args]Value) KError![]const Value {
         if (argc == 0 or argc > out.len) return error.Internal;
         var loaded: usize = 0;
         errdefer self.releaseOwnedValues(out[0..loaded]);
@@ -13935,105 +17756,209 @@ pub const Session = struct {
         return out[0..argc];
     }
 
-    fn execGlobalCallSlots(self: *Session, frame: *CallFrame, slot: u16, argc: u8) KError!void {
+    fn applyGlobalIndexArrayValue(self: *Session, callee: Value, selector: Value) KError!?Value {
+        if (callee.tag() != .array) return null;
+        if (scalarIntLikeValue(selector)) |raw_index| return try self.applyArrayCall1Scalar(callee, raw_index);
+        return try self.applyArrayCall1(callee, selector);
+    }
+
+    fn execGlobalIndexSource(self: *Session, frame: *CallFrame, slot: u16) KError!void {
         self.noteGlobalCall(slot);
-        const callee = try self.loadGlobalSlot(slot);
-        if (callee.tag() == .closure) {
+        const source = try readGlobalCallArgSource(frame);
+        const selector = try self.evalGlobalCallArgSource(frame, source);
+        const cell = try self.loadGlobalCell(slot);
+        const callee = cell.value;
+        if (cell.class.isArray()) {
+            if (try self.applyGlobalIndexArrayValue(callee, selector)) |result| {
+                self.releaseValue(selector);
+                try self.push(result);
+                return;
+            }
+        }
+        var args = [_]Value{selector};
+        return try self.execOwnedGlobalCallArgs(slot, callee, args[0..]);
+    }
+
+    fn execGlobalIndexSourceStoreLocal(self: *Session, frame: *CallFrame, slot: u16) KError!void {
+        self.noteGlobalCall(slot);
+        const source = try readGlobalCallArgSource(frame);
+        const selector = try self.evalGlobalCallArgSource(frame, source);
+        const dst_slot = try readByte(frame);
+        const cell = try self.loadGlobalCell(slot);
+        const callee = cell.value;
+        if (cell.class.isArray()) {
+            if (try self.applyGlobalIndexArrayValue(callee, selector)) |result| {
+                self.releaseValue(selector);
+                try self.writeLocalValue(frame, dst_slot, result);
+                return;
+            }
+        }
+        var args = [_]Value{selector};
+        return try self.execOwnedGlobalCallArgsToLocal(frame, dst_slot, slot, callee, args[0..]);
+    }
+
+    fn execTailGlobalIndexSource(self: *Session, frame_index: usize, frame: *CallFrame, slot: u16) KError!?Value {
+        self.noteGlobalCall(slot);
+        const source = try readGlobalCallArgSource(frame);
+        const selector = try self.evalGlobalCallArgSource(frame, source);
+        const cell = try self.loadGlobalCell(slot);
+        const callee = cell.value;
+        if (cell.class.isArray()) {
+            if (try self.applyGlobalIndexArrayValue(callee, selector)) |result| {
+                self.releaseValue(selector);
+                return try self.finishFrame(frame_index, result);
+            }
+        }
+        var args = [_]Value{selector};
+        return try self.execOwnedTailGlobalCallArgs(frame_index, slot, callee, args[0..]);
+    }
+
+    fn execGlobalCallSlots(self: *Session, frame: *CallFrame, slot: u16, argc: u8) KError!void {
+        if (comptime enable_probe_instrumentation) self.debug_global_call_slots_count += 1;
+        self.noteGlobalCall(slot);
+        const cell = try self.loadGlobalCell(slot);
+        const callee = cell.value;
+        if (compactKCodeForGlobalCellCall(cell, argc)) |compact| {
+            var args_buf: [max_shaped_call_args]Value = undefined;
+            const args = try self.readOwnedGlobalCallSlots(frame, argc, &args_buf);
+            const result = try self.runCompactKCodeOwned(compact, args);
+            if (comptime enable_probe_instrumentation) self.debug_global_call_slots_fast_count += 1;
+            try self.push(result);
+            return;
+        }
+        if (currentFrameSelfClosure(frame, slot, callee)) |self_closure| {
+            if (self_closure.code.arity != argc) return error.Arity;
+            if (comptime enable_probe_instrumentation) self.debug_global_call_slots_fast_count += 1;
+            return try self.pushCurrentFrameSelfFromGlobalCallSlots(frame, argc, .stack);
+        }
+        if (cell.class == .closure) {
             const closure = callee.asClosure();
             if (closureIsCompactPlainGlobal(closure) and closure.code.arity == argc and currentFrameSelfClosure(frame, slot, callee) == null) {
-                var sources_buf: [4]GlobalCallArgSource = undefined;
+                var sources_buf: [max_shaped_call_args]GlobalCallArgSource = undefined;
                 const sources = try readGlobalCallArgSources(frame, argc, &sources_buf);
+                if (comptime enable_probe_instrumentation) self.debug_global_call_slots_fast_count += 1;
                 return try self.pushCompactPlainClosureFromGlobalCallSources(frame, callee, closure, slot, sources, .stack);
             }
             if (!closureMayUseDerivedApply(closure)) {
                 if (closure.code.arity == argc and (closure.code.direct_closure_mask & directClosureMaskBit(argc)) == 0) {
                     if (currentFrameSelfClosure(frame, slot, callee)) |self_closure| {
-                        return try self.pushCurrentFrameSelfClosureFromGlobalCallSlots(frame, self_closure, argc);
+                        if (comptime enable_probe_instrumentation) self.debug_global_call_slots_fast_count += 1;
+                        return try self.pushCurrentFrameSelfClosureFromGlobalCallSlots(frame, self_closure, argc, .stack);
                     }
-                    return try self.pushPlainClosureFromGlobalCallSlots(frame, callee, closure, slot, argc);
+                    if (comptime enable_probe_instrumentation) self.debug_global_call_slots_fast_count += 1;
+                    return try self.pushPlainClosureFromGlobalCallSlots(frame, callee, closure, slot, argc, .stack);
                 }
             }
         }
-        var args_buf: [4]Value = undefined;
+        var args_buf: [max_shaped_call_args]Value = undefined;
         const args = try self.readOwnedGlobalCallSlots(frame, argc, &args_buf);
         if (currentFrameSelfClosure(frame, slot, callee)) |closure| {
             if (closure.code.arity != args.len) return error.Arity;
-            return try self.pushCurrentFrameSelfClosureArgs(frame, closure, args);
+            if (comptime enable_probe_instrumentation) self.debug_global_call_slots_fast_count += 1;
+            return try self.pushCurrentFrameSelfClosureArgs(frame, closure, args, .stack);
         }
-        if (callee.tag() == .closure) {
+        if (cell.class == .closure) {
             const closure = callee.asClosure();
             if (!closureMayUseDerivedApply(closure)) {
                 switch (args.len) {
                     1 => if (try self.tryApplyDirectClosure1(closure, args[0])) |result| {
                         self.releaseOwnedValues(args);
+                        if (comptime enable_probe_instrumentation) self.debug_global_call_slots_fast_count += 1;
                         try self.push(result);
                         return;
                     },
                     2 => if (try self.tryApplyDirectClosure2(closure, args[0], args[1])) |result| {
                         self.releaseOwnedValues(args);
+                        if (comptime enable_probe_instrumentation) self.debug_global_call_slots_fast_count += 1;
                         try self.push(result);
                         return;
                     },
                     3 => if (try self.tryApplyDirectClosure3(closure, args[0], args[1], args[2])) |result| {
                         self.releaseOwnedValues(args);
+                        if (comptime enable_probe_instrumentation) self.debug_global_call_slots_fast_count += 1;
                         try self.push(result);
                         return;
                     },
                     else => {},
                 }
                 if (closure.code.arity != args.len) return error.Arity;
+                if (comptime enable_probe_instrumentation) self.debug_global_call_slots_fast_count += 1;
                 try self.pushOwnedClosureArgs(callee, closure, slot, args, .stack);
                 return;
             }
         }
+        if (comptime enable_probe_instrumentation) self.debug_global_call_slots_fallback_count += 1;
         return try self.execOwnedGlobalCallArgs(slot, callee, args);
     }
 
     fn execGlobalCallSlotsStoreLocal(self: *Session, frame: *CallFrame, slot: u16, argc: u8) KError!void {
+        if (comptime enable_probe_instrumentation) self.debug_global_call_slots_count += 1;
         self.noteGlobalCall(slot);
-        const callee = try self.loadGlobalSlot(slot);
-        if (callee.tag() == .closure) {
+        const cell = try self.loadGlobalCell(slot);
+        const callee = cell.value;
+        if (compactKCodeForGlobalCellCall(cell, argc)) |compact| {
+            var args_buf: [max_shaped_call_args]Value = undefined;
+            const args = try self.readOwnedGlobalCallSlots(frame, argc, &args_buf);
+            const local_slot = try readByte(frame);
+            const result = try self.runCompactKCodeOwned(compact, args);
+            if (comptime enable_probe_instrumentation) self.debug_global_call_slots_fast_count += 1;
+            try self.writeLocalValue(frame, local_slot, result);
+            return;
+        }
+        if (currentFrameSelfClosure(frame, slot, callee)) |self_closure| {
+            if (self_closure.code.arity != argc) return error.Arity;
+            if (comptime enable_probe_instrumentation) self.debug_global_call_slots_fast_count += 1;
+            return try self.pushCurrentFrameSelfFromGlobalCallSlots(frame, argc, .parent_local);
+        }
+        if (cell.class == .closure) {
             const closure = callee.asClosure();
             if (closureIsCompactPlainGlobal(closure) and closure.code.arity == argc and currentFrameSelfClosure(frame, slot, callee) == null) {
-                var sources_buf: [4]GlobalCallArgSource = undefined;
+                var sources_buf: [max_shaped_call_args]GlobalCallArgSource = undefined;
                 const sources = try readGlobalCallArgSources(frame, argc, &sources_buf);
                 const local_slot = try readByte(frame);
                 const target = parentLocalResultTarget(frame, local_slot);
+                if (comptime enable_probe_instrumentation) self.debug_global_call_slots_fast_count += 1;
                 return try self.pushCompactPlainClosureFromGlobalCallSources(frame, callee, closure, slot, sources, target);
             }
             if (!closureMayUseDerivedApply(closure)) {
                 if (closure.code.arity == argc and (closure.code.direct_closure_mask & directClosureMaskBit(argc)) == 0) {
                     if (currentFrameSelfClosure(frame, slot, callee)) |self_closure| {
-                        return try self.pushCurrentFrameSelfClosureFromGlobalCallSlotsToLocal(frame, self_closure, argc);
+                        if (comptime enable_probe_instrumentation) self.debug_global_call_slots_fast_count += 1;
+                        return try self.pushCurrentFrameSelfClosureFromGlobalCallSlots(frame, self_closure, argc, .parent_local);
                     }
-                    return try self.pushPlainClosureFromGlobalCallSlotsToLocal(frame, callee, closure, slot, argc);
+                    if (comptime enable_probe_instrumentation) self.debug_global_call_slots_fast_count += 1;
+                    return try self.pushPlainClosureFromGlobalCallSlots(frame, callee, closure, slot, argc, .parent_local);
                 }
             }
         }
 
-        var args_buf: [4]Value = undefined;
+        var args_buf: [max_shaped_call_args]Value = undefined;
         const args = try self.readOwnedGlobalCallSlots(frame, argc, &args_buf);
         const local_slot = try readByte(frame);
         if (currentFrameSelfClosure(frame, slot, callee)) |closure| {
             if (closure.code.arity != args.len) return error.Arity;
-            return try self.pushCurrentFrameSelfClosureArgsToLocal(frame, closure, args, local_slot);
+            if (comptime enable_probe_instrumentation) self.debug_global_call_slots_fast_count += 1;
+            return try self.pushCurrentFrameSelfClosureArgs(frame, closure, args, .{ .parent_local = local_slot });
         }
-        if (callee.tag() == .closure) {
+        if (cell.class == .closure) {
             const closure = callee.asClosure();
             if (!closureMayUseDerivedApply(closure)) {
                 switch (args.len) {
                     1 => if (try self.tryApplyDirectClosure1(closure, args[0])) |result| {
                         self.releaseOwnedValues(args);
+                        if (comptime enable_probe_instrumentation) self.debug_global_call_slots_fast_count += 1;
                         try self.writeLocalValue(frame, local_slot, result);
                         return;
                     },
                     2 => if (try self.tryApplyDirectClosure2(closure, args[0], args[1])) |result| {
                         self.releaseOwnedValues(args);
+                        if (comptime enable_probe_instrumentation) self.debug_global_call_slots_fast_count += 1;
                         try self.writeLocalValue(frame, local_slot, result);
                         return;
                     },
                     3 => if (try self.tryApplyDirectClosure3(closure, args[0], args[1], args[2])) |result| {
                         self.releaseOwnedValues(args);
+                        if (comptime enable_probe_instrumentation) self.debug_global_call_slots_fast_count += 1;
                         try self.writeLocalValue(frame, local_slot, result);
                         return;
                     },
@@ -14041,75 +17966,126 @@ pub const Session = struct {
                 }
                 if (closure.code.arity != args.len) return error.Arity;
                 const target = parentLocalResultTarget(frame, local_slot);
+                if (comptime enable_probe_instrumentation) self.debug_global_call_slots_fast_count += 1;
                 try self.pushOwnedClosureArgs(callee, closure, slot, args, target);
                 return;
             }
         }
+        if (comptime enable_probe_instrumentation) self.debug_global_call_slots_fallback_count += 1;
         return try self.execOwnedGlobalCallArgsToLocal(frame, local_slot, slot, callee, args);
     }
 
     fn execTailGlobalCallSlots(self: *Session, frame_index: usize, frame: *CallFrame, slot: u16, argc: u8) KError!?Value {
+        if (comptime enable_probe_instrumentation) self.debug_global_call_slots_count += 1;
         self.noteGlobalCall(slot);
-        const callee = try self.loadGlobalSlot(slot);
-        if (callee.tag() == .closure) {
+        const cell = try self.loadGlobalCell(slot);
+        const callee = cell.value;
+        if (compactKCodeForGlobalCellCall(cell, argc)) |compact| {
+            var args_buf: [max_shaped_call_args]Value = undefined;
+            const args = try self.readOwnedGlobalCallSlots(frame, argc, &args_buf);
+            const result = try self.runCompactKCodeOwned(compact, args);
+            if (comptime enable_probe_instrumentation) self.debug_global_call_slots_fast_count += 1;
+            return try self.finishFrame(frame_index, result);
+        }
+        if (currentFrameSelfClosure(frame, slot, callee)) |self_closure| {
+            if (self_closure.code.arity != argc) return error.Arity;
+            var args_buf: [max_shaped_call_args]Value = undefined;
+            const args = try self.readOwnedGlobalCallSlots(frame, argc, &args_buf);
+            if (comptime enable_probe_instrumentation) self.debug_global_call_slots_fast_count += 1;
+            try self.replaceCurrentFrameWithCurrentSelfArgs(frame_index, args);
+            return null;
+        }
+        if (cell.class == .closure) {
             const closure = callee.asClosure();
             if (closureIsCompactPlainGlobal(closure) and closure.code.arity == argc) {
-                var sources_buf: [4]GlobalCallArgSource = undefined;
+                var sources_buf: [max_shaped_call_args]GlobalCallArgSource = undefined;
                 const sources = try readGlobalCallArgSources(frame, argc, &sources_buf);
+                if (comptime enable_probe_instrumentation) self.debug_global_call_slots_fast_count += 1;
                 try self.replaceCurrentFrameWithCompactPlainClosureFromGlobalCallSources(frame_index, frame, callee, closure, slot, sources);
                 return null;
             }
             if (!closureMayUseDerivedApply(closure)) {
                 if (closure.code.arity == argc and (closure.code.direct_closure_mask & directClosureMaskBit(argc)) == 0) {
                     if (currentFrameSelfClosure(frame, slot, callee) != null) {
-                        var args_buf: [4]Value = undefined;
+                        var args_buf: [max_shaped_call_args]Value = undefined;
                         const args = try self.readOwnedGlobalCallSlots(frame, argc, &args_buf);
+                        if (comptime enable_probe_instrumentation) self.debug_global_call_slots_fast_count += 1;
                         try self.replaceCurrentFrameWithSelfClosureArgs(frame_index, currentFrameSelfClosure(frame, slot, callee).?, args);
                         return null;
                     }
+                    if (comptime enable_probe_instrumentation) self.debug_global_call_slots_fast_count += 1;
                     try self.replaceCurrentFrameWithOwnedPlainClosureFromGlobalCallSlots(frame_index, frame, callee, closure, slot, argc);
                     return null;
                 }
             }
         }
-        var args_buf: [4]Value = undefined;
+        var args_buf: [max_shaped_call_args]Value = undefined;
         const args = try self.readOwnedGlobalCallSlots(frame, argc, &args_buf);
         if (currentFrameSelfClosure(frame, slot, callee)) |closure| {
             if (closure.code.arity != args.len) return error.Arity;
+            if (comptime enable_probe_instrumentation) self.debug_global_call_slots_fast_count += 1;
             try self.replaceCurrentFrameWithSelfClosureArgs(frame_index, closure, args);
             return null;
         }
-        if (callee.tag() == .closure) {
+        if (cell.class == .closure) {
             const closure = callee.asClosure();
             if (!closureMayUseDerivedApply(closure)) {
                 switch (args.len) {
                     1 => if (try self.tryApplyDirectClosure1(closure, args[0])) |result| {
                         self.releaseOwnedValues(args);
+                        if (comptime enable_probe_instrumentation) self.debug_global_call_slots_fast_count += 1;
                         return try self.finishFrame(frame_index, result);
                     },
                     2 => if (try self.tryApplyDirectClosure2(closure, args[0], args[1])) |result| {
                         self.releaseOwnedValues(args);
+                        if (comptime enable_probe_instrumentation) self.debug_global_call_slots_fast_count += 1;
                         return try self.finishFrame(frame_index, result);
                     },
                     3 => if (try self.tryApplyDirectClosure3(closure, args[0], args[1], args[2])) |result| {
                         self.releaseOwnedValues(args);
+                        if (comptime enable_probe_instrumentation) self.debug_global_call_slots_fast_count += 1;
                         return try self.finishFrame(frame_index, result);
                     },
                     else => {},
                 }
                 if (closure.code.arity != args.len) return error.Arity;
+                if (comptime enable_probe_instrumentation) self.debug_global_call_slots_fast_count += 1;
                 try self.replaceCurrentFrameWithOwnedClosure(frame_index, callee, closure, slot, args);
                 return null;
             }
         }
+        if (comptime enable_probe_instrumentation) self.debug_global_call_slots_fallback_count += 1;
         return try self.execOwnedTailGlobalCallArgs(frame_index, slot, callee, args);
+    }
+
+    fn execCompactGlobalCallFromStack(self: *Session, compact: *const CompactKCode, arg_start: usize, argc: usize) KError!void {
+        if (compact.arity != argc) return error.Arity;
+        if (argc > max_explicit_params or arg_start + argc > self.stack_len) return error.Unsupported;
+        var args_buf: [max_explicit_params]Value = undefined;
+        var idx: usize = 0;
+        while (idx < argc) : (idx += 1) args_buf[idx] = self.stack[arg_start + idx];
+        self.stack_len = arg_start;
+        const result = try self.runCompactKCodeOwned(compact, args_buf[0..argc]);
+        try self.push(result);
+    }
+
+    fn execCompactTailGlobalCallFromStack(self: *Session, frame_index: usize, compact: *const CompactKCode, arg_start: usize, argc: usize) KError!?Value {
+        if (compact.arity != argc) return error.Arity;
+        if (argc > max_explicit_params or arg_start + argc > self.stack_len) return error.Unsupported;
+        var args_buf: [max_explicit_params]Value = undefined;
+        var idx: usize = 0;
+        while (idx < argc) : (idx += 1) args_buf[idx] = self.stack[arg_start + idx];
+        self.stack_len = arg_start;
+        const result = try self.runCompactKCodeOwned(compact, args_buf[0..argc]);
+        return try self.finishFrame(frame_index, result);
     }
 
     fn execGlobalCall1(self: *Session, slot: u16) KError!void {
         if (self.stack_len < 1) return error.Internal;
 
         self.noteGlobalCall(slot);
-        const callee = try self.loadGlobalSlot(slot);
+        const cell = try self.loadGlobalCell(slot);
+        const callee = cell.value;
         const arg0_index = self.stack_len - 1;
         const arg0 = self.stack[arg0_index];
 
@@ -14132,14 +18108,10 @@ pub const Session = struct {
                     self.stack[arg0_index] = result;
                     return;
                 }
-                try self.pushFrame(.{
-                    .code = closure.code,
-                    .ip = 0,
-                    .base = arg0_index,
-                    .captures = closure.captures,
-                    .owner = self.retainedFrameOwner(callee),
-                    .callable_global_slot = slot,
-                });
+                if (compactKCodeForPlainClosure(closure, 1)) |compact| return try self.execCompactGlobalCallFromStack(compact, arg0_index, 1);
+                var state = FrameLocalReleaseState{};
+                noteLocalReleaseState(&state, 0, arg0);
+                try self.pushClosureFrameAtBaseWithReleaseState(closure.code, self.retainedFrameOwner(callee), slot, arg0_index, state, .stack);
             },
             .array => {
                 const result = try self.applyArrayCall1(callee, arg0);
@@ -14154,8 +18126,10 @@ pub const Session = struct {
         if (self.stack_len < 1) return error.Internal;
 
         self.noteGlobalCall(slot);
-        const callee = try self.loadGlobalSlot(slot);
-        const arg0 = self.stack[self.stack_len - 1];
+        const cell = try self.loadGlobalCell(slot);
+        const callee = cell.value;
+        const arg0_index = self.stack_len - 1;
+        const arg0 = self.stack[arg0_index];
 
         switch (callee.tag()) {
             .builtin => {
@@ -14168,7 +18142,8 @@ pub const Session = struct {
                     return try self.finishFrame(frame_index, result);
                 }
                 if (closure.code.arity != 1) return error.Arity;
-                try self.replaceCurrentFrameWithBorrowedClosure1(frame_index, callee, closure, slot);
+                if (compactKCodeForPlainClosure(closure, 1)) |compact| return try self.execCompactTailGlobalCallFromStack(frame_index, compact, arg0_index, 1);
+                try self.replaceCurrentFrameWithTrailingClosureArgs(frame_index, callee, closure, slot, 1, .borrowed_global);
                 return null;
             },
             .array => {
@@ -14183,7 +18158,8 @@ pub const Session = struct {
         if (self.stack_len < 2) return error.Internal;
 
         self.noteGlobalCall(slot);
-        const callee = try self.loadGlobalSlot(slot);
+        const cell = try self.loadGlobalCell(slot);
+        const callee = cell.value;
         const arg0_index = self.stack_len - 2;
         const arg0 = self.stack[arg0_index];
         const arg1 = self.stack[arg0_index + 1];
@@ -14212,14 +18188,9 @@ pub const Session = struct {
                     try self.push(result);
                     return;
                 }
-                try self.pushFrame(.{
-                    .code = closure.code,
-                    .ip = 0,
-                    .base = arg0_index,
-                    .captures = closure.captures,
-                    .owner = self.retainedFrameOwner(callee),
-                    .callable_global_slot = slot,
-                });
+                if (compactKCodeForPlainClosure(closure, 2)) |compact| return try self.execCompactGlobalCallFromStack(compact, arg0_index, 2);
+                const state = frameReleaseStateFromValues(self.stack[arg0_index .. arg0_index + 2]);
+                try self.pushClosureFrameAtBaseWithReleaseState(closure.code, self.retainedFrameOwner(callee), slot, arg0_index, state, .stack);
             },
             .array => {
                 const result = try self.applyArrayCall(callee, &[_]Value{ arg0, arg1 });
@@ -14234,7 +18205,8 @@ pub const Session = struct {
         if (self.stack_len < 2) return error.Internal;
 
         self.noteGlobalCall(slot);
-        const callee = try self.loadGlobalSlot(slot);
+        const cell = try self.loadGlobalCell(slot);
+        const callee = cell.value;
         const arg0_index = self.stack_len - 2;
         const arg0 = self.stack[arg0_index];
         const arg1 = self.stack[arg0_index + 1];
@@ -14253,7 +18225,8 @@ pub const Session = struct {
                     return try self.finishFrame(frame_index, result);
                 }
                 if (closure.code.arity != 2) return error.Arity;
-                try self.replaceCurrentFrameWithBorrowedClosure2(frame_index, callee, closure, slot);
+                if (compactKCodeForPlainClosure(closure, 2)) |compact| return try self.execCompactTailGlobalCallFromStack(frame_index, compact, arg0_index, 2);
+                try self.replaceCurrentFrameWithTrailingClosureArgs(frame_index, callee, closure, slot, 2, .borrowed_global);
                 return null;
             },
             .array => {
@@ -14268,7 +18241,8 @@ pub const Session = struct {
         if (self.stack_len < 3) return error.Internal;
 
         self.noteGlobalCall(slot);
-        const callee = try self.loadGlobalSlot(slot);
+        const cell = try self.loadGlobalCell(slot);
+        const callee = cell.value;
         const arg0_index = self.stack_len - 3;
         const arg0 = self.stack[arg0_index];
         const arg1 = self.stack[arg0_index + 1];
@@ -14293,14 +18267,9 @@ pub const Session = struct {
                     try self.push(result);
                     return;
                 }
-                try self.pushFrame(.{
-                    .code = closure.code,
-                    .ip = 0,
-                    .base = arg0_index,
-                    .captures = closure.captures,
-                    .owner = self.retainedFrameOwner(callee),
-                    .callable_global_slot = slot,
-                });
+                if (compactKCodeForPlainClosure(closure, 3)) |compact| return try self.execCompactGlobalCallFromStack(compact, arg0_index, 3);
+                const state = frameReleaseStateFromValues(self.stack[arg0_index .. arg0_index + 3]);
+                try self.pushClosureFrameAtBaseWithReleaseState(closure.code, self.retainedFrameOwner(callee), slot, arg0_index, state, .stack);
             },
             .array => {
                 const result = try self.applyArrayCall(callee, &[_]Value{ arg0, arg1, arg2 });
@@ -14315,7 +18284,8 @@ pub const Session = struct {
         if (self.stack_len < 3) return error.Internal;
 
         self.noteGlobalCall(slot);
-        const callee = try self.loadGlobalSlot(slot);
+        const cell = try self.loadGlobalCell(slot);
+        const callee = cell.value;
         const arg0_index = self.stack_len - 3;
         const arg0 = self.stack[arg0_index];
         const arg1 = self.stack[arg0_index + 1];
@@ -14335,7 +18305,8 @@ pub const Session = struct {
                 if (try self.tryApplyDirectClosure3(closure, arg0, arg1, arg2)) |result| {
                     return try self.finishFrame(frame_index, result);
                 }
-                try self.replaceCurrentFrameWithBorrowedClosure3(frame_index, callee, closure, slot);
+                if (compactKCodeForPlainClosure(closure, 3)) |compact| return try self.execCompactTailGlobalCallFromStack(frame_index, compact, arg0_index, 3);
+                try self.replaceCurrentFrameWithTrailingClosureArgs(frame_index, callee, closure, slot, 3, .borrowed_global);
                 return null;
             },
             .array => {
@@ -14350,7 +18321,8 @@ pub const Session = struct {
         if (self.stack_len < 4) return error.Internal;
 
         self.noteGlobalCall(slot);
-        const callee = try self.loadGlobalSlot(slot);
+        const cell = try self.loadGlobalCell(slot);
+        const callee = cell.value;
         const arg0_index = self.stack_len - 4;
         const arg0 = self.stack[arg0_index];
         const arg1 = self.stack[arg0_index + 1];
@@ -14371,14 +18343,9 @@ pub const Session = struct {
                     return;
                 }
                 if (closure.code.arity != 4) return error.Arity;
-                try self.pushFrame(.{
-                    .code = closure.code,
-                    .ip = 0,
-                    .base = arg0_index,
-                    .captures = closure.captures,
-                    .owner = self.retainedFrameOwner(callee),
-                    .callable_global_slot = slot,
-                });
+                if (compactKCodeForPlainClosure(closure, 4)) |compact| return try self.execCompactGlobalCallFromStack(compact, arg0_index, 4);
+                const state = frameReleaseStateFromValues(self.stack[arg0_index .. arg0_index + 4]);
+                try self.pushClosureFrameAtBaseWithReleaseState(closure.code, self.retainedFrameOwner(callee), slot, arg0_index, state, .stack);
             },
             .array => {
                 const result = try self.applyArrayCall(callee, &[_]Value{ arg0, arg1, arg2, arg3 });
@@ -14393,7 +18360,8 @@ pub const Session = struct {
         if (self.stack_len < 4) return error.Internal;
 
         self.noteGlobalCall(slot);
-        const callee = try self.loadGlobalSlot(slot);
+        const cell = try self.loadGlobalCell(slot);
+        const callee = cell.value;
         const arg0_index = self.stack_len - 4;
         const arg0 = self.stack[arg0_index];
         const arg1 = self.stack[arg0_index + 1];
@@ -14411,7 +18379,8 @@ pub const Session = struct {
                     return try self.finishFrame(frame_index, result);
                 }
                 if (closure.code.arity != 4) return error.Arity;
-                try self.replaceCurrentFrameWithBorrowedClosure4(frame_index, callee, closure, slot);
+                if (compactKCodeForPlainClosure(closure, 4)) |compact| return try self.execCompactTailGlobalCallFromStack(frame_index, compact, arg0_index, 4);
+                try self.replaceCurrentFrameWithTrailingClosureArgs(frame_index, callee, closure, slot, 4, .borrowed_global);
                 return null;
             },
             .array => {
@@ -14427,7 +18396,8 @@ pub const Session = struct {
         if (self.stack_len < total) return error.Internal;
 
         self.noteGlobalCall(slot);
-        const callee = try self.loadGlobalSlot(slot);
+        const cell = try self.loadGlobalCell(slot);
+        const callee = cell.value;
         const arg_start = self.stack_len - total;
         const args = self.stack[arg_start..self.stack_len];
 
@@ -14445,14 +18415,9 @@ pub const Session = struct {
                     return;
                 }
                 if (argc != closure.code.arity) return error.Arity;
-                try self.pushFrame(.{
-                    .code = closure.code,
-                    .ip = 0,
-                    .base = arg_start,
-                    .captures = closure.captures,
-                    .owner = self.retainedFrameOwner(callee),
-                    .callable_global_slot = slot,
-                });
+                if (compactKCodeForPlainClosure(closure, total)) |compact| return try self.execCompactGlobalCallFromStack(compact, arg_start, total);
+                const state = frameReleaseStateFromValues(args);
+                try self.pushClosureFrameAtBaseWithReleaseState(closure.code, self.retainedFrameOwner(callee), slot, arg_start, state, .stack);
             },
             .array => {
                 const result = try self.applyArrayCall(callee, args);
@@ -14469,6 +18434,12 @@ pub const Session = struct {
         const left = self.pop();
         errdefer self.releaseCanonicalManagedNumericValue(left);
         errdefer self.releaseCanonicalManagedNumericValue(right);
+        if (try self.tryFastInlineScalarDyad(op, left, right)) |fast| {
+            self.releaseCanonicalManagedNumericValue(left);
+            self.releaseCanonicalManagedNumericValue(right);
+            try self.push(fast);
+            return;
+        }
         const value = try self.applyDyad(op, left, right);
         self.releaseCanonicalManagedNumericValue(left);
         self.releaseCanonicalManagedNumericValue(right);
@@ -14605,7 +18576,7 @@ pub const Session = struct {
                 self.noteHostDenseDyadMiss(.view);
                 return err;
             };
-            self.noteHostDenseDyadHost(op, left, right, false);
+            self.noteHostDenseDyadHost(op, left, right, len, false);
             break :blk switch (denseResultMode(op, left_mode, right_mode)) {
                 .int => try self.applyHostArrayDyadInt(op, left, right, left_view, right_view, len),
                 .float => try self.applyHostArrayDyadFloat(op, left, right, left_view, right_view, len),
@@ -14754,22 +18725,6 @@ pub const Session = struct {
         try self.push(result);
     }
 
-    fn execInlineCallBinaryCapture(self: *Session, op: BuiltinId, frame: *const CallFrame, slot: u8, arg_first: bool) KError!void {
-        if (self.stack_len < 1) return error.Internal;
-        const base = self.stack_len - 1;
-        const capture = try self.readCapture(frame, slot);
-        const arg = self.stack[base];
-        const result = switch (op) {
-            .add => if (arg_first) try self.addValues(arg, capture) else try self.addValues(capture, arg),
-            .sub => if (arg_first) try self.subValues(arg, capture) else try self.subValues(capture, arg),
-            .mul => if (arg_first) try self.mulValues(arg, capture) else try self.mulValues(capture, arg),
-            .div => return error.Unsupported,
-            else => return error.Unsupported,
-        };
-        self.dropStackFrom(base);
-        try self.push(result);
-    }
-
     fn execInlineCallUnary(self: *Session, op: Op) KError!void {
         if (self.stack_len < 1) return error.Internal;
         const base = self.stack_len - 1;
@@ -14796,19 +18751,6 @@ pub const Session = struct {
         try self.push(result);
     }
 
-    fn execInlineCallUnaryCapture(self: *Session, op: Op, frame: *const CallFrame, slot: u8) KError!void {
-        if (self.stack_len < 1) return error.Internal;
-        const base = self.stack_len - 1;
-        const value = try self.readCapture(frame, slot);
-        const result = switch (op) {
-            .negate => try self.negateValue(value),
-            .sqrt => try self.sqrtValue(value),
-            else => return error.Internal,
-        };
-        self.dropStackFrom(base);
-        try self.push(result);
-    }
-
     fn execInlineCallAdd2(self: *Session) KError!void {
         try self.execInlineCallBinary2(.add);
     }
@@ -14819,14 +18761,6 @@ pub const Session = struct {
 
     fn execInlineCallAddArgGlobal(self: *Session, slot: u16) KError!void {
         try self.execInlineCallBinaryGlobal(.add, slot, true);
-    }
-
-    fn execInlineCallAddCapture(self: *Session, frame: *const CallFrame, slot: u8) KError!void {
-        try self.execInlineCallBinaryCapture(.add, frame, slot, false);
-    }
-
-    fn execInlineCallAddArgCapture(self: *Session, frame: *const CallFrame, slot: u8) KError!void {
-        try self.execInlineCallBinaryCapture(.add, frame, slot, true);
     }
 
     fn execInlineCallSub2(self: *Session) KError!void {
@@ -14841,14 +18775,6 @@ pub const Session = struct {
         try self.execInlineCallBinaryGlobal(.sub, slot, true);
     }
 
-    fn execInlineCallSubCapture(self: *Session, frame: *const CallFrame, slot: u8) KError!void {
-        try self.execInlineCallBinaryCapture(.sub, frame, slot, false);
-    }
-
-    fn execInlineCallSubArgCapture(self: *Session, frame: *const CallFrame, slot: u8) KError!void {
-        try self.execInlineCallBinaryCapture(.sub, frame, slot, true);
-    }
-
     fn execInlineCallMul2(self: *Session) KError!void {
         try self.execInlineCallBinary2(.mul);
     }
@@ -14861,14 +18787,6 @@ pub const Session = struct {
         try self.execInlineCallBinaryGlobal(.mul, slot, true);
     }
 
-    fn execInlineCallMulCapture(self: *Session, frame: *const CallFrame, slot: u8) KError!void {
-        try self.execInlineCallBinaryCapture(.mul, frame, slot, false);
-    }
-
-    fn execInlineCallMulArgCapture(self: *Session, frame: *const CallFrame, slot: u8) KError!void {
-        try self.execInlineCallBinaryCapture(.mul, frame, slot, true);
-    }
-
     fn execInlineCallNegate1(self: *Session) KError!void {
         try self.execInlineCallUnary(.negate);
     }
@@ -14877,20 +18795,12 @@ pub const Session = struct {
         try self.execInlineCallUnaryGlobal(.negate, slot);
     }
 
-    fn execInlineCallNegateCapture(self: *Session, frame: *const CallFrame, slot: u8) KError!void {
-        try self.execInlineCallUnaryCapture(.negate, frame, slot);
-    }
-
     fn execInlineCallSqrt1(self: *Session) KError!void {
         try self.execInlineCallUnary(.sqrt);
     }
 
     fn execInlineCallSqrtGlobal(self: *Session, slot: u16) KError!void {
         try self.execInlineCallUnaryGlobal(.sqrt, slot);
-    }
-
-    fn execInlineCallSqrtCapture(self: *Session, frame: *const CallFrame, slot: u8) KError!void {
-        try self.execInlineCallUnaryCapture(.sqrt, frame, slot);
     }
 
     fn execInlineCallArgmax1(self: *Session) KError!void {
@@ -14939,6 +18849,9 @@ pub const Session = struct {
         if (try numericValueScalarIndexValue(self, callee, raw_index)) |result| return result;
         if (valueRangeIotaHandle(callee)) |handle| {
             return (try numericStructuralScalarIndexValue(self, .{ .handle = handle }, raw_index)).?;
+        }
+        if (valueNonVectorNumericShape(callee) == null) {
+            if (hostDenseIfPresent(callee)) |array| return try self.hostDenseIndexScalar(array, raw_index);
         }
         if (valueNumericHandle(callee)) |handle| {
             return try self.hostDenseIndexScalar(try hostStructuralArrayForHandle(self, @constCast(handle)), raw_index);
@@ -15013,6 +18926,7 @@ pub const Session = struct {
                     3 => if (try self.tryApplyDirectClosure3(closure, args[0], args[1], args[2])) |result| break :blk result,
                     else => {},
                 }
+                if (compactKCodeForPlainClosure(closure, args.len)) |compact| break :blk try self.runCompactKCodeBorrowed(compact, args);
                 if (closure.code.arity != args.len) return error.Arity;
                 break :blk try self.runClosureMode(closure, args, false);
             },
@@ -15301,12 +19215,15 @@ pub const Session = struct {
     }
 
     fn cloneGlobalsInto(self: *Session, sibling: *Session) !void {
-        try sibling.global_values.resize(self.allocator, self.global_values.items.len);
-        try sibling.global_initialized.resize(self.allocator, self.global_initialized.items.len);
+        try sibling.global_cells.resize(self.allocator, self.global_cells.items.len);
         try sibling.global_names.resize(self.allocator, self.global_names.items.len);
-        for (sibling.global_initialized.items, 0..) |*initialized, idx| {
-            initialized.* = false;
-            sibling.global_values.items[idx] = Value.fromBool(false);
+        for (sibling.global_cells.items) |*cell| {
+            cell.* = .{
+                .value = Value.fromBool(false),
+                .initialized = false,
+                .class = .uninitialized,
+                .compact_k = null,
+            };
         }
         for (self.global_names.items, 0..) |name, idx| {
             sibling.global_names.items[idx] = try sibling.arena.allocator().dupe(u8, name);
@@ -15317,10 +19234,15 @@ pub const Session = struct {
             try sibling.global_slots.put(sibling.global_names.items[entry.value_ptr.*], entry.value_ptr.*);
         }
 
-        for (self.global_values.items, self.global_initialized.items, 0..) |value, initialized, idx| {
-            if (!initialized) continue;
-            sibling.global_values.items[idx] = try sibling.retainEscapedValue(value);
-            sibling.global_initialized.items[idx] = true;
+        for (self.global_cells.items, 0..) |cell, idx| {
+            if (!cell.initialized) continue;
+            const value = try sibling.retainEscapedValue(cell.value);
+            sibling.global_cells.items[idx] = .{
+                .value = value,
+                .initialized = true,
+                .class = classifyGlobalValue(value),
+                .compact_k = compactKCodeForStoredGlobal(value),
+            };
         }
     }
 
@@ -15450,7 +19372,7 @@ pub const Session = struct {
         } else if (closure.header.owner != .scratch) {
             return .{ .reject = .capture_or_global_dependency };
         }
-        if (closure.captures.len != 0 or closure.code.globals.len != 0 or closure.code.templates.len != 0) {
+        if (closure.captures.len != 0 or closure.code.references_globals) {
             const result: DenseAutodiffLowerResult = .{ .reject = .capture_or_global_dependency };
             if (cacheable) self.dense_autodiff_cache.put(cache_key, result) catch {};
             return result;
@@ -15771,13 +19693,11 @@ pub const Session = struct {
         const start = row_idx * cols;
         return switch (array.storage) {
             .bit => blk: {
-                var out = std.ArrayList(bool).empty;
-                defer out.deinit(self.allocator);
-                try out.ensureTotalCapacity(self.allocator, cols);
-                for (0..cols) |col| try out.append(self.allocator, bitGet(array.storage.bit, start + col));
-                break :blk try self.createManagedHostBitArray(out.items);
+                const out = try self.allocHostBitArray(.managed, cols);
+                bitCopyRange(out.words, 0, .{ .words = array.storage.bit, .len = array.logical_len }, start, cols);
+                break :blk try self.finishManagedHostBitAlloc(out, host_dense_flag_normalized, .{ .min = 0, .max = 1 });
             },
-            .float64 => |items| try self.createManagedHostFloatArray(items[start .. start + cols]),
+            .float64 => |items| try self.createManagedHostFloatArray(hostDenseLogicalItems(f64, array, items)[start .. start + cols]),
             else => blk: {
                 const view = hostIntArrayView(array) orelse return error.Type;
                 var out = std.ArrayList(i64).empty;
@@ -15793,14 +19713,14 @@ pub const Session = struct {
         const shape = numericShapeSnapshotMatrix(row_indices.len, cols);
         switch (array.storage) {
             .bit => {
-                var out = std.ArrayList(bool).empty;
-                defer out.deinit(self.allocator);
-                try out.ensureTotalCapacity(self.allocator, row_indices.len * cols);
-                for (row_indices) |row_idx| {
-                    const base = row_idx * cols;
-                    for (0..cols) |col| try out.append(self.allocator, bitGet(array.storage.bit, base + col));
+                const total = row_indices.len * cols;
+                const out = try self.allocHostBitArray(.managed, total);
+                for (row_indices, 0..) |row_idx, out_row_idx| {
+                    const src_start = row_idx * cols;
+                    const dst_start = out_row_idx * cols;
+                    bitCopyRange(out.words, dst_start, .{ .words = array.storage.bit, .len = array.logical_len }, src_start, cols);
                 }
-                const value = try self.createManagedHostBitArray(out.items);
+                const value = try self.finishManagedHostBitAlloc(out, host_dense_flag_normalized, .{ .min = 0, .max = 1 });
                 return try applyNonVectorNumericShapeToValue(self, value, shape);
             },
             .float64 => |items| {
@@ -15829,7 +19749,51 @@ pub const Session = struct {
         }
     }
 
+    fn copyBitMatrixRowsByDenseSelector(
+        dst_words: []u64,
+        source: HostBitSlice,
+        selector: HostIntDenseView,
+        source_rows: usize,
+        cols: usize,
+    ) KError!void {
+        for (0..hostIntDenseViewLen(selector)) |out_row_idx| {
+            const source_row = try normalizeIndex(try hostIntDenseViewItem(selector, out_row_idx), source_rows);
+            bitCopyRange(dst_words, out_row_idx * cols, source, source_row * cols, cols);
+        }
+    }
+
+    fn copyBitMatrixRowsByMask(dst_words: []u64, source: HostBitSlice, mask: HostBitSlice, cols: usize) void {
+        var out_row_idx: usize = 0;
+        for (mask.words, 0..) |_, word_idx| {
+            const row_base = word_idx * host_bit_word_bits;
+            var selected = bitWordMasked(mask.words, mask.len, word_idx);
+            while (selected != 0) {
+                const bit_idx: usize = @intCast(@ctz(selected));
+                const source_row = row_base + bit_idx;
+                bitCopyRange(dst_words, out_row_idx * cols, source, source_row * cols, cols);
+                out_row_idx += 1;
+                selected &= selected - 1;
+            }
+        }
+    }
+
     fn hostNumericMatrixIndexByIntVector(self: *Session, array: *const HostDenseArray, selector: HostIntArrayView, rows: usize, cols: usize) KError!Value {
+        if (std.meta.activeTag(array.storage) == .bit) {
+            if (comptime enable_probe_instrumentation) self.debug_host_matrix_index_copy_count += 1;
+            const selected_rows = hostIntArrayViewLen(selector);
+            const total = selected_rows * cols;
+            const out = try self.allocHostBitArray(.managed, total);
+            try copyBitMatrixRowsByDenseSelector(
+                out.words,
+                .{ .words = array.storage.bit, .len = array.logical_len },
+                .{ .dense = selector },
+                rows,
+                cols,
+            );
+            const metadata = analyzeBitSlice(.{ .words = out.words, .len = out.len });
+            const value = try self.finishManagedHostBitAlloc(out, metadata.flags, metadata.range);
+            return try applyNonVectorNumericShapeToValue(self, value, numericShapeSnapshotMatrix(selected_rows, cols));
+        }
         if (comptime enable_probe_instrumentation) self.debug_host_matrix_index_copy_count += 1;
         var row_indices = std.ArrayList(usize).empty;
         defer row_indices.deinit(self.allocator);
@@ -15841,6 +19805,22 @@ pub const Session = struct {
     }
 
     fn hostNumericMatrixIndexByIntDenseView(self: *Session, array: *const HostDenseArray, selector: HostIntDenseView, rows: usize, cols: usize) KError!Value {
+        if (std.meta.activeTag(array.storage) == .bit) {
+            if (comptime enable_probe_instrumentation) self.debug_host_matrix_index_copy_count += 1;
+            const selected_rows = hostIntDenseViewLen(selector);
+            const total = selected_rows * cols;
+            const out = try self.allocHostBitArray(.managed, total);
+            try copyBitMatrixRowsByDenseSelector(
+                out.words,
+                .{ .words = array.storage.bit, .len = array.logical_len },
+                selector,
+                rows,
+                cols,
+            );
+            const metadata = analyzeBitSlice(.{ .words = out.words, .len = out.len });
+            const value = try self.finishManagedHostBitAlloc(out, metadata.flags, metadata.range);
+            return try applyNonVectorNumericShapeToValue(self, value, numericShapeSnapshotMatrix(selected_rows, cols));
+        }
         if (selector == .dense) return try self.hostNumericMatrixIndexByIntVector(array, selector.dense, rows, cols);
         if (comptime enable_probe_instrumentation) self.debug_host_matrix_index_copy_count += 1;
         var row_indices = std.ArrayList(usize).empty;
@@ -15854,6 +19834,17 @@ pub const Session = struct {
 
     fn hostNumericMatrixIndexMask(self: *Session, array: *const HostDenseArray, mask: HostBitSlice, rows: usize, cols: usize) KError!Value {
         if (mask.len != rows) return error.Type;
+        if (hostBitSliceContiguousTrueRun(mask)) |run| return try createManagedHostNumericMatrixRowRange(self, array, run.start, run.len, cols);
+        if (std.meta.activeTag(array.storage) == .bit) {
+            if (comptime enable_probe_instrumentation) self.debug_host_matrix_mask_copy_count += 1;
+            const selected_rows = bitCountTrue(mask);
+            const total = selected_rows * cols;
+            const out = try self.allocHostBitArray(.managed, total);
+            copyBitMatrixRowsByMask(out.words, .{ .words = array.storage.bit, .len = array.logical_len }, mask, cols);
+            const metadata = analyzeBitSlice(.{ .words = out.words, .len = out.len });
+            const value = try self.finishManagedHostBitAlloc(out, metadata.flags, metadata.range);
+            return try applyNonVectorNumericShapeToValue(self, value, numericShapeSnapshotMatrix(selected_rows, cols));
+        }
         if (comptime enable_probe_instrumentation) self.debug_host_matrix_mask_copy_count += 1;
         var row_indices = std.ArrayList(usize).empty;
         defer row_indices.deinit(self.allocator);
@@ -15868,7 +19859,9 @@ pub const Session = struct {
         return switch (selector.tag()) {
             .int, .bool => try self.hostDenseIndexScalar(array, scalarIntLikeValue(selector).?),
             .array => switch (selector.arrayKind()) {
-                .host_dense_array, .backend_array, .numeric_array => if (valueHostIntStructuralView(selector)) |view|
+                .host_dense_array, .backend_array, .numeric_array => if (hostDenseIfPresent(selector)) |selector_array|
+                    try self.hostDenseIndexVector(array, selector_array)
+                else if (valueHostIntStructuralView(selector)) |view|
                     try self.hostDenseIndexDenseSelector(array, view)
                 else
                     error.Type,
@@ -15882,7 +19875,9 @@ pub const Session = struct {
         return switch (selector.tag()) {
             .int, .bool => try self.hostBoxedArrayIndexScalar(array, scalarIntLikeValue(selector).?),
             .array => switch (selector.arrayKind()) {
-                .host_dense_array, .backend_array, .numeric_array => if (valueHostIntStructuralView(selector)) |view|
+                .host_dense_array, .backend_array, .numeric_array => if (hostDenseIfPresent(selector)) |selector_array|
+                    try self.hostBoxedArrayIndexVector(array, selector_array)
+                else if (valueHostIntStructuralView(selector)) |view|
                     try self.hostBoxedArrayIndexDenseSelector(array, view)
                 else
                     error.Type,
@@ -15913,7 +19908,18 @@ pub const Session = struct {
         if (hostIntArrayView(selector)) |selector_view| {
             return switch (selector_view) {
                 .bit => |bits| try self.hostDenseIndexMask(array, bits),
-                else => try self.hostDenseIndexByIntVector(array, selector_view),
+                else => blk: {
+                    if (denseSelectorCachedRangeFitsSource(selector, array.logical_len)) {
+                        if (comptime enable_probe_instrumentation) self.debug_host_index_in_bounds_fast_count += 1;
+                        break :blk switch (array.storage) {
+                            .bit => try self.gatherManagedHostBitArraySelectionInBounds(.{ .words = array.storage.bit, .len = array.logical_len }, selector_view),
+                            .float64 => |items| try self.gatherManagedHostFloatArraySelectionInBounds(items, selector_view),
+                            else => try self.gatherManagedHostIntArraySelectionInBounds(hostIntArrayView(array).?, selector_view),
+                        };
+                    }
+                    if (comptime enable_probe_instrumentation) self.debug_host_index_in_bounds_fallback_count += 1;
+                    break :blk try self.hostDenseIndexByIntVector(array, selector_view);
+                },
             };
         }
         return error.Type;
@@ -15958,13 +19964,10 @@ pub const Session = struct {
         if (comptime enable_probe_instrumentation) self.debug_host_mask_copy_count += 1;
         switch (array.storage) {
             .bit => {
-                var out = std.ArrayList(bool).empty;
-                defer out.deinit(self.allocator);
-                for (0..mask.len) |idx| {
-                    if (!bitGet(mask.words, idx)) continue;
-                    try out.append(self.allocator, bitGet(array.storage.bit, idx));
-                }
-                return try self.createManagedHostBitArray(out.items);
+                const selected_len = bitCountTrue(mask);
+                var out = try self.allocHostBitArray(.managed, selected_len);
+                const stats = compressBitSliceByMask(&out, .{ .words = array.storage.bit, .len = array.logical_len }, mask);
+                return try self.finishManagedHostBitAlloc(out, stats.flags, stats.range);
             },
             .float64 => |items| {
                 var out = std.ArrayList(f64).empty;
@@ -15999,41 +20002,451 @@ pub const Session = struct {
         return try self.createManagedHostBoxedArray(out.items);
     }
 
+    const DenseIntGatherStats = struct {
+        flags: u8,
+        range: HostIntRange,
+    };
+
+    fn compressBitSliceByMask(out: *HostBitAlloc, source: HostBitSlice, mask: HostBitSlice) DenseIntGatherStats {
+        var asc = true;
+        var dsc = true;
+        var saw_zero = out.len == 0;
+        var saw_one = false;
+        var prev = false;
+        var out_count: usize = 0;
+        var out_word_idx: usize = 0;
+        var out_bit_idx: usize = 0;
+        var out_word: u64 = 0;
+
+        for (mask.words, 0..) |_, word_idx| {
+            const word_base = word_idx * host_bit_word_bits;
+            var selected = bitWordMasked(mask.words, mask.len, word_idx);
+            while (selected != 0) {
+                const bit_idx: usize = @intCast(@ctz(selected));
+                const item = bitGet(source.words, word_base + bit_idx);
+                if (item) out_word |= @as(u64, 1) << @intCast(out_bit_idx);
+                if (out_count == 0) {
+                    saw_zero = !item;
+                    saw_one = item;
+                } else {
+                    if (item) saw_one = true else saw_zero = true;
+                    if (@intFromBool(prev) > @intFromBool(item)) asc = false;
+                    if (@intFromBool(prev) < @intFromBool(item)) dsc = false;
+                }
+                prev = item;
+                out_count += 1;
+                out_bit_idx += 1;
+                if (out_bit_idx == host_bit_word_bits) {
+                    out.words[out_word_idx] = out_word;
+                    out_word_idx += 1;
+                    out_bit_idx = 0;
+                    out_word = 0;
+                }
+                selected &= selected - 1;
+            }
+        }
+        if (out_bit_idx != 0) out.words[out_word_idx] = out_word;
+
+        return .{
+            .flags = host_dense_flag_normalized | orderFlagsFromMonotonic(asc, dsc),
+            .range = .{
+                .min = if (saw_zero) 0 else 1,
+                .max = if (saw_one) 1 else 0,
+            },
+        };
+    }
+
+    fn denseSelectorCachedRangeFitsSource(selector: *const HostDenseArray, source_len: usize) bool {
+        const range = hostDenseCachedIntRange(selector) orelse return false;
+        if (range.min < 0) return false;
+        if (selector.logical_len == 0) return true;
+        const source_len_i64 = std.math.cast(i64, source_len) orelse return false;
+        return range.max < source_len_i64;
+    }
+
+    fn gatherTypedBitDenseSelectionUnchecked(
+        comptime SelT: type,
+        out: *HostBitAlloc,
+        source: HostBitSlice,
+        selector: []const SelT,
+    ) DenseIntGatherStats {
+        const src = source.words;
+        var selector_ptr: [*]const SelT = selector.ptr;
+        var saw_zero = false;
+        var saw_one = false;
+
+        for (0..out.words.len) |word_idx| {
+            const active_len = bitWordActiveLen(out.len, word_idx, out.words.len);
+            const active_mask = bitLowMask(active_len);
+            var word: u64 = 0;
+            var bit_idx: usize = 0;
+            while (bit_idx + 8 <= active_len) : (bit_idx += 8) {
+                const chunk =
+                    (@as(u64, @intFromBool(bitGet(src, @as(usize, @intCast(selector_ptr[0]))))) << 0) |
+                    (@as(u64, @intFromBool(bitGet(src, @as(usize, @intCast(selector_ptr[1]))))) << 1) |
+                    (@as(u64, @intFromBool(bitGet(src, @as(usize, @intCast(selector_ptr[2]))))) << 2) |
+                    (@as(u64, @intFromBool(bitGet(src, @as(usize, @intCast(selector_ptr[3]))))) << 3) |
+                    (@as(u64, @intFromBool(bitGet(src, @as(usize, @intCast(selector_ptr[4]))))) << 4) |
+                    (@as(u64, @intFromBool(bitGet(src, @as(usize, @intCast(selector_ptr[5]))))) << 5) |
+                    (@as(u64, @intFromBool(bitGet(src, @as(usize, @intCast(selector_ptr[6]))))) << 6) |
+                    (@as(u64, @intFromBool(bitGet(src, @as(usize, @intCast(selector_ptr[7]))))) << 7);
+                word |= chunk << @intCast(bit_idx);
+                selector_ptr += 8;
+            }
+            while (bit_idx < active_len) : (bit_idx += 1) {
+                if (bitGet(src, @as(usize, @intCast(selector_ptr[0])))) {
+                    word |= @as(u64, 1) << @intCast(bit_idx);
+                }
+                selector_ptr += 1;
+            }
+            out.words[word_idx] = word;
+            const masked = word & active_mask;
+            if (masked != 0) saw_one = true;
+            if (masked != active_mask) saw_zero = true;
+        }
+
+        return .{
+            .flags = host_dense_flag_normalized |
+                (if (out.len <= 1) host_dense_flag_asc | host_dense_flag_dsc else 0),
+            .range = .{
+                .min = if (!saw_one) 0 else if (saw_zero) 0 else 1,
+                .max = if (saw_one) 1 else 0,
+            },
+        };
+    }
+
+    fn gatherBitDenseSelectionUnchecked(
+        out: *HostBitAlloc,
+        source: HostBitSlice,
+        selector: HostIntArrayView,
+    ) DenseIntGatherStats {
+        return switch (selector) {
+            .bit => unreachable,
+            .int8 => |items| gatherTypedBitDenseSelectionUnchecked(i8, out, source, items),
+            .int16 => |items| gatherTypedBitDenseSelectionUnchecked(i16, out, source, items),
+            .int32 => |items| gatherTypedBitDenseSelectionUnchecked(i32, out, source, items),
+            .int64 => |items| gatherTypedBitDenseSelectionUnchecked(i64, out, source, items),
+        };
+    }
+
+    fn gatherTypedIntDenseSelectionUnchecked(
+        comptime T: type,
+        comptime SelT: type,
+        out: []T,
+        source: []const T,
+        selector: []const SelT,
+    ) void {
+        const src: [*]const T = source.ptr;
+        var dst: [*]T = out.ptr;
+        var idx: usize = 0;
+        while (idx + 8 <= selector.len) : (idx += 8) {
+            dst[0] = src[@as(usize, @intCast(selector[idx + 0]))];
+            dst[1] = src[@as(usize, @intCast(selector[idx + 1]))];
+            dst[2] = src[@as(usize, @intCast(selector[idx + 2]))];
+            dst[3] = src[@as(usize, @intCast(selector[idx + 3]))];
+            dst[4] = src[@as(usize, @intCast(selector[idx + 4]))];
+            dst[5] = src[@as(usize, @intCast(selector[idx + 5]))];
+            dst[6] = src[@as(usize, @intCast(selector[idx + 6]))];
+            dst[7] = src[@as(usize, @intCast(selector[idx + 7]))];
+            dst += 8;
+        }
+        while (idx < selector.len) : (idx += 1) {
+            dst[0] = src[@as(usize, @intCast(selector[idx]))];
+            dst += 1;
+        }
+    }
+
+    fn gatherIntDenseSelectionUnchecked(
+        comptime T: type,
+        out: []T,
+        source: []const T,
+        selector: HostIntArrayView,
+    ) void {
+        switch (selector) {
+            .bit => unreachable,
+            .int8 => |items| gatherTypedIntDenseSelectionUnchecked(T, i8, out, source, items),
+            .int16 => |items| gatherTypedIntDenseSelectionUnchecked(T, i16, out, source, items),
+            .int32 => |items| gatherTypedIntDenseSelectionUnchecked(T, i32, out, source, items),
+            .int64 => |items| gatherTypedIntDenseSelectionUnchecked(T, i64, out, source, items),
+        }
+    }
+
+    fn gatherTypedFloatDenseSelectionUnchecked(
+        comptime SelT: type,
+        out: []f64,
+        source: []const f64,
+        selector: []const SelT,
+    ) void {
+        for (selector, 0..) |raw_idx, out_idx| {
+            out[out_idx] = source[@as(usize, @intCast(raw_idx))];
+        }
+    }
+
+    fn gatherFloatDenseSelectionUnchecked(out: []f64, source: []const f64, selector: HostIntArrayView) void {
+        switch (selector) {
+            .bit => unreachable,
+            .int8 => |items| gatherTypedFloatDenseSelectionUnchecked(i8, out, source, items),
+            .int16 => |items| gatherTypedFloatDenseSelectionUnchecked(i16, out, source, items),
+            .int32 => |items| gatherTypedFloatDenseSelectionUnchecked(i32, out, source, items),
+            .int64 => |items| gatherTypedFloatDenseSelectionUnchecked(i64, out, source, items),
+        }
+    }
+
+    fn gatherManagedHostBitArraySelectionInBounds(self: *Session, source: HostBitSlice, selector: HostIntArrayView) KError!Value {
+        const len = hostIntArrayViewLen(selector);
+        var out = try self.allocManagedHostIntResult(.bit, len);
+        const stats = switch (out) {
+            .bit => |*result| gatherBitDenseSelectionUnchecked(result, source, selector),
+            else => unreachable,
+        };
+
+        const value = try out.value(self);
+        const host = try mutableNumericHostArrayValue(self, value);
+        hostDenseSetFlags(host, stats.flags);
+        hostDenseSetCachedIntRange(host, stats.range);
+        return value;
+    }
+
+    fn gatherManagedHostBitArraySelection(self: *Session, source: HostBitSlice, selector: HostIntArrayView) KError!Value {
+        const len = hostIntArrayViewLen(selector);
+        var out = try self.allocManagedHostIntResult(.bit, len);
+
+        var asc = true;
+        var dsc = true;
+        var saw_zero = len == 0;
+        var saw_one = false;
+        var prev = false;
+
+        switch (out) {
+            .bit => |*result| {
+                for (0..len) |idx| {
+                    const source_idx = try normalizeIndex(hostIntViewItem(selector, idx), source.len);
+                    const item = bitGet(source.words, source_idx);
+                    bitSet(result.words, idx, item);
+                    if (idx == 0) {
+                        saw_zero = !item;
+                        saw_one = item;
+                    } else {
+                        if (item) saw_one = true else saw_zero = true;
+                        if (@intFromBool(prev) > @intFromBool(item)) asc = false;
+                        if (@intFromBool(prev) < @intFromBool(item)) dsc = false;
+                    }
+                    prev = item;
+                }
+            },
+            else => unreachable,
+        }
+
+        const value = try out.value(self);
+        const host = try mutableNumericHostArrayValue(self, value);
+        hostDenseSetFlags(host, host_dense_flag_normalized | orderFlagsFromMonotonic(asc, dsc));
+        hostDenseSetCachedIntRange(host, .{
+            .min = if (saw_zero) 0 else 1,
+            .max = if (saw_one) 1 else 0,
+        });
+        return value;
+    }
+
+    fn gatherManagedHostFloatArraySelection(self: *Session, source: []const f64, selector: HostIntArrayView) KError!Value {
+        const len = hostIntArrayViewLen(selector);
+        var out = try self.allocManagedHostFloatResult(len);
+        for (0..len) |idx| {
+            const source_idx = try normalizeIndex(hostIntViewItem(selector, idx), source.len);
+            out.items[idx] = source[source_idx];
+        }
+
+        const value = try out.value(self);
+        const analysis = analyzeFloatSlice(out.items);
+        hostDenseSetFlags(try mutableNumericHostArrayValue(self, value), analysis.flags);
+        return value;
+    }
+
+    fn gatherManagedHostFloatArraySelectionInBounds(self: *Session, source: []const f64, selector: HostIntArrayView) KError!Value {
+        const len = hostIntArrayViewLen(selector);
+        var out = try self.allocManagedHostFloatResult(len);
+        gatherFloatDenseSelectionUnchecked(out.items, source, selector);
+
+        const value = try out.value(self);
+        const analysis = analyzeFloatSlice(out.items);
+        hostDenseSetFlags(try mutableNumericHostArrayValue(self, value), analysis.flags);
+        return value;
+    }
+
+    fn gatherManagedHostBitSelection(self: *Session, source: HostBitSlice, selector: HostIntDenseView) KError!Value {
+        const len = hostIntDenseViewLen(selector);
+        var out = try self.allocManagedHostIntResult(.bit, len);
+
+        var asc = true;
+        var dsc = true;
+        var saw_zero = len == 0;
+        var saw_one = false;
+        var prev = false;
+
+        switch (out) {
+            .bit => |*result| {
+                for (0..len) |idx| {
+                    const source_idx = try normalizeIndex(try hostIntDenseViewItem(selector, idx), source.len);
+                    const item = bitGet(source.words, source_idx);
+                    bitSet(result.words, idx, item);
+                    if (idx == 0) {
+                        saw_zero = !item;
+                        saw_one = item;
+                    } else {
+                        if (item) saw_one = true else saw_zero = true;
+                        if (@intFromBool(prev) > @intFromBool(item)) asc = false;
+                        if (@intFromBool(prev) < @intFromBool(item)) dsc = false;
+                    }
+                    prev = item;
+                }
+            },
+            else => unreachable,
+        }
+
+        const value = try out.value(self);
+        const host = try mutableNumericHostArrayValue(self, value);
+        hostDenseSetFlags(host, host_dense_flag_normalized | orderFlagsFromMonotonic(asc, dsc));
+        hostDenseSetCachedIntRange(host, .{
+            .min = if (saw_zero) 0 else 1,
+            .max = if (saw_one) 1 else 0,
+        });
+        return value;
+    }
+
+    fn gatherManagedHostFloatSelection(self: *Session, source: []const f64, selector: HostIntDenseView) KError!Value {
+        const len = hostIntDenseViewLen(selector);
+        var out = try self.allocManagedHostFloatResult(len);
+        for (0..len) |idx| {
+            const source_idx = try normalizeIndex(try hostIntDenseViewItem(selector, idx), source.len);
+            out.items[idx] = source[source_idx];
+        }
+
+        const value = try out.value(self);
+        const analysis = analyzeFloatSlice(out.items);
+        hostDenseSetFlags(try mutableNumericHostArrayValue(self, value), analysis.flags);
+        return value;
+    }
+
+    fn gatherManagedHostIntArraySelection(self: *Session, view: HostIntArrayView, selector: HostIntArrayView) KError!Value {
+        const len = hostIntArrayViewLen(selector);
+        var out = try self.allocManagedHostIntResult(hostIntArrayViewKind(view), len);
+
+        var asc = true;
+        var dsc = true;
+        var min_value: i64 = 0;
+        var max_value: i64 = 0;
+        var prev: i64 = 0;
+
+        for (0..len) |idx| {
+            const source_idx = try normalizeIndex(hostIntViewItem(selector, idx), hostIntArrayViewLen(view));
+            const item = hostIntViewItem(view, source_idx);
+            try out.set(idx, item);
+            if (idx == 0) {
+                min_value = item;
+                max_value = item;
+            } else {
+                min_value = @min(min_value, item);
+                max_value = @max(max_value, item);
+                if (prev > item) asc = false;
+                if (prev < item) dsc = false;
+            }
+            prev = item;
+        }
+
+        const value = try out.value(self);
+        const host = try mutableNumericHostArrayValue(self, value);
+        hostDenseSetFlags(host, host_dense_flag_normalized | orderFlagsFromMonotonic(asc, dsc));
+        hostDenseSetCachedIntRange(host, if (len == 0)
+            .{ .min = 0, .max = 0 }
+        else
+            .{ .min = min_value, .max = max_value });
+        return value;
+    }
+
+    fn gatherManagedHostIntArraySelectionInBounds(self: *Session, view: HostIntArrayView, selector: HostIntArrayView) KError!Value {
+        const len = hostIntArrayViewLen(selector);
+        var out = try self.allocManagedHostIntResult(hostIntArrayViewKind(view), len);
+        switch (view) {
+            .bit => unreachable,
+            .int8 => |source| switch (out) {
+                .int8 => |*dest| gatherIntDenseSelectionUnchecked(i8, dest.items, source, selector),
+                else => unreachable,
+            },
+            .int16 => |source| switch (out) {
+                .int16 => |*dest| gatherIntDenseSelectionUnchecked(i16, dest.items, source, selector),
+                else => unreachable,
+            },
+            .int32 => |source| switch (out) {
+                .int32 => |*dest| gatherIntDenseSelectionUnchecked(i32, dest.items, source, selector),
+                else => unreachable,
+            },
+            .int64 => |source| switch (out) {
+                .int64 => |*dest| gatherIntDenseSelectionUnchecked(i64, dest.items, source, selector),
+                else => unreachable,
+            },
+        }
+
+        const value = try out.value(self);
+        const host = try mutableNumericHostArrayValue(self, value);
+        hostDenseSetFlags(host, if (len <= 1)
+            host_dense_flag_normalized | host_dense_flag_asc | host_dense_flag_dsc
+        else
+            host_dense_flag_normalized);
+        hostDenseClearCachedIntRange(host);
+        return value;
+    }
+
+    fn gatherManagedHostIntSelection(self: *Session, view: HostIntArrayView, selector: HostIntDenseView) KError!Value {
+        const len = hostIntDenseViewLen(selector);
+        var out = try self.allocManagedHostIntResult(hostIntArrayViewKind(view), len);
+
+        var asc = true;
+        var dsc = true;
+        var min_value: i64 = 0;
+        var max_value: i64 = 0;
+        var prev: i64 = 0;
+
+        for (0..len) |idx| {
+            const source_idx = try normalizeIndex(try hostIntDenseViewItem(selector, idx), hostIntArrayViewLen(view));
+            const item = hostIntViewItem(view, source_idx);
+            try out.set(idx, item);
+            if (idx == 0) {
+                min_value = item;
+                max_value = item;
+            } else {
+                min_value = @min(min_value, item);
+                max_value = @max(max_value, item);
+                if (prev > item) asc = false;
+                if (prev < item) dsc = false;
+            }
+            prev = item;
+        }
+
+        const value = try out.value(self);
+        const host = try mutableNumericHostArrayValue(self, value);
+        hostDenseSetFlags(host, host_dense_flag_normalized | orderFlagsFromMonotonic(asc, dsc));
+        hostDenseSetCachedIntRange(host, if (len == 0)
+            .{ .min = 0, .max = 0 }
+        else
+            .{ .min = min_value, .max = max_value });
+        return value;
+    }
+
     fn hostDenseIndexByIntVector(self: *Session, array: *const HostDenseArray, selector: HostIntArrayView) KError!Value {
         if (hostDenseNonVectorShape(array)) |shape| {
             if (shape.rank != 2) return error.Unsupported;
             return try self.hostNumericMatrixIndexByIntVector(array, selector, @intCast(shape.shape[0]), @intCast(shape.shape[1]));
         }
         if (comptime enable_probe_instrumentation) self.debug_host_index_copy_count += 1;
-        const len = hostIntArrayViewLen(selector);
         switch (array.storage) {
             .bit => {
-                var out = std.ArrayList(bool).empty;
-                defer out.deinit(self.allocator);
-                for (0..len) |sel_idx| {
-                    const idx = try normalizeIndex(hostIntViewItem(selector, sel_idx), array.len());
-                    try out.append(self.allocator, bitGet(array.storage.bit, idx));
-                }
-                return try self.createManagedHostBitArray(out.items);
+                return try self.gatherManagedHostBitArraySelection(.{ .words = array.storage.bit, .len = array.logical_len }, selector);
             },
             .float64 => |items| {
-                var out = std.ArrayList(f64).empty;
-                defer out.deinit(self.allocator);
-                for (0..len) |sel_idx| {
-                    const idx = try normalizeIndex(hostIntViewItem(selector, sel_idx), array.len());
-                    try out.append(self.allocator, items[idx]);
-                }
-                return try self.createManagedHostFloatArray(out.items);
+                return try self.gatherManagedHostFloatArraySelection(items, selector);
             },
             else => {
-                var out = std.ArrayList(i64).empty;
-                defer out.deinit(self.allocator);
                 const view = hostIntArrayView(array).?;
-                for (0..len) |sel_idx| {
-                    const idx = try normalizeIndex(hostIntViewItem(selector, sel_idx), array.len());
-                    try out.append(self.allocator, hostIntViewItem(view, idx));
-                }
-                return try self.createManagedHostIntArray(out.items);
+                return try self.gatherManagedHostIntArraySelection(view, selector);
             },
         }
     }
@@ -16056,38 +20469,16 @@ pub const Session = struct {
             return try self.hostNumericMatrixIndexByIntDenseView(array, selector, @intCast(shape.shape[0]), @intCast(shape.shape[1]));
         }
         if (comptime enable_probe_instrumentation) self.debug_host_index_copy_count += 1;
-        const len = hostIntDenseViewLen(selector);
         switch (array.storage) {
             .bit => {
-                var out = std.ArrayList(bool).empty;
-                defer out.deinit(self.allocator);
-                try out.ensureTotalCapacity(self.allocator, len);
-                for (0..len) |idx| {
-                    const source_idx = try normalizeIndex(try hostIntDenseViewItem(selector, idx), array.len());
-                    try out.append(self.allocator, bitGet(array.storage.bit, source_idx));
-                }
-                return try self.createManagedHostBitArray(out.items);
+                return try self.gatherManagedHostBitSelection(.{ .words = array.storage.bit, .len = array.logical_len }, selector);
             },
             .float64 => |items| {
-                var out = std.ArrayList(f64).empty;
-                defer out.deinit(self.allocator);
-                try out.ensureTotalCapacity(self.allocator, len);
-                for (0..len) |idx| {
-                    const source_idx = try normalizeIndex(try hostIntDenseViewItem(selector, idx), items.len);
-                    try out.append(self.allocator, items[source_idx]);
-                }
-                return try self.createManagedHostFloatArray(out.items);
+                return try self.gatherManagedHostFloatSelection(items, selector);
             },
             else => {
                 const view = hostIntArrayView(array).?;
-                var out = std.ArrayList(i64).empty;
-                defer out.deinit(self.allocator);
-                try out.ensureTotalCapacity(self.allocator, len);
-                for (0..len) |idx| {
-                    const source_idx = try normalizeIndex(try hostIntDenseViewItem(selector, idx), hostIntArrayViewLen(view));
-                    try out.append(self.allocator, hostIntViewItem(view, source_idx));
-                }
-                return try self.createManagedHostIntArray(out.items);
+                return try self.gatherManagedHostIntSelection(view, selector);
             },
         }
     }
@@ -16948,11 +21339,89 @@ pub const Session = struct {
             return scalarIntLikeValue(scalar.value);
         }
         return switch (value.raw & Value.tag_mask) {
-            Value.int_tag => @as(i64, @bitCast(value.raw)) >> Value.tag_bits,
-            Value.boxed_int_tag => value.asBoxedInt().value,
+            Value.int_tag, Value.boxed_int_tag => value.asInt(),
             Value.bool_tag => @intFromBool(value.asBool()),
             else => null,
         };
+    }
+
+    fn inlineIntBoolValue(value: Value) ?i64 {
+        return switch (value.raw & Value.tag_mask) {
+            Value.int_tag => value.asInt(),
+            Value.bool_tag => @intFromBool(value.asBool()),
+            else => null,
+        };
+    }
+
+    fn inlineExactIntNumericValue(value: Value) ?i64 {
+        return switch (value.raw & Value.tag_mask) {
+            Value.int_tag => value.asInt(),
+            Value.bool_tag => @intFromBool(value.asBool()),
+            else => if (value.tag() == .float) exactIntFromFloat(value.asFloat()) else null,
+        };
+    }
+
+    fn inlineNumericFloatValue(value: Value) ?f64 {
+        return switch (value.raw & Value.tag_mask) {
+            Value.int_tag => @floatFromInt(value.asInt()),
+            Value.bool_tag => @floatFromInt(@intFromBool(value.asBool())),
+            else => if (value.tag() == .float) value.asFloat() else null,
+        };
+    }
+
+    fn tryFastInlineScalarDyad(self: *Session, op: BuiltinId, left: Value, right: Value) KError!?Value {
+        const left_int = inlineIntBoolValue(left);
+        const right_int = inlineIntBoolValue(right);
+        if (left_int != null and right_int != null) {
+            if (comptime enable_probe_instrumentation) self.debug_inline_scalar_dyad_attempt_count += 1;
+            const lhs = left_int.?;
+            const rhs = right_int.?;
+            const result: ?Value = switch (op) {
+                .add => try self.addIntValue(lhs, rhs),
+                .sub => try self.subIntValue(lhs, rhs),
+                .mul => try self.mulIntValue(lhs, rhs),
+                .div => try self.floatValue(@as(f64, @floatFromInt(lhs)) / @as(f64, @floatFromInt(rhs))),
+                .pow => try self.intValue(try intPowLikeMlx(lhs, rhs)),
+                .iota => try self.intValue(bangIntOp(lhs, rhs)),
+                .minimum => if (left.tag() == .bool and right.tag() == .bool)
+                    Value.fromBool(left.asBool() and right.asBool())
+                else
+                    try self.intValue(@min(lhs, rhs)),
+                .maximum => if (left.tag() == .bool and right.tag() == .bool)
+                    Value.fromBool(left.asBool() or right.asBool())
+                else
+                    try self.intValue(@max(lhs, rhs)),
+                .less => Value.fromBool(lhs < rhs),
+                .more => Value.fromBool(lhs > rhs),
+                .equal => Value.fromBool(lhs == rhs),
+                else => null,
+            };
+            if (comptime enable_probe_instrumentation) {
+                if (result != null) self.debug_inline_scalar_dyad_hit_count += 1 else self.debug_inline_scalar_dyad_fallback_count += 1;
+            }
+            return result;
+        }
+
+        const left_float = inlineNumericFloatValue(left) orelse return null;
+        const right_float = inlineNumericFloatValue(right) orelse return null;
+        if (comptime enable_probe_instrumentation) self.debug_inline_scalar_dyad_attempt_count += 1;
+        const result: ?Value = switch (op) {
+            .add => try self.floatValue(left_float + right_float),
+            .sub => try self.floatValue(left_float - right_float),
+            .mul => try self.floatValue(left_float * right_float),
+            .div => try self.floatValue(left_float / right_float),
+            .minimum => try self.floatValue(@min(left_float, right_float)),
+            .maximum => try self.floatValue(@max(left_float, right_float)),
+            .less => Value.fromBool(left_float < right_float),
+            .more => Value.fromBool(left_float > right_float),
+            .equal => Value.fromBool(left_float == right_float),
+            .pow => try self.floatValue(std.math.pow(f64, left_float, right_float)),
+            else => null,
+        };
+        if (comptime enable_probe_instrumentation) {
+            if (result != null) self.debug_inline_scalar_dyad_hit_count += 1 else self.debug_inline_scalar_dyad_fallback_count += 1;
+        }
+        return result;
     }
 
     fn tryScalarIntBoolDyad(self: *Session, op: BuiltinId, left: Value, right: Value) KError!?Value {
@@ -16976,13 +21445,13 @@ pub const Session = struct {
     fn numericStructuralAffineOffsetValue(self: *Session, value: Value, offset: i64) KError!?Value {
         const handle = valueNumericHandle(value) orelse return null;
         if (!numericArrayIsRangeIota(handle)) return null;
-        const start = try checkedIntOp(.add, handle.range_iota.start, offset);
+        const start = try checkedIntOp(.add, numericArrayRangeIota(handle).start, offset);
         return try newRangeIotaValueWithShape(
             self,
             .managed,
             numericArrayRangeLen(handle),
             start,
-            handle.range_iota.step,
+            numericArrayRangeIota(handle).step,
             numericShapeSnapshotFromHandle(handle),
         );
     }
@@ -17551,7 +22020,10 @@ pub const Session = struct {
     }
 
     fn resolveLoadPath(self: *Session, path: []const u8) KError![]u8 {
-        if (comptime zig_builtin.target.os.tag == .freestanding or zig_builtin.target.cpu.arch == .wasm32) {
+        if (comptime zig_builtin.target.os.tag == .freestanding or
+            zig_builtin.target.os.tag == .watchos or
+            zig_builtin.target.cpu.arch == .wasm32)
+        {
             return self.allocator.dupe(u8, path);
         }
         return std.fs.realpathAlloc(self.allocator, path) catch |err| switch (err) {
@@ -18350,8 +22822,7 @@ pub const Session = struct {
 
     fn scalarRandomCountValue(value: Value) ?i64 {
         return switch (value.raw & Value.tag_mask) {
-            Value.int_tag => @as(i64, @bitCast(value.raw)) >> Value.tag_bits,
-            Value.boxed_int_tag => value.asBoxedInt().value,
+            Value.int_tag, Value.boxed_int_tag => value.asInt(),
             else => null,
         };
     }
@@ -19890,7 +24361,7 @@ pub const Session = struct {
         }
         if (valueNumericMatrixView(value)) |matrix| {
             if (numericArrayIsRangeIota(matrix.handle)) {
-                if (matrix.shape.rows <= 1 or matrix.handle.range_iota.step != 0) return self.shareValue(value);
+                if (matrix.shape.rows <= 1 or numericArrayRangeIota(matrix.handle).step != 0) return self.shareValue(value);
                 return (try numericValueFirstAxisContiguousSliceValue(self, value, .{ .start = 0, .len = 1 })) orelse error.Type;
             }
             if (matrix.shape.rows == 0) return self.shareValue(value);
@@ -20594,7 +25065,20 @@ pub const Session = struct {
                 },
                 else => 0,
             },
-            else => 0,
+            else => blk: {
+                const len = hostFloatDenseViewLen(view);
+                if (len <= 1) break :blk host_dense_flag_normalized | host_dense_flag_asc | host_dense_flag_dsc;
+                var prev = hostFloatDenseViewItem(view, 0) catch unreachable;
+                var asc = true;
+                var dsc = true;
+                for (1..len) |idx| {
+                    const item = hostFloatDenseViewItem(view, idx) catch unreachable;
+                    if (prev > item) asc = false;
+                    if (prev < item) dsc = false;
+                    prev = item;
+                }
+                break :blk host_dense_flag_normalized | orderFlagsFromMonotonic(asc, dsc);
+            },
         };
     }
 
@@ -20668,13 +25152,84 @@ pub const Session = struct {
         };
     }
 
-    fn tryFastHostFloatVectorFindScalar(left: Value, view: HostFloatDenseView, query: f64, miss_index: usize) ?usize {
-        const items = switch (view) {
-            .dense => |dense_items| dense_items,
+    fn findFirstEqualHostFlatSliceIntView(view: HostFlatSliceView, query: i64) ?usize {
+        const array = view.source_host orelse return null;
+        const end = std.math.add(usize, view.start, view.len) catch return null;
+        switch (array.storage) {
+            .bit => |words| {
+                if (end > array.logical_len) return null;
+                const want = switch (query) {
+                    0 => false,
+                    1 => true,
+                    else => return null,
+                };
+                for (0..view.len) |idx| {
+                    if (bitGet(words, view.start + idx) == want) return idx;
+                }
+                return null;
+            },
+            .int8 => |items| {
+                const logical_items = hostDenseLogicalItems(i8, array, items);
+                if (end > logical_items.len) return null;
+                return findFirstEqualDenseIntSlice(i8, logical_items[view.start..end], std.math.cast(i8, query) orelse return null);
+            },
+            .int16 => |items| {
+                const logical_items = hostDenseLogicalItems(i16, array, items);
+                if (end > logical_items.len) return null;
+                return findFirstEqualDenseIntSlice(i16, logical_items[view.start..end], std.math.cast(i16, query) orelse return null);
+            },
+            .int32 => |items| {
+                const logical_items = hostDenseLogicalItems(i32, array, items);
+                if (end > logical_items.len) return null;
+                return findFirstEqualDenseIntSlice(i32, logical_items[view.start..end], std.math.cast(i32, query) orelse return null);
+            },
+            .int64 => |items| {
+                const logical_items = hostDenseLogicalItems(i64, array, items);
+                if (end > logical_items.len) return null;
+                return findFirstEqualDenseIntSlice(i64, logical_items[view.start..end], query);
+            },
+            .float64 => return null,
+        }
+    }
+
+    fn findFirstEqualHostFlatSliceFloatView(view: HostFlatSliceView, query: f64) ?usize {
+        const array = view.source_host orelse return null;
+        const items = switch (array.storage) {
+            .float64 => |items| hostDenseLogicalItems(f64, array, items),
             else => return null,
         };
-        if (items.len == 0) return miss_index;
+        const end = std.math.add(usize, view.start, view.len) catch return null;
+        if (end > items.len) return null;
+        return findFirstEqualDenseFloatSlice(items[view.start..end], query);
+    }
+
+    fn findFirstEqualStructuralIntView(view: HostIntDenseView, query: i64) KError!?usize {
+        if (view == .flat_slice) {
+            if (findFirstEqualHostFlatSliceIntView(view.flat_slice, query)) |idx| return idx;
+        }
+        for (0..hostIntDenseViewLen(view)) |idx| {
+            if ((try hostIntDenseViewItem(view, idx)) == query) return idx;
+        }
+        return null;
+    }
+
+    fn findFirstEqualStructuralFloatView(view: HostFloatDenseView, query: f64) KError!?usize {
+        if (view == .flat_slice) {
+            if (findFirstEqualHostFlatSliceFloatView(view.flat_slice, query)) |idx| return idx;
+        }
+        for (0..hostFloatDenseViewLen(view)) |idx| {
+            if ((try hostFloatDenseViewItem(view, idx)) == query) return idx;
+        }
+        return null;
+    }
+
+    fn tryFastHostFloatVectorFindScalar(left: Value, view: HostFloatDenseView, query: f64, miss_index: usize) KError!?usize {
         if (query != query) return miss_index;
+        const items = switch (view) {
+            .dense => |dense_items| dense_items,
+            else => return (try findFirstEqualStructuralFloatView(view, query)) orelse miss_index,
+        };
+        if (items.len == 0) return miss_index;
 
         const mono = monotonicFlags(hostFloatDenseValueFlags(left, view));
         if (mono != 0) {
@@ -20703,8 +25258,8 @@ pub const Session = struct {
             .range_iota => |items| {
                 const len = hostRangeIotaViewLen(items);
                 if (len == 0) return miss_index;
-                const start = items.handle.range_iota.start;
-                const step = items.handle.range_iota.step;
+                const start = numericArrayRangeIota(items.handle).start;
+                const step = numericArrayRangeIota(items.handle).step;
                 if (step == 0) return if (query == start) 0 else miss_index;
 
                 const delta = query - start;
@@ -20736,7 +25291,7 @@ pub const Session = struct {
                 }
                 return findFirstEqualDenseIntView(items, query) orelse miss_index;
             },
-            else => return null,
+            else => return (try findFirstEqualStructuralIntView(view, query)) orelse miss_index,
         }
     }
 
@@ -20744,7 +25299,7 @@ pub const Session = struct {
         const right_mode = valueNumericMode(right) orelse return null;
         const left_view = hostDenseView(self, left) catch return null;
         return switch (left_view) {
-            .float_array => |items| tryFastHostFloatVectorFindScalar(left, items, try numericFloatAt(right, 0), miss_index),
+            .float_array => |items| try tryFastHostFloatVectorFindScalar(left, items, try numericFloatAt(right, 0), miss_index),
             .int_array => |items| blk: {
                 const query = switch (right_mode) {
                     .int => try numericIntAt(right, 0),
@@ -20924,11 +25479,11 @@ pub const Session = struct {
 
     fn ensureManagedHostFloatFindCache(self: *Session, array: *HostDenseArray, items: []const f64) KError!bool {
         if (numericPayloadOwner(array) != .managed) return false;
-        if (array.find_cache_kind == .float and array.find_cache_keys != null and array.find_cache_slots != null) return true;
+        if (array.find_cache) |cache| {
+            if (cache.kind == .float and cache.keys != null and cache.slots != null) return true;
+        }
 
-        if (array.find_cache_keys) |keys| self.allocator.free(keys);
-        if (array.find_cache_slots) |slots| self.allocator.free(slots);
-        hostDenseResetFindCacheState(array);
+        self.clearManagedHostDenseFindCache(array);
 
         const capacity = denseFindLookupCapacity(items.len) orelse return error.Unsupported;
         const keys = try self.allocator.alloc(u64, capacity);
@@ -20955,23 +25510,24 @@ pub const Session = struct {
             denseFindLookupInsert(keys, slots, capacity - 1, key, idx);
         }
 
-        array.find_cache_kind = .float;
-        array.find_cache_keys = keys;
-        array.find_cache_slots = slots;
-        array.find_cache_mask = capacity - 1;
-        array.float_bounds_known = bounds_known;
-        array.float_bounds_min = min_value;
-        array.float_bounds_max = max_value;
+        const cache = try self.ensureManagedHostDenseFindCache(array);
+        cache.kind = .float;
+        cache.keys = keys;
+        cache.slots = slots;
+        cache.mask = capacity - 1;
+        cache.float_bounds_known = bounds_known;
+        cache.float_bounds_min = min_value;
+        cache.float_bounds_max = max_value;
         return true;
     }
 
     fn ensureManagedHostIntFindCache(self: *Session, array: *HostDenseArray) KError!bool {
         if (numericPayloadOwner(array) != .managed) return false;
-        if (array.find_cache_kind == .int and array.find_cache_keys != null and array.find_cache_slots != null) return true;
+        if (array.find_cache) |cache| {
+            if (cache.kind == .int and cache.keys != null and cache.slots != null) return true;
+        }
 
-        if (array.find_cache_keys) |keys| self.allocator.free(keys);
-        if (array.find_cache_slots) |slots| self.allocator.free(slots);
-        hostDenseResetFindCacheState(array);
+        self.clearManagedHostDenseFindCache(array);
 
         const item_count = array.len();
         const capacity = denseFindLookupCapacity(item_count) orelse return error.Unsupported;
@@ -20987,17 +25543,18 @@ pub const Session = struct {
                     denseFindLookupInsert(keys, slots, capacity - 1, intFindHashKey(@intFromBool(bitGet(items, idx))), idx);
                 }
             },
-            .int8 => |items| for (items, 0..) |item, idx| denseFindLookupInsert(keys, slots, capacity - 1, intFindHashKey(item), idx),
-            .int16 => |items| for (items, 0..) |item, idx| denseFindLookupInsert(keys, slots, capacity - 1, intFindHashKey(item), idx),
-            .int32 => |items| for (items, 0..) |item, idx| denseFindLookupInsert(keys, slots, capacity - 1, intFindHashKey(item), idx),
-            .int64 => |items| for (items, 0..) |item, idx| denseFindLookupInsert(keys, slots, capacity - 1, intFindHashKey(item), idx),
+            .int8 => |items| for (hostDenseLogicalItems(i8, array, items), 0..) |item, idx| denseFindLookupInsert(keys, slots, capacity - 1, intFindHashKey(item), idx),
+            .int16 => |items| for (hostDenseLogicalItems(i16, array, items), 0..) |item, idx| denseFindLookupInsert(keys, slots, capacity - 1, intFindHashKey(item), idx),
+            .int32 => |items| for (hostDenseLogicalItems(i32, array, items), 0..) |item, idx| denseFindLookupInsert(keys, slots, capacity - 1, intFindHashKey(item), idx),
+            .int64 => |items| for (hostDenseLogicalItems(i64, array, items), 0..) |item, idx| denseFindLookupInsert(keys, slots, capacity - 1, intFindHashKey(item), idx),
             .float64 => return false,
         }
 
-        array.find_cache_kind = .int;
-        array.find_cache_keys = keys;
-        array.find_cache_slots = slots;
-        array.find_cache_mask = capacity - 1;
+        const cache = try self.ensureManagedHostDenseFindCache(array);
+        cache.kind = .int;
+        cache.keys = keys;
+        cache.slots = slots;
+        cache.mask = capacity - 1;
         return true;
     }
 
@@ -21066,13 +25623,14 @@ pub const Session = struct {
         if (left_array) |array| {
             if (try self.ensureManagedHostFloatFindCache(array, left_items)) {
                 const miss_i64 = std.math.cast(i64, miss_index) orelse return error.Unsupported;
-                if (!array.float_bounds_known) {
+                const cache = array.find_cache.?;
+                if (!cache.float_bounds_known) {
                     @memset(out, miss_i64);
                     return;
                 }
                 var all_outside = true;
                 for (right_items) |query| {
-                    if (query == query and query >= array.float_bounds_min and query <= array.float_bounds_max) {
+                    if (query == query and query >= cache.float_bounds_min and query <= cache.float_bounds_max) {
                         all_outside = false;
                         break;
                     }
@@ -21081,11 +25639,11 @@ pub const Session = struct {
                     @memset(out, miss_i64);
                     return;
                 }
-                const keys = array.find_cache_keys.?;
-                const slots = array.find_cache_slots.?;
+                const keys = cache.keys.?;
+                const slots = cache.slots.?;
                 for (right_items, 0..) |query, query_idx| {
                     if (floatFindHashKey(query)) |key| {
-                        out[query_idx] = if (denseFindLookupGet(keys, slots, array.find_cache_mask, key)) |found_idx|
+                        out[query_idx] = if (denseFindLookupGet(keys, slots, cache.mask, key)) |found_idx|
                             std.math.cast(i64, found_idx) orelse return error.Unsupported
                         else
                             miss_i64;
@@ -21163,14 +25721,15 @@ pub const Session = struct {
         if (left_array) |array| {
             if (try self.ensureManagedHostFloatFindCache(array, left_items)) {
                 const miss_i64 = std.math.cast(i64, miss_index) orelse return error.Unsupported;
-                const keys = array.find_cache_keys.?;
-                const slots = array.find_cache_slots.?;
+                const cache = array.find_cache.?;
+                const keys = cache.keys.?;
+                const slots = cache.slots.?;
                 switch (right_items) {
                     .bit => |items| {
                         for (0..items.len) |query_idx| {
                             const query = @as(f64, @floatFromInt(@intFromBool(bitGet(items.words, query_idx))));
                             const key = floatFindHashKey(query) orelse unreachable;
-                            out[query_idx] = if (denseFindLookupGet(keys, slots, array.find_cache_mask, key)) |found_idx|
+                            out[query_idx] = if (denseFindLookupGet(keys, slots, cache.mask, key)) |found_idx|
                                 std.math.cast(i64, found_idx) orelse return error.Unsupported
                             else
                                 miss_i64;
@@ -21179,7 +25738,7 @@ pub const Session = struct {
                     .int8 => |items| {
                         for (items, 0..) |query, query_idx| {
                             const key = floatFindHashKey(@as(f64, @floatFromInt(query))) orelse unreachable;
-                            out[query_idx] = if (denseFindLookupGet(keys, slots, array.find_cache_mask, key)) |found_idx|
+                            out[query_idx] = if (denseFindLookupGet(keys, slots, cache.mask, key)) |found_idx|
                                 std.math.cast(i64, found_idx) orelse return error.Unsupported
                             else
                                 miss_i64;
@@ -21188,7 +25747,7 @@ pub const Session = struct {
                     .int16 => |items| {
                         for (items, 0..) |query, query_idx| {
                             const key = floatFindHashKey(@as(f64, @floatFromInt(query))) orelse unreachable;
-                            out[query_idx] = if (denseFindLookupGet(keys, slots, array.find_cache_mask, key)) |found_idx|
+                            out[query_idx] = if (denseFindLookupGet(keys, slots, cache.mask, key)) |found_idx|
                                 std.math.cast(i64, found_idx) orelse return error.Unsupported
                             else
                                 miss_i64;
@@ -21197,7 +25756,7 @@ pub const Session = struct {
                     .int32 => |items| {
                         for (items, 0..) |query, query_idx| {
                             const key = floatFindHashKey(@as(f64, @floatFromInt(query))) orelse unreachable;
-                            out[query_idx] = if (denseFindLookupGet(keys, slots, array.find_cache_mask, key)) |found_idx|
+                            out[query_idx] = if (denseFindLookupGet(keys, slots, cache.mask, key)) |found_idx|
                                 std.math.cast(i64, found_idx) orelse return error.Unsupported
                             else
                                 miss_i64;
@@ -21206,7 +25765,7 @@ pub const Session = struct {
                     .int64 => |items| {
                         for (items, 0..) |query, query_idx| {
                             const key = floatFindHashKey(@as(f64, @floatFromInt(query))) orelse unreachable;
-                            out[query_idx] = if (denseFindLookupGet(keys, slots, array.find_cache_mask, key)) |found_idx|
+                            out[query_idx] = if (denseFindLookupGet(keys, slots, cache.mask, key)) |found_idx|
                                 std.math.cast(i64, found_idx) orelse return error.Unsupported
                             else
                                 miss_i64;
@@ -21286,12 +25845,13 @@ pub const Session = struct {
         if (left_array) |array| {
             if (try self.ensureManagedHostIntFindCache(array)) {
                 const miss_i64 = std.math.cast(i64, miss_index) orelse return error.Unsupported;
-                const keys = array.find_cache_keys.?;
-                const slots = array.find_cache_slots.?;
+                const cache = array.find_cache.?;
+                const keys = cache.keys.?;
+                const slots = cache.slots.?;
                 switch (right_items) {
                     .bit => |items| {
                         for (0..items.len) |query_idx| {
-                            out[query_idx] = if (denseFindLookupGet(keys, slots, array.find_cache_mask, intFindHashKey(@intFromBool(bitGet(items.words, query_idx))))) |found_idx|
+                            out[query_idx] = if (denseFindLookupGet(keys, slots, cache.mask, intFindHashKey(@intFromBool(bitGet(items.words, query_idx))))) |found_idx|
                                 std.math.cast(i64, found_idx) orelse return error.Unsupported
                             else
                                 miss_i64;
@@ -21299,7 +25859,7 @@ pub const Session = struct {
                     },
                     .int8 => |items| {
                         for (items, 0..) |query, query_idx| {
-                            out[query_idx] = if (denseFindLookupGet(keys, slots, array.find_cache_mask, intFindHashKey(query))) |found_idx|
+                            out[query_idx] = if (denseFindLookupGet(keys, slots, cache.mask, intFindHashKey(query))) |found_idx|
                                 std.math.cast(i64, found_idx) orelse return error.Unsupported
                             else
                                 miss_i64;
@@ -21307,7 +25867,7 @@ pub const Session = struct {
                     },
                     .int16 => |items| {
                         for (items, 0..) |query, query_idx| {
-                            out[query_idx] = if (denseFindLookupGet(keys, slots, array.find_cache_mask, intFindHashKey(query))) |found_idx|
+                            out[query_idx] = if (denseFindLookupGet(keys, slots, cache.mask, intFindHashKey(query))) |found_idx|
                                 std.math.cast(i64, found_idx) orelse return error.Unsupported
                             else
                                 miss_i64;
@@ -21315,7 +25875,7 @@ pub const Session = struct {
                     },
                     .int32 => |items| {
                         for (items, 0..) |query, query_idx| {
-                            out[query_idx] = if (denseFindLookupGet(keys, slots, array.find_cache_mask, intFindHashKey(query))) |found_idx|
+                            out[query_idx] = if (denseFindLookupGet(keys, slots, cache.mask, intFindHashKey(query))) |found_idx|
                                 std.math.cast(i64, found_idx) orelse return error.Unsupported
                             else
                                 miss_i64;
@@ -21323,7 +25883,7 @@ pub const Session = struct {
                     },
                     .int64 => |items| {
                         for (items, 0..) |query, query_idx| {
-                            out[query_idx] = if (denseFindLookupGet(keys, slots, array.find_cache_mask, intFindHashKey(query))) |found_idx|
+                            out[query_idx] = if (denseFindLookupGet(keys, slots, cache.mask, intFindHashKey(query))) |found_idx|
                                 std.math.cast(i64, found_idx) orelse return error.Unsupported
                             else
                                 miss_i64;
@@ -21403,12 +25963,13 @@ pub const Session = struct {
         if (left_array) |array| {
             if (try self.ensureManagedHostIntFindCache(array)) {
                 const miss_i64 = std.math.cast(i64, miss_index) orelse return error.Unsupported;
-                const keys = array.find_cache_keys.?;
-                const slots = array.find_cache_slots.?;
+                const cache = array.find_cache.?;
+                const keys = cache.keys.?;
+                const slots = cache.slots.?;
                 for (right_items, 0..) |query, query_idx| {
                     const query_int = exactIntFromFloat(query);
                     out[query_idx] = if (query_int) |value|
-                        if (denseFindLookupGet(keys, slots, array.find_cache_mask, intFindHashKey(value))) |found_idx|
+                        if (denseFindLookupGet(keys, slots, cache.mask, intFindHashKey(value))) |found_idx|
                             std.math.cast(i64, found_idx) orelse return error.Unsupported
                         else
                             miss_i64
@@ -22202,6 +26763,14 @@ pub const Session = struct {
         if (!backendResidentNumericVectorFindPrefersHost(self, left, right, left_len, query_len)) {
             if (try self.tryFastBackendNumericVectorFindValue(left, right)) |result| return result;
         }
+        if (query_len == 1 and
+            numericValueSupportsStructuralFlatItemsWithoutHost(left) and
+            numericValueSupportsStructuralFlatItemsWithoutHost(right))
+        {
+            if (try self.tryFastHostNumericVectorFindScalarIndex(left, right, left_len)) |idx| {
+                return try self.intValue(@intCast(idx));
+            }
+        }
         if (valueNumericHandle(left)) |handle| _ = try tryEnsureHostRealizationForHandle(self, @constCast(handle));
         if (valueNumericHandle(right)) |handle| _ = try tryEnsureHostRealizationForHandle(self, @constCast(handle));
         if (query_len == 1) {
@@ -22324,14 +26893,23 @@ pub const Session = struct {
     }
 
     fn iotaBitVectorValue(self: *Session, array: *const HostDenseArray) KError!Value {
-        var out = std.ArrayList(i64).empty;
-        defer out.deinit(self.allocator);
+        const bits: HostBitSlice = .{ .words = array.storage.bit, .len = array.len() };
+        const count = bitCountTrue(bits);
+        const out = try self.allocator.alloc(i64, count);
+        defer self.allocator.free(out);
 
-        try out.ensureTotalCapacity(self.allocator, array.len());
-        for (0..array.len()) |idx| {
-            if (bitGet(array.storage.bit, idx)) try out.append(self.allocator, @intCast(idx));
+        var out_idx: usize = 0;
+        for (bits.words, 0..) |_, word_idx| {
+            const word_base = word_idx * host_bit_word_bits;
+            var selected = bitWordMasked(bits.words, bits.len, word_idx);
+            while (selected != 0) {
+                const bit_idx: usize = @intCast(@ctz(selected));
+                out[out_idx] = @intCast(word_base + bit_idx);
+                out_idx += 1;
+                selected &= selected - 1;
+            }
         }
-        return try self.createManagedHostIntArray(out.items);
+        return try self.createManagedHostIntArray(out);
     }
 
     fn iotaIntVectorValue(self: *Session, array: *const HostDenseArray) KError!Value {
@@ -22380,14 +26958,23 @@ pub const Session = struct {
     }
 
     fn whereBitVectorValue(self: *Session, array: *const HostDenseArray) KError!Value {
-        var out = std.ArrayList(i64).empty;
-        defer out.deinit(self.allocator);
+        const bits: HostBitSlice = .{ .words = array.storage.bit, .len = array.len() };
+        const count = bitCountTrue(bits);
+        const out = try self.allocator.alloc(i64, count);
+        defer self.allocator.free(out);
 
-        try out.ensureTotalCapacity(self.allocator, array.len());
-        for (0..array.len()) |idx| {
-            if (bitGet(array.storage.bit, idx)) try out.append(self.allocator, @intCast(idx));
+        var out_idx: usize = 0;
+        for (bits.words, 0..) |_, word_idx| {
+            const word_base = word_idx * host_bit_word_bits;
+            var selected = bitWordMasked(bits.words, bits.len, word_idx);
+            while (selected != 0) {
+                const bit_idx: usize = @intCast(@ctz(selected));
+                out[out_idx] = @intCast(word_base + bit_idx);
+                out_idx += 1;
+                selected &= selected - 1;
+            }
         }
-        return try self.createManagedHostIntArray(out.items);
+        return try self.createManagedHostIntArray(out);
     }
 
     fn whereIntVectorValue(self: *Session, array: *const HostDenseArray) KError!Value {
@@ -22474,10 +27061,10 @@ pub const Session = struct {
         if (valueVectorRangeIotaHandle(value)) |handle| {
             const len = numericArrayRangeLen(handle);
             const start = if (len == 0)
-                handle.range_iota.start
+                numericArrayRangeIota(handle).start
             else
                 try numericArrayRangeIotaValueAt(handle, len - 1);
-            const step = try checkedIntOp(.sub, 0, handle.range_iota.step);
+            const step = try checkedIntOp(.sub, 0, numericArrayRangeIota(handle).step);
             return try newRangeIotaValueWithParams(self, .managed, len, start, step);
         }
         if (shapedNumericHandle(value)) |handle| {
@@ -22512,46 +27099,61 @@ pub const Session = struct {
             }
             return try self.createManagedHostNumericMatrixRows(array, row_indices.items, shape.cols);
         }
-        return switch (array.storage) {
-            .bit => blk: {
-                var out = std.ArrayList(bool).empty;
-                defer out.deinit(self.allocator);
-                try out.ensureTotalCapacity(self.allocator, array.len());
-                var idx = array.len();
-                while (idx > 0) {
-                    idx -= 1;
-                    try out.append(self.allocator, bitGet(array.storage.bit, idx));
-                }
-                break :blk try self.createManagedHostBitArray(out.items);
-            },
-            .float64 => |items| blk: {
-                var out = std.ArrayList(f64).empty;
-                defer out.deinit(self.allocator);
-                try out.ensureTotalCapacity(self.allocator, items.len);
-                var idx = items.len;
-                while (idx > 0) {
-                    idx -= 1;
-                    try out.append(self.allocator, items[idx]);
-                }
-                break :blk try self.createManagedHostFloatArray(out.items);
-            },
-            else => blk: {
-                const view = hostIntArrayView(array).?;
-                var out = std.ArrayList(i64).empty;
-                defer out.deinit(self.allocator);
-                try out.ensureTotalCapacity(self.allocator, array.len());
-                var idx = hostIntArrayViewLen(view);
-                while (idx > 0) {
-                    idx -= 1;
-                    try out.append(self.allocator, hostIntViewItem(view, idx));
-                }
-                break :blk try self.createManagedHostIntArray(out.items);
-            },
-        };
+        return try self.reverseDenseHostVectorValue(value, array);
     }
 
     fn reverseHostString(self: *Session, text: *const HostText) KError!Value {
         return try self.reverseStringBytes(hostTextBytes(text));
+    }
+
+    fn reverseDenseHostVectorValue(self: *Session, value: Value, array: *const HostDenseArray) KError!Value {
+        return switch (array.storage) {
+            .bit => |words| blk: {
+                const out = try self.allocHostBitArray(.managed, array.len());
+                bitReverseInto(out.words, .{ .words = words, .len = array.len() });
+                break :blk try self.finishManagedHostBitAlloc(out, reversedDenseFlags(array.flags), sourceHostIntRange(value, array));
+            },
+            .int8 => |items| blk: {
+                const out = try self.allocHostArrayTyped(i8, .int8, .managed, items.len);
+                reverseTypedSlice(i8, out.items, items);
+                const host = out.array;
+                hostDenseSetFlags(host, reversedDenseFlags(array.flags));
+                hostDenseSetCachedIntRange(host, sourceHostIntRange(value, array));
+                break :blk try wrapOwnedHostArrayValue(self, host);
+            },
+            .int16 => |items| blk: {
+                const out = try self.allocHostArrayTyped(i16, .int16, .managed, items.len);
+                reverseTypedSlice(i16, out.items, items);
+                const host = out.array;
+                hostDenseSetFlags(host, reversedDenseFlags(array.flags));
+                hostDenseSetCachedIntRange(host, sourceHostIntRange(value, array));
+                break :blk try wrapOwnedHostArrayValue(self, host);
+            },
+            .int32 => |items| blk: {
+                const out = try self.allocHostArrayTyped(i32, .int32, .managed, items.len);
+                reverseTypedSlice(i32, out.items, items);
+                const host = out.array;
+                hostDenseSetFlags(host, reversedDenseFlags(array.flags));
+                hostDenseSetCachedIntRange(host, sourceHostIntRange(value, array));
+                break :blk try wrapOwnedHostArrayValue(self, host);
+            },
+            .int64 => |items| blk: {
+                const out = try self.allocHostArrayTyped(i64, .int64, .managed, items.len);
+                reverseTypedSlice(i64, out.items, items);
+                const host = out.array;
+                hostDenseSetFlags(host, reversedDenseFlags(array.flags));
+                hostDenseSetCachedIntRange(host, sourceHostIntRange(value, array));
+                break :blk try wrapOwnedHostArrayValue(self, host);
+            },
+            .float64 => |items| blk: {
+                const out = try self.allocHostArrayTyped(f64, .float64, .managed, items.len);
+                reverseTypedSlice(f64, out.items, items);
+                const host = out.array;
+                hostDenseSetFlags(host, reversedDenseFlags(array.flags));
+                hostDenseCopyFloatBounds(host, array);
+                break :blk try wrapOwnedHostArrayValue(self, host);
+            },
+        };
     }
 
     fn reverseStringBytes(self: *Session, src: []const u8) KError!Value {
@@ -22615,11 +27217,16 @@ pub const Session = struct {
     fn notValue(self: *Session, value: Value) KError!Value {
         if (boolLikeValue(value)) |truthy| return Value.fromBool(!truthy);
         if (valueHostIntStructuralView(value)) |view| {
-            var out = std.ArrayList(bool).empty;
-            defer out.deinit(self.allocator);
-            try out.ensureTotalCapacity(self.allocator, hostIntDenseViewLen(view));
-            for (0..hostIntDenseViewLen(view)) |idx| try out.append(self.allocator, try hostIntDenseViewItem(view, idx) == 0);
-            return try self.createManagedHostBitArray(out.items);
+            const len = hostIntDenseViewLen(view);
+            const out = try self.allocHostBitArray(.managed, len);
+            var stats = BitSequenceStats{};
+            for (0..len) |idx| {
+                const item = (try hostIntDenseViewItem(view, idx)) == 0;
+                bitSet(out.words, idx, item);
+                stats.note(item);
+            }
+            const metadata = stats.metadata();
+            return try self.finishManagedHostBitAlloc(out, metadata.flags, metadata.range);
         }
         const array = try numericHostArrayValue(self, value);
         switch (array.storage) {
@@ -22631,19 +27238,28 @@ pub const Session = struct {
                 return result;
             },
             .float64 => |items| {
-                var out = std.ArrayList(bool).empty;
-                defer out.deinit(self.allocator);
-                try out.ensureTotalCapacity(self.allocator, items.len);
-                for (items) |item| try out.append(self.allocator, item == 0.0);
-                return try self.createManagedHostBitArray(out.items);
+                const out = try self.allocHostBitArray(.managed, items.len);
+                var stats = BitSequenceStats{};
+                for (items, 0..) |item, idx| {
+                    const bit = item == 0.0;
+                    bitSet(out.words, idx, bit);
+                    stats.note(bit);
+                }
+                const metadata = stats.metadata();
+                return try self.finishManagedHostBitAlloc(out, metadata.flags, metadata.range);
             },
             else => {
                 const view = hostIntArrayView(array).?;
-                var out = std.ArrayList(bool).empty;
-                defer out.deinit(self.allocator);
-                try out.ensureTotalCapacity(self.allocator, hostIntArrayViewLen(view));
-                for (0..hostIntArrayViewLen(view)) |idx| try out.append(self.allocator, hostIntViewItem(view, idx) == 0);
-                return try self.createManagedHostBitArray(out.items);
+                const len = hostIntArrayViewLen(view);
+                const out = try self.allocHostBitArray(.managed, len);
+                var stats = BitSequenceStats{};
+                for (0..len) |idx| {
+                    const bit = hostIntViewItem(view, idx) == 0;
+                    bitSet(out.words, idx, bit);
+                    stats.note(bit);
+                }
+                const metadata = stats.metadata();
+                return try self.finishManagedHostBitAlloc(out, metadata.flags, metadata.range);
             },
         }
     }
@@ -22777,18 +27393,35 @@ pub const Session = struct {
 
         switch (source.storage) {
             .bit => {
-                var out = std.ArrayList(bool).empty;
-                defer out.deinit(self.allocator);
-                for (0..len) |idx| {
-                    const item = Value.fromBool(bitGet(source.storage.bit, idx));
-                    if (try self.sequenceContainsValue(right, item)) {
-                        removed_any = true;
-                        continue;
-                    }
-                    try out.append(self.allocator, item.asBool());
+                const remove_false = try self.sequenceContainsValue(right, Value.fromBool(false));
+                const remove_true = try self.sequenceContainsValue(right, Value.fromBool(true));
+                if (!remove_false and !remove_true) return self.shareValue(left);
+
+                const bits: HostBitSlice = .{ .words = source.storage.bit, .len = len };
+                const count_true = bitCountTrue(bits);
+                const count_false = len - count_true;
+                const out_len = (if (remove_false) 0 else count_false) + (if (remove_true) 0 else count_true);
+                const out = try self.allocHostBitArray(.managed, out_len);
+
+                if (!remove_false and remove_true) {
+                    const metadata = (BitSequenceStats{
+                        .saw_zero = out_len != 0,
+                        .has_prev = out_len != 0,
+                        .prev = false,
+                    }).metadata();
+                    return try self.finishManagedHostBitAlloc(out, metadata.flags, metadata.range);
                 }
-                if (!removed_any) return self.shareValue(left);
-                return try self.createManagedHostBitArray(out.items);
+                if (remove_false and !remove_true) {
+                    bitFill(out.words, out.len, true);
+                    const metadata = (BitSequenceStats{
+                        .saw_one = out_len != 0,
+                        .has_prev = out_len != 0,
+                        .prev = true,
+                    }).metadata();
+                    return try self.finishManagedHostBitAlloc(out, metadata.flags, metadata.range);
+                }
+                removed_any = true;
+                return try self.finishManagedHostBitAlloc(out, host_dense_flag_normalized | host_dense_flag_asc | host_dense_flag_dsc, .{ .min = 0, .max = 0 });
             },
             .float64 => |items| {
                 var out = std.ArrayList(f64).empty;
@@ -22981,11 +27614,1369 @@ pub const Session = struct {
         if (flipped) @memcpy(idxs, src);
     }
 
+    fn reverseIndexValue(self: *Session, len: usize) KError!Value {
+        if (len == 0) return try newRangeIotaValue(self, .managed, 0);
+        const start = std.math.cast(i64, len - 1) orelse return error.Unsupported;
+        return try newRangeIotaValueWithParams(self, .managed, len, start, -1);
+    }
+
+    fn tryMonotonicGradeValue(self: *Session, len: usize, flags: u8, ascending: bool) KError!?Value {
+        if (len <= 1) return try newRangeIotaValue(self, .managed, len);
+
+        const mono = monotonicFlags(flags);
+        if (mono == 0) return null;
+
+        const direct_flag = if (ascending) host_dense_flag_asc else host_dense_flag_dsc;
+        if ((mono & direct_flag) != 0) return try newRangeIotaValue(self, .managed, len);
+        return null;
+    }
+
     fn managedHostIndexArrayValue(self: *Session, idxs: []const usize) KError!Value {
-        var out = try self.allocator.alloc(i64, idxs.len);
-        defer self.allocator.free(out);
-        for (idxs, 0..) |idx, out_idx| out[out_idx] = @intCast(idx);
-        return try self.createManagedHostIntArray(out);
+        const max_value = if (idxs.len == 0)
+            0
+        else
+            std.math.cast(i64, idxs.len - 1) orelse return error.Unsupported;
+
+        var out = try self.allocManagedHostIntResult(hostIntStorageKindForRange(0, max_value), idxs.len);
+        var asc = true;
+        var dsc = true;
+        var prev: i64 = 0;
+        for (idxs, 0..) |idx, out_idx| {
+            const value = std.math.cast(i64, idx) orelse return error.Unsupported;
+            try out.set(out_idx, value);
+            if (out_idx != 0) {
+                if (prev > value) asc = false;
+                if (prev < value) dsc = false;
+            }
+            prev = value;
+        }
+
+        const value = try out.value(self);
+        const host = try mutableNumericHostArrayValue(self, value);
+        hostDenseSetFlags(host, host_dense_flag_normalized | orderFlagsFromMonotonic(asc, dsc));
+        hostDenseSetCachedIntRange(host, .{ .min = 0, .max = max_value });
+        return value;
+    }
+
+    fn intGradeRangeLen(range: HostIntRange) ?usize {
+        const len_i128 = @as(i128, range.max) - @as(i128, range.min) + 1;
+        if (len_i128 <= 0 or len_i128 > std.math.maxInt(usize)) return null;
+        return @intCast(len_i128);
+    }
+
+    fn preferBucketIntGrade(len: usize, range_len: usize) bool {
+        if (range_len == 0) return false;
+        if (range_len > (1 << 18)) return false;
+        const scaled_len = std.math.mul(usize, len, 16) catch std.math.maxInt(usize);
+        return range_len <= scaled_len;
+    }
+
+    const small_grade_stack_threshold: usize = 128;
+    const small_dense_int8_grade_threshold: usize = 24;
+    const small_dense_int16_grade_threshold: usize = 48;
+    const small_dense_int32_grade_threshold: usize = 64;
+    const small_dense_int64_grade_threshold: usize = 64;
+    const small_dense_float_grade_threshold: usize = 64;
+
+    fn gradeResultMaxValue(len: usize) KError!i64 {
+        return if (len == 0)
+            0
+        else
+            std.math.cast(i64, len - 1) orelse return error.Unsupported;
+    }
+
+    fn analyzeGradeIndexSlice(comptime T: type, items: []const T) u8 {
+        if (items.len <= 1) return host_dense_flag_normalized | host_dense_flag_asc | host_dense_flag_dsc;
+
+        var asc = true;
+        var dsc = true;
+        var prev: i64 = items[0];
+        for (items[1..]) |item| {
+            const value: i64 = item;
+            if (prev > value) asc = false;
+            if (prev < value) dsc = false;
+            prev = value;
+        }
+        return host_dense_flag_normalized | orderFlagsFromMonotonic(asc, dsc);
+    }
+
+    fn finalizeManagedGradeResult(self: *Session, out: *HostIntResult, max_value: i64) KError!Value {
+        const flags = switch (out.*) {
+            .bit => unreachable,
+            .int8 => |dest| analyzeGradeIndexSlice(i8, dest.items),
+            .int16 => |dest| analyzeGradeIndexSlice(i16, dest.items),
+            .int32 => |dest| analyzeGradeIndexSlice(i32, dest.items),
+            .int64 => |dest| analyzeGradeIndexSlice(i64, dest.items),
+        };
+
+        const value = try out.value(self);
+        const host = try mutableNumericHostArrayValue(self, value);
+        hostDenseSetFlags(host, flags);
+        hostDenseSetCachedIntRange(host, .{ .min = 0, .max = max_value });
+        return value;
+    }
+
+    fn fillTypedBooleanGradeIndicesBitSlice(comptime IdxT: type, out: []IdxT, bits: HostBitSlice, ascending: bool) void {
+        const count_one = bitCountTrue(bits);
+        var zero_pos: usize = if (ascending) 0 else count_one;
+        var one_pos: usize = if (ascending) bits.len - count_one else 0;
+
+        for (bits.words, 0..) |_, word_idx| {
+            const active_mask = if (word_idx + 1 == bits.words.len) bitTailMask(bits.len) else std.math.maxInt(u64);
+            const word = bits.words[word_idx] & active_mask;
+            const word_base = word_idx * host_bit_word_bits;
+
+            var zeros = (~word) & active_mask;
+            while (zeros != 0) {
+                const bit_idx: usize = @intCast(@ctz(zeros));
+                out[zero_pos] = @intCast(word_base + bit_idx);
+                zero_pos += 1;
+                zeros &= zeros - 1;
+            }
+
+            var ones = word;
+            while (ones != 0) {
+                const bit_idx: usize = @intCast(@ctz(ones));
+                out[one_pos] = @intCast(word_base + bit_idx);
+                one_pos += 1;
+                ones &= ones - 1;
+            }
+        }
+        std.debug.assert(zero_pos == (if (ascending) bits.len - count_one else bits.len));
+        std.debug.assert(one_pos == (if (ascending) bits.len else count_one));
+    }
+
+    fn fillTypedBooleanGradeIndicesIntSlice(comptime T: type, comptime IdxT: type, out: []IdxT, items: []const T, ascending: bool) void {
+        var count_one: usize = 0;
+        for (items) |item| {
+            if (item != 0) count_one += 1;
+        }
+
+        var zero_pos: usize = if (ascending) 0 else count_one;
+        var one_pos: usize = if (ascending) out.len - count_one else 0;
+        for (items, 0..) |item, idx| {
+            if (item == 0) {
+                out[zero_pos] = @intCast(idx);
+                zero_pos += 1;
+            } else {
+                out[one_pos] = @intCast(idx);
+                one_pos += 1;
+            }
+        }
+    }
+
+    fn fillTypedBooleanGradeResult(comptime IdxT: type, dest: []IdxT, items: HostIntArrayView, ascending: bool) void {
+        switch (items) {
+            .bit => |bits| fillTypedBooleanGradeIndicesBitSlice(IdxT, dest, bits, ascending),
+            .int8 => |slice| fillTypedBooleanGradeIndicesIntSlice(i8, IdxT, dest, slice, ascending),
+            .int16 => |slice| fillTypedBooleanGradeIndicesIntSlice(i16, IdxT, dest, slice, ascending),
+            .int32 => |slice| fillTypedBooleanGradeIndicesIntSlice(i32, IdxT, dest, slice, ascending),
+            .int64 => |slice| fillTypedBooleanGradeIndicesIntSlice(i64, IdxT, dest, slice, ascending),
+        }
+    }
+
+    fn managedHostBooleanGradeValue(self: *Session, view: HostIntDenseView, len: usize, ascending: bool) KError!Value {
+        switch (view) {
+            .dense => |items| {
+                const max_value = try gradeResultMaxValue(len);
+                var out = try self.allocManagedHostIntResult(hostIntStorageKindForRange(0, max_value), len);
+                switch (out) {
+                    .bit => unreachable,
+                    .int8 => |*dest| fillTypedBooleanGradeResult(i8, dest.items, items, ascending),
+                    .int16 => |*dest| fillTypedBooleanGradeResult(i16, dest.items, items, ascending),
+                    .int32 => |*dest| fillTypedBooleanGradeResult(i32, dest.items, items, ascending),
+                    .int64 => |*dest| fillTypedBooleanGradeResult(i64, dest.items, items, ascending),
+                }
+                return try finalizeManagedGradeResult(self, &out, max_value);
+            },
+            else => {
+                if (len <= small_grade_stack_threshold) {
+                    var idxs_buf: [small_grade_stack_threshold]usize = undefined;
+                    const idxs = idxs_buf[0..len];
+                    try fillBooleanGradeIndices(idxs, view, ascending);
+                    return try self.managedHostIndexArrayValue(idxs);
+                }
+
+                const idxs = try self.allocator.alloc(usize, len);
+                defer self.allocator.free(idxs);
+                try fillBooleanGradeIndices(idxs, view, ascending);
+                return try self.managedHostIndexArrayValue(idxs);
+            },
+        }
+    }
+
+    fn int8GradeBucket(item: i8) u8 {
+        return @as(u8, @bitCast(item)) ^ 0x80;
+    }
+
+    fn fillTypedReverseMonotonicGradeIndicesBitSlice(comptime IdxT: type, out: []IdxT, bits: HostBitSlice) bool {
+        var out_idx: usize = 0;
+        var scan = bits.len;
+        var unique = true;
+        while (scan > 0) {
+            const run_end = scan;
+            const run_value = bitGet(bits.words, run_end - 1);
+            scan -= 1;
+            while (scan > 0 and bitGet(bits.words, scan - 1) == run_value) : (scan -= 1) {
+                unique = false;
+            }
+            for (scan..run_end) |idx| {
+                out[out_idx] = @intCast(idx);
+                out_idx += 1;
+            }
+        }
+        return unique;
+    }
+
+    fn fillTypedReverseMonotonicGradeIndicesIntSlice(comptime T: type, comptime IdxT: type, out: []IdxT, items: []const T) bool {
+        var out_idx: usize = 0;
+        var scan = items.len;
+        var unique = true;
+        while (scan > 0) {
+            const run_end = scan;
+            const run_value = items[run_end - 1];
+            scan -= 1;
+            while (scan > 0 and items[scan - 1] == run_value) : (scan -= 1) {
+                unique = false;
+            }
+            for (scan..run_end) |idx| {
+                out[out_idx] = @intCast(idx);
+                out_idx += 1;
+            }
+        }
+        return unique;
+    }
+
+    fn fillTypedReverseMonotonicGradeIndicesFloatSlice(comptime IdxT: type, out: []IdxT, items: []const f64) bool {
+        var out_idx: usize = 0;
+        var scan = items.len;
+        var unique = true;
+        while (scan > 0) {
+            const run_end = scan;
+            const run_value = items[run_end - 1];
+            scan -= 1;
+            while (scan > 0 and std.math.order(items[scan - 1], run_value) == .eq) : (scan -= 1) {
+                unique = false;
+            }
+            for (scan..run_end) |idx| {
+                out[out_idx] = @intCast(idx);
+                out_idx += 1;
+            }
+        }
+        return unique;
+    }
+
+    fn fillTypedInsertionGradeIndicesIntSlice(comptime T: type, comptime IdxT: type, out: []IdxT, items: []const T, ascending: bool) void {
+        for (out, 0..) |*slot, idx| slot.* = @intCast(idx);
+        for (1..out.len) |idx| {
+            const key_idx = @as(usize, @intCast(out[idx]));
+            const key = items[key_idx];
+            var scan = idx;
+            while (scan > 0) {
+                const prev_idx = @as(usize, @intCast(out[scan - 1]));
+                if (!orderComesBefore(std.math.order(key, items[prev_idx]), ascending)) break;
+                out[scan] = @intCast(prev_idx);
+                scan -= 1;
+            }
+            out[scan] = @intCast(key_idx);
+        }
+    }
+
+    fn fillTypedInsertionGradeIndicesFloatSlice(comptime IdxT: type, out: []IdxT, items: []const f64, ascending: bool) void {
+        for (out, 0..) |*slot, idx| slot.* = @intCast(idx);
+        for (1..out.len) |idx| {
+            const key_idx = @as(usize, @intCast(out[idx]));
+            const key = items[key_idx];
+            var scan = idx;
+            while (scan > 0) {
+                const prev_idx = @as(usize, @intCast(out[scan - 1]));
+                if (!orderComesBefore(std.math.order(key, items[prev_idx]), ascending)) break;
+                out[scan] = @intCast(prev_idx);
+                scan -= 1;
+            }
+            out[scan] = @intCast(key_idx);
+        }
+    }
+
+    fn fillTypedInt8GradeResult(comptime T: type, dest: []T, items: []const i8, counts: *[256]usize) void {
+        for (items, 0..) |item, idx| {
+            const bucket = int8GradeBucket(item);
+            const out_idx = counts[bucket];
+            counts[bucket] = out_idx + 1;
+            dest[out_idx] = @intCast(idx);
+        }
+    }
+
+    fn managedHostInt8GradeValue(self: *Session, items: []const i8, ascending: bool) KError!Value {
+        const max_value = try gradeResultMaxValue(items.len);
+
+        var out = try self.allocManagedHostIntResult(hostIntStorageKindForRange(0, max_value), items.len);
+        var counts: [256]usize = undefined;
+        @memset(counts[0..], 0);
+
+        for (items) |item| {
+            counts[int8GradeBucket(item)] += 1;
+        }
+
+        var total: usize = 0;
+        if (ascending) {
+            for (counts[0..]) |*count| {
+                const next = total + count.*;
+                count.* = total;
+                total = next;
+            }
+        } else {
+            var bucket = counts.len;
+            while (bucket > 0) {
+                bucket -= 1;
+                const next = total + counts[bucket];
+                counts[bucket] = total;
+                total = next;
+            }
+        }
+
+        switch (out) {
+            .bit => unreachable,
+            .int8 => |*dest| fillTypedInt8GradeResult(i8, dest.items, items, &counts),
+            .int16 => |*dest| fillTypedInt8GradeResult(i16, dest.items, items, &counts),
+            .int32 => |*dest| fillTypedInt8GradeResult(i32, dest.items, items, &counts),
+            .int64 => |*dest| fillTypedInt8GradeResult(i64, dest.items, items, &counts),
+        }
+
+        return try finalizeManagedGradeResult(self, &out, max_value);
+    }
+
+    fn fillBooleanGradeIndices(out: []usize, view: HostIntDenseView, ascending: bool) KError!void {
+        switch (view) {
+            .dense => |items| switch (items) {
+                .bit => |bits| fillTypedBooleanGradeIndicesBitSlice(usize, out, bits, ascending),
+                .int8 => |slice| fillTypedBooleanGradeIndicesIntSlice(i8, usize, out, slice, ascending),
+                .int16 => |slice| fillTypedBooleanGradeIndicesIntSlice(i16, usize, out, slice, ascending),
+                .int32 => |slice| fillTypedBooleanGradeIndicesIntSlice(i32, usize, out, slice, ascending),
+                .int64 => |slice| fillTypedBooleanGradeIndicesIntSlice(i64, usize, out, slice, ascending),
+            },
+            else => {
+                var count_one: usize = 0;
+                for (0..out.len) |idx| {
+                    if ((try hostIntDenseViewItem(view, idx)) != 0) count_one += 1;
+                }
+
+                var zero_pos: usize = if (ascending) 0 else count_one;
+                var one_pos: usize = if (ascending) out.len - count_one else 0;
+                for (0..out.len) |idx| {
+                    if ((try hostIntDenseViewItem(view, idx)) == 0) {
+                        out[zero_pos] = idx;
+                        zero_pos += 1;
+                    } else {
+                        out[one_pos] = idx;
+                        one_pos += 1;
+                    }
+                }
+            },
+        }
+    }
+
+    fn fillBucketGradeIndices(out: []usize, view: HostIntDenseView, range: HostIntRange, ascending: bool, allocator: std.mem.Allocator) KError!void {
+        const bucket_count = intGradeRangeLen(range) orelse return error.Unsupported;
+        const counts = try allocator.alloc(usize, bucket_count);
+        defer allocator.free(counts);
+        @memset(counts, 0);
+
+        for (0..out.len) |idx| {
+            const value = try hostIntDenseViewItem(view, idx);
+            const bucket_i128 = if (ascending)
+                @as(i128, value) - @as(i128, range.min)
+            else
+                @as(i128, range.max) - @as(i128, value);
+            counts[@intCast(bucket_i128)] += 1;
+        }
+
+        var total: usize = 0;
+        for (counts) |*count| {
+            const next = total + count.*;
+            count.* = total;
+            total = next;
+        }
+
+        for (0..out.len) |idx| {
+            const value = try hostIntDenseViewItem(view, idx);
+            const bucket_i128 = if (ascending)
+                @as(i128, value) - @as(i128, range.min)
+            else
+                @as(i128, range.max) - @as(i128, value);
+            const bucket: usize = @intCast(bucket_i128);
+            out[counts[bucket]] = idx;
+            counts[bucket] += 1;
+        }
+    }
+
+    fn intGradePassCount(kind: HostIntStorageKind) usize {
+        return switch (kind) {
+            .bit, .int8 => 1,
+            .int16 => 2,
+            .int32 => 4,
+            .int64 => 8,
+        };
+    }
+
+    fn intGradeKey(value: i64, kind: HostIntStorageKind, ascending: bool) u64 {
+        const key = switch (kind) {
+            .bit => @as(u64, @intCast(value)),
+            .int8 => @as(u64, @as(u8, @bitCast(std.math.cast(i8, value) orelse unreachable)) ^ 0x80),
+            .int16 => @as(u64, @as(u16, @bitCast(std.math.cast(i16, value) orelse unreachable)) ^ 0x8000),
+            .int32 => @as(u64, @as(u32, @bitCast(std.math.cast(i32, value) orelse unreachable)) ^ 0x8000_0000),
+            .int64 => @as(u64, @bitCast(value)) ^ 0x8000_0000_0000_0000,
+        };
+        return if (ascending) key else ~key;
+    }
+
+    fn intGradeKeyTyped(comptime T: type, value: T, ascending: bool) std.meta.Int(.unsigned, @bitSizeOf(T)) {
+        const KeyT = std.meta.Int(.unsigned, @bitSizeOf(T));
+        const sign_mask: KeyT = @as(KeyT, 1) << (@bitSizeOf(T) - 1);
+        const key = @as(KeyT, @bitCast(value)) ^ sign_mask;
+        return if (ascending) key else ~key;
+    }
+
+    fn floatGradeKey(value: f64, ascending: bool) ?u64 {
+        if (std.math.isNan(value)) return null;
+        const key = if (value == 0.0)
+            @as(u64, 0x8000_0000_0000_0000)
+        else blk: {
+            const bits: u64 = @bitCast(value);
+            break :blk if ((bits & 0x8000_0000_0000_0000) != 0)
+                ~bits
+            else
+                bits ^ 0x8000_0000_0000_0000;
+        };
+        return if (ascending) key else ~key;
+    }
+
+    fn fillInsertionGradeIndicesIntSlice(comptime T: type, out: []usize, items: []const T, ascending: bool) void {
+        for (out, 0..) |*slot, idx| slot.* = idx;
+        for (1..out.len) |idx| {
+            const key_idx = out[idx];
+            const key = items[key_idx];
+            var scan = idx;
+            while (scan > 0) {
+                const prev_idx = out[scan - 1];
+                if (!orderComesBefore(std.math.order(key, items[prev_idx]), ascending)) break;
+                out[scan] = prev_idx;
+                scan -= 1;
+            }
+            out[scan] = key_idx;
+        }
+    }
+
+    fn fillInsertionGradeIndicesIntView(out: []usize, view: HostIntDenseView, ascending: bool) KError!void {
+        for (out, 0..) |*slot, idx| slot.* = idx;
+        for (1..out.len) |idx| {
+            const key_idx = out[idx];
+            const key = try hostIntDenseViewItem(view, key_idx);
+            var scan = idx;
+            while (scan > 0) {
+                const prev_idx = out[scan - 1];
+                if (!orderComesBefore(std.math.order(key, try hostIntDenseViewItem(view, prev_idx)), ascending)) break;
+                out[scan] = prev_idx;
+                scan -= 1;
+            }
+            out[scan] = key_idx;
+        }
+    }
+
+    fn fillInsertionGradeIndicesFloatSlice(out: []usize, items: []const f64, ascending: bool) void {
+        for (out, 0..) |*slot, idx| slot.* = idx;
+        for (1..out.len) |idx| {
+            const key_idx = out[idx];
+            const key = items[key_idx];
+            var scan = idx;
+            while (scan > 0) {
+                const prev_idx = out[scan - 1];
+                if (!orderComesBefore(std.math.order(key, items[prev_idx]), ascending)) break;
+                out[scan] = prev_idx;
+                scan -= 1;
+            }
+            out[scan] = key_idx;
+        }
+    }
+
+    fn fillInsertionGradeIndicesFloatView(out: []usize, view: HostFloatDenseView, ascending: bool) KError!void {
+        for (out, 0..) |*slot, idx| slot.* = idx;
+        for (1..out.len) |idx| {
+            const key_idx = out[idx];
+            const key = try hostFloatDenseViewItem(view, key_idx);
+            var scan = idx;
+            while (scan > 0) {
+                const prev_idx = out[scan - 1];
+                if (!orderComesBefore(std.math.order(key, try hostFloatDenseViewItem(view, prev_idx)), ascending)) break;
+                out[scan] = prev_idx;
+                scan -= 1;
+            }
+            out[scan] = key_idx;
+        }
+    }
+
+    fn fillReverseMonotonicGradeIndicesBitSlice(out: []usize, bits: HostBitSlice) bool {
+        var out_idx: usize = 0;
+        var scan = bits.len;
+        var unique = true;
+        while (scan > 0) {
+            const run_end = scan;
+            const run_value = bitGet(bits.words, run_end - 1);
+            scan -= 1;
+            while (scan > 0 and bitGet(bits.words, scan - 1) == run_value) : (scan -= 1) {
+                unique = false;
+            }
+            for (scan..run_end) |idx| {
+                out[out_idx] = idx;
+                out_idx += 1;
+            }
+        }
+        return unique;
+    }
+
+    fn fillReverseMonotonicGradeIndicesIntSlice(comptime T: type, out: []usize, items: []const T) bool {
+        var out_idx: usize = 0;
+        var scan = items.len;
+        var unique = true;
+        while (scan > 0) {
+            const run_end = scan;
+            const run_value = items[run_end - 1];
+            scan -= 1;
+            while (scan > 0 and items[scan - 1] == run_value) : (scan -= 1) {
+                unique = false;
+            }
+            for (scan..run_end) |idx| {
+                out[out_idx] = idx;
+                out_idx += 1;
+            }
+        }
+        return unique;
+    }
+
+    fn fillReverseMonotonicGradeIndicesIntView(out: []usize, view: HostIntDenseView) KError!bool {
+        var out_idx: usize = 0;
+        var scan = out.len;
+        var unique = true;
+        while (scan > 0) {
+            const run_end = scan;
+            const run_value = try hostIntDenseViewItem(view, run_end - 1);
+            scan -= 1;
+            while (scan > 0 and (try hostIntDenseViewItem(view, scan - 1)) == run_value) : (scan -= 1) {
+                unique = false;
+            }
+            for (scan..run_end) |idx| {
+                out[out_idx] = idx;
+                out_idx += 1;
+            }
+        }
+        return unique;
+    }
+
+    fn fillReverseMonotonicGradeIndicesFloatSlice(out: []usize, items: []const f64) bool {
+        var out_idx: usize = 0;
+        var scan = items.len;
+        var unique = true;
+        while (scan > 0) {
+            const run_end = scan;
+            const run_value = items[run_end - 1];
+            scan -= 1;
+            while (scan > 0 and std.math.order(items[scan - 1], run_value) == .eq) : (scan -= 1) {
+                unique = false;
+            }
+            for (scan..run_end) |idx| {
+                out[out_idx] = idx;
+                out_idx += 1;
+            }
+        }
+        return unique;
+    }
+
+    fn fillReverseMonotonicGradeIndicesFloatView(out: []usize, view: HostFloatDenseView) KError!bool {
+        var out_idx: usize = 0;
+        var scan = out.len;
+        var unique = true;
+        while (scan > 0) {
+            const run_end = scan;
+            const run_value = try hostFloatDenseViewItem(view, run_end - 1);
+            scan -= 1;
+            while (scan > 0 and std.math.order(try hostFloatDenseViewItem(view, scan - 1), run_value) == .eq) : (scan -= 1) {
+                unique = false;
+            }
+            for (scan..run_end) |idx| {
+                out[out_idx] = idx;
+                out_idx += 1;
+            }
+        }
+        return unique;
+    }
+
+    fn fillBucketGradeIndicesIntSlice(comptime T: type, out: []usize, items: []const T, range: HostIntRange, ascending: bool, allocator: std.mem.Allocator) KError!void {
+        const bucket_count = intGradeRangeLen(range) orelse return error.Unsupported;
+        const counts = try allocator.alloc(usize, bucket_count);
+        defer allocator.free(counts);
+        @memset(counts, 0);
+
+        for (items) |item| {
+            const value: i64 = item;
+            const bucket_i128 = if (ascending)
+                @as(i128, value) - @as(i128, range.min)
+            else
+                @as(i128, range.max) - @as(i128, value);
+            counts[@intCast(bucket_i128)] += 1;
+        }
+
+        var total: usize = 0;
+        for (counts) |*count| {
+            const next = total + count.*;
+            count.* = total;
+            total = next;
+        }
+
+        for (items, 0..) |item, idx| {
+            const value: i64 = item;
+            const bucket_i128 = if (ascending)
+                @as(i128, value) - @as(i128, range.min)
+            else
+                @as(i128, range.max) - @as(i128, value);
+            const bucket: usize = @intCast(bucket_i128);
+            out[counts[bucket]] = idx;
+            counts[bucket] += 1;
+        }
+    }
+
+    fn fillTypedBucketGradeIndicesIntSlice(
+        comptime T: type,
+        comptime IdxT: type,
+        out: []IdxT,
+        items: []const T,
+        range: HostIntRange,
+        ascending: bool,
+        allocator: std.mem.Allocator,
+    ) KError!void {
+        const bucket_count = intGradeRangeLen(range) orelse return error.Unsupported;
+        const counts = try allocator.alloc(usize, bucket_count);
+        defer allocator.free(counts);
+        @memset(counts, 0);
+
+        for (items) |item| {
+            const value: i64 = item;
+            const bucket_i128 = if (ascending)
+                @as(i128, value) - @as(i128, range.min)
+            else
+                @as(i128, range.max) - @as(i128, value);
+            counts[@intCast(bucket_i128)] += 1;
+        }
+
+        var total: usize = 0;
+        for (counts) |*count| {
+            const next = total + count.*;
+            count.* = total;
+            total = next;
+        }
+
+        for (items, 0..) |item, idx| {
+            const value: i64 = item;
+            const bucket_i128 = if (ascending)
+                @as(i128, value) - @as(i128, range.min)
+            else
+                @as(i128, range.max) - @as(i128, value);
+            const bucket: usize = @intCast(bucket_i128);
+            out[counts[bucket]] = @intCast(idx);
+            counts[bucket] += 1;
+        }
+    }
+
+    fn fillRadixGradeIndicesIntSlice(comptime T: type, kind: HostIntStorageKind, out: []usize, items: []const T, ascending: bool, allocator: std.mem.Allocator) KError!void {
+        if (out.len == 0) return;
+
+        const scratch = try allocator.alloc(usize, out.len);
+        defer allocator.free(scratch);
+        for (out, 0..) |*slot, idx| slot.* = idx;
+
+        var counts: [256]usize = undefined;
+        var src: []usize = out;
+        var dst: []usize = scratch;
+        const pass_count = intGradePassCount(kind);
+        for (0..pass_count) |pass| {
+            @memset(counts[0..], 0);
+            const shift: u6 = @intCast(pass * 8);
+            for (src) |idx| {
+                const digit = @as(u8, @truncate(intGradeKey(@as(i64, items[idx]), kind, ascending) >> shift));
+                counts[digit] += 1;
+            }
+
+            var total: usize = 0;
+            for (counts[0..]) |*count| {
+                const next = total + count.*;
+                count.* = total;
+                total = next;
+            }
+
+            for (src) |idx| {
+                const digit = @as(u8, @truncate(intGradeKey(@as(i64, items[idx]), kind, ascending) >> shift));
+                dst[counts[digit]] = idx;
+                counts[digit] += 1;
+            }
+
+            const tmp = src;
+            src = dst;
+            dst = tmp;
+        }
+
+        if (src.ptr != out.ptr) @memcpy(out, src);
+    }
+
+    fn fillRadixGradeIndicesTypedIntSlice(
+        comptime T: type,
+        comptime IdxT: type,
+        out: []IdxT,
+        items: []const T,
+        ascending: bool,
+        allocator: std.mem.Allocator,
+    ) KError!void {
+        if (out.len == 0) return;
+
+        const KeyT = std.meta.Int(.unsigned, @bitSizeOf(T));
+        const keys = try allocator.alloc(KeyT, out.len);
+        defer allocator.free(keys);
+        var pass_counts: [@sizeOf(KeyT)][256]usize = undefined;
+        for (&pass_counts) |*counts| @memset(counts, 0);
+        for (items, 0..) |item, idx| {
+            const key = intGradeKeyTyped(T, item, ascending);
+            keys[idx] = key;
+            out[idx] = @intCast(idx);
+            for (0..@sizeOf(KeyT)) |pass| {
+                const shift: std.math.Log2Int(KeyT) = @intCast(pass * 8);
+                const digit = @as(u8, @truncate(key >> shift));
+                pass_counts[pass][digit] += 1;
+            }
+        }
+
+        const scratch = try allocator.alloc(IdxT, out.len);
+        defer allocator.free(scratch);
+        const scratch_keys = try allocator.alloc(KeyT, out.len);
+        defer allocator.free(scratch_keys);
+
+        var active_passes = [_]bool{false} ** @sizeOf(KeyT);
+        for (0..@sizeOf(KeyT)) |pass| {
+            active_passes[pass] = true;
+            for (pass_counts[pass]) |count| {
+                if (count == out.len) {
+                    active_passes[pass] = false;
+                    break;
+                }
+            }
+        }
+
+        var src: []IdxT = out;
+        var dst: []IdxT = scratch;
+        var src_keys: []KeyT = keys;
+        var dst_keys: []KeyT = scratch_keys;
+        for (0..@sizeOf(KeyT)) |pass| {
+            if (!active_passes[pass]) continue;
+            var counts = pass_counts[pass];
+            const shift: std.math.Log2Int(KeyT) = @intCast(pass * 8);
+            var total: usize = 0;
+            for (counts[0..]) |*count| {
+                const next = total + count.*;
+                count.* = total;
+                total = next;
+            }
+
+            for (src_keys, src) |key, idx| {
+                const digit = @as(u8, @truncate(key >> shift));
+                const out_idx = counts[digit];
+                counts[digit] = out_idx + 1;
+                dst[out_idx] = idx;
+                dst_keys[out_idx] = key;
+            }
+
+            const tmp = src;
+            src = dst;
+            dst = tmp;
+            const tmp_keys = src_keys;
+            src_keys = dst_keys;
+            dst_keys = tmp_keys;
+        }
+
+        if (src.ptr != out.ptr) @memcpy(out, src);
+    }
+
+    fn fillRadixGradeIndicesFloatSlice(out: []usize, items: []const f64, ascending: bool, allocator: std.mem.Allocator) KError!bool {
+        if (out.len == 0) return true;
+
+        const keys = try allocator.alloc(u64, out.len);
+        defer allocator.free(keys);
+        for (items, 0..) |item, idx| {
+            keys[idx] = floatGradeKey(item, ascending) orelse return false;
+            out[idx] = idx;
+        }
+
+        const scratch = try allocator.alloc(usize, out.len);
+        defer allocator.free(scratch);
+
+        var counts: [256]usize = undefined;
+        var src: []usize = out;
+        var dst: []usize = scratch;
+        for (0..8) |pass| {
+            @memset(counts[0..], 0);
+            const shift: u6 = @intCast(pass * 8);
+            for (src) |idx| {
+                const digit = @as(u8, @truncate(keys[idx] >> shift));
+                counts[digit] += 1;
+            }
+
+            var total: usize = 0;
+            for (counts[0..]) |*count| {
+                const next = total + count.*;
+                count.* = total;
+                total = next;
+            }
+
+            for (src) |idx| {
+                const digit = @as(u8, @truncate(keys[idx] >> shift));
+                dst[counts[digit]] = idx;
+                counts[digit] += 1;
+            }
+
+            const tmp = src;
+            src = dst;
+            dst = tmp;
+        }
+
+        if (src.ptr != out.ptr) @memcpy(out, src);
+        return true;
+    }
+
+    fn fillRadixGradeIndicesTypedFloatSlice(comptime IdxT: type, out: []IdxT, items: []const f64, ascending: bool, allocator: std.mem.Allocator) KError!bool {
+        if (out.len == 0) return true;
+
+        const keys = try allocator.alloc(u64, out.len);
+        defer allocator.free(keys);
+        var pass_counts: [8][256]usize = undefined;
+        for (&pass_counts) |*counts| @memset(counts, 0);
+        for (items, 0..) |item, idx| {
+            const key = floatGradeKey(item, ascending) orelse return false;
+            keys[idx] = key;
+            out[idx] = @intCast(idx);
+            for (0..8) |pass| {
+                const shift: u6 = @intCast(pass * 8);
+                const digit = @as(u8, @truncate(key >> shift));
+                pass_counts[pass][digit] += 1;
+            }
+        }
+
+        const scratch = try allocator.alloc(IdxT, out.len);
+        defer allocator.free(scratch);
+        const scratch_keys = try allocator.alloc(u64, out.len);
+        defer allocator.free(scratch_keys);
+
+        var active_passes = [_]bool{false} ** 8;
+        for (0..8) |pass| {
+            active_passes[pass] = true;
+            for (pass_counts[pass]) |count| {
+                if (count == out.len) {
+                    active_passes[pass] = false;
+                    break;
+                }
+            }
+        }
+
+        var src: []IdxT = out;
+        var dst: []IdxT = scratch;
+        var src_keys: []u64 = keys;
+        var dst_keys: []u64 = scratch_keys;
+        for (0..8) |pass| {
+            if (!active_passes[pass]) continue;
+            var counts = pass_counts[pass];
+            const shift: u6 = @intCast(pass * 8);
+            var total: usize = 0;
+            for (counts[0..]) |*count| {
+                const next = total + count.*;
+                count.* = total;
+                total = next;
+            }
+
+            for (src_keys, src) |key, idx| {
+                const digit = @as(u8, @truncate(key >> shift));
+                const out_idx = counts[digit];
+                counts[digit] = out_idx + 1;
+                dst[out_idx] = idx;
+                dst_keys[out_idx] = key;
+            }
+
+            const tmp = src;
+            src = dst;
+            dst = tmp;
+            const tmp_keys = src_keys;
+            src_keys = dst_keys;
+            dst_keys = tmp_keys;
+        }
+
+        if (src.ptr != out.ptr) @memcpy(out, src);
+        return true;
+    }
+
+    fn fillRadixGradeIndicesFloatView(out: []usize, view: HostFloatDenseView, ascending: bool, allocator: std.mem.Allocator) KError!bool {
+        if (out.len == 0) return true;
+
+        const keys = try allocator.alloc(u64, out.len);
+        defer allocator.free(keys);
+        for (0..out.len) |idx| {
+            keys[idx] = floatGradeKey(try hostFloatDenseViewItem(view, idx), ascending) orelse return false;
+            out[idx] = idx;
+        }
+
+        const scratch = try allocator.alloc(usize, out.len);
+        defer allocator.free(scratch);
+
+        var counts: [256]usize = undefined;
+        var src: []usize = out;
+        var dst: []usize = scratch;
+        for (0..8) |pass| {
+            @memset(counts[0..], 0);
+            const shift: u6 = @intCast(pass * 8);
+            for (src) |idx| {
+                const digit = @as(u8, @truncate(keys[idx] >> shift));
+                counts[digit] += 1;
+            }
+
+            var total: usize = 0;
+            for (counts[0..]) |*count| {
+                const next = total + count.*;
+                count.* = total;
+                total = next;
+            }
+
+            for (src) |idx| {
+                const digit = @as(u8, @truncate(keys[idx] >> shift));
+                dst[counts[digit]] = idx;
+                counts[digit] += 1;
+            }
+
+            const tmp = src;
+            src = dst;
+            dst = tmp;
+        }
+
+        if (src.ptr != out.ptr) @memcpy(out, src);
+        return true;
+    }
+
+    fn fillRadixGradeIndices(out: []usize, view: HostIntDenseView, kind: HostIntStorageKind, ascending: bool, allocator: std.mem.Allocator) KError!void {
+        if (out.len == 0) return;
+
+        const scratch = try allocator.alloc(usize, out.len);
+        defer allocator.free(scratch);
+        for (out, 0..) |*slot, idx| slot.* = idx;
+
+        var counts: [256]usize = undefined;
+        var src: []usize = out;
+        var dst: []usize = scratch;
+        const pass_count = intGradePassCount(kind);
+        for (0..pass_count) |pass| {
+            @memset(counts[0..], 0);
+            const shift: u6 = @intCast(pass * 8);
+            for (src) |idx| {
+                const digit = @as(u8, @truncate(intGradeKey(try hostIntDenseViewItem(view, idx), kind, ascending) >> shift));
+                counts[digit] += 1;
+            }
+
+            var total: usize = 0;
+            for (counts[0..]) |*count| {
+                const next = total + count.*;
+                count.* = total;
+                total = next;
+            }
+
+            for (src) |idx| {
+                const digit = @as(u8, @truncate(intGradeKey(try hostIntDenseViewItem(view, idx), kind, ascending) >> shift));
+                dst[counts[digit]] = idx;
+                counts[digit] += 1;
+            }
+
+            const tmp = src;
+            src = dst;
+            dst = tmp;
+        }
+
+        if (src.ptr != out.ptr) @memcpy(out, src);
+    }
+
+    fn fillManagedDenseIntReverseMonotonicGradeResult(out: *HostIntResult, items: HostIntArrayView) KError!bool {
+        return switch (out.*) {
+            .bit => unreachable,
+            .int8 => |*dest| switch (items) {
+                .bit => |bits| fillTypedReverseMonotonicGradeIndicesBitSlice(i8, dest.items, bits),
+                .int8 => |slice| fillTypedReverseMonotonicGradeIndicesIntSlice(i8, i8, dest.items, slice),
+                .int16 => |slice| fillTypedReverseMonotonicGradeIndicesIntSlice(i16, i8, dest.items, slice),
+                .int32 => |slice| fillTypedReverseMonotonicGradeIndicesIntSlice(i32, i8, dest.items, slice),
+                .int64 => |slice| fillTypedReverseMonotonicGradeIndicesIntSlice(i64, i8, dest.items, slice),
+            },
+            .int16 => |*dest| switch (items) {
+                .bit => |bits| fillTypedReverseMonotonicGradeIndicesBitSlice(i16, dest.items, bits),
+                .int8 => |slice| fillTypedReverseMonotonicGradeIndicesIntSlice(i8, i16, dest.items, slice),
+                .int16 => |slice| fillTypedReverseMonotonicGradeIndicesIntSlice(i16, i16, dest.items, slice),
+                .int32 => |slice| fillTypedReverseMonotonicGradeIndicesIntSlice(i32, i16, dest.items, slice),
+                .int64 => |slice| fillTypedReverseMonotonicGradeIndicesIntSlice(i64, i16, dest.items, slice),
+            },
+            .int32 => |*dest| switch (items) {
+                .bit => |bits| fillTypedReverseMonotonicGradeIndicesBitSlice(i32, dest.items, bits),
+                .int8 => |slice| fillTypedReverseMonotonicGradeIndicesIntSlice(i8, i32, dest.items, slice),
+                .int16 => |slice| fillTypedReverseMonotonicGradeIndicesIntSlice(i16, i32, dest.items, slice),
+                .int32 => |slice| fillTypedReverseMonotonicGradeIndicesIntSlice(i32, i32, dest.items, slice),
+                .int64 => |slice| fillTypedReverseMonotonicGradeIndicesIntSlice(i64, i32, dest.items, slice),
+            },
+            .int64 => |*dest| switch (items) {
+                .bit => |bits| fillTypedReverseMonotonicGradeIndicesBitSlice(i64, dest.items, bits),
+                .int8 => |slice| fillTypedReverseMonotonicGradeIndicesIntSlice(i8, i64, dest.items, slice),
+                .int16 => |slice| fillTypedReverseMonotonicGradeIndicesIntSlice(i16, i64, dest.items, slice),
+                .int32 => |slice| fillTypedReverseMonotonicGradeIndicesIntSlice(i32, i64, dest.items, slice),
+                .int64 => |slice| fillTypedReverseMonotonicGradeIndicesIntSlice(i64, i64, dest.items, slice),
+            },
+        };
+    }
+
+    fn fillManagedDenseFloatReverseMonotonicGradeResult(out: *HostIntResult, items: []const f64) bool {
+        return switch (out.*) {
+            .bit => unreachable,
+            .int8 => |*dest| fillTypedReverseMonotonicGradeIndicesFloatSlice(i8, dest.items, items),
+            .int16 => |*dest| fillTypedReverseMonotonicGradeIndicesFloatSlice(i16, dest.items, items),
+            .int32 => |*dest| fillTypedReverseMonotonicGradeIndicesFloatSlice(i32, dest.items, items),
+            .int64 => |*dest| fillTypedReverseMonotonicGradeIndicesFloatSlice(i64, dest.items, items),
+        };
+    }
+
+    fn fillManagedDenseIntInsertionGradeResult(out: *HostIntResult, items: HostIntArrayView, ascending: bool) void {
+        switch (out.*) {
+            .bit => unreachable,
+            .int8 => |*dest| switch (items) {
+                .bit => unreachable,
+                .int8 => |slice| fillTypedInsertionGradeIndicesIntSlice(i8, i8, dest.items, slice, ascending),
+                .int16 => |slice| fillTypedInsertionGradeIndicesIntSlice(i16, i8, dest.items, slice, ascending),
+                .int32 => |slice| fillTypedInsertionGradeIndicesIntSlice(i32, i8, dest.items, slice, ascending),
+                .int64 => |slice| fillTypedInsertionGradeIndicesIntSlice(i64, i8, dest.items, slice, ascending),
+            },
+            .int16 => |*dest| switch (items) {
+                .bit => unreachable,
+                .int8 => |slice| fillTypedInsertionGradeIndicesIntSlice(i8, i16, dest.items, slice, ascending),
+                .int16 => |slice| fillTypedInsertionGradeIndicesIntSlice(i16, i16, dest.items, slice, ascending),
+                .int32 => |slice| fillTypedInsertionGradeIndicesIntSlice(i32, i16, dest.items, slice, ascending),
+                .int64 => |slice| fillTypedInsertionGradeIndicesIntSlice(i64, i16, dest.items, slice, ascending),
+            },
+            .int32 => |*dest| switch (items) {
+                .bit => unreachable,
+                .int8 => |slice| fillTypedInsertionGradeIndicesIntSlice(i8, i32, dest.items, slice, ascending),
+                .int16 => |slice| fillTypedInsertionGradeIndicesIntSlice(i16, i32, dest.items, slice, ascending),
+                .int32 => |slice| fillTypedInsertionGradeIndicesIntSlice(i32, i32, dest.items, slice, ascending),
+                .int64 => |slice| fillTypedInsertionGradeIndicesIntSlice(i64, i32, dest.items, slice, ascending),
+            },
+            .int64 => |*dest| switch (items) {
+                .bit => unreachable,
+                .int8 => |slice| fillTypedInsertionGradeIndicesIntSlice(i8, i64, dest.items, slice, ascending),
+                .int16 => |slice| fillTypedInsertionGradeIndicesIntSlice(i16, i64, dest.items, slice, ascending),
+                .int32 => |slice| fillTypedInsertionGradeIndicesIntSlice(i32, i64, dest.items, slice, ascending),
+                .int64 => |slice| fillTypedInsertionGradeIndicesIntSlice(i64, i64, dest.items, slice, ascending),
+            },
+        }
+    }
+
+    fn fillManagedDenseFloatInsertionGradeResult(out: *HostIntResult, items: []const f64, ascending: bool) void {
+        switch (out.*) {
+            .bit => unreachable,
+            .int8 => |*dest| fillTypedInsertionGradeIndicesFloatSlice(i8, dest.items, items, ascending),
+            .int16 => |*dest| fillTypedInsertionGradeIndicesFloatSlice(i16, dest.items, items, ascending),
+            .int32 => |*dest| fillTypedInsertionGradeIndicesFloatSlice(i32, dest.items, items, ascending),
+            .int64 => |*dest| fillTypedInsertionGradeIndicesFloatSlice(i64, dest.items, items, ascending),
+        }
+    }
+
+    fn fillManagedDenseIntBucketGradeResult(self: *Session, out: *HostIntResult, items: HostIntArrayView, range: HostIntRange, ascending: bool) KError!void {
+        switch (out.*) {
+            .bit => unreachable,
+            .int8 => |*dest| switch (items) {
+                .bit => unreachable,
+                .int8 => |slice| try fillTypedBucketGradeIndicesIntSlice(i8, i8, dest.items, slice, range, ascending, self.allocator),
+                .int16 => |slice| try fillTypedBucketGradeIndicesIntSlice(i16, i8, dest.items, slice, range, ascending, self.allocator),
+                .int32 => |slice| try fillTypedBucketGradeIndicesIntSlice(i32, i8, dest.items, slice, range, ascending, self.allocator),
+                .int64 => |slice| try fillTypedBucketGradeIndicesIntSlice(i64, i8, dest.items, slice, range, ascending, self.allocator),
+            },
+            .int16 => |*dest| switch (items) {
+                .bit => unreachable,
+                .int8 => |slice| try fillTypedBucketGradeIndicesIntSlice(i8, i16, dest.items, slice, range, ascending, self.allocator),
+                .int16 => |slice| try fillTypedBucketGradeIndicesIntSlice(i16, i16, dest.items, slice, range, ascending, self.allocator),
+                .int32 => |slice| try fillTypedBucketGradeIndicesIntSlice(i32, i16, dest.items, slice, range, ascending, self.allocator),
+                .int64 => |slice| try fillTypedBucketGradeIndicesIntSlice(i64, i16, dest.items, slice, range, ascending, self.allocator),
+            },
+            .int32 => |*dest| switch (items) {
+                .bit => unreachable,
+                .int8 => |slice| try fillTypedBucketGradeIndicesIntSlice(i8, i32, dest.items, slice, range, ascending, self.allocator),
+                .int16 => |slice| try fillTypedBucketGradeIndicesIntSlice(i16, i32, dest.items, slice, range, ascending, self.allocator),
+                .int32 => |slice| try fillTypedBucketGradeIndicesIntSlice(i32, i32, dest.items, slice, range, ascending, self.allocator),
+                .int64 => |slice| try fillTypedBucketGradeIndicesIntSlice(i64, i32, dest.items, slice, range, ascending, self.allocator),
+            },
+            .int64 => |*dest| switch (items) {
+                .bit => unreachable,
+                .int8 => |slice| try fillTypedBucketGradeIndicesIntSlice(i8, i64, dest.items, slice, range, ascending, self.allocator),
+                .int16 => |slice| try fillTypedBucketGradeIndicesIntSlice(i16, i64, dest.items, slice, range, ascending, self.allocator),
+                .int32 => |slice| try fillTypedBucketGradeIndicesIntSlice(i32, i64, dest.items, slice, range, ascending, self.allocator),
+                .int64 => |slice| try fillTypedBucketGradeIndicesIntSlice(i64, i64, dest.items, slice, range, ascending, self.allocator),
+            },
+        }
+    }
+
+    fn fillManagedDenseIntRadixGradeResult(self: *Session, out: *HostIntResult, items: HostIntArrayView, ascending: bool) KError!void {
+        switch (out.*) {
+            .bit => unreachable,
+            .int8 => |*dest| switch (items) {
+                .bit => unreachable,
+                .int8 => |slice| try fillRadixGradeIndicesTypedIntSlice(i8, i8, dest.items, slice, ascending, self.allocator),
+                .int16 => |slice| try fillRadixGradeIndicesTypedIntSlice(i16, i8, dest.items, slice, ascending, self.allocator),
+                .int32 => |slice| try fillRadixGradeIndicesTypedIntSlice(i32, i8, dest.items, slice, ascending, self.allocator),
+                .int64 => |slice| try fillRadixGradeIndicesTypedIntSlice(i64, i8, dest.items, slice, ascending, self.allocator),
+            },
+            .int16 => |*dest| switch (items) {
+                .bit => unreachable,
+                .int8 => |slice| try fillRadixGradeIndicesTypedIntSlice(i8, i16, dest.items, slice, ascending, self.allocator),
+                .int16 => |slice| try fillRadixGradeIndicesTypedIntSlice(i16, i16, dest.items, slice, ascending, self.allocator),
+                .int32 => |slice| try fillRadixGradeIndicesTypedIntSlice(i32, i16, dest.items, slice, ascending, self.allocator),
+                .int64 => |slice| try fillRadixGradeIndicesTypedIntSlice(i64, i16, dest.items, slice, ascending, self.allocator),
+            },
+            .int32 => |*dest| switch (items) {
+                .bit => unreachable,
+                .int8 => |slice| try fillRadixGradeIndicesTypedIntSlice(i8, i32, dest.items, slice, ascending, self.allocator),
+                .int16 => |slice| try fillRadixGradeIndicesTypedIntSlice(i16, i32, dest.items, slice, ascending, self.allocator),
+                .int32 => |slice| try fillRadixGradeIndicesTypedIntSlice(i32, i32, dest.items, slice, ascending, self.allocator),
+                .int64 => |slice| try fillRadixGradeIndicesTypedIntSlice(i64, i32, dest.items, slice, ascending, self.allocator),
+            },
+            .int64 => |*dest| switch (items) {
+                .bit => unreachable,
+                .int8 => |slice| try fillRadixGradeIndicesTypedIntSlice(i8, i64, dest.items, slice, ascending, self.allocator),
+                .int16 => |slice| try fillRadixGradeIndicesTypedIntSlice(i16, i64, dest.items, slice, ascending, self.allocator),
+                .int32 => |slice| try fillRadixGradeIndicesTypedIntSlice(i32, i64, dest.items, slice, ascending, self.allocator),
+                .int64 => |slice| try fillRadixGradeIndicesTypedIntSlice(i64, i64, dest.items, slice, ascending, self.allocator),
+            },
+        }
+    }
+
+    fn fillManagedDenseFloatRadixGradeResult(self: *Session, out: *HostIntResult, items: []const f64, ascending: bool) KError!bool {
+        return switch (out.*) {
+            .bit => unreachable,
+            .int8 => |*dest| try fillRadixGradeIndicesTypedFloatSlice(i8, dest.items, items, ascending, self.allocator),
+            .int16 => |*dest| try fillRadixGradeIndicesTypedFloatSlice(i16, dest.items, items, ascending, self.allocator),
+            .int32 => |*dest| try fillRadixGradeIndicesTypedFloatSlice(i32, dest.items, items, ascending, self.allocator),
+            .int64 => |*dest| try fillRadixGradeIndicesTypedFloatSlice(i64, dest.items, items, ascending, self.allocator),
+        };
+    }
+
+    fn managedHostDenseIntInsertionGradeValue(self: *Session, items: HostIntArrayView, ascending: bool) KError!Value {
+        const len = hostIntArrayViewLen(items);
+        const max_value = try gradeResultMaxValue(len);
+        var out = try self.allocManagedHostIntResult(hostIntStorageKindForRange(0, max_value), len);
+        fillManagedDenseIntInsertionGradeResult(&out, items, ascending);
+        return try finalizeManagedGradeResult(self, &out, max_value);
+    }
+
+    fn managedHostDenseFloatInsertionGradeValue(self: *Session, items: []const f64, ascending: bool) KError!Value {
+        const len = items.len;
+        const max_value = try gradeResultMaxValue(len);
+        var out = try self.allocManagedHostIntResult(hostIntStorageKindForRange(0, max_value), len);
+        fillManagedDenseFloatInsertionGradeResult(&out, items, ascending);
+        return try finalizeManagedGradeResult(self, &out, max_value);
+    }
+
+    fn managedHostDenseIntReverseMonotonicGradeValue(self: *Session, items: HostIntArrayView) KError!struct { value: Value, unique: bool } {
+        const len = hostIntArrayViewLen(items);
+        const max_value = try gradeResultMaxValue(len);
+        var out = try self.allocManagedHostIntResult(hostIntStorageKindForRange(0, max_value), len);
+        const unique = try fillManagedDenseIntReverseMonotonicGradeResult(&out, items);
+        return .{ .value = try finalizeManagedGradeResult(self, &out, max_value), .unique = unique };
+    }
+
+    fn managedHostDenseFloatReverseMonotonicGradeValue(self: *Session, items: []const f64) KError!struct { value: Value, unique: bool } {
+        const len = items.len;
+        const max_value = try gradeResultMaxValue(len);
+        var out = try self.allocManagedHostIntResult(hostIntStorageKindForRange(0, max_value), len);
+        const unique = fillManagedDenseFloatReverseMonotonicGradeResult(&out, items);
+        return .{ .value = try finalizeManagedGradeResult(self, &out, max_value), .unique = unique };
+    }
+
+    fn managedHostDenseIntBucketGradeValue(self: *Session, items: HostIntArrayView, range: HostIntRange, ascending: bool) KError!Value {
+        const len = hostIntArrayViewLen(items);
+        const max_value = try gradeResultMaxValue(len);
+        var out = try self.allocManagedHostIntResult(hostIntStorageKindForRange(0, max_value), len);
+        try fillManagedDenseIntBucketGradeResult(self, &out, items, range, ascending);
+        return try finalizeManagedGradeResult(self, &out, max_value);
+    }
+
+    fn managedHostDenseIntRadixGradeValue(self: *Session, items: HostIntArrayView, ascending: bool) KError!Value {
+        const len = hostIntArrayViewLen(items);
+        const max_value = try gradeResultMaxValue(len);
+        var out = try self.allocManagedHostIntResult(hostIntStorageKindForRange(0, max_value), len);
+        try fillManagedDenseIntRadixGradeResult(self, &out, items, ascending);
+        return try finalizeManagedGradeResult(self, &out, max_value);
+    }
+
+    fn managedHostDenseFloatRadixGradeValue(self: *Session, items: []const f64, ascending: bool) KError!?Value {
+        const len = items.len;
+        const max_value = try gradeResultMaxValue(len);
+        var out = try self.allocManagedHostIntResult(hostIntStorageKindForRange(0, max_value), len);
+        if (!try fillManagedDenseFloatRadixGradeResult(self, &out, items, ascending)) return null;
+        return try finalizeManagedGradeResult(self, &out, max_value);
+    }
+
+    fn tryFastHostFloatDenseGradeValue(self: *Session, value: Value, view: HostFloatDenseView, ascending: bool) KError!?Value {
+        const len = hostFloatDenseViewLen(view);
+        if (len <= 1) return try newRangeIotaValue(self, .managed, len);
+        const flags = hostFloatDenseValueFlags(value, view);
+        if (try self.tryMonotonicGradeValue(len, flags, ascending)) |result| return result;
+
+        const mono = monotonicFlags(flags);
+        const reverse_flag = if (ascending) host_dense_flag_dsc else host_dense_flag_asc;
+        if ((mono & reverse_flag) != 0) {
+            return switch (view) {
+                .dense => |items| blk: {
+                    const result = try self.managedHostDenseFloatReverseMonotonicGradeValue(items);
+                    if (result.unique) break :blk try self.reverseIndexValue(len);
+                    break :blk result.value;
+                },
+                else => blk: {
+                    if (len <= small_grade_stack_threshold) {
+                        var idxs_buf: [small_grade_stack_threshold]usize = undefined;
+                        const idxs = idxs_buf[0..len];
+                        const unique = try fillReverseMonotonicGradeIndicesFloatView(idxs, view);
+                        if (unique) break :blk try self.reverseIndexValue(len);
+                        break :blk try self.managedHostIndexArrayValue(idxs);
+                    }
+
+                    const idxs = try self.allocator.alloc(usize, len);
+                    defer self.allocator.free(idxs);
+                    const unique = try fillReverseMonotonicGradeIndicesFloatView(idxs, view);
+                    if (unique) break :blk try self.reverseIndexValue(len);
+                    break :blk try self.managedHostIndexArrayValue(idxs);
+                },
+            };
+        }
+
+        if (len <= small_dense_float_grade_threshold) {
+            return switch (view) {
+                .dense => |items| try self.managedHostDenseFloatInsertionGradeValue(items, ascending),
+                else => blk: {
+                    var idxs_buf: [small_grade_stack_threshold]usize = undefined;
+                    const idxs = idxs_buf[0..len];
+                    try fillInsertionGradeIndicesFloatView(idxs, view, ascending);
+                    break :blk try self.managedHostIndexArrayValue(idxs);
+                },
+            };
+        }
+
+        return switch (view) {
+            .dense => |items| try self.managedHostDenseFloatRadixGradeValue(items, ascending),
+            else => blk: {
+                const idxs = try self.allocator.alloc(usize, len);
+                defer self.allocator.free(idxs);
+
+                const fast = try fillRadixGradeIndicesFloatView(idxs, view, ascending, self.allocator);
+                if (fast) break :blk try self.managedHostIndexArrayValue(idxs);
+                break :blk null;
+            },
+        };
+    }
+
+    fn tryFastHostIntDenseGradeValue(self: *Session, value: Value, view: HostIntDenseView, ascending: bool) KError!?Value {
+        const len = hostIntDenseViewLen(view);
+        if (len <= 1) return try newRangeIotaValue(self, .managed, len);
+
+        const flags = hostIntDenseValueFlags(value, view);
+        if (try self.tryMonotonicGradeValue(len, flags, ascending)) |result| return result;
+
+        const range = hostIntDenseValueRange(value, view);
+        const mono = monotonicFlags(flags);
+        const reverse_flag = if (ascending) host_dense_flag_dsc else host_dense_flag_asc;
+        if ((mono & reverse_flag) != 0) {
+            switch (view) {
+                .dense => |items| {
+                    const result = try self.managedHostDenseIntReverseMonotonicGradeValue(items);
+                    if (result.unique) return try self.reverseIndexValue(len);
+                    return result.value;
+                },
+                .range_iota => {
+                    return try self.reverseIndexValue(len);
+                },
+                else => {
+                    if (len <= small_grade_stack_threshold) {
+                        var idxs_buf: [small_grade_stack_threshold]usize = undefined;
+                        const idxs = idxs_buf[0..len];
+                        const unique = try fillReverseMonotonicGradeIndicesIntView(idxs, view);
+                        if (unique) return try self.reverseIndexValue(len);
+                        return try self.managedHostIndexArrayValue(idxs);
+                    }
+
+                    const idxs = try self.allocator.alloc(usize, len);
+                    defer self.allocator.free(idxs);
+                    const unique = try fillReverseMonotonicGradeIndicesIntView(idxs, view);
+                    if (unique) return try self.reverseIndexValue(len);
+                    return try self.managedHostIndexArrayValue(idxs);
+                },
+            }
+        }
+
+        switch (view) {
+            .dense => |items| {
+                if (range.min >= 0 and range.max <= 1) {
+                    return try self.managedHostBooleanGradeValue(view, len, ascending);
+                }
+
+                const small_dense_threshold = switch (items) {
+                    .int8 => small_dense_int8_grade_threshold,
+                    .int16 => small_dense_int16_grade_threshold,
+                    .int32 => small_dense_int32_grade_threshold,
+                    .int64 => small_dense_int64_grade_threshold,
+                    .bit => small_grade_stack_threshold,
+                };
+                if (len <= small_dense_threshold) {
+                    return try self.managedHostDenseIntInsertionGradeValue(items, ascending);
+                }
+
+                switch (items) {
+                    .int8 => |slice| return try self.managedHostInt8GradeValue(slice, ascending),
+                    else => {},
+                }
+
+                if (intGradeRangeLen(range)) |range_len| {
+                    if (preferBucketIntGrade(len, range_len)) {
+                        return try self.managedHostDenseIntBucketGradeValue(items, range, ascending);
+                    }
+                }
+
+                return try self.managedHostDenseIntRadixGradeValue(items, ascending);
+            },
+            else => {
+                if (range.min >= 0 and range.max <= 1) {
+                    return try self.managedHostBooleanGradeValue(view, len, ascending);
+                }
+
+                if (len <= small_grade_stack_threshold) {
+                    var idxs_buf: [small_grade_stack_threshold]usize = undefined;
+                    const idxs = idxs_buf[0..len];
+                    try fillInsertionGradeIndicesIntView(idxs, view, ascending);
+                    return try self.managedHostIndexArrayValue(idxs);
+                }
+
+                const idxs = try self.allocator.alloc(usize, len);
+                defer self.allocator.free(idxs);
+
+                if (intGradeRangeLen(range)) |range_len| {
+                    if (preferBucketIntGrade(len, range_len)) {
+                        try fillBucketGradeIndices(idxs, view, range, ascending, self.allocator);
+                        return try self.managedHostIndexArrayValue(idxs);
+                    }
+                }
+
+                try fillRadixGradeIndices(idxs, view, hostIntStorageKindForRange(range.min, range.max), ascending, self.allocator);
+                return try self.managedHostIndexArrayValue(idxs);
+            },
+        }
     }
 
     fn gradeValue(self: *Session, value: Value, ascending: bool) KError!Value {
@@ -22998,6 +28989,22 @@ pub const Session = struct {
         if (valueNumericMode(value) != null) {
             if (numericVectorLen(value)) |len| {
                 if (hostDenseIfPresent(value) != null or numericValueSupportsStructuralFlatItemsWithoutHost(value)) {
+                    const view = try hostDenseView(self, value);
+                    switch (view) {
+                        .int_array => |items| {
+                            if (try self.tryFastHostIntDenseGradeValue(value, items, ascending)) |result| {
+                                if (self.debugDetailedProbeActive()) self.debug_grade_structural_numeric_fast_count += 1;
+                                return result;
+                            }
+                        },
+                        .float_array => |items| {
+                            if (try self.tryFastHostFloatDenseGradeValue(value, items, ascending)) |result| {
+                                if (self.debugDetailedProbeActive()) self.debug_grade_structural_numeric_fast_count += 1;
+                                return result;
+                            }
+                        },
+                        else => {},
+                    }
                     const idxs = try self.allocator.alloc(usize, len);
                     defer self.allocator.free(idxs);
                     for (idxs, 0..) |*slot, idx| slot.* = idx;
@@ -23027,16 +29034,16 @@ pub const Session = struct {
     fn sortValue(self: *Session, value: Value) KError!Value {
         if (valueRangeIotaHandle(value)) |handle| {
             if (handle.rank > 1) {
-                if (handle.range_iota.step >= 0) return self.shareValue(value);
-            } else if (handle.range_iota.step >= 0) {
+                if (numericArrayRangeIota(handle).step >= 0) return self.shareValue(value);
+            } else if (numericArrayRangeIota(handle).step >= 0) {
                 return self.shareValue(value);
             } else {
                 const len = numericArrayRangeLen(handle);
                 const start = if (len == 0)
-                    handle.range_iota.start
+                    numericArrayRangeIota(handle).start
                 else
                     try numericArrayRangeIotaValueAt(handle, len - 1);
-                const step = try checkedIntOp(.sub, 0, handle.range_iota.step);
+                const step = try checkedIntOp(.sub, 0, numericArrayRangeIota(handle).step);
                 return try newRangeIotaValueWithParams(self, .managed, len, start, step);
             }
         }
@@ -23057,18 +29064,23 @@ pub const Session = struct {
         }
         return switch (array.storage) {
             .bit => blk: {
-                var out = std.ArrayList(bool).empty;
-                defer out.deinit(self.allocator);
-                var count_one: usize = 0;
-                for (0..array.len()) |idx| {
-                    if (bitGet(array.storage.bit, idx)) count_one += 1;
-                }
-                try out.resize(self.allocator, array.len());
-                for (out.items, 0..) |*slot, idx| slot.* = idx >= (array.len() - count_one);
-                break :blk try self.createManagedHostBitArray(out.items);
+                const bits = HostBitSlice{ .words = array.storage.bit, .len = array.len() };
+                const count_one = bitCountTrue(bits);
+                const out = try self.allocHostBitArray(.managed, bits.len);
+                bitFill(out.words, out.len, false);
+                bitFillRange(out.words, bits.len - count_one, count_one, true);
+                const all_equal = count_one == 0 or count_one == bits.len;
+                break :blk try self.finishManagedHostBitAlloc(
+                    out,
+                    host_dense_flag_normalized | host_dense_flag_asc | (if (all_equal) host_dense_flag_dsc else 0),
+                    .{
+                        .min = if (count_one == bits.len and bits.len != 0) 1 else 0,
+                        .max = if (count_one == 0) 0 else 1,
+                    },
+                );
             },
             .float64 => |items| blk: {
-                var out = try self.allocator.dupe(f64, items);
+                var out = try self.allocator.dupe(f64, hostDenseLogicalItems(f64, array, items));
                 defer self.allocator.free(out);
                 var i: usize = 1;
                 while (i < out.len) : (i += 1) {
@@ -23094,6 +29106,214 @@ pub const Session = struct {
                 }
                 break :blk try self.createManagedHostIntArray(out.items);
             },
+        };
+    }
+
+    fn canMutateHostDenseAppend(array: *const HostDenseArray) bool {
+        if (numericPayloadOwner(array) != .managed) return false;
+        if (numericPayloadManagedRefCount(array) != 1) return false;
+        if (array.logical_handle) |handle| {
+            if (handle.host != array) return false;
+            if (handle.mlx != null) return false;
+            if (numericArrayStructuralTag(handle) != .materialized) return false;
+            if (handle.rank != 1) return false;
+            if (@as(usize, @intCast(handle.shape[0])) != array.logical_len) return false;
+        }
+        return true;
+    }
+
+    fn writeHostDenseIntScalar(array: *HostDenseArray, kind: HostIntStorageKind, idx: usize, scalar_int: i64) KError!void {
+        switch (kind) {
+            .bit => {
+                if (scalar_int != 0 and scalar_int != 1) return error.Unsupported;
+                bitSet(array.storage.bit, idx, scalar_int == 1);
+            },
+            .int8 => array.storage.int8[idx] = std.math.cast(i8, scalar_int) orelse return error.Unsupported,
+            .int16 => array.storage.int16[idx] = std.math.cast(i16, scalar_int) orelse return error.Unsupported,
+            .int32 => array.storage.int32[idx] = std.math.cast(i32, scalar_int) orelse return error.Unsupported,
+            .int64 => array.storage.int64[idx] = scalar_int,
+        }
+    }
+
+    fn tryAppendIntVectorScalarInPlace(
+        self: *Session,
+        vector: Value,
+        view: HostIntDenseView,
+        result_kind: HostIntStorageKind,
+        scalar_int: i64,
+        range: HostIntRange,
+        flags: u8,
+    ) KError!?Value {
+        switch (view) {
+            .dense => {},
+            else => return null,
+        }
+        const array = @constCast(hostDenseIfPresent(vector) orelse return null);
+        if (!canMutateHostDenseAppend(array)) return null;
+
+        const old_len = array.logical_len;
+        const new_len = std.math.add(usize, old_len, 1) catch return error.Unsupported;
+        try self.ensureManagedHostDenseIntCapacity(array, result_kind, new_len);
+        try writeHostDenseIntScalar(array, result_kind, old_len, scalar_int);
+        array.logical_len = new_len;
+        if (array.logical_handle) |handle| numericArraySetVectorShape(handle, new_len);
+        if (result_kind == .bit) bitClearUnusedTail(array.storage.bit, new_len);
+        self.clearManagedHostDenseFindCache(array);
+        hostDenseSetFlags(array, flags);
+        hostDenseSetCachedIntRange(array, range);
+        return self.shareValue(vector);
+    }
+
+    fn concatIntVectorScalar(self: *Session, vector: Value, view: HostIntDenseView, scalar: Value, scalar_int: i64, scalar_on_right: bool) KError!Value {
+        const len = hostIntDenseViewLen(view);
+        const total_len = std.math.add(usize, len, 1) catch return error.Unsupported;
+        var range = if (len == 0) hostIntRangeForValue(scalar_int) else hostIntDenseValueRange(vector, view);
+        if (len != 0) {
+            range.min = @min(range.min, scalar_int);
+            range.max = @max(range.max, scalar_int);
+        }
+        const vector_kind = hostIntDenseViewKind(view);
+        const kind: HostIntStorageKind = if ((vector_kind == .bit or len == 0) and scalar.tag() == .bool)
+            .bit
+        else
+            hostIntStorageKindForRange(range.min, range.max);
+        const vector_flags = hostIntDenseValueFlags(vector, view);
+        var asc = len <= 1 or (vector_flags & host_dense_flag_asc) != 0;
+        var dsc = len <= 1 or (vector_flags & host_dense_flag_dsc) != 0;
+        if (len != 0) {
+            const first = try hostIntDenseViewItem(view, 0);
+            const last = try hostIntDenseViewItem(view, len - 1);
+            if (scalar_on_right) {
+                asc = asc and last <= scalar_int;
+                dsc = dsc and last >= scalar_int;
+            } else {
+                asc = asc and scalar_int <= first;
+                dsc = dsc and scalar_int >= first;
+            }
+        }
+        const flags = host_dense_flag_normalized | orderFlagsFromMonotonic(asc, dsc);
+
+        if (scalar_on_right) {
+            if (try self.tryAppendIntVectorScalarInPlace(vector, view, kind, scalar_int, range, flags)) |result| return result;
+        }
+
+        var out = try self.allocManagedHostIntResult(kind, total_len);
+
+        var write_idx: usize = 0;
+        if (!scalar_on_right) {
+            try out.set(0, scalar_int);
+            write_idx = 1;
+        }
+        for (0..len) |idx| try out.set(write_idx + idx, try hostIntDenseViewItem(view, idx));
+        if (scalar_on_right) try out.set(len, scalar_int);
+
+        const result = try out.value(self);
+        const host = try mutableNumericHostArrayValue(self, result);
+        hostDenseSetFlags(host, flags);
+        hostDenseSetCachedIntRange(host, range);
+        return result;
+    }
+
+    fn concatIntVectorFloatScalar(self: *Session, view: HostIntDenseView, scalar_float: f64, scalar_on_right: bool) KError!Value {
+        const len = hostIntDenseViewLen(view);
+        const total_len = std.math.add(usize, len, 1) catch return error.Unsupported;
+        const out = try self.allocManagedHostFloatResult(total_len);
+        var write_idx: usize = 0;
+        if (!scalar_on_right) {
+            out.items[0] = scalar_float;
+            write_idx = 1;
+        }
+        for (0..len) |idx| out.items[write_idx + idx] = @floatFromInt(try hostIntDenseViewItem(view, idx));
+        if (scalar_on_right) out.items[len] = scalar_float;
+
+        const analysis = analyzeFloatSlice(out.items);
+        const result = try out.value(self);
+        hostDenseSetFlags(try mutableNumericHostArrayValue(self, result), analysis.flags);
+        return result;
+    }
+
+    fn concatFloatVectorAsIntScalar(self: *Session, vector: Value, view: HostFloatDenseView, scalar_int: i64, range: HostIntRange, scalar_on_right: bool) KError!Value {
+        const len = hostFloatDenseViewLen(view);
+        const total_len = std.math.add(usize, len, 1) catch return error.Unsupported;
+        var out = try self.allocManagedHostIntResult(hostIntStorageKindForRange(range.min, range.max), total_len);
+
+        var write_idx: usize = 0;
+        if (!scalar_on_right) {
+            try out.set(0, scalar_int);
+            write_idx = 1;
+        }
+        for (0..len) |idx| try out.set(write_idx + idx, exactIntFromFloat(try hostFloatDenseViewItem(view, idx)).?);
+        if (scalar_on_right) try out.set(len, scalar_int);
+
+        const vector_flags = hostFloatDenseValueFlags(vector, view);
+        var asc = len <= 1 or (vector_flags & host_dense_flag_asc) != 0;
+        var dsc = len <= 1 or (vector_flags & host_dense_flag_dsc) != 0;
+        if (len != 0) {
+            const first = exactIntFromFloat(try hostFloatDenseViewItem(view, 0)).?;
+            const last = exactIntFromFloat(try hostFloatDenseViewItem(view, len - 1)).?;
+            if (scalar_on_right) {
+                asc = asc and last <= scalar_int;
+                dsc = dsc and last >= scalar_int;
+            } else {
+                asc = asc and scalar_int <= first;
+                dsc = dsc and scalar_int >= first;
+            }
+        }
+
+        const result = try out.value(self);
+        const host = try mutableNumericHostArrayValue(self, result);
+        hostDenseSetFlags(host, host_dense_flag_normalized | orderFlagsFromMonotonic(asc, dsc));
+        hostDenseSetCachedIntRange(host, range);
+        return result;
+    }
+
+    fn concatFloatVectorScalar(self: *Session, vector: Value, view: HostFloatDenseView, scalar_float: f64, scalar_exact_int: ?i64, scalar_on_right: bool) KError!Value {
+        const len = hostFloatDenseViewLen(view);
+        const total_len = std.math.add(usize, len, 1) catch return error.Unsupported;
+        if (scalar_exact_int) |scalar_int| {
+            var range = hostIntRangeForValue(scalar_int);
+            var all_int = true;
+            for (0..len) |idx| {
+                const item_int = exactIntFromFloat(try hostFloatDenseViewItem(view, idx)) orelse {
+                    all_int = false;
+                    break;
+                };
+                range.min = @min(range.min, item_int);
+                range.max = @max(range.max, item_int);
+            }
+            if (all_int) return try self.concatFloatVectorAsIntScalar(vector, view, scalar_int, range, scalar_on_right);
+        }
+
+        const out = try self.allocManagedHostFloatResult(total_len);
+        var write_idx: usize = 0;
+        if (!scalar_on_right) {
+            out.items[0] = scalar_float;
+            write_idx = 1;
+        }
+        for (0..len) |idx| out.items[write_idx + idx] = try hostFloatDenseViewItem(view, idx);
+        if (scalar_on_right) out.items[len] = scalar_float;
+
+        const analysis = analyzeFloatSlice(out.items);
+        const result = try out.value(self);
+        hostDenseSetFlags(try mutableNumericHostArrayValue(self, result), analysis.flags);
+        return result;
+    }
+
+    fn concatNumericVectorScalar(self: *Session, vector: Value, scalar: Value, scalar_on_right: bool) KError!?Value {
+        if (numericVectorLen(vector) == null or valueNumericMatrixShape(vector) != null) return null;
+        const scalar_float = inlineNumericFloatValue(scalar) orelse return null;
+        const scalar_exact_int = inlineExactIntNumericValue(scalar);
+        const vector_view = hostDenseView(self, vector) catch |err| switch (err) {
+            error.Type => return null,
+            else => return err,
+        };
+        return switch (vector_view) {
+            .int_array => |view| if (scalar_exact_int) |scalar_int|
+                try self.concatIntVectorScalar(vector, view, scalar, scalar_int, scalar_on_right)
+            else
+                try self.concatIntVectorFloatScalar(view, scalar_float, scalar_on_right),
+            .float_array => |view| try self.concatFloatVectorScalar(vector, view, scalar_float, scalar_exact_int, scalar_on_right),
+            else => null,
         };
     }
 
@@ -23123,6 +29343,8 @@ pub const Session = struct {
             const result = try self.makeArrayFromValues(values.items);
             return try self.setNumericMatrixShapeOnValue(result, shape.rows, shape.cols);
         }
+        if (try self.concatNumericVectorScalar(left, right, true)) |result| return result;
+        if (try self.concatNumericVectorScalar(right, left, false)) |result| return result;
         if (left.tag() == .array and right.tag() == .array and
             valueNumericMode(left) != null and valueNumericMode(right) != null and
             numericVectorLen(left) != null and numericVectorLen(right) != null)
@@ -23156,7 +29378,7 @@ pub const Session = struct {
         const array = try numericHostArrayValue(self, value);
         switch (array.storage) {
             .bit => |words| for (0..array.len()) |idx| try values.append(self.allocator, Value.fromBool(bitGet(words, idx))),
-            .float64 => |items| for (items) |item| try values.append(self.allocator, try self.floatValue(item)),
+            .float64 => |items| for (hostDenseLogicalItems(f64, array, items)) |item| try values.append(self.allocator, try self.floatValue(item)),
             else => {
                 const view = hostIntArrayView(array).?;
                 for (0..hostIntArrayViewLen(view)) |idx| try values.append(self.allocator, try self.intValue(hostIntViewItem(view, idx)));
@@ -23270,8 +29492,8 @@ pub const Session = struct {
                     self,
                     .managed,
                     total,
-                    handle.range_iota.start,
-                    handle.range_iota.step,
+                    numericArrayRangeIota(handle).start,
+                    numericArrayRangeIota(handle).step,
                     shape,
                 );
             }
@@ -23318,11 +29540,13 @@ pub const Session = struct {
         const count: usize = @intCast(@abs(raw_count));
         switch (value.tag()) {
             .bool => {
-                var out = std.ArrayList(bool).empty;
-                defer out.deinit(self.allocator);
-                try out.ensureTotalCapacity(self.allocator, count);
-                for (0..count) |_| try out.append(self.allocator, value.asBool());
-                return try self.createManagedHostBitArray(out.items);
+                const out = try self.allocHostBitArray(.managed, count);
+                bitFill(out.words, out.len, value.asBool());
+                return try self.finishManagedHostBitAlloc(
+                    out,
+                    host_dense_flag_normalized | host_dense_flag_asc | host_dense_flag_dsc,
+                    hostIntRangeForValue(@intFromBool(value.asBool())),
+                );
             },
             .float => {
                 var out = std.ArrayList(f64).empty;
@@ -23380,11 +29604,19 @@ pub const Session = struct {
         if (raw_count >= 0) {
             return switch (array.storage) {
                 .bit => blk: {
-                    var out = std.ArrayList(bool).empty;
-                    defer out.deinit(self.allocator);
-                    try out.ensureTotalCapacity(self.allocator, count);
-                    for (0..count) |idx| try out.append(self.allocator, bitGet(array.storage.bit, idx % array.len()));
-                    break :blk try self.createManagedHostBitArray(out.items);
+                    const source = HostBitSlice{ .words = array.storage.bit, .len = array.logical_len };
+                    const out = try self.allocHostBitArray(.managed, count);
+                    var dst_start: usize = 0;
+                    while (dst_start < count) {
+                        const chunk_len = @min(source.len, count - dst_start);
+                        bitCopyRange(out.words, dst_start, source, 0, chunk_len);
+                        dst_start += chunk_len;
+                    }
+                    break :blk try self.finishManagedHostBitAlloc(
+                        out,
+                        if (count <= array.len()) array.flags else host_dense_flag_normalized,
+                        sourceHostIntRange(hostDenseSourceValue(array), array),
+                    );
                 },
                 .float64 => |items| blk: {
                     var out = std.ArrayList(f64).empty;
@@ -23405,23 +29637,23 @@ pub const Session = struct {
         }
         return switch (array.storage) {
             .bit => blk: {
-                var out = std.ArrayList(bool).empty;
-                defer out.deinit(self.allocator);
-                try out.ensureTotalCapacity(self.allocator, count);
+                const source = HostBitSlice{ .words = array.storage.bit, .len = array.logical_len };
+                const out = try self.allocHostBitArray(.managed, count);
                 const pad = if (count > array.len()) count - array.len() else 0;
-                for (0..pad) |_| try out.append(self.allocator, bitGet(array.storage.bit, 0));
+                bitFillRange(out.words, 0, pad, bitGet(array.storage.bit, 0));
                 const start = if (count >= array.len()) 0 else array.len() - count;
-                for (start..array.len()) |idx| try out.append(self.allocator, bitGet(array.storage.bit, idx));
-                break :blk try self.createManagedHostBitArray(out.items);
+                bitCopyRange(out.words, pad, source, start, array.len() - start);
+                break :blk try self.finishManagedHostBitAlloc(out, array.flags, sourceHostIntRange(hostDenseSourceValue(array), array));
             },
             .float64 => |items| blk: {
+                const logical_items = hostDenseLogicalItems(f64, array, items);
                 var out = std.ArrayList(f64).empty;
                 defer out.deinit(self.allocator);
                 try out.ensureTotalCapacity(self.allocator, count);
-                const pad = if (count > items.len) count - items.len else 0;
-                for (0..pad) |_| try out.append(self.allocator, items[0]);
-                const start = if (count >= items.len) 0 else items.len - count;
-                for (items[start..]) |item| try out.append(self.allocator, item);
+                const pad = if (count > logical_items.len) count - logical_items.len else 0;
+                for (0..pad) |_| try out.append(self.allocator, logical_items[0]);
+                const start = if (count >= logical_items.len) 0 else logical_items.len - count;
+                for (logical_items[start..]) |item| try out.append(self.allocator, item);
                 break :blk try self.createManagedHostFloatArray(out.items);
             },
             else => blk: {
@@ -23560,13 +29792,11 @@ pub const Session = struct {
         const end: usize = if (raw_count >= 0) len else drop_count;
         return switch (array.storage) {
             .bit => blk: {
-                var out = std.ArrayList(bool).empty;
-                defer out.deinit(self.allocator);
-                try out.ensureTotalCapacity(self.allocator, end - start);
-                for (start..end) |idx| try out.append(self.allocator, bitGet(array.storage.bit, idx));
-                break :blk try self.createManagedHostBitArray(out.items);
+                const out = try self.allocHostBitArray(.managed, end - start);
+                bitCopyRange(out.words, 0, .{ .words = array.storage.bit, .len = array.logical_len }, start, end - start);
+                break :blk try self.finishManagedHostBitAlloc(out, array.flags, sourceHostIntRange(hostDenseSourceValue(array), array));
             },
-            .float64 => |items| try self.createManagedHostFloatArray(items[start..end]),
+            .float64 => |items| try self.createManagedHostFloatArray(hostDenseLogicalItems(f64, array, items)[start..end]),
             else => blk: {
                 const view = hostIntArrayView(array).?;
                 var out = std.ArrayList(i64).empty;
@@ -23624,8 +29854,8 @@ pub const Session = struct {
                 self,
                 .managed,
                 total,
-                handle.range_iota.start,
-                handle.range_iota.step,
+                numericArrayRangeIota(handle).start,
+                numericArrayRangeIota(handle).step,
                 numericShapeSnapshotMatrix(rows, row_len),
             );
         }
@@ -23637,13 +29867,11 @@ pub const Session = struct {
         if (right.arraySubkind() != .host_boxed_array) {
             const value = switch (source.storage) {
                 .bit => blk: {
-                    var out = std.ArrayList(bool).empty;
-                    defer out.deinit(self.allocator);
-                    try out.ensureTotalCapacity(self.allocator, total);
-                    for (0..total) |idx| try out.append(self.allocator, bitGet(source.storage.bit, idx));
-                    break :blk try self.createManagedHostBitArray(out.items);
+                    const out = try self.allocHostBitArray(.managed, total);
+                    bitCopyRange(out.words, 0, .{ .words = source.storage.bit, .len = source.logical_len }, 0, total);
+                    break :blk try self.finishManagedHostBitAlloc(out, source.flags, sourceHostIntRange(hostDenseSourceValue(source), source));
                 },
-                .float64 => |items| try self.createManagedHostFloatArray(items),
+                .float64 => |items| try self.createManagedHostFloatArray(hostDenseLogicalItems(f64, source, items)),
                 else => blk: {
                     const view = hostIntArrayView(source) orelse return error.Type;
                     var out = std.ArrayList(i64).empty;
@@ -23677,6 +29905,7 @@ pub const Session = struct {
     }
 
     fn equalValues(self: *Session, left: Value, right: Value) KError!Value {
+        if (try self.tryFastInlineScalarDyad(.equal, left, right)) |result| return result;
         if (try self.promoteRenderableNumericDyadOperands(left, right)) |operands| {
             return try self.equalValues(operands.left, operands.right);
         }
@@ -23756,9 +29985,8 @@ pub const Session = struct {
         if (try self.tryFastHostBitCompare(op, left, right, shape)) |result| return result;
         const len = try arrayResultLen(left, right);
         const rowwise = rowwiseMatrixVectorDyad(left, right);
-        var out = std.ArrayList(bool).empty;
-        defer out.deinit(self.allocator);
-        try out.ensureTotalCapacity(self.allocator, len);
+        const out = try self.allocHostBitArray(.managed, len);
+        var stats = BitSequenceStats{};
         for (0..len) |idx| {
             const lhs = if (left.tag() == .array)
                 try numericFloatAt(left, if (rowwise) |info| info.operandIndex(true, idx) else idx)
@@ -23768,13 +29996,16 @@ pub const Session = struct {
                 try numericFloatAt(right, if (rowwise) |info| info.operandIndex(false, idx) else idx)
             else
                 scalarNumericFloatValue(right).?;
-            try out.append(self.allocator, switch (op) {
+            const bit = switch (op) {
                 .less => lhs < rhs,
                 .more => lhs > rhs,
                 else => return error.Internal,
-            });
+            };
+            bitSet(out.words, idx, bit);
+            stats.note(bit);
         }
-        const result = try self.createManagedHostBitArray(out.items);
+        const metadata = stats.metadata();
+        const result = try self.finishManagedHostBitAlloc(out, metadata.flags, metadata.range);
         return try applyNonVectorNumericShapeToValue(self, result, shape);
     }
 
@@ -24004,6 +30235,7 @@ pub const Session = struct {
     }
 
     fn minimumValues(self: *Session, left: Value, right: Value) KError!Value {
+        if (try self.tryFastInlineScalarDyad(.minimum, left, right)) |result| return result;
         if (try self.promoteRenderableNumericDyadOperands(left, right)) |operands| {
             return try self.minimumValues(operands.left, operands.right);
         }
@@ -24024,6 +30256,7 @@ pub const Session = struct {
     }
 
     fn maximumValues(self: *Session, left: Value, right: Value) KError!Value {
+        if (try self.tryFastInlineScalarDyad(.maximum, left, right)) |result| return result;
         if (try self.promoteRenderableNumericDyadOperands(left, right)) |operands| {
             return try self.maximumValues(operands.left, operands.right);
         }
@@ -24044,6 +30277,7 @@ pub const Session = struct {
     }
 
     fn lessValues(self: *Session, left: Value, right: Value) KError!Value {
+        if (try self.tryFastInlineScalarDyad(.less, left, right)) |result| return result;
         if (try self.promoteRenderableNumericDyadOperands(left, right)) |operands| {
             return try self.lessValues(operands.left, operands.right);
         }
@@ -24056,6 +30290,7 @@ pub const Session = struct {
     }
 
     fn moreValues(self: *Session, left: Value, right: Value) KError!Value {
+        if (try self.tryFastInlineScalarDyad(.more, left, right)) |result| return result;
         if (try self.promoteRenderableNumericDyadOperands(left, right)) |operands| {
             return try self.moreValues(operands.left, operands.right);
         }
@@ -24074,9 +30309,8 @@ pub const Session = struct {
             if (try self.tryFastHostBitCompare(.equal, left, right, shape)) |result| return result;
             const len = try arrayResultLen(left, right);
             const rowwise = rowwiseMatrixVectorDyad(left, right);
-            var out = std.ArrayList(bool).empty;
-            defer out.deinit(self.allocator);
-            try out.ensureTotalCapacity(self.allocator, len);
+            const out = try self.allocHostBitArray(.managed, len);
+            var stats = BitSequenceStats{};
             for (0..len) |idx| {
                 const lhs = if (left.tag() == .array)
                     try numericFloatAt(left, if (rowwise) |info| info.operandIndex(true, idx) else idx)
@@ -24086,9 +30320,12 @@ pub const Session = struct {
                     try numericFloatAt(right, if (rowwise) |info| info.operandIndex(false, idx) else idx)
                 else
                     scalarNumericFloatValue(right).?;
-                try out.append(self.allocator, lhs == rhs);
+                const bit = lhs == rhs;
+                bitSet(out.words, idx, bit);
+                stats.note(bit);
             }
-            const result = try self.createManagedHostBitArray(out.items);
+            const metadata = stats.metadata();
+            const result = try self.finishManagedHostBitAlloc(out, metadata.flags, metadata.range);
             return try applyNonVectorNumericShapeToValue(self, result, shape);
         }
         const left_array = if (left.tag() == .array) try numericHostArrayValue(self, left) else null;
@@ -24098,9 +30335,8 @@ pub const Session = struct {
             break :blk left_array.?.len();
         } else if (left_array != null) left_array.?.len() else right_array.?.len();
 
-        var out = std.ArrayList(bool).empty;
-        defer out.deinit(self.allocator);
-        try out.ensureTotalCapacity(self.allocator, len);
+        const out = try self.allocHostBitArray(.managed, len);
+        var stats = BitSequenceStats{};
         for (0..len) |idx| {
             const lhs = if (left_array) |array| try self.hostDenseIndexScalar(array, @intCast(idx)) else left;
             const rhs = if (right_array) |array| try self.hostDenseIndexScalar(array, @intCast(idx)) else right;
@@ -24108,12 +30344,15 @@ pub const Session = struct {
             defer if (right_array != null) self.releaseValue(rhs);
             const eq = try self.equalValues(lhs, rhs);
             defer if (eq.tag() != .bool) self.releaseValue(eq);
-            try out.append(self.allocator, eq.asBool());
+            bitSet(out.words, idx, eq.asBool());
+            stats.note(eq.asBool());
         }
-        return try self.createManagedHostBitArray(out.items);
+        const metadata = stats.metadata();
+        return try self.finishManagedHostBitAlloc(out, metadata.flags, metadata.range);
     }
 
     fn addValues(self: *Session, left: Value, right: Value) KError!Value {
+        if (try self.tryFastInlineScalarDyad(.add, left, right)) |result| return result;
         if (try self.promoteRenderableNumericDyadOperands(left, right)) |operands| {
             return try self.addValues(operands.left, operands.right);
         }
@@ -24140,6 +30379,7 @@ pub const Session = struct {
     }
 
     fn subValues(self: *Session, left: Value, right: Value) KError!Value {
+        if (try self.tryFastInlineScalarDyad(.sub, left, right)) |result| return result;
         if (try self.promoteRenderableNumericDyadOperands(left, right)) |operands| {
             return try self.subValues(operands.left, operands.right);
         }
@@ -24165,6 +30405,7 @@ pub const Session = struct {
     }
 
     fn mulValues(self: *Session, left: Value, right: Value) KError!Value {
+        if (try self.tryFastInlineScalarDyad(.mul, left, right)) |result| return result;
         if (try self.promoteRenderableNumericDyadOperands(left, right)) |operands| {
             return try self.mulValues(operands.left, operands.right);
         }
@@ -24190,6 +30431,7 @@ pub const Session = struct {
     }
 
     fn divValues(self: *Session, left: Value, right: Value) KError!Value {
+        if (try self.tryFastInlineScalarDyad(.div, left, right)) |result| return result;
         if (try self.promoteRenderableNumericDyadOperands(left, right)) |operands| {
             return try self.divValues(operands.left, operands.right);
         }
@@ -24212,6 +30454,7 @@ pub const Session = struct {
     }
 
     fn powValues(self: *Session, left: Value, right: Value) KError!Value {
+        if (try self.tryFastInlineScalarDyad(.pow, left, right)) |result| return result;
         if (try self.promoteRenderableNumericDyadOperands(left, right)) |operands| {
             return try self.powValues(operands.left, operands.right);
         }
@@ -24600,7 +30843,7 @@ pub const Session = struct {
             if (supportsBackendMonad(op) and !numericHasHostAttachment(handle) and hasBackendRealization(value)) {
                 return try self.applyBackendArrayMonad(op, value);
             }
-            if (!numericHasHostAttachment(handle) and handle.structural != .materialized) {
+            if (!numericHasHostAttachment(handle) and numericArrayStructuralTag(handle) != .materialized) {
                 const view = try hostDenseView(self, value);
                 return try self.applyHostDenseViewMonad(op, value, view);
             }
@@ -24704,8 +30947,8 @@ pub const Session = struct {
 
     fn applyGenericArrayDyad(self: *Session, op: BuiltinId, left: Value, right: Value) KError!Value {
         const len = try arrayResultLen(left, right);
-        const left_dense = if (left.tag() == .array and left.arraySubkind() != .host_boxed_array) try numericHostArrayValue(self, left) else null;
-        const right_dense = if (right.tag() == .array and right.arraySubkind() != .host_boxed_array) try numericHostArrayValue(self, right) else null;
+        const left_dense = if (left.tag() == .array and valueNumericMode(left) != null) try numericHostArrayValue(self, left) else null;
+        const right_dense = if (right.tag() == .array and valueNumericMode(right) != null) try numericHostArrayValue(self, right) else null;
         const left_boxed = if (left.tag() == .array and left.arraySubkind() == .host_boxed_array) left.asHostBoxedArray() else null;
         const right_boxed = if (right.tag() == .array and right.arraySubkind() == .host_boxed_array) right.asHostBoxedArray() else null;
         var out = std.ArrayList(Value).empty;
@@ -24830,7 +31073,7 @@ pub const Session = struct {
         };
         const len = try arrayResultLen(left, right);
         if (rowwiseMatrixVectorDyad(left, right)) |rowwise| {
-            self.noteHostDenseDyadHost(op, left, right, true);
+            self.noteHostDenseDyadHost(op, left, right, len, true);
             return switch (mode) {
                 .int => try self.applyHostArrayDyadRowwiseInt(op, left, right, rowwise, len),
                 .float => try self.applyHostArrayDyadRowwiseFloat(op, left, right, rowwise, len),
@@ -24844,7 +31087,7 @@ pub const Session = struct {
             self.noteHostDenseDyadMiss(.view);
             return err;
         };
-        self.noteHostDenseDyadHost(op, left, right, false);
+        self.noteHostDenseDyadHost(op, left, right, len, false);
         return switch (mode) {
             .int => try self.applyHostArrayDyadInt(op, left, right, left_view, right_view, len),
             .float => try self.applyHostArrayDyadFloat(op, left, right, left_view, right_view, len),
@@ -25249,13 +31492,38 @@ pub const Session = struct {
         return try self.intValue(result[0]);
     }
 
+    fn classifyGlobalValue(value: Value) GlobalValueClass {
+        return switch (value.tag()) {
+            .int, .float, .bool => .scalar,
+            .builtin => .builtin,
+            .closure => .closure,
+            .array => blk: {
+                if (valueNonVectorNumericShape(value) == null) {
+                    if (hostDenseIfPresent(value)) |host| {
+                        break :blk switch (hostDenseNumericMode(host)) {
+                            .int => .dense_int_vector,
+                            .float => .dense_float_vector,
+                        };
+                    }
+                }
+                break :blk .array;
+            },
+        };
+    }
+
+    fn compactKCodeForStoredGlobal(value: Value) ?*const CompactKCode {
+        if (value.tag() != .closure) return null;
+        const closure = value.asClosure();
+        if (closure.kind != .plain or closure.captures.len != 0) return null;
+        return closure.code.compact_k;
+    }
+
     fn internGlobalSlot(self: *Session, name: []const u8) !u16 {
         if (self.global_slots.get(name)) |slot| return slot;
 
-        const slot = std.math.cast(u16, self.global_values.items.len) orelse return error.Unsupported;
+        const slot = std.math.cast(u16, self.global_cells.items.len) orelse return error.Unsupported;
         const owned_name = try self.arena.allocator().dupe(u8, name);
-        try self.global_values.append(self.allocator, Value.fromBool(false));
-        try self.global_initialized.append(self.allocator, false);
+        try self.global_cells.append(self.allocator, .{});
         try self.global_names.append(self.allocator, owned_name);
         try self.debug_global_call_counts.append(self.allocator, 0);
         try self.global_slots.put(owned_name, slot);
@@ -25263,12 +31531,17 @@ pub const Session = struct {
     }
 
     fn storeGlobalSlot(self: *Session, slot: u16, value: Value) !void {
-        if (slot >= self.global_values.items.len or slot >= self.global_initialized.items.len) return error.Internal;
-        if (self.global_initialized.items[slot]) {
-            self.releaseValue(self.global_values.items[slot]);
-        }
-        self.global_values.items[slot] = try self.retainGlobalStoredValue(value);
-        self.global_initialized.items[slot] = true;
+        if (slot >= self.global_cells.items.len) return error.Internal;
+        const cell = &self.global_cells.items[slot];
+        if (cell.initialized) self.releaseValue(cell.value);
+        const stored = try self.retainGlobalStoredValue(value);
+        const compact_k = compactKCodeForStoredGlobal(stored);
+        cell.* = .{
+            .value = stored,
+            .initialized = true,
+            .class = classifyGlobalValue(stored),
+            .compact_k = compact_k,
+        };
     }
 
     pub fn debugGlobalIsFrozenClosure(self: *Session, name: []const u8) !bool {
@@ -25325,9 +31598,23 @@ pub const Session = struct {
     }
 
     fn loadGlobalSlot(self: *Session, slot: u16) KError!Value {
-        if (slot >= self.global_values.items.len or slot >= self.global_initialized.items.len) return error.Internal;
-        if (!self.global_initialized.items[slot]) return error.Name;
-        return self.global_values.items[slot];
+        return (try self.loadGlobalCell(slot)).value;
+    }
+
+    fn loadGlobalCell(self: *Session, slot: u16) KError!*GlobalCell {
+        if (slot >= self.global_cells.items.len) return error.Internal;
+        const cell = &self.global_cells.items[slot];
+        if (!cell.initialized) return error.Name;
+        return cell;
+    }
+
+    fn takeGlobalSlot(self: *Session, slot: u16) KError!Value {
+        const cell = try self.loadGlobalCell(slot);
+        const value = cell.value;
+        cell.value = Value.fromBool(false);
+        cell.class = classifyGlobalValue(cell.value);
+        cell.compact_k = null;
+        return value;
     }
 
     fn noteGlobalCall(self: *Session, slot: u16) void {
@@ -25353,9 +31640,11 @@ pub const Session = struct {
     }
 
     fn ensureFrameLocalSlots(self: *Session, code: *const Code, base: usize) KError!void {
-        const slot_count: u8 = if (code.frame_slot_count == 0 and code.arity != 0) code.arity else code.frame_slot_count;
-        if (slot_count < code.arity) return error.Internal;
+        const slot_count = frameSlotCount(code);
+        if (slot_count < @as(usize, code.arity)) return error.Internal;
         const required_len = base + slot_count;
+        const activation_len = base + staticActivationSlotCount(code);
+        if (activation_len > self.stack.len) return error.Unsupported;
         if (required_len > self.stack.len) return error.Unsupported;
         while (self.stack_len < required_len) {
             self.stack[self.stack_len] = Value.fromBool(false);
@@ -25364,10 +31653,29 @@ pub const Session = struct {
     }
 
     inline fn pushFrame(self: *Session, frame: CallFrame) KError!void {
+        try self.pushFrameWithArgCount(frame, frame.code.arity);
+    }
+
+    inline fn pushFrameWithArgCount(self: *Session, frame: CallFrame, arg_count: usize) KError!void {
+        const state = try self.frameReleaseStateFromStackArgs(&frame, arg_count);
+        try self.pushFrameWithReleaseState(frame, state, false);
+    }
+
+    inline fn pushFrameWithReleaseState(self: *Session, frame: CallFrame, state: FrameLocalReleaseState, comptime known_release_state: bool) KError!void {
+        if (comptime enable_probe_instrumentation) self.debug_frame_push_count += 1;
+        if (comptime enable_probe_instrumentation and known_release_state) self.debug_frame_push_known_release_count += 1;
         if (self.frame_len >= self.frames.len) return error.Unsupported;
         self.frames[self.frame_len] = frame;
         self.frame_len += 1;
         try self.ensureFrameLocalSlots(frame.code, frame.base);
+        applyFrameLocalReleaseState(&self.frames[self.frame_len - 1], state);
+    }
+
+    inline fn prepareReusedFrameActivationWithReleaseState(self: *Session, frame_index: usize, state: FrameLocalReleaseState, comptime known_release_state: bool) KError!void {
+        if (comptime enable_probe_instrumentation and known_release_state) self.debug_frame_reuse_known_release_count += 1;
+        const frame = &self.frames[frame_index];
+        try self.ensureFrameLocalSlots(frame.code, frame.base);
+        applyFrameLocalReleaseState(frame, state);
     }
 
     fn createManagedHostIntArray(self: *Session, items: []const i64) !Value {
@@ -26031,11 +32339,11 @@ fn copyExactFloatSliceToIntResult(out: *HostIntResult, items: []const f64) KErro
 
 fn hostIntArrayView(array: *const HostDenseArray) ?HostIntArrayView {
     return switch (array.storage) {
-        .bit => |words| .{ .bit = .{ .words = words, .len = array.logical_len } },
-        .int8 => |items| .{ .int8 = items },
-        .int16 => |items| .{ .int16 = items },
-        .int32 => |items| .{ .int32 = items },
-        .int64 => |items| .{ .int64 = items },
+        .bit => |words| .{ .bit = .{ .words = hostDenseLogicalBitWords(array, words), .len = array.logical_len } },
+        .int8 => |items| .{ .int8 = hostDenseLogicalItems(i8, array, items) },
+        .int16 => |items| .{ .int16 = hostDenseLogicalItems(i16, array, items) },
+        .int32 => |items| .{ .int32 = hostDenseLogicalItems(i32, array, items) },
+        .int64 => |items| .{ .int64 = hostDenseLogicalItems(i64, array, items) },
         .float64 => null,
     };
 }
@@ -26151,7 +32459,7 @@ fn hostRangeIotaViewFlags(view: HostRangeIotaView) u8 {
     const mono = if (len <= 1)
         host_dense_flag_asc | host_dense_flag_dsc
     else
-        orderFlagsFromMonotonic(view.handle.range_iota.step >= 0, view.handle.range_iota.step <= 0);
+        orderFlagsFromMonotonic(numericArrayRangeIota(view.handle).step >= 0, numericArrayRangeIota(view.handle).step <= 0);
     return host_dense_flag_normalized | mono;
 }
 
@@ -26677,8 +32985,8 @@ fn hostRangeIotaViewArithmeticSlice(view: HostRangeIotaView, len: usize) ?Arithm
     const slice_len = hostRangeIotaViewLen(view);
     if (slice_len == 0) return .{ .start = 0, .len = 0, .step = 1 };
 
-    const start_raw = view.handle.range_iota.start;
-    const step = std.math.cast(i32, view.handle.range_iota.step) orelse return null;
+    const start_raw = numericArrayRangeIota(view.handle).start;
+    const step = std.math.cast(i32, numericArrayRangeIota(view.handle).step) orelse return null;
     if (step == 0) return null;
 
     const len_i64 = std.math.cast(i64, len) orelse return null;
@@ -26822,7 +33130,7 @@ fn valueHostIntStructuralView(value: Value) ?HostIntDenseView {
                 } };
             }
             if (numericArrayIsFirstAxisSlice(handle)) {
-                const slice = handle.first_axis_slice orelse break :blk null;
+                const slice = numericArrayFirstAxisSlicePayload(handle) orelse break :blk null;
                 if (slice.step != 1) break :blk null;
                 const source_handle = shapedNumericHandle(slice.source) orelse break :blk null;
                 const source_host = if (hostDenseIfPresent(slice.source)) |array|
@@ -26841,7 +33149,7 @@ fn valueHostIntStructuralView(value: Value) ?HostIntDenseView {
                 } };
             }
             if (numericArrayIsFirstAxisIndex(handle)) {
-                const index = handle.first_axis_index orelse break :blk null;
+                const index = numericArrayFirstAxisIndexPayload(handle) orelse break :blk null;
                 const source_handle = shapedNumericHandle(index.source) orelse break :blk null;
                 const source_host = if (hostDenseIfPresent(index.source)) |array|
                     if (hostIntArrayView(array) != null) array else break :blk null
@@ -26936,7 +33244,7 @@ fn valueHostIntStructuralView(value: Value) ?HostIntDenseView {
                 } };
             }
             if (numericArrayIsFirstAxisSlice(handle)) {
-                const slice = handle.first_axis_slice orelse break :blk null;
+                const slice = numericArrayFirstAxisSlicePayload(handle) orelse break :blk null;
                 if (slice.step != 1) break :blk null;
                 const source_handle = shapedNumericHandle(slice.source) orelse break :blk null;
                 const source_host = if (hostDenseIfPresent(slice.source)) |array|
@@ -26955,7 +33263,7 @@ fn valueHostIntStructuralView(value: Value) ?HostIntDenseView {
                 } };
             }
             if (numericArrayIsFirstAxisIndex(handle)) {
-                const index = handle.first_axis_index orelse break :blk null;
+                const index = numericArrayFirstAxisIndexPayload(handle) orelse break :blk null;
                 const source_handle = shapedNumericHandle(index.source) orelse break :blk null;
                 const source_host = if (hostDenseIfPresent(index.source)) |array|
                     if (hostIntArrayView(array) != null) array else break :blk null
@@ -27012,7 +33320,7 @@ fn normalizeIndex(raw_index: i64, len: usize) KError!usize {
 
 fn hostStorageCopyIntSlice(array: *const HostDenseArray) []const i64 {
     return switch (array.storage) {
-        .int64 => |items| items,
+        .int64 => |items| hostDenseLogicalItems(i64, array, items),
         .bit, .int8, .int16, .int32, .float64 => unreachable,
         else => unreachable,
     };
@@ -27202,7 +33510,7 @@ const DuckDbKiwiTableScan = if (runtime_has_duckdb) struct {
     fn columnFloatSlice(table: *const HostKeyedStore, column_idx: usize) ?[]const f64 {
         const array = hostDenseIfPresent(Session.tableColumnData(table, column_idx)) orelse return null;
         return switch (array.storage) {
-            .float64 => |items| items,
+            .float64 => |items| hostDenseLogicalItems(f64, array, items),
             else => null,
         };
     }
@@ -27669,6 +33977,12 @@ const DuckDbKiwiTableScan = if (runtime_has_duckdb) struct {
 
 fn destroyManagedHostArrayNoPool(allocator: std.mem.Allocator, array: *HostDenseArray) void {
     array.logical_handle = null;
+    if (array.find_cache) |cache| {
+        if (cache.keys) |keys| allocator.free(keys);
+        if (cache.slots) |slots| allocator.free(slots);
+        allocator.destroy(cache);
+        array.find_cache = null;
+    }
     switch (array.storage) {
         .bit => |words| allocator.free(words),
         .int8 => |items| allocator.free(items),
@@ -27723,10 +34037,16 @@ fn destroyManagedBackendArrayNoPool(allocator: std.mem.Allocator, array: *Backen
 
 fn isManagedValue(value: Value) bool {
     return switch (value.raw & Value.tag_mask) {
-        Value.boxed_float_tag => value.asBoxedFloat().header.owner == .managed,
         Value.boxed_int_tag => value.asBoxedInt().header.owner == .managed,
         Value.closure_tag => value.asClosure().header.owner == .managed,
         Value.array_tag => value.arrayOwner() == .managed,
+        else => false,
+    };
+}
+
+fn valueMayNeedRelease(value: Value) bool {
+    return switch (value.raw & Value.tag_mask) {
+        Value.boxed_int_tag, Value.closure_tag, Value.array_tag => true,
         else => false,
     };
 }
@@ -27736,26 +34056,29 @@ fn releaseManagedNumericHandleNoPool(allocator: std.mem.Allocator, handle: *Nume
     std.debug.assert(handle.header.ref_count != 0);
     handle.header.ref_count -= 1;
     if (handle.header.ref_count == 0) {
-        if (handle.flat_slice) |slice| releaseHeapValue(allocator, slice.source);
-        if (handle.flat_concat) |concat| {
-            releaseHeapValue(allocator, concat.left);
-            releaseHeapValue(allocator, concat.right);
+        switch (handle.structural) {
+            .materialized, .range_iota => {},
+            .flat_slice => |slice| releaseHeapValue(allocator, slice.source),
+            .flat_concat => |concat| {
+                releaseHeapValue(allocator, concat.left);
+                releaseHeapValue(allocator, concat.right);
+            },
+            .flat_segments => |segments| {
+                for (segments.values) |item| releaseHeapValue(allocator, item);
+                allocator.free(segments.values);
+            },
+            .first_axis_slice => |slice| releaseHeapValue(allocator, slice.source),
+            .first_axis_index => |index| {
+                releaseHeapValue(allocator, index.source);
+                releaseHeapValue(allocator, index.row_indices);
+            },
+            .first_axis_concat => |concat| {
+                releaseHeapValue(allocator, concat.left);
+                releaseHeapValue(allocator, concat.right);
+            },
+            .reshape_view => |reshape| releaseHeapValue(allocator, reshape.source),
+            .transpose_view => |transpose| releaseHeapValue(allocator, transpose.source),
         }
-        if (handle.flat_segments) |segments| {
-            for (segments.values) |item| releaseHeapValue(allocator, item);
-            allocator.free(segments.values);
-        }
-        if (handle.first_axis_slice) |slice| releaseHeapValue(allocator, slice.source);
-        if (handle.first_axis_index) |index| {
-            releaseHeapValue(allocator, index.source);
-            releaseHeapValue(allocator, index.row_indices);
-        }
-        if (handle.first_axis_concat) |concat| {
-            releaseHeapValue(allocator, concat.left);
-            releaseHeapValue(allocator, concat.right);
-        }
-        if (handle.reshape_view) |reshape| releaseHeapValue(allocator, reshape.source);
-        if (handle.transpose_view) |transpose| releaseHeapValue(allocator, transpose.source);
         if (handle.host) |array| destroyManagedHostArrayNoPool(allocator, array);
         if (handle.mlx) |array| destroyManagedBackendArrayNoPool(allocator, array);
         allocator.destroy(handle);
@@ -27764,10 +34087,6 @@ fn releaseManagedNumericHandleNoPool(allocator: std.mem.Allocator, handle: *Nume
 
 fn retainHeapValue(value: Value) void {
     switch (value.raw & Value.tag_mask) {
-        Value.boxed_float_tag => {
-            const box = @constCast(value.asBoxedFloat());
-            if (box.header.owner == .managed) box.header.ref_count += 1;
-        },
         Value.boxed_int_tag => {
             const box = @constCast(value.asBoxedInt());
             if (box.header.owner == .managed) box.header.ref_count += 1;
@@ -27795,17 +34114,12 @@ fn retainHeapValue(value: Value) void {
                     }
                 },
                 .host_boxed_array => {
-                    switch (value.arrayKind()) {
-                        .host_boxed_array => {
-                            const array = @constCast(value.asHostBoxedArray());
-                            if (array.header.owner == .managed) array.header.ref_count += 1;
-                        },
-                        .host_keyed_store => {
-                            const store = @constCast(value.asHostKeyedStore());
-                            if (store.header.owner == .managed) store.header.ref_count += 1;
-                        },
-                        else => unreachable,
-                    }
+                    const array = @constCast(value.asHostBoxedArray());
+                    if (array.header.owner == .managed) array.header.ref_count += 1;
+                },
+                .host_keyed_store => {
+                    const store = @constCast(value.asHostKeyedStore());
+                    if (store.header.owner == .managed) store.header.ref_count += 1;
                 },
                 .host_string => {
                     const text = @constCast(value.asHostString());
@@ -27816,21 +34130,16 @@ fn retainHeapValue(value: Value) void {
                     if (text.header.owner == .managed) text.header.ref_count += 1;
                 },
                 .host_string_view => {
-                    switch (value.arrayKind()) {
-                        .host_string_view => {
-                            const view = @constCast(value.asHostStringView());
-                            if (view.header.owner == .managed) view.header.ref_count += 1;
-                        },
-                        .host_relation => {
-                            const relation = @constCast(value.asHostRelation());
-                            if (relation.header.owner == .managed) relation.header.ref_count += 1;
-                        },
-                        .host_table_scalar => {
-                            const scalar = @constCast(valueAsHostTableScalar(value));
-                            if (scalar.header.owner == .managed) scalar.header.ref_count += 1;
-                        },
-                        else => unreachable,
-                    }
+                    const view = @constCast(value.asHostStringView());
+                    if (view.header.owner == .managed) view.header.ref_count += 1;
+                },
+                .host_relation => {
+                    const relation = @constCast(value.asHostRelation());
+                    if (relation.header.owner == .managed) relation.header.ref_count += 1;
+                },
+                .host_table_scalar => {
+                    const scalar = @constCast(valueAsHostTableScalar(value));
+                    if (scalar.header.owner == .managed) scalar.header.ref_count += 1;
                 },
                 .host_string_list => {
                     const list = @constCast(value.asHostStringList());
@@ -27854,13 +34163,6 @@ fn retainHeapValue(value: Value) void {
 
 fn releaseHeapValue(allocator: std.mem.Allocator, value: Value) void {
     switch (value.raw & Value.tag_mask) {
-        Value.boxed_float_tag => {
-            const box = @constCast(value.asBoxedFloat());
-            if (box.header.owner != .managed) return;
-            std.debug.assert(box.header.ref_count != 0);
-            box.header.ref_count -= 1;
-            if (box.header.ref_count == 0) allocator.destroy(box);
-        },
         Value.boxed_int_tag => {
             const box = @constCast(value.asBoxedInt());
             if (box.header.owner != .managed) return;
@@ -27901,26 +34203,21 @@ fn releaseHeapValue(allocator: std.mem.Allocator, value: Value) void {
                     }
                 },
                 .host_boxed_array => {
-                    switch (value.arrayKind()) {
-                        .host_boxed_array => {
-                            const array = @constCast(value.asHostBoxedArray());
-                            if (array.header.owner != .managed) return;
-                            std.debug.assert(array.header.ref_count != 0);
-                            array.header.ref_count -= 1;
-                            if (array.header.ref_count == 0) {
-                                destroyManagedHostBoxedArrayNoPool(allocator, array);
-                            }
-                        },
-                        .host_keyed_store => {
-                            const store = @constCast(value.asHostKeyedStore());
-                            if (store.header.owner != .managed) return;
-                            std.debug.assert(store.header.ref_count != 0);
-                            store.header.ref_count -= 1;
-                            if (store.header.ref_count == 0) {
-                                destroyManagedHostKeyedStoreNoPool(allocator, store);
-                            }
-                        },
-                        else => unreachable,
+                    const array = @constCast(value.asHostBoxedArray());
+                    if (array.header.owner != .managed) return;
+                    std.debug.assert(array.header.ref_count != 0);
+                    array.header.ref_count -= 1;
+                    if (array.header.ref_count == 0) {
+                        destroyManagedHostBoxedArrayNoPool(allocator, array);
+                    }
+                },
+                .host_keyed_store => {
+                    const store = @constCast(value.asHostKeyedStore());
+                    if (store.header.owner != .managed) return;
+                    std.debug.assert(store.header.ref_count != 0);
+                    store.header.ref_count -= 1;
+                    if (store.header.ref_count == 0) {
+                        destroyManagedHostKeyedStoreNoPool(allocator, store);
                     }
                 },
                 .host_string, .host_symbol => {
@@ -27935,37 +34232,32 @@ fn releaseHeapValue(allocator: std.mem.Allocator, value: Value) void {
                     if (text.header.ref_count == 0) freeHostTextAlloc(allocator, text);
                 },
                 .host_string_view => {
-                    switch (value.arrayKind()) {
-                        .host_string_view => {
-                            const view = @constCast(value.asHostStringView());
-                            if (view.header.owner != .managed) return;
-                            std.debug.assert(view.header.ref_count != 0);
-                            view.header.ref_count -= 1;
-                            if (view.header.ref_count == 0) {
-                                releaseHeapValue(allocator, Value.array(view.base));
-                                allocator.destroy(view);
-                            }
-                        },
-                        .host_relation => {
-                            const relation = @constCast(value.asHostRelation());
-                            if (relation.header.owner != .managed) return;
-                            std.debug.assert(relation.header.ref_count != 0);
-                            relation.header.ref_count -= 1;
-                            if (relation.header.ref_count == 0) {
-                                destroyManagedHostRelationNoPool(allocator, relation);
-                            }
-                        },
-                        .host_table_scalar => {
-                            const scalar = @constCast(valueAsHostTableScalar(value));
-                            if (scalar.header.owner != .managed) return;
-                            std.debug.assert(scalar.header.ref_count != 0);
-                            scalar.header.ref_count -= 1;
-                            if (scalar.header.ref_count == 0) {
-                                releaseHeapValue(allocator, scalar.value);
-                                allocator.destroy(scalar);
-                            }
-                        },
-                        else => unreachable,
+                    const view = @constCast(value.asHostStringView());
+                    if (view.header.owner != .managed) return;
+                    std.debug.assert(view.header.ref_count != 0);
+                    view.header.ref_count -= 1;
+                    if (view.header.ref_count == 0) {
+                        releaseHeapValue(allocator, Value.array(view.base));
+                        allocator.destroy(view);
+                    }
+                },
+                .host_relation => {
+                    const relation = @constCast(value.asHostRelation());
+                    if (relation.header.owner != .managed) return;
+                    std.debug.assert(relation.header.ref_count != 0);
+                    relation.header.ref_count -= 1;
+                    if (relation.header.ref_count == 0) {
+                        destroyManagedHostRelationNoPool(allocator, relation);
+                    }
+                },
+                .host_table_scalar => {
+                    const scalar = @constCast(valueAsHostTableScalar(value));
+                    if (scalar.header.owner != .managed) return;
+                    std.debug.assert(scalar.header.ref_count != 0);
+                    scalar.header.ref_count -= 1;
+                    if (scalar.header.ref_count == 0) {
+                        releaseHeapValue(allocator, scalar.value);
+                        allocator.destroy(scalar);
                     }
                 },
                 .host_string_list => {
@@ -28005,15 +34297,6 @@ fn releaseHeapValue(allocator: std.mem.Allocator, value: Value) void {
         },
         else => {},
     }
-}
-
-fn allocBoxedFloat(allocator: std.mem.Allocator, owner: HeapOwner, value: f64) !Value {
-    const box = try allocator.create(BoxedFloat);
-    box.* = .{
-        .header = HeapHeader.init(.boxed_float, owner),
-        .value = value,
-    };
-    return Value.boxedFloat(box);
 }
 
 fn allocBoxedInt(allocator: std.mem.Allocator, owner: HeapOwner, value: i64) !Value {
@@ -28099,7 +34382,7 @@ fn newRangeIotaValue(self: *Session, owner: HeapOwner, len: usize) !Value {
 fn newRangeIotaValueWithParams(self: *Session, owner: HeapOwner, len: usize, start: i64, step: i64) !Value {
     const value = try newRangeIotaValue(self, owner, len);
     const handle = @constCast(value.asNumericArray());
-    handle.range_iota = .{ .start = start, .step = step };
+    handle.structural = .{ .range_iota = .{ .start = start, .step = step } };
     return value;
 }
 
@@ -28134,10 +34417,9 @@ fn newFlatSliceValue(self: *Session, source: Value, start: usize, len: usize) KE
     handle.* = .{
         .header = HeapHeader.init(.numeric_array, .managed),
         .preferred = preferred,
-        .structural = .flat_slice,
+        .structural = .{ .flat_slice = .{ .source = retained_source, .start = start } },
         .rank = 1,
         .shape = [_]i32{ @intCast(len), 0, 0, 0 },
-        .flat_slice = .{ .source = retained_source, .start = start },
         .host = null,
         .mlx = null,
     };
@@ -28169,10 +34451,9 @@ fn newFlatConcatPairValue(self: *Session, left: Value, right: Value) KError!Valu
     handle.* = .{
         .header = HeapHeader.init(.numeric_array, .managed),
         .preferred = preferred,
-        .structural = .flat_concat,
+        .structural = .{ .flat_concat = .{ .left = retained_left, .right = retained_right } },
         .rank = 1,
         .shape = [_]i32{ @intCast(left_len + right_len), 0, 0, 0 },
-        .flat_concat = .{ .left = retained_left, .right = retained_right },
         .host = null,
         .mlx = null,
     };
@@ -28209,10 +34490,9 @@ fn newFlatSegmentsValue(self: *Session, segments: []const FlatNumericSegment) KE
     handle.* = .{
         .header = HeapHeader.init(.numeric_array, .managed),
         .preferred = preferred,
-        .structural = .flat_segments,
+        .structural = .{ .flat_segments = .{ .values = retained } },
         .rank = 1,
         .shape = [_]i32{ @intCast(total_len), 0, 0, 0 },
-        .flat_segments = .{ .values = retained },
         .host = null,
         .mlx = null,
     };
@@ -28250,10 +34530,9 @@ fn newFirstAxisSliceValueWithStep(self: *Session, source: Value, start: usize, l
     handle.* = .{
         .header = HeapHeader.init(.numeric_array, .managed),
         .preferred = source_handle.preferred,
-        .structural = .first_axis_slice,
+        .structural = .{ .first_axis_slice = .{ .source = retained_source, .start = start, .step = step } },
         .rank = source_handle.rank,
         .shape = source_handle.shape,
-        .first_axis_slice = .{ .source = retained_source, .start = start, .step = step },
         .host = null,
         .mlx = null,
     };
@@ -28286,10 +34565,9 @@ fn newFirstAxisIndexValue(self: *Session, source: Value, row_indices: Value) KEr
     handle.* = .{
         .header = HeapHeader.init(.numeric_array, .managed),
         .preferred = source_handle.preferred,
-        .structural = .first_axis_index,
+        .structural = .{ .first_axis_index = .{ .source = retained_source, .row_indices = retained_rows } },
         .rank = source_handle.rank,
         .shape = source_handle.shape,
-        .first_axis_index = .{ .source = retained_source, .row_indices = retained_rows },
         .host = null,
         .mlx = null,
     };
@@ -28320,10 +34598,9 @@ fn newFirstAxisConcatValue(self: *Session, left: Value, right: Value, shape: Num
     handle.* = .{
         .header = HeapHeader.init(.numeric_array, .managed),
         .preferred = preferred,
-        .structural = .first_axis_concat,
+        .structural = .{ .first_axis_concat = .{ .left = retained_left, .right = retained_right } },
         .rank = 2,
         .shape = numericShapeSnapshotMatrix(shape.rows, shape.cols).shape,
-        .first_axis_concat = .{ .left = retained_left, .right = retained_right },
         .host = null,
         .mlx = null,
     };
@@ -28359,10 +34636,9 @@ fn newReshapeViewValue(self: *Session, source: Value, shape: NumericShapeSnapsho
     handle.* = .{
         .header = HeapHeader.init(.numeric_array, .managed),
         .preferred = preferred,
-        .structural = .reshape_view,
+        .structural = .{ .reshape_view = .{ .source = retained_source } },
         .rank = shape.rank,
         .shape = shape.shape,
-        .reshape_view = .{ .source = retained_source },
         .host = null,
         .mlx = null,
     };
@@ -28387,10 +34663,9 @@ fn newTransposeViewValue(self: *Session, source: Value) KError!Value {
     handle.* = .{
         .header = HeapHeader.init(.numeric_array, .managed),
         .preferred = source_handle.preferred,
-        .structural = .transpose_view,
+        .structural = .{ .transpose_view = .{ .source = retained_source } },
         .rank = 2,
         .shape = numericShapeSnapshotMatrix(@intCast(source_handle.shape[1]), @intCast(source_handle.shape[0])).shape,
-        .transpose_view = .{ .source = retained_source },
         .host = null,
         .mlx = null,
     };
@@ -28582,32 +34857,36 @@ fn createBackendArrayFromHostArray(self: *Session, array: *const HostDenseArray)
             break :blk mlx.Array.fromBoolSliceChecked(converted, dims) catch |err| return mapMlxError(err);
         },
         .int8 => |items| blk: {
-            const converted = try self.allocator.alloc(i32, items.len);
+            const logical_items = hostDenseLogicalItems(i8, array, items);
+            const converted = try self.allocator.alloc(i32, logical_items.len);
             defer self.allocator.free(converted);
-            for (items, 0..) |item, idx| converted[idx] = item;
+            for (logical_items, 0..) |item, idx| converted[idx] = item;
             break :blk mlx.Array.fromIntSlice(converted, dims);
         },
         .int16 => |items| blk: {
-            const converted = try self.allocator.alloc(i32, items.len);
+            const logical_items = hostDenseLogicalItems(i16, array, items);
+            const converted = try self.allocator.alloc(i32, logical_items.len);
             defer self.allocator.free(converted);
-            for (items, 0..) |item, idx| converted[idx] = item;
+            for (logical_items, 0..) |item, idx| converted[idx] = item;
             break :blk mlx.Array.fromIntSlice(converted, dims);
         },
         .int32 => |items| blk: {
-            break :blk mlx.Array.fromIntSlice(items, dims);
+            break :blk mlx.Array.fromIntSlice(hostDenseLogicalItems(i32, array, items), dims);
         },
         .int64 => |items| blk: {
-            const converted = try self.allocator.alloc(i32, items.len);
+            const logical_items = hostDenseLogicalItems(i64, array, items);
+            const converted = try self.allocator.alloc(i32, logical_items.len);
             defer self.allocator.free(converted);
-            for (items, 0..) |item, idx| {
+            for (logical_items, 0..) |item, idx| {
                 converted[idx] = std.math.cast(i32, item) orelse return error.Unsupported;
             }
             break :blk mlx.Array.fromIntSlice(converted, dims);
         },
         .float64 => |items| blk: {
-            const converted = try self.allocator.alloc(f32, items.len);
+            const logical_items = hostDenseLogicalItems(f64, array, items);
+            const converted = try self.allocator.alloc(f32, logical_items.len);
             defer self.allocator.free(converted);
-            for (items, 0..) |item, idx| converted[idx] = @floatCast(item);
+            for (logical_items, 0..) |item, idx| converted[idx] = @floatCast(item);
             break :blk mlx.Array.fromFloatSlice(converted, dims);
         },
     };
@@ -28622,6 +34901,18 @@ fn backendArrayElementCount(array: mlx.Array) usize {
 
 fn transposeTileLen(comptime T: type) usize {
     return if (@sizeOf(T) >= 8) 16 else 32;
+}
+
+fn reverseTypedSlice(comptime T: type, out: []T, source: []const T) void {
+    std.debug.assert(out.len == source.len);
+    if (source.len == 0) return;
+    var src_idx = source.len;
+    var dst_idx: usize = 0;
+    while (src_idx > 0) {
+        src_idx -= 1;
+        out[dst_idx] = source[src_idx];
+        dst_idx += 1;
+    }
 }
 
 fn transposeBlockedTyped(comptime T: type, out: []T, source: []const T, rows: usize, cols: usize) void {
@@ -28789,7 +35080,7 @@ fn createHostArrayFromRangeIota(self: *Session, owner: HeapOwner, handle: *const
     hostDenseSetFlags(
         host,
         host_dense_flag_normalized |
-            orderFlagsFromMonotonic(handle.range_iota.step >= 0, handle.range_iota.step <= 0),
+            orderFlagsFromMonotonic(numericArrayRangeIota(handle).step >= 0, numericArrayRangeIota(handle).step <= 0),
     );
     hostDenseSetCachedIntRange(host, bounds);
     return host;
@@ -28804,8 +35095,8 @@ fn createBackendArrayFromRangeIota(self: *Session, handle: *const NumericArray) 
         return mlx.Array.zeros(ctx.*, handle.shapeSlice(), c.MLX_INT32) catch |err| return mapMlxError(err);
     }
 
-    const start = handle.range_iota.start;
-    const step = handle.range_iota.step;
+    const start = numericArrayRangeIota(handle).start;
+    const step = numericArrayRangeIota(handle).step;
     if (step == 0) {
         const scalar = std.math.cast(i32, start) orelse return error.Unsupported;
         var base = mlx.Array.zeros(ctx.*, handle.shapeSlice(), c.MLX_INT32) catch |err| return mapMlxError(err);
@@ -28900,6 +35191,17 @@ fn createHostArrayFromFlatSlice(self: *Session, owner: HeapOwner, handle: *const
         .int => blk: {
             if (collapsed) |view| switch (view) {
                 .flat_slice => |items| {
+                    if (items.source_host) |array| switch (array.storage) {
+                        .bit => {
+                            const out = try self.allocHostBitArray(owner, len);
+                            bitCopyRange(out.words, 0, .{ .words = array.storage.bit, .len = array.logical_len }, items.start, len);
+                            const metadata = analyzeBitSlice(.{ .words = out.words, .len = out.len });
+                            hostDenseSetFlags(out.array, metadata.flags);
+                            hostDenseSetCachedIntRange(out.array, metadata.range);
+                            break :blk out.array;
+                        },
+                        else => {},
+                    };
                     var values = try self.allocator.alloc(i64, len);
                     defer self.allocator.free(values);
                     for (0..len) |idx| values[idx] = try hostFlatSliceIntItem(items, idx);
@@ -28913,6 +35215,19 @@ fn createHostArrayFromFlatSlice(self: *Session, owner: HeapOwner, handle: *const
                     break :blk host;
                 },
                 .flat_stride => |items| {
+                    if (items.source_host) |array| switch (array.storage) {
+                        .bit => {
+                            const out = try self.allocHostBitArray(owner, len);
+                            for (0..len) |idx| {
+                                bitSet(out.words, idx, bitGet(array.storage.bit, items.start + idx * items.step));
+                            }
+                            const metadata = analyzeBitSlice(.{ .words = out.words, .len = out.len });
+                            hostDenseSetFlags(out.array, metadata.flags);
+                            hostDenseSetCachedIntRange(out.array, metadata.range);
+                            break :blk out.array;
+                        },
+                        else => {},
+                    };
                     var values = try self.allocator.alloc(i64, len);
                     defer self.allocator.free(values);
                     for (0..len) |idx| values[idx] = try hostFlatStrideIntItem(items, idx);
@@ -28925,6 +35240,17 @@ fn createHostArrayFromFlatSlice(self: *Session, owner: HeapOwner, handle: *const
                     hostDenseSetCachedIntRange(host, analysis.range);
                     break :blk host;
                 },
+            };
+            if (hostDenseIfPresent(source)) |array| switch (array.storage) {
+                .bit => {
+                    const out = try self.allocHostBitArray(owner, len);
+                    bitCopyRange(out.words, 0, .{ .words = array.storage.bit, .len = array.logical_len }, start, len);
+                    const metadata = analyzeBitSlice(.{ .words = out.words, .len = out.len });
+                    hostDenseSetFlags(out.array, metadata.flags);
+                    hostDenseSetCachedIntRange(out.array, metadata.range);
+                    break :blk out.array;
+                },
+                else => {},
             };
             var values = try self.allocator.alloc(i64, len);
             defer self.allocator.free(values);
@@ -28983,37 +35309,17 @@ fn createHostArrayFromFlatValues(self: *Session, owner: HeapOwner, segments: []c
             }
         }
         if (all_bits) {
-            var out_bits = std.ArrayList(bool).empty;
-            defer out_bits.deinit(self.allocator);
-            try out_bits.ensureTotalCapacity(self.allocator, total_len);
+            const out = try self.allocHostBitArray(owner, total_len);
+            var dst_start: usize = 0;
             for (segments) |segment| {
                 const bits = valueNumericBitSlice(segment) orelse return error.Type;
-                for (0..bits.len) |idx| try out_bits.append(self.allocator, bitGet(bits.words, idx));
+                bitCopyRange(out.words, dst_start, bits, 0, bits.len);
+                dst_start += bits.len;
             }
-            var asc = true;
-            var dsc = true;
-            var saw_zero = out_bits.items.len == 0;
-            var saw_one = false;
-            if (out_bits.items.len != 0) {
-                if (out_bits.items[0]) saw_one = true else saw_zero = true;
-                var prev = out_bits.items[0];
-                for (out_bits.items[1..]) |item| {
-                    if (item) saw_one = true else saw_zero = true;
-                    if (@intFromBool(prev) > @intFromBool(item)) asc = false;
-                    if (@intFromBool(prev) < @intFromBool(item)) dsc = false;
-                    prev = item;
-                }
-            }
-            var out = try self.allocOwnedHostIntResult(owner, .bit, total_len);
-            for (out_bits.items, 0..) |item, idx| try out.set(idx, @intFromBool(item));
-            const host = out.arrayPtr();
-            bitClearUnusedTail(host.storage.bit, host.logical_len);
-            hostDenseSetFlags(host, host_dense_flag_normalized | orderFlagsFromMonotonic(asc, dsc));
-            hostDenseSetCachedIntRange(host, .{
-                .min = if (saw_zero) 0 else 1,
-                .max = if (saw_one) 1 else 0,
-            });
-            return host;
+            const metadata = analyzeBitSlice(.{ .words = out.words, .len = out.len });
+            hostDenseSetFlags(out.array, metadata.flags);
+            hostDenseSetCachedIntRange(out.array, metadata.range);
+            return out.array;
         }
 
         var values = try self.allocator.alloc(i64, total_len);
@@ -29090,7 +35396,7 @@ fn createBackendArrayFromFlatSegments(self: *Session, handle: *const NumericArra
 
 fn createHostArrayFromFirstAxisSlice(self: *Session, owner: HeapOwner, handle: *const NumericArray) KError!*HostDenseArray {
     if (!numericArrayIsFirstAxisSlice(handle)) return error.Type;
-    const slice = handle.first_axis_slice orelse return error.Type;
+    const slice = numericArrayFirstAxisSlicePayload(handle) orelse return error.Type;
     const source_handle = shapedNumericHandle(slice.source) orelse return error.Type;
     const row_width = numericShapeInnerBlockLen(source_handle);
     const row_count: usize = @intCast(handle.shape[0]);
@@ -29123,15 +35429,12 @@ fn createHostArrayFromFirstAxisSlice(self: *Session, owner: HeapOwner, handle: *
     const source_array = try hostStructuralArrayForHandle(self, try numericHandleRequired(slice.source));
     if (slice.step == 1) switch (source_array.storage) {
         .bit => {
-            var out = try self.allocOwnedHostIntResult(owner, .bit, total_len);
-            for (0..total_len) |idx| try out.set(idx, @intFromBool(bitGet(source_array.storage.bit, start + idx)));
-            const host = out.arrayPtr();
-            bitClearUnusedTail(host.storage.bit, host.logical_len);
-            host.flags = source_array.flags;
-            host.int_range_known = source_array.int_range_known;
-            host.int_range_min = source_array.int_range_min;
-            host.int_range_max = source_array.int_range_max;
-            return host;
+            const out = try self.allocHostBitArray(owner, total_len);
+            bitCopyRange(out.words, 0, .{ .words = source_array.storage.bit, .len = source_array.logical_len }, start, total_len);
+            const metadata = analyzeBitSlice(.{ .words = out.words, .len = out.len });
+            hostDenseSetFlags(out.array, metadata.flags);
+            hostDenseSetCachedIntRange(out.array, metadata.range);
+            return out.array;
         },
         .float64 => |items| {
             const out = try self.allocHostArrayTyped(f64, .float64, owner, total_len);
@@ -29171,6 +35474,24 @@ fn createHostArrayFromFirstAxisSlice(self: *Session, owner: HeapOwner, handle: *
             return out.array;
         },
         .int => {
+            if (std.meta.activeTag(source_array.storage) == .bit) {
+                const out = try self.allocHostBitArray(owner, total_len);
+                for (0..row_count) |row| {
+                    const source_row_i64 = @as(i64, @intCast(slice.start)) + @as(i64, @intCast(row)) * @as(i64, slice.step);
+                    if (source_row_i64 < 0) return error.Type;
+                    bitCopyRange(
+                        out.words,
+                        row * row_width,
+                        .{ .words = source_array.storage.bit, .len = source_array.logical_len },
+                        @as(usize, @intCast(source_row_i64)) * row_width,
+                        row_width,
+                    );
+                }
+                const metadata = analyzeBitSlice(.{ .words = out.words, .len = out.len });
+                hostDenseSetFlags(out.array, metadata.flags);
+                hostDenseSetCachedIntRange(out.array, metadata.range);
+                return out.array;
+            }
             var values = try self.allocator.alloc(i64, total_len);
             defer self.allocator.free(values);
             var out_idx: usize = 0;
@@ -29197,7 +35518,7 @@ fn createHostArrayFromFirstAxisSlice(self: *Session, owner: HeapOwner, handle: *
 
 fn createBackendArrayFromFirstAxisSlice(self: *Session, handle: *const NumericArray) KError!mlx.Array {
     if (!numericArrayIsFirstAxisSlice(handle)) return error.Type;
-    const slice = handle.first_axis_slice orelse return error.Type;
+    const slice = numericArrayFirstAxisSlicePayload(handle) orelse return error.Type;
     const source_handle = shapedNumericHandle(slice.source) orelse return error.Type;
     if (source_handle.rank != handle.rank) return error.Type;
 
@@ -29240,7 +35561,7 @@ fn createBackendArrayFromFirstAxisSlice(self: *Session, handle: *const NumericAr
 
 fn createHostArrayFromFirstAxisIndex(self: *Session, owner: HeapOwner, handle: *const NumericArray) KError!*HostDenseArray {
     if (!numericArrayIsFirstAxisIndex(handle)) return error.Type;
-    const index = handle.first_axis_index orelse return error.Type;
+    const index = numericArrayFirstAxisIndexPayload(handle) orelse return error.Type;
     const source_handle = shapedNumericHandle(index.source) orelse return error.Type;
     const row_width = numericShapeInnerBlockLen(source_handle);
     const row_count: usize = @intCast(handle.shape[0]);
@@ -29264,6 +35585,16 @@ fn createHostArrayFromFirstAxisIndex(self: *Session, owner: HeapOwner, handle: *
             break :blk out.array;
         },
         .int => blk: {
+            if (valueNumericBitSlice(index.source)) |bits| {
+                if (valueHostIntStructuralView(index.row_indices)) |view| {
+                    const out = try self.allocHostBitArray(owner, total_len);
+                    try Session.copyBitMatrixRowsByDenseSelector(out.words, bits, view, @intCast(source_handle.shape[0]), row_width);
+                    const metadata = analyzeBitSlice(.{ .words = out.words, .len = out.len });
+                    hostDenseSetFlags(out.array, metadata.flags);
+                    hostDenseSetCachedIntRange(out.array, metadata.range);
+                    break :blk out.array;
+                }
+            }
             var values = try self.allocator.alloc(i64, total_len);
             defer self.allocator.free(values);
             var out_idx: usize = 0;
@@ -29290,7 +35621,7 @@ fn createHostArrayFromFirstAxisIndex(self: *Session, owner: HeapOwner, handle: *
 
 fn createBackendArrayFromFirstAxisIndex(self: *Session, handle: *const NumericArray) KError!mlx.Array {
     if (!numericArrayIsFirstAxisIndex(handle)) return error.Type;
-    const index = handle.first_axis_index orelse return error.Type;
+    const index = numericArrayFirstAxisIndexPayload(handle) orelse return error.Type;
     const row_count: usize = @intCast(handle.shape[0]);
     const idx_dims = [_]i32{std.math.cast(i32, row_count) orelse return error.Unsupported};
     const indices_buf = try self.allocator.alloc(i32, row_count);
@@ -29336,37 +35667,17 @@ fn createHostArrayFromFirstAxisConcat(self: *Session, owner: HeapOwner, handle: 
             }
         }
         if (all_bits) {
-            var out_bits = std.ArrayList(bool).empty;
-            defer out_bits.deinit(self.allocator);
-            try out_bits.ensureTotalCapacity(self.allocator, total_len);
+            const out = try self.allocHostBitArray(owner, total_len);
+            var dst_start: usize = 0;
             for (segments.items) |segment| {
                 const bits = valueNumericBitSlice(segment.value) orelse return error.Type;
-                for (0..bits.len) |idx| try out_bits.append(self.allocator, bitGet(bits.words, idx));
+                bitCopyRange(out.words, dst_start, bits, 0, bits.len);
+                dst_start += bits.len;
             }
-            var asc = true;
-            var dsc = true;
-            var saw_zero = out_bits.items.len == 0;
-            var saw_one = false;
-            if (out_bits.items.len != 0) {
-                if (out_bits.items[0]) saw_one = true else saw_zero = true;
-                var prev = out_bits.items[0];
-                for (out_bits.items[1..]) |item| {
-                    if (item) saw_one = true else saw_zero = true;
-                    if (@intFromBool(prev) > @intFromBool(item)) asc = false;
-                    if (@intFromBool(prev) < @intFromBool(item)) dsc = false;
-                    prev = item;
-                }
-            }
-            var out = try self.allocOwnedHostIntResult(owner, .bit, total_len);
-            for (out_bits.items, 0..) |item, idx| try out.set(idx, @intFromBool(item));
-            const host = out.arrayPtr();
-            bitClearUnusedTail(host.storage.bit, host.logical_len);
-            hostDenseSetFlags(host, host_dense_flag_normalized | orderFlagsFromMonotonic(asc, dsc));
-            hostDenseSetCachedIntRange(host, .{
-                .min = if (saw_zero) 0 else 1,
-                .max = if (saw_one) 1 else 0,
-            });
-            return host;
+            const metadata = analyzeBitSlice(.{ .words = out.words, .len = out.len });
+            hostDenseSetFlags(out.array, metadata.flags);
+            hostDenseSetCachedIntRange(out.array, metadata.range);
+            return out.array;
         }
 
         var values = try self.allocator.alloc(i64, total_len);
@@ -29615,7 +35926,7 @@ fn tryEnsureHostRealizationForHandle(self: *Session, handle: *NumericArray) KErr
     };
     if (comptime enable_probe_instrumentation) {
         self.debug_host_realization_count += 1;
-        if (handle.structural != .materialized) self.debug_structural_host_realization_count += 1;
+        if (numericArrayStructuralTag(handle) != .materialized) self.debug_structural_host_realization_count += 1;
         if (had_mlx_attachment) self.debug_host_readback_count += 1;
     }
     handle.host = host;
@@ -30056,7 +36367,7 @@ fn arrayResultLen(left: Value, right: Value) KError!usize {
         .array => switch (left.arrayKind()) {
             .host_dense_array, .backend_array, .numeric_array => numericFlatLen(left) orelse return error.Type,
             .host_boxed_array => left.asHostBoxedArray().len(),
-            else => return error.Internal,
+            else => return error.Type,
         },
         .int, .float, .bool => null,
         else => return error.Type,
@@ -30065,7 +36376,7 @@ fn arrayResultLen(left: Value, right: Value) KError!usize {
         .array => switch (right.arrayKind()) {
             .host_dense_array, .backend_array, .numeric_array => numericFlatLen(right) orelse return error.Type,
             .host_boxed_array => right.asHostBoxedArray().len(),
-            else => return error.Internal,
+            else => return error.Type,
         },
         .int, .float, .bool => null,
         else => return error.Type,
@@ -30204,12 +36515,12 @@ const HostCollapsedFlatSlice = union(enum) {
 
 fn hostDenseViewForHostArray(array: *const HostDenseArray) KError!HostDenseView {
     return switch (array.storage) {
-        .bit => |words| .{ .int_array = .{ .dense = .{ .bit = .{ .words = words, .len = array.logical_len } } } },
-        .int8 => |items| .{ .int_array = .{ .dense = .{ .int8 = items } } },
-        .int16 => |items| .{ .int_array = .{ .dense = .{ .int16 = items } } },
-        .int32 => |items| .{ .int_array = .{ .dense = .{ .int32 = items } } },
-        .int64 => |items| .{ .int_array = .{ .dense = .{ .int64 = items } } },
-        .float64 => |items| .{ .float_array = .{ .dense = items } },
+        .bit => |words| .{ .int_array = .{ .dense = .{ .bit = .{ .words = hostDenseLogicalBitWords(array, words), .len = array.logical_len } } } },
+        .int8 => |items| .{ .int_array = .{ .dense = .{ .int8 = hostDenseLogicalItems(i8, array, items) } } },
+        .int16 => |items| .{ .int_array = .{ .dense = .{ .int16 = hostDenseLogicalItems(i16, array, items) } } },
+        .int32 => |items| .{ .int_array = .{ .dense = .{ .int32 = hostDenseLogicalItems(i32, array, items) } } },
+        .int64 => |items| .{ .int_array = .{ .dense = .{ .int64 = hostDenseLogicalItems(i64, array, items) } } },
+        .float64 => |items| .{ .float_array = .{ .dense = hostDenseLogicalItems(f64, array, items) } },
     };
 }
 
@@ -30292,7 +36603,7 @@ fn hostDenseViewForNumericHandle(self: *Session, value: Value, handle: *const Nu
         };
     }
     if (numericArrayIsFirstAxisSlice(handle)) {
-        const slice = handle.first_axis_slice orelse return error.Type;
+        const slice = numericArrayFirstAxisSlicePayload(handle) orelse return error.Type;
         const source_handle = shapedNumericHandle(slice.source) orelse return error.Type;
         const row_width = numericShapeInnerBlockLen(source_handle);
         const row_count: usize = @intCast(handle.shape[0]);
@@ -30336,7 +36647,7 @@ fn hostDenseViewForNumericHandle(self: *Session, value: Value, handle: *const Nu
         };
     }
     if (numericArrayIsFirstAxisIndex(handle)) {
-        const index = handle.first_axis_index orelse return error.Type;
+        const index = numericArrayFirstAxisIndexPayload(handle) orelse return error.Type;
         const source_handle = shapedNumericHandle(index.source) orelse return error.Type;
         const row_width = numericShapeInnerBlockLen(source_handle);
         const flat_len = numericFlatLen(value) orelse return error.Type;
@@ -30491,19 +36802,19 @@ fn hostDenseIntAt(array: *const HostDenseArray, idx: usize) KError!i64 {
             break :blk @intFromBool(bitGet(words, idx));
         },
         .int8 => |items| blk: {
-            if (idx >= items.len) return error.Internal;
+            if (idx >= array.logical_len) return error.Internal;
             break :blk items[idx];
         },
         .int16 => |items| blk: {
-            if (idx >= items.len) return error.Internal;
+            if (idx >= array.logical_len) return error.Internal;
             break :blk items[idx];
         },
         .int32 => |items| blk: {
-            if (idx >= items.len) return error.Internal;
+            if (idx >= array.logical_len) return error.Internal;
             break :blk items[idx];
         },
         .int64 => |items| blk: {
-            if (idx >= items.len) return error.Internal;
+            if (idx >= array.logical_len) return error.Internal;
             break :blk items[idx];
         },
         .float64 => error.Type,
@@ -30517,23 +36828,23 @@ fn hostDenseFloatAt(array: *const HostDenseArray, idx: usize) KError!f64 {
             break :blk if (bitGet(words, idx)) 1.0 else 0.0;
         },
         .int8 => |items| blk: {
-            if (idx >= items.len) return error.Internal;
+            if (idx >= array.logical_len) return error.Internal;
             break :blk @floatFromInt(items[idx]);
         },
         .int16 => |items| blk: {
-            if (idx >= items.len) return error.Internal;
+            if (idx >= array.logical_len) return error.Internal;
             break :blk @floatFromInt(items[idx]);
         },
         .int32 => |items| blk: {
-            if (idx >= items.len) return error.Internal;
+            if (idx >= array.logical_len) return error.Internal;
             break :blk @floatFromInt(items[idx]);
         },
         .int64 => |items| blk: {
-            if (idx >= items.len) return error.Internal;
+            if (idx >= array.logical_len) return error.Internal;
             break :blk @as(f64, @floatFromInt(items[idx]));
         },
         .float64 => |items| blk: {
-            if (idx >= items.len) return error.Internal;
+            if (idx >= array.logical_len) return error.Internal;
             break :blk items[idx];
         },
     };
@@ -33168,13 +39479,12 @@ fn skipSpacesInSource(source: []const u8, start: usize) usize {
 }
 
 const max_explicit_params = 16;
-const max_captures = 32;
 const max_body_instructions = 256;
+const max_compact_k_stack_slots = 32;
 const max_scope_depth = 32;
 const max_body_bytes = max_body_instructions * 10;
-const max_shaped_global_local_args = max_body_instructions * 4;
-const max_body_globals = 96;
-const max_body_templates = 32;
+const max_shaped_call_args = 8;
+const max_shaped_global_local_args = 64;
 const max_body_constants = 64;
 const max_runtime_stack = 512;
 const max_runtime_frames = 64;
@@ -33216,15 +39526,9 @@ const IdentRef = struct {
     key: IdentKey,
 };
 
-const CaptureBinding = struct {
-    ident: IdentRef,
-    source: CaptureSource,
-};
-
 const ResolveResult = union(enum) {
     local: u16,
     inline_local: u16,
-    capture: u16,
     global: void,
 };
 
@@ -33269,15 +39573,7 @@ const ConsumeCandidates = struct {
         switch (resolved) {
             .local => |slot| try self.addLocal(slot),
             .inline_local => |slot| try self.addInlineLocal(slot),
-            .capture, .global => {},
-        }
-    }
-
-    fn addCaptureSource(self: *ConsumeCandidates, source: CaptureSource) KError!void {
-        switch (source) {
-            .local => |slot| try self.addLocal(slot),
-            .inline_local => |slot| try self.addInlineLocal(slot),
-            .capture => {},
+            .global => {},
         }
     }
 
@@ -33287,6 +39583,14 @@ const ConsumeCandidates = struct {
         for (other.shaped_global_locals[0..other.shaped_global_local_count]) |site| {
             try self.noteShapedGlobalLocalArg(site.slot, site.load_start, site.arg_kind_start);
         }
+    }
+
+    fn withoutRecordedUses(self: ConsumeCandidates) ConsumeCandidates {
+        var copy = self;
+        for (copy.locals[0..copy.local_count]) |*candidate| candidate.last_load_start = null;
+        for (copy.inline_locals[0..copy.inline_local_count]) |*candidate| candidate.last_load_start = null;
+        copy.shaped_global_local_count = 0;
+        return copy;
     }
 
     fn noteLoad(self: *ConsumeCandidates, resolved: ResolveResult, start: usize) void {
@@ -33301,12 +39605,12 @@ const ConsumeCandidates = struct {
                     if (candidate.slot == slot) candidate.last_load_start = start;
                 }
             },
-            .capture, .global => {},
+            .global => {},
         }
     }
 
     fn noteShapedGlobalLocalArg(self: *ConsumeCandidates, slot: u8, load_start: usize, arg_kind_start: usize) KError!void {
-        if (self.shaped_global_local_count >= self.shaped_global_locals.len) return error.Unsupported;
+        if (self.shaped_global_local_count >= self.shaped_global_locals.len) return;
         self.shaped_global_locals[self.shaped_global_local_count] = .{
             .slot = slot,
             .load_start = load_start,
@@ -33405,9 +39709,31 @@ const BodyStatementSplit = struct {
     tail: ?[]const u8,
 };
 
+const ConditionalSlices = struct {
+    condition: []const u8,
+    then_branch: []const u8,
+    else_branch: []const u8,
+};
+
+const NameAssignmentMode = enum {
+    bind,
+    modified,
+    explicit_global,
+};
+
 const LocalAssignment = struct {
     ident: IdentRef,
     rhs_source: []const u8,
+    mode: NameAssignmentMode = .bind,
+    builtin: BuiltinId = .add,
+};
+
+const IndexedAssignment = struct {
+    ident: IdentRef,
+    selector_source: []const u8,
+    rhs_source: []const u8,
+    mode: AmendMode,
+    builtin: BuiltinId = .add,
 };
 
 const InnerProductInfo = struct {
@@ -33454,16 +39780,27 @@ const ProducedValue = union(enum) {
         end: usize,
         slot: u8,
     },
-    load_capture: struct {
-        start: usize,
-        end: usize,
-        slot: u8,
-    },
     local_const_op: struct {
         start: usize,
         end: usize,
         slot: u8,
         op: BuiltinId,
+        const_value: i64,
+    },
+    local_local_op: struct {
+        start: usize,
+        end: usize,
+        left_slot: u8,
+        right_slot: u8,
+        op: BuiltinId,
+    },
+    local_local_const_op: struct {
+        start: usize,
+        end: usize,
+        left_slot: u8,
+        right_slot: u8,
+        op: BuiltinId,
+        const_op: BuiltinId,
         const_value: i64,
     },
     array_value: struct {
@@ -33478,8 +39815,9 @@ const ProducedValue = union(enum) {
             .const_value => |inst| inst.start,
             .load_local => |inst| inst.start,
             .load_inline_local => |inst| inst.start,
-            .load_capture => |inst| inst.start,
             .local_const_op => |inst| inst.start,
+            .local_local_op => |inst| inst.start,
+            .local_local_const_op => |inst| inst.start,
             .array_value => |inst| inst.start,
         };
     }
@@ -33490,8 +39828,9 @@ const ProducedValue = union(enum) {
             .const_value => |inst| inst.end,
             .load_local => |inst| inst.end,
             .load_inline_local => |inst| inst.end,
-            .load_capture => |inst| inst.end,
             .local_const_op => |inst| inst.end,
+            .local_local_op => |inst| inst.end,
+            .local_local_const_op => |inst| inst.end,
             .array_value => |inst| inst.end,
         };
     }
@@ -33503,10 +39842,23 @@ const GlobalCallArgSource = union(enum) {
         consume: bool,
     },
     const_int: i64,
+    const_bool: bool,
     local_const_op: struct {
         slot: u8,
         consume: bool,
         op: BuiltinId,
+        const_value: i64,
+    },
+    local_local_op: struct {
+        left_slot: u8,
+        right_slot: u8,
+        op: BuiltinId,
+    },
+    local_local_const_op: struct {
+        left_slot: u8,
+        right_slot: u8,
+        op: BuiltinId,
+        const_op: BuiltinId,
         const_value: i64,
     },
 };
@@ -33514,27 +39866,23 @@ const GlobalCallArgSource = union(enum) {
 const InstructionBuffer = struct {
     bytes: [max_body_bytes]u8 = undefined,
     byte_len: usize = 0,
-    globals: [max_body_globals]u16 = undefined,
-    global_len: usize = 0,
-    templates: [max_body_templates]*const LambdaTemplate = undefined,
-    template_len: usize = 0,
     constants: [max_body_constants]Value = undefined,
     constant_len: usize = 0,
+    references_globals: bool = false,
     previous_simple: ?ProducedValue = null,
     last_simple: ?ProducedValue = null,
-    simple_history: [4]ProducedValue = undefined,
+    simple_history: [max_shaped_call_args]ProducedValue = undefined,
     simple_history_len: usize = 0,
     last_op_start: usize = 0,
     control_flow_op_count: usize = 0,
 
     const Mark = struct {
         byte_len: usize,
-        global_len: usize,
-        template_len: usize,
         constant_len: usize,
+        references_globals: bool,
         previous_simple: ?ProducedValue,
         last_simple: ?ProducedValue,
-        simple_history: [4]ProducedValue,
+        simple_history: [max_shaped_call_args]ProducedValue,
         simple_history_len: usize,
         last_op_start: usize,
         control_flow_op_count: usize,
@@ -33547,9 +39895,8 @@ const InstructionBuffer = struct {
     fn mark(self: *const InstructionBuffer) Mark {
         return .{
             .byte_len = self.byte_len,
-            .global_len = self.global_len,
-            .template_len = self.template_len,
             .constant_len = self.constant_len,
+            .references_globals = self.references_globals,
             .previous_simple = self.previous_simple,
             .last_simple = self.last_simple,
             .simple_history = self.simple_history,
@@ -33561,23 +39908,14 @@ const InstructionBuffer = struct {
 
     fn restore(self: *InstructionBuffer, saved: Mark) void {
         self.byte_len = saved.byte_len;
-        self.global_len = saved.global_len;
-        self.template_len = saved.template_len;
         self.constant_len = saved.constant_len;
+        self.references_globals = saved.references_globals;
         self.previous_simple = saved.previous_simple;
         self.last_simple = saved.last_simple;
         self.simple_history = saved.simple_history;
         self.simple_history_len = saved.simple_history_len;
         self.last_op_start = saved.last_op_start;
         self.control_flow_op_count = saved.control_flow_op_count;
-    }
-
-    fn globalSlice(self: *const InstructionBuffer) []const u16 {
-        return self.globals[0..self.global_len];
-    }
-
-    fn templateSlice(self: *const InstructionBuffer) []const *const LambdaTemplate {
-        return self.templates[0..self.template_len];
     }
 
     fn constantSlice(self: *const InstructionBuffer) []const Value {
@@ -33593,7 +39931,12 @@ const InstructionBuffer = struct {
         self.last_op_start = self.byte_len;
         try self.appendByte(@intFromEnum(op));
         switch (op) {
-            .jump, .jump_if_false => self.control_flow_op_count += 1,
+            .jump,
+            .jump_if_false,
+            .jump_if_false_equal_local_const,
+            .jump_if_false_less_local_const,
+            .jump_if_false_more_local_const,
+            => self.control_flow_op_count += 1,
             else => {},
         }
     }
@@ -33624,6 +39967,31 @@ const InstructionBuffer = struct {
             .div => {
                 if (try self.tryShapeArrayDyad(.array_div)) return;
                 try self.appendOp(.div);
+            },
+            .minimum => {
+                if (try self.tryShapeConstDyad(.minimum)) return;
+                if (try self.tryShapeDyad(.minimum)) return;
+                try self.appendOp(.minimum);
+            },
+            .maximum => {
+                if (try self.tryShapeConstDyad(.maximum)) return;
+                if (try self.tryShapeDyad(.maximum)) return;
+                try self.appendOp(.maximum);
+            },
+            .less => {
+                if (try self.tryShapeConstDyad(.less)) return;
+                if (try self.tryShapeDyad(.less)) return;
+                try self.appendOp(.less);
+            },
+            .more => {
+                if (try self.tryShapeConstDyad(.more)) return;
+                if (try self.tryShapeDyad(.more)) return;
+                try self.appendOp(.more);
+            },
+            .equal => {
+                if (try self.tryShapeConstDyad(.equal)) return;
+                if (try self.tryShapeDyad(.equal)) return;
+                try self.appendOp(.equal);
             },
             else => return error.Unsupported,
         }
@@ -33680,20 +40048,156 @@ const InstructionBuffer = struct {
         self.noteSimple(.{ .load_inline_local = .{ .start = start, .end = self.byte_len, .slot = pooled } });
     }
 
-    fn emitLoadCapture(self: *InstructionBuffer, slot: u16) KError!void {
-        const start = self.byte_len;
-        try self.appendRawOp(.load_capture);
-        const pooled = std.math.cast(u8, slot) orelse return error.Unsupported;
-        try self.appendByte(pooled);
-        self.noteSimple(.{ .load_capture = .{ .start = start, .end = self.byte_len, .slot = pooled } });
-    }
-
     fn emitStoreLocal(self: *InstructionBuffer, slot: u16) KError!void {
         const pooled = std.math.cast(u8, slot) orelse return error.Unsupported;
         if (try self.tryShapeStoreLocalLocalConst(pooled)) return;
         if (try self.tryShapeStoreLocalGlobalCallSlots(pooled)) return;
         try self.appendOp(.store_local);
         try self.appendByte(pooled);
+    }
+
+    fn emitStoreGlobal(self: *InstructionBuffer, slot: u16, want_result: bool) KError!void {
+        try self.appendOp(.store_global);
+        try self.appendGlobalSlot(slot);
+        if (!want_result) try self.appendOp(.discard);
+    }
+
+    fn tryShapeModifiedAssignConst(
+        self: *InstructionBuffer,
+        op: Op,
+        slot: u16,
+        builtin: BuiltinId,
+        want_result: bool,
+        rhs: ProducedValue,
+    ) KError!bool {
+        if (rhs.end() != self.byte_len) return false;
+        const rhs_value = switch (rhs) {
+            .const_int => |inst| inst.value,
+            .const_value => |inst| switch (inst.value.tag()) {
+                .bool => @as(i64, @intFromBool(inst.value.asBool())),
+                else => return false,
+            },
+            else => return false,
+        };
+
+        self.byte_len = rhs.start();
+        self.invalidateSimple();
+        try self.appendOp(op);
+        switch (op) {
+            .modify_global_const => try self.appendGlobalSlot(slot),
+            .modify_local_const => try self.appendPoolByte(slot),
+            else => return error.Internal,
+        }
+        try self.appendByte(@intFromEnum(builtin));
+        try self.appendByte(if (want_result) 1 else 0);
+        try self.appendU64(@bitCast(rhs_value));
+        return true;
+    }
+
+    fn emitModifiedAssignGlobal(self: *InstructionBuffer, slot: u16, builtin: BuiltinId, want_result: bool, rhs: ?ProducedValue) KError!void {
+        if (rhs) |simple| {
+            if (try self.tryShapeModifiedAssignConst(.modify_global_const, slot, builtin, want_result, simple)) return;
+        }
+        try self.appendOp(.modify_global);
+        try self.appendGlobalSlot(slot);
+        try self.appendByte(@intFromEnum(builtin));
+        try self.appendByte(if (want_result) 1 else 0);
+    }
+
+    fn emitModifiedAssignLocal(self: *InstructionBuffer, slot: u16, builtin: BuiltinId, want_result: bool, rhs: ?ProducedValue) KError!void {
+        const pooled = std.math.cast(u8, slot) orelse return error.Unsupported;
+        if (rhs) |simple| {
+            if (try self.tryShapeModifiedAssignConst(.modify_local_const, slot, builtin, want_result, simple)) return;
+        }
+        try self.appendOp(.modify_local);
+        try self.appendByte(pooled);
+        try self.appendByte(@intFromEnum(builtin));
+        try self.appendByte(if (want_result) 1 else 0);
+    }
+
+    fn emitModifiedAssignInlineLocal(self: *InstructionBuffer, slot: u16, builtin: BuiltinId, want_result: bool) KError!void {
+        const pooled = std.math.cast(u8, slot) orelse return error.Unsupported;
+        try self.appendOp(.modify_inline_local);
+        try self.appendByte(pooled);
+        try self.appendByte(@intFromEnum(builtin));
+        try self.appendByte(if (want_result) 1 else 0);
+    }
+
+    fn emitIndexedAssignGlobal(self: *InstructionBuffer, slot: u16, mode: AmendMode, builtin: BuiltinId, want_result: bool) KError!void {
+        try self.appendOp(.assign_index_global);
+        try self.appendGlobalSlot(slot);
+        try self.appendByte(@intFromEnum(mode));
+        try self.appendByte(@intFromEnum(builtin));
+        try self.appendByte(if (want_result) 1 else 0);
+    }
+
+    fn tryShapeIndexedAssignGlobalSources(
+        self: *InstructionBuffer,
+        slot: u16,
+        mode: AmendMode,
+        builtin: BuiltinId,
+        want_result: bool,
+        selector: ProducedValue,
+        rhs: ProducedValue,
+    ) KError!bool {
+        if (selector.end() != rhs.start() or rhs.end() != self.byte_len) return false;
+        const selector_source = self.simpleGlobalCallArg(selector) orelse return false;
+        const rhs_source = self.simpleGlobalCallArg(rhs) orelse return false;
+
+        self.byte_len = selector.start();
+        self.invalidateSimple();
+        try self.appendOp(.assign_index_global_sources);
+        try self.appendGlobalSlot(slot);
+        try self.appendByte(@intFromEnum(mode));
+        try self.appendByte(@intFromEnum(builtin));
+        try self.appendByte(if (want_result) 1 else 0);
+        try self.appendGlobalCallArgSource(selector_source);
+        try self.appendGlobalCallArgSource(rhs_source);
+        return true;
+    }
+
+    fn emitIndexedAssignLocal(self: *InstructionBuffer, slot: u16, mode: AmendMode, builtin: BuiltinId, want_result: bool) KError!void {
+        const pooled = std.math.cast(u8, slot) orelse return error.Unsupported;
+        try self.appendOp(.assign_index_local);
+        try self.appendByte(pooled);
+        try self.appendByte(@intFromEnum(mode));
+        try self.appendByte(@intFromEnum(builtin));
+        try self.appendByte(if (want_result) 1 else 0);
+    }
+
+    fn tryShapeIndexedAssignLocalSources(
+        self: *InstructionBuffer,
+        slot: u16,
+        mode: AmendMode,
+        builtin: BuiltinId,
+        want_result: bool,
+        selector: ProducedValue,
+        rhs: ProducedValue,
+    ) KError!bool {
+        if (selector.end() != rhs.start() or rhs.end() != self.byte_len) return false;
+        const selector_source = self.simpleGlobalCallArg(selector) orelse return false;
+        const rhs_source = self.simpleGlobalCallArg(rhs) orelse return false;
+        const pooled = std.math.cast(u8, slot) orelse return error.Unsupported;
+
+        self.byte_len = selector.start();
+        self.invalidateSimple();
+        try self.appendOp(.assign_index_local_sources);
+        try self.appendByte(pooled);
+        try self.appendByte(@intFromEnum(mode));
+        try self.appendByte(@intFromEnum(builtin));
+        try self.appendByte(if (want_result) 1 else 0);
+        try self.appendGlobalCallArgSource(selector_source);
+        try self.appendGlobalCallArgSource(rhs_source);
+        return true;
+    }
+
+    fn emitIndexedAssignInlineLocal(self: *InstructionBuffer, slot: u16, mode: AmendMode, builtin: BuiltinId, want_result: bool) KError!void {
+        const pooled = std.math.cast(u8, slot) orelse return error.Unsupported;
+        try self.appendOp(.assign_index_inline_local);
+        try self.appendByte(pooled);
+        try self.appendByte(@intFromEnum(mode));
+        try self.appendByte(@intFromEnum(builtin));
+        try self.appendByte(if (want_result) 1 else 0);
     }
 
     fn patchOpAt(self: *InstructionBuffer, start: usize, op: Op) void {
@@ -33738,11 +40242,77 @@ const InstructionBuffer = struct {
         try self.appendByte(@intCast((value >> 8) & 0xff));
     }
 
+    inline fn appendGlobalSlot(self: *InstructionBuffer, slot: u16) KError!void {
+        self.references_globals = true;
+        try self.appendU16(slot);
+    }
+
     inline fn patchU16(self: *InstructionBuffer, start: usize, value: u16) KError!void {
         const end = start + 2;
         if (end > self.byte_len) return error.Internal;
         self.bytes[start] = @intCast(value & 0xff);
         self.bytes[start + 1] = @intCast((value >> 8) & 0xff);
+    }
+
+    fn emitJumpIfFalsePlaceholder(self: *InstructionBuffer) KError!usize {
+        if (try self.tryShapeJumpIfFalseLocalConst()) |patch| return patch;
+        try self.appendOp(.jump_if_false);
+        const patch = self.byte_len;
+        try self.appendU16(0);
+        return patch;
+    }
+
+    fn tryShapeJumpIfFalseLocalConst(self: *InstructionBuffer) KError!?usize {
+        if (self.byte_len == 0 or self.last_op_start >= self.byte_len) return null;
+        const start = self.last_op_start;
+        const op = std.meta.intToEnum(Op, self.bytes[start]) catch return null;
+        const shaped: ?struct {
+            op: Op,
+            slot: u8,
+            const_value: i64,
+        } = switch (op) {
+            .equal_local_const, .less_local_const, .more_local_const => blk: {
+                if (start + 10 != self.byte_len) return null;
+                const slot = self.bytes[start + 1];
+                const const_value = Session.directReadI64(self.bytes[0..self.byte_len], start + 2) orelse return null;
+                break :blk .{
+                    .op = switch (op) {
+                        .equal_local_const => .jump_if_false_equal_local_const,
+                        .less_local_const => .jump_if_false_less_local_const,
+                        .more_local_const => .jump_if_false_more_local_const,
+                        else => unreachable,
+                    },
+                    .slot = slot,
+                    .const_value = const_value,
+                };
+            },
+            .equal_const_local, .less_const_local, .more_const_local => blk: {
+                if (start + 10 != self.byte_len) return null;
+                const const_value = Session.directReadI64(self.bytes[0..self.byte_len], start + 1) orelse return null;
+                const slot = self.bytes[start + 9];
+                break :blk .{
+                    .op = switch (op) {
+                        .equal_const_local => .jump_if_false_equal_local_const,
+                        .less_const_local => .jump_if_false_more_local_const,
+                        .more_const_local => .jump_if_false_less_local_const,
+                        else => unreachable,
+                    },
+                    .slot = slot,
+                    .const_value = const_value,
+                };
+            },
+            else => null,
+        };
+        if (shaped == null) return null;
+
+        self.byte_len = start;
+        self.invalidateSimple();
+        try self.appendOp(shaped.?.op);
+        try self.appendByte(shaped.?.slot);
+        try self.appendU64(@bitCast(shaped.?.const_value));
+        const patch = self.byte_len;
+        try self.appendU16(0);
+        return patch;
     }
 
     fn simpleNumericInt(simple: ProducedValue) ?i64 {
@@ -33783,28 +40353,6 @@ const InstructionBuffer = struct {
         while (idx < 8) : (idx += 1) {
             try self.appendByte(@intCast((value >> @intCast(idx * 8)) & 0xff));
         }
-    }
-
-    fn internGlobal(self: *InstructionBuffer, slot: u16) KError!u8 {
-        var idx: usize = 0;
-        while (idx < self.global_len) : (idx += 1) {
-            if (self.globals[idx] == slot) return std.math.cast(u8, idx) orelse return error.Unsupported;
-        }
-        if (self.global_len >= self.globals.len) return error.Unsupported;
-        self.globals[self.global_len] = slot;
-        self.global_len += 1;
-        return std.math.cast(u8, self.global_len - 1) orelse return error.Unsupported;
-    }
-
-    fn internTemplate(self: *InstructionBuffer, template: *const LambdaTemplate) KError!u8 {
-        var idx: usize = 0;
-        while (idx < self.template_len) : (idx += 1) {
-            if (self.templates[idx] == template) return std.math.cast(u8, idx) orelse return error.Unsupported;
-        }
-        if (self.template_len >= self.templates.len) return error.Unsupported;
-        self.templates[self.template_len] = template;
-        self.template_len += 1;
-        return std.math.cast(u8, self.template_len - 1) orelse return error.Unsupported;
     }
 
     fn internConstant(self: *InstructionBuffer, value: Value) KError!u8 {
@@ -33864,13 +40412,11 @@ const InstructionBuffer = struct {
                     .add => .add_local_local,
                     .sub => .sub_local_local,
                     .mul => .mul_local_local,
-                    .div => return false,
-                    else => return false,
-                }, .left_slot = left_inst.slot, .right_slot = right_inst.slot },
-                .load_capture => |right_inst| .{ .op = switch (op) {
-                    .add => .add_local_capture,
-                    .sub => .sub_local_capture,
-                    .mul => .mul_local_capture,
+                    .minimum => .minimum_local_local,
+                    .maximum => .maximum_local_local,
+                    .less => .less_local_local,
+                    .more => .more_local_local,
+                    .equal => .equal_local_local,
                     .div => return false,
                     else => return false,
                 }, .left_slot = left_inst.slot, .right_slot = right_inst.slot },
@@ -33884,30 +40430,6 @@ const InstructionBuffer = struct {
                     .div => return false,
                     else => return false,
                 }, .left_slot = left_inst.slot, .right_slot = right_inst.slot },
-                .load_capture => |right_inst| .{ .op = switch (op) {
-                    .add => .add_inline_local_capture,
-                    .sub => .sub_inline_local_capture,
-                    .mul => .mul_inline_local_capture,
-                    .div => return false,
-                    else => return false,
-                }, .left_slot = left_inst.slot, .right_slot = right_inst.slot },
-                else => null,
-            },
-            .load_capture => |left_inst| switch (right) {
-                .load_local => |right_inst| .{ .op = switch (op) {
-                    .add => .add_capture_local,
-                    .sub => .sub_capture_local,
-                    .mul => .mul_capture_local,
-                    .div => return false,
-                    else => return false,
-                }, .left_slot = left_inst.slot, .right_slot = right_inst.slot },
-                .load_inline_local => |right_inst| .{ .op = switch (op) {
-                    .add => .add_capture_inline_local,
-                    .sub => .sub_capture_inline_local,
-                    .mul => .mul_capture_inline_local,
-                    .div => return false,
-                    else => return false,
-                }, .left_slot = left_inst.slot, .right_slot = right_inst.slot },
                 else => null,
             },
             else => null,
@@ -33915,6 +40437,32 @@ const InstructionBuffer = struct {
         if (shaped == null) return false;
 
         self.byte_len = left.start();
+        const selector_shape: ?struct { left_slot: u8, right_slot: u8, op: BuiltinId } = switch (left) {
+            .load_local => |left_inst| switch (right) {
+                .load_local => |right_inst| switch (op) {
+                    .add, .sub => .{ .left_slot = left_inst.slot, .right_slot = right_inst.slot, .op = op },
+                    else => null,
+                },
+                else => null,
+            },
+            else => null,
+        };
+        if (selector_shape) |selector| {
+            try self.appendRawOp(shaped.?.op);
+            try self.appendByte(shaped.?.left_slot);
+            try self.appendByte(shaped.?.right_slot);
+            self.replaceSimpleTail(2, .{
+                .local_local_op = .{
+                    .start = left.start(),
+                    .end = self.byte_len,
+                    .left_slot = selector.left_slot,
+                    .right_slot = selector.right_slot,
+                    .op = selector.op,
+                },
+            });
+            return true;
+        }
+
         self.invalidateSimple();
         try self.appendOp(shaped.?.op);
         try self.appendByte(shaped.?.left_slot);
@@ -33927,6 +40475,44 @@ const InstructionBuffer = struct {
         const right = self.last_simple orelse return false;
         if (left.end() != right.start() or right.end() != self.byte_len) return false;
 
+        if (switch (left) {
+            .local_local_op => true,
+            else => false,
+        } and switch (right) {
+            .const_int => true,
+            else => false,
+        }) {
+            const left_inst = switch (left) {
+                .local_local_op => |inst| inst,
+                else => unreachable,
+            };
+            const right_inst = switch (right) {
+                .const_int => |inst| inst,
+                else => unreachable,
+            };
+            switch (op) {
+                .add, .sub => {},
+                else => return false,
+            }
+            try self.appendRawOp(switch (op) {
+                .add => .add,
+                .sub => .sub,
+                else => unreachable,
+            });
+            self.replaceSimpleTail(2, .{
+                .local_local_const_op = .{
+                    .start = left_inst.start,
+                    .end = self.byte_len,
+                    .left_slot = left_inst.left_slot,
+                    .right_slot = left_inst.right_slot,
+                    .op = left_inst.op,
+                    .const_op = op,
+                    .const_value = right_inst.value,
+                },
+            });
+            return true;
+        }
+
         const shaped: ?struct { op: Op, const_value: i64, slot: u8, const_first: bool } = switch (left) {
             .const_int => |left_inst| switch (right) {
                 .load_local => |right_inst| .{
@@ -33934,6 +40520,11 @@ const InstructionBuffer = struct {
                         .add => .add_const_local,
                         .sub => .sub_const_local,
                         .mul => .mul_const_local,
+                        .minimum => .minimum_const_local,
+                        .maximum => .maximum_const_local,
+                        .less => .less_const_local,
+                        .more => .more_const_local,
+                        .equal => .equal_const_local,
                         .div => return false,
                         else => return false,
                     },
@@ -33953,18 +40544,6 @@ const InstructionBuffer = struct {
                     .slot = right_inst.slot,
                     .const_first = true,
                 },
-                .load_capture => |right_inst| .{
-                    .op = switch (op) {
-                        .add => .add_const_capture,
-                        .sub => .sub_const_capture,
-                        .mul => .mul_const_capture,
-                        .div => return false,
-                        else => return false,
-                    },
-                    .const_value = left_inst.value,
-                    .slot = right_inst.slot,
-                    .const_first = true,
-                },
                 else => null,
             },
             .load_local => |left_inst| switch (right) {
@@ -33973,6 +40552,11 @@ const InstructionBuffer = struct {
                         .add => .add_local_const,
                         .sub => .sub_local_const,
                         .mul => .mul_local_const,
+                        .minimum => .minimum_local_const,
+                        .maximum => .maximum_local_const,
+                        .less => .less_local_const,
+                        .more => .more_local_const,
+                        .equal => .equal_local_const,
                         .div => return false,
                         else => return false,
                     },
@@ -33997,26 +40581,35 @@ const InstructionBuffer = struct {
                 },
                 else => null,
             },
-            .load_capture => |left_inst| switch (right) {
-                .const_int => |right_inst| .{
-                    .op = switch (op) {
-                        .add => .add_capture_const,
-                        .sub => .sub_capture_const,
-                        .mul => .mul_capture_const,
-                        .div => return false,
-                        else => return false,
-                    },
-                    .const_value = right_inst.value,
-                    .slot = left_inst.slot,
-                    .const_first = false,
-                },
-                else => null,
-            },
             else => null,
         };
         if (shaped == null) return false;
 
         self.byte_len = left.start();
+        const local_const_shape: ?struct { slot: u8, op: BuiltinId, const_value: i64 } = if (!shaped.?.const_first) switch (left) {
+            .load_local => |left_inst| .{
+                .slot = left_inst.slot,
+                .op = op,
+                .const_value = shaped.?.const_value,
+            },
+            else => null,
+        } else null;
+        if (local_const_shape) |local_const| {
+            try self.appendRawOp(shaped.?.op);
+            try self.appendByte(shaped.?.slot);
+            try self.appendU64(@bitCast(shaped.?.const_value));
+            self.replaceSimpleTail(2, .{
+                .local_const_op = .{
+                    .start = left.start(),
+                    .end = self.byte_len,
+                    .slot = local_const.slot,
+                    .op = local_const.op,
+                    .const_value = local_const.const_value,
+                },
+            });
+            return true;
+        }
+
         self.invalidateSimple();
         try self.appendOp(shaped.?.op);
         if (shaped.?.const_first) {
@@ -34025,17 +40618,6 @@ const InstructionBuffer = struct {
         } else {
             try self.appendByte(shaped.?.slot);
             try self.appendU64(@bitCast(shaped.?.const_value));
-        }
-        if (!shaped.?.const_first) {
-            self.noteSimple(.{
-                .local_const_op = .{
-                    .start = left.start(),
-                    .end = self.byte_len,
-                    .slot = shaped.?.slot,
-                    .op = op,
-                    .const_value = shaped.?.const_value,
-                },
-            });
         }
         return true;
     }
@@ -34066,8 +40648,11 @@ const InstructionBuffer = struct {
     fn tryShapeStoreLocalGlobalCallSlots(self: *InstructionBuffer, dst_slot: u8) KError!bool {
         if (self.byte_len == 0 or self.last_op_start >= self.byte_len) return false;
         const op = std.meta.intToEnum(Op, self.bytes[self.last_op_start]) catch return false;
-        if (op != .call_global_slots) return false;
-        self.patchOpAt(self.last_op_start, .call_global_slots_store_local);
+        switch (op) {
+            .call_global_slots => self.patchOpAt(self.last_op_start, .call_global_slots_store_local),
+            .index_global_source => self.patchOpAt(self.last_op_start, .index_global_source_store_local),
+            else => return false,
+        }
         self.invalidateSimple();
         try self.appendByte(dst_slot);
         return true;
@@ -34086,11 +40671,6 @@ const InstructionBuffer = struct {
             .load_inline_local => |inst| .{ .op = switch (op) {
                 .negate => .neg_inline_local,
                 .sqrt => .sqrt_inline_local,
-                else => return false,
-            }, .slot = inst.slot },
-            .load_capture => |inst| .{ .op = switch (op) {
-                .negate => .neg_capture,
-                .sqrt => .sqrt_capture,
                 else => return false,
             }, .slot = inst.slot },
             else => null,
@@ -34178,33 +40758,53 @@ const InstructionBuffer = struct {
         const arg = self.last_simple orelse return false;
         if (callee.end() != arg.start() or arg.end() != self.byte_len) return false;
 
-        const shaped: ?struct { op: Op, callee_slot: u8, arg_slot: u8 } = switch (callee) {
+        switch (callee) {
             .load_local => |callee_inst| switch (arg) {
-                .load_local => |arg_inst| .{
-                    .op = .call1_local_local,
-                    .callee_slot = callee_inst.slot,
-                    .arg_slot = arg_inst.slot,
+                .load_local => |arg_inst| {
+                    self.byte_len = callee.start();
+                    self.invalidateSimple();
+                    try self.appendOp(.call1_local_local);
+                    try self.appendByte(callee_inst.slot);
+                    try self.appendByte(arg_inst.slot);
+                    return true;
                 },
-                else => null,
+                .local_local_op => |arg_inst| {
+                    self.byte_len = callee.start();
+                    self.invalidateSimple();
+                    try self.appendOp(.call1_local_local_op);
+                    try self.appendByte(callee_inst.slot);
+                    try self.appendByte(@intFromEnum(arg_inst.op));
+                    try self.appendByte(arg_inst.left_slot);
+                    try self.appendByte(arg_inst.right_slot);
+                    return true;
+                },
+                .local_local_const_op => |arg_inst| {
+                    self.byte_len = callee.start();
+                    self.invalidateSimple();
+                    try self.appendOp(.call1_local_local_op_const);
+                    try self.appendByte(callee_inst.slot);
+                    try self.appendByte(@intFromEnum(arg_inst.op));
+                    try self.appendByte(arg_inst.left_slot);
+                    try self.appendByte(arg_inst.right_slot);
+                    try self.appendByte(@intFromEnum(arg_inst.const_op));
+                    try self.appendU64(@bitCast(arg_inst.const_value));
+                    return true;
+                },
+                else => return false,
             },
             .load_inline_local => |callee_inst| switch (arg) {
-                .load_inline_local => |arg_inst| .{
-                    .op = .call1_inline_local_local,
-                    .callee_slot = callee_inst.slot,
-                    .arg_slot = arg_inst.slot,
+                .load_inline_local => |arg_inst| {
+                    self.byte_len = callee.start();
+                    self.invalidateSimple();
+                    try self.appendOp(.call1_inline_local_local);
+                    try self.appendByte(callee_inst.slot);
+                    try self.appendByte(arg_inst.slot);
+                    return true;
                 },
-                else => null,
+                else => return false,
             },
-            else => null,
-        };
-        if (shaped == null) return false;
-
-        self.byte_len = callee.start();
-        self.invalidateSimple();
-        try self.appendOp(shaped.?.op);
-        try self.appendByte(shaped.?.callee_slot);
-        try self.appendByte(shaped.?.arg_slot);
-        return true;
+            else => return false,
+        }
     }
 
     fn simpleTail(self: *const InstructionBuffer, count: usize) ?[]const ProducedValue {
@@ -34228,11 +40828,31 @@ const InstructionBuffer = struct {
                 },
             },
             .const_int => |inst| .{ .const_int = inst.value },
+            .const_value => |inst| switch (inst.value.tag()) {
+                .bool => .{ .const_bool = inst.value.asBool() },
+                else => null,
+            },
             .local_const_op => |inst| .{
                 .local_const_op = .{
                     .slot = inst.slot,
                     .consume = false,
                     .op = inst.op,
+                    .const_value = inst.const_value,
+                },
+            },
+            .local_local_op => |inst| .{
+                .local_local_op = .{
+                    .left_slot = inst.left_slot,
+                    .right_slot = inst.right_slot,
+                    .op = inst.op,
+                },
+            },
+            .local_local_const_op => |inst| .{
+                .local_local_const_op = .{
+                    .left_slot = inst.left_slot,
+                    .right_slot = inst.right_slot,
+                    .op = inst.op,
+                    .const_op = inst.const_op,
                     .const_value = inst.const_value,
                 },
             },
@@ -34250,6 +40870,9 @@ const InstructionBuffer = struct {
                 try self.appendByte(global_call_arg_kind_byte(.const_int, false));
                 try self.appendU64(@bitCast(value));
             },
+            .const_bool => |value| {
+                try self.appendByte(global_call_arg_kind_byte(if (value) .const_true else .const_false, false));
+            },
             .local_const_op => |value| {
                 const kind: GlobalCallArgKind = switch (value.op) {
                     .add => .local_add_const,
@@ -34261,7 +40884,38 @@ const InstructionBuffer = struct {
                 try self.appendByte(value.slot);
                 try self.appendU64(@bitCast(value.const_value));
             },
+            .local_local_op => |value| {
+                try self.appendByte(global_call_arg_kind_byte(.local_local_op, false));
+                try self.appendByte(@intFromEnum(value.op));
+                try self.appendByte(value.left_slot);
+                try self.appendByte(value.right_slot);
+            },
+            .local_local_const_op => |value| {
+                try self.appendByte(global_call_arg_kind_byte(.local_local_const_op, false));
+                try self.appendByte(@intFromEnum(value.op));
+                try self.appendByte(value.left_slot);
+                try self.appendByte(value.right_slot);
+                try self.appendByte(@intFromEnum(value.const_op));
+                try self.appendU64(@bitCast(value.const_value));
+            },
         }
+    }
+
+    fn tryShapeGlobalIndexSource(self: *InstructionBuffer, slot: u16, arg: ProducedValue, candidates: *ConsumeCandidates) KError!bool {
+        if (arg.end() != self.byte_len) return false;
+        const source = self.simpleGlobalCallArg(arg) orelse return false;
+        self.byte_len = arg.start();
+        self.invalidateSimple();
+        try self.appendOp(.index_global_source);
+        try self.appendGlobalSlot(slot);
+        const arg_kind_start = self.byte_len;
+        try self.appendGlobalCallArgSource(source);
+        switch (arg) {
+            .load_local => |inst| try candidates.noteShapedGlobalLocalArg(inst.slot, inst.start, arg_kind_start),
+            .local_const_op => |inst| try candidates.noteShapedGlobalLocalArg(inst.slot, inst.start, arg_kind_start),
+            else => {},
+        }
+        return true;
     }
 
     fn tryShapeGlobalCallSlots(self: *InstructionBuffer, slot: u16, argc: u8, candidates: *ConsumeCandidates) KError!bool {
@@ -34270,10 +40924,10 @@ const InstructionBuffer = struct {
     }
 
     fn tryShapeGlobalCallSlotsFromSimples(self: *InstructionBuffer, slot: u16, args: []const ProducedValue, candidates: *ConsumeCandidates) KError!bool {
-        if (args.len == 0 or args.len > 4) return false;
+        if (args.len == 0 or args.len > max_shaped_call_args) return false;
         if (args[args.len - 1].end() != self.byte_len) return false;
         const start = args[0].start();
-        var sources: [4]GlobalCallArgSource = undefined;
+        var sources: [max_shaped_call_args]GlobalCallArgSource = undefined;
         for (args, 0..) |arg, idx| {
             sources[idx] = self.simpleGlobalCallArg(arg) orelse return false;
         }
@@ -34281,7 +40935,7 @@ const InstructionBuffer = struct {
         self.byte_len = start;
         self.invalidateSimple();
         try self.appendOp(.call_global_slots);
-        try self.appendByte(try self.internGlobal(slot));
+        try self.appendGlobalSlot(slot);
         try self.appendByte(@intCast(args.len));
         for (args, 0..) |arg, idx| {
             const arg_kind_start = self.byte_len;
@@ -34301,12 +40955,15 @@ const InstructionBuffer = struct {
         const shaped: ?Op = switch (op) {
             .call1 => .tail_call1,
             .call1_local_local => .tail_call1_local_local,
+            .call1_local_local_op => .tail_call1_local_local_op,
+            .call1_local_local_op_const => .tail_call1_local_local_op_const,
             .call2 => .tail_call2,
             .call_global1 => .tail_call_global1,
             .call_global2 => .tail_call_global2,
             .call_global3 => .tail_call_global3,
             .call_global4 => .tail_call_global4,
             .call_global_slots => .tail_call_global_slots,
+            .index_global_source => .tail_index_global_source,
             else => null,
         };
         if (shaped == null) return false;
@@ -34328,6 +40985,27 @@ const InstructionBuffer = struct {
         self.simple_history_len = 0;
     }
 
+    fn refreshSimplePointers(self: *InstructionBuffer) void {
+        self.last_simple = if (self.simple_history_len >= 1) self.simple_history[self.simple_history_len - 1] else null;
+        self.previous_simple = if (self.simple_history_len >= 2) self.simple_history[self.simple_history_len - 2] else null;
+    }
+
+    fn replaceSimpleTail(self: *InstructionBuffer, count: usize, simple: ProducedValue) void {
+        if (count > self.simple_history_len) {
+            self.invalidateSimple();
+            self.noteSimple(simple);
+            return;
+        }
+        self.simple_history_len -= count;
+        if (self.simple_history_len == self.simple_history.len) {
+            std.mem.copyForwards(ProducedValue, self.simple_history[0 .. self.simple_history.len - 1], self.simple_history[1..]);
+            self.simple_history_len -= 1;
+        }
+        self.simple_history[self.simple_history_len] = simple;
+        self.simple_history_len += 1;
+        self.refreshSimplePointers();
+    }
+
     fn noteSimple(self: *InstructionBuffer, simple: ProducedValue) void {
         if (self.simple_history_len == self.simple_history.len) {
             std.mem.copyForwards(ProducedValue, self.simple_history[0 .. self.simple_history.len - 1], self.simple_history[1..]);
@@ -34335,8 +41013,7 @@ const InstructionBuffer = struct {
         }
         self.simple_history[self.simple_history_len] = simple;
         self.simple_history_len += 1;
-        self.last_simple = self.simple_history[self.simple_history_len - 1];
-        self.previous_simple = if (self.simple_history_len >= 2) self.simple_history[self.simple_history_len - 2] else null;
+        self.refreshSimplePointers();
     }
 };
 
@@ -34439,6 +41116,51 @@ fn identMatches(stored: IdentRef, query: IdentRef) bool {
     return std.mem.eql(u8, stored.text, query.text);
 }
 
+fn identRefFromText(text: []const u8) IdentRef {
+    return .{
+        .text = text,
+        .key = IdentKey.fromText(text),
+    };
+}
+
+fn sourceReferencesIdentCurrentLambda(source: []const u8, ident: IdentRef) bool {
+    var index: usize = 0;
+    var brace_depth: usize = 0;
+    while (index < source.len) {
+        const ch = source[index];
+        if (ch == '"') {
+            index += 1;
+            while (index < source.len and source[index] != '"') : (index += 1) {}
+            if (index < source.len) index += 1;
+            continue;
+        }
+        if (ch == '`') {
+            index += 1;
+            while (index < source.len and isIdentContinue(source[index])) : (index += 1) {}
+            continue;
+        }
+        if (ch == '{') {
+            brace_depth += 1;
+            index += 1;
+            continue;
+        }
+        if (ch == '}') {
+            if (brace_depth != 0) brace_depth -= 1;
+            index += 1;
+            continue;
+        }
+        if (brace_depth == 0 and isIdentStart(ch)) {
+            const start = index;
+            index += 1;
+            while (index < source.len and isIdentContinue(source[index])) : (index += 1) {}
+            if (identMatches(identRefFromText(source[start..index]), ident)) return true;
+            continue;
+        }
+        index += 1;
+    }
+    return false;
+}
+
 fn constantMatches(stored: Value, query: Value) bool {
     if (stored.tag() != query.tag()) return false;
     return switch (stored.tag()) {
@@ -34452,14 +41174,11 @@ fn constantMatches(stored: Value, query: Value) bool {
 }
 
 const Scope = struct {
-    parent: ?*Scope = null,
     explicit_names: [max_explicit_params]IdentRef = undefined,
     explicit_count: u8 = 0,
     local_names: [max_explicit_params]IdentRef = undefined,
     local_slots: [max_explicit_params]u16 = undefined,
     local_count: u8 = 0,
-    capture_bindings: [max_captures]CaptureBinding = undefined,
-    capture_count: u8 = 0,
     allow_implicit_params: bool = false,
     param_binding_kind: ParamBindingKind = .frame_local,
     arity: u8 = 0,
@@ -34488,6 +41207,7 @@ const Scope = struct {
             if (identMatches(self.local_names[idx], ident)) return self.local_slots[idx];
         }
         if (self.local_count >= max_explicit_params) return error.Unsupported;
+        self.ensureLocalSlotFloor();
         const slot: u16 = self.frame_slot_count;
         self.local_names[self.local_count] = ident;
         self.local_slots[self.local_count] = slot;
@@ -34496,41 +41216,26 @@ const Scope = struct {
         return slot;
     }
 
-    fn resolveLoad(self: *Scope, ident: IdentRef) !ResolveResult {
-        if (self.lookupResolvedHere(ident)) |resolved| return resolved;
-
-        var capture_chain: [max_scope_depth]*Scope = undefined;
-        var depth: usize = 0;
-        var descendant: *Scope = self;
-        var current_opt = self.parent;
-
-        while (current_opt) |current| {
-            if (depth >= capture_chain.len) return error.Unsupported;
-            capture_chain[depth] = descendant;
-            depth += 1;
-
-            if (current.isPureGlobalScope()) return .global;
-            if (current.lookupResolvedHere(ident)) |resolved| {
-                return try threadCaptureChain(ident, capture_chain[0..depth], resolved);
-            }
-
-            descendant = current;
-            current_opt = current.parent;
-        }
-
-        return .global;
+    fn declareShadowLocal(self: *Scope, ident: IdentRef) !u16 {
+        if (self.local_count >= max_explicit_params) return error.Unsupported;
+        self.ensureLocalSlotFloor();
+        const slot: u16 = self.frame_slot_count;
+        self.local_names[self.local_count] = ident;
+        self.local_slots[self.local_count] = slot;
+        self.local_count += 1;
+        self.frame_slot_count += 1;
+        return slot;
     }
 
-    fn ensureCapture(self: *Scope, ident: IdentRef, source: CaptureSource) !u16 {
-        if (self.lookupCapture(ident)) |slot| return slot;
-        if (self.capture_count >= max_captures) return error.Unsupported;
-        const slot: u16 = self.capture_count;
-        self.capture_bindings[self.capture_count] = .{
-            .ident = ident,
-            .source = source,
-        };
-        self.capture_count += 1;
-        return slot;
+    fn ensureLocalSlotFloor(self: *Scope) void {
+        if (self.param_binding_kind == .frame_local and self.allow_implicit_params and self.explicit_count == 0 and self.frame_slot_count < 3) {
+            self.frame_slot_count = 3;
+        }
+    }
+
+    fn resolveLoad(self: *Scope, ident: IdentRef) !ResolveResult {
+        if (self.lookupResolvedHere(ident)) |resolved| return resolved;
+        return .global;
     }
 
     fn lookupLocal(self: *Scope, ident: IdentRef) ?u16 {
@@ -34574,7 +41279,6 @@ const Scope = struct {
 
     fn lookupResolvedHere(self: *Scope, ident: IdentRef) ?ResolveResult {
         if (self.lookupLocal(ident)) |slot| return self.resolveLocal(slot);
-        if (self.lookupCapture(ident)) |slot| return .{ .capture = slot };
         return null;
     }
 
@@ -34586,49 +41290,11 @@ const Scope = struct {
         return null;
     }
 
-    fn lookupCapture(self: *const Scope, ident: IdentRef) ?u16 {
-        var idx: u8 = 0;
-        while (idx < self.capture_count) : (idx += 1) {
-            if (identMatches(self.capture_bindings[idx].ident, ident)) return idx;
-        }
-        return null;
-    }
-
     fn isPureGlobalScope(self: *const Scope) bool {
-        return self.parent == null and
-            self.explicit_count == 0 and
-            self.capture_count == 0 and
+        return self.explicit_count == 0 and
             !self.allow_implicit_params;
     }
 };
-
-fn threadCaptureChain(
-    ident: IdentRef,
-    descendants: []const *Scope,
-    resolved: ResolveResult,
-) !ResolveResult {
-    var source = switch (resolved) {
-        .local => |slot| CaptureSource{ .local = slot },
-        .inline_local => |slot| CaptureSource{ .inline_local = slot },
-        .capture => |slot| CaptureSource{ .capture = slot },
-        .global => return .global,
-    };
-
-    var idx = descendants.len;
-    while (idx > 0) {
-        idx -= 1;
-        const slot = try descendants[idx].ensureCapture(ident, source);
-        source = .{ .capture = slot };
-    }
-
-    return .{
-        .capture = switch (source) {
-            .capture => |slot| slot,
-            .local => unreachable,
-            .inline_local => unreachable,
-        },
-    };
-}
 
 const Compiler = struct {
     session: *Session,
@@ -34692,18 +41358,15 @@ const Compiler = struct {
     fn compileSingleTopLevelStatementInto(self: *Compiler, instructions: *InstructionBuffer, scope: *Scope) KError!void {
         if (try self.tryCompileSimpleTopLevelShape(instructions, scope)) return;
 
-        if (self.scanIdentifierAt(self.index)) |scanned| {
-            const after = skipSpacesInSource(self.source, scanned.next_index);
-            if (after < self.source.len and self.source[after] == ':') {
-                self.index = skipSpacesInSource(self.source, scanned.next_index);
-                try self.expectChar(':');
-                _ = try self.parseExpr(instructions, scope);
-                try instructions.appendOp(.store_global);
-                try instructions.appendByte(try instructions.internGlobal(try self.globalSlot(scanned.ident.text)));
-            } else {
-                try self.compileExprSliceInto(instructions, scope, self.source);
-                self.index = self.source.len;
+        if (try self.scanIndexedAssignmentStatement(self.source)) |assignment| {
+            try self.compileIndexedAssignmentInto(instructions, scope, assignment, true);
+            self.index = self.source.len;
+        } else if (try self.scanLocalAssignmentStatement(self.source)) |assignment| {
+            switch (assignment.mode) {
+                .bind, .explicit_global => try self.compileExplicitGlobalAssignmentInto(instructions, scope, assignment, true),
+                .modified => try self.compileModifiedAssignmentInto(instructions, scope, assignment, true),
             }
+            self.index = self.source.len;
         } else {
             try self.compileExprSliceInto(instructions, scope, self.source);
             self.index = self.source.len;
@@ -34732,6 +41395,8 @@ const Compiler = struct {
         source_slice: []const u8,
         candidates: ConsumeCandidates,
     ) KError!ConsumeCandidates {
+        if (try self.tryCompileWholeCondExprSlice(out, scope, source_slice, candidates)) |updated| return updated;
+
         var expr_compiler = try Compiler.init(
             self.session,
             source_slice,
@@ -34746,6 +41411,33 @@ const Compiler = struct {
         }
         if (!expr_compiler.atEnd()) return error.Parse;
         return expr_compiler.consume_candidates;
+    }
+
+    fn tryCompileWholeCondExprSlice(
+        self: *Compiler,
+        out: *InstructionBuffer,
+        scope: *Scope,
+        source_slice: []const u8,
+        candidates: ConsumeCandidates,
+    ) KError!?ConsumeCandidates {
+        const split = splitWholeCondSpecialForm(source_slice) orelse return null;
+
+        _ = try self.compileExprSliceIntoWithConsumeCandidates(out, scope, split.condition, .{});
+        const false_jump_patch = try out.emitJumpIfFalsePlaceholder();
+
+        const branch_candidates = candidates.withoutRecordedUses();
+        const then_candidates = try self.compileExprSliceIntoWithConsumeCandidates(out, scope, split.then_branch, branch_candidates);
+        patchConsumeCandidates(out, then_candidates);
+
+        try out.appendOp(.jump);
+        const end_jump_patch = out.byte_len;
+        try out.appendU16(0);
+
+        try out.patchU16(false_jump_patch, std.math.cast(u16, out.byte_len) orelse return error.Unsupported);
+        const else_candidates = try self.compileExprSliceIntoWithConsumeCandidates(out, scope, split.else_branch, branch_candidates);
+        patchConsumeCandidates(out, else_candidates);
+        try out.patchU16(end_jump_patch, std.math.cast(u16, out.byte_len) orelse return error.Unsupported);
+        return .{};
     }
 
     fn compileLambdaBodyIntoWithConsumeCandidates(
@@ -34770,7 +41462,6 @@ const Compiler = struct {
         switch (resolved) {
             .local => |slot| try out.emitLoadLocal(slot),
             .inline_local => |slot| try out.emitLoadInlineLocal(slot),
-            .capture => |slot| try out.emitLoadCapture(slot),
             .global => return error.Internal,
         }
         self.consume_candidates.noteLoad(resolved, out.last_op_start);
@@ -34787,36 +41478,44 @@ const Compiler = struct {
         }
     }
 
-    fn captureSourceMatchesResolved(source: CaptureSource, resolved: ResolveResult) bool {
-        return switch (source) {
-            .local => |slot| switch (resolved) {
-                .local => |resolved_slot| resolved_slot == slot,
-                else => false,
-            },
-            .inline_local => |slot| switch (resolved) {
-                .inline_local => |resolved_slot| resolved_slot == slot,
-                else => false,
-            },
-            .capture => |_| false,
-        };
-    }
-
-    fn addScopeParamConsumeCandidatesExceptSources(
+    fn addLocalBindingRhsConsumeCandidates(
         candidates: *ConsumeCandidates,
         scope: *Scope,
-        excluded_sources: []const CaptureSource,
+        rhs_source: []const u8,
+        body_source: []const u8,
     ) KError!void {
-        var slot: u16 = 0;
-        while (slot < scope.arity) : (slot += 1) {
-            const resolved = scope.resolveLocal(slot);
-            var excluded = false;
-            for (excluded_sources) |source| {
-                if (captureSourceMatchesResolved(source, resolved)) {
-                    excluded = true;
-                    break;
+        var explicit_idx: u8 = 0;
+        while (explicit_idx < scope.explicit_count) : (explicit_idx += 1) {
+            const ident = scope.explicit_names[explicit_idx];
+            if (sourceReferencesIdentCurrentLambda(rhs_source, ident) and
+                !sourceReferencesIdentCurrentLambda(body_source, ident))
+            {
+                try candidates.addResolved(scope.resolveLocal(explicit_idx));
+            }
+        }
+
+        var local_idx: u8 = 0;
+        while (local_idx < scope.local_count) : (local_idx += 1) {
+            const ident = scope.local_names[local_idx];
+            if (sourceReferencesIdentCurrentLambda(rhs_source, ident) and
+                !sourceReferencesIdentCurrentLambda(body_source, ident))
+            {
+                try candidates.addResolved(scope.resolveLocal(scope.local_slots[local_idx]));
+            }
+        }
+
+        if (scope.allow_implicit_params and scope.explicit_count == 0) {
+            const implicit_names = [_][]const u8{ "x", "y", "z" };
+            for (implicit_names, 0..) |name, slot| {
+                const ident = identRefFromText(name);
+                if (sourceReferencesIdentCurrentLambda(rhs_source, ident) and
+                    !sourceReferencesIdentCurrentLambda(body_source, ident))
+                {
+                    if (scope.arity < slot + 1) scope.arity = @intCast(slot + 1);
+                    if (scope.frame_slot_count < slot + 1) scope.frame_slot_count = @intCast(slot + 1);
+                    try candidates.addResolved(scope.resolveLocal(@intCast(slot)));
                 }
             }
-            if (!excluded) try candidates.addResolved(resolved);
         }
     }
 
@@ -34842,9 +41541,26 @@ const Compiler = struct {
 
     fn compileLambdaBodyInto(self: *Compiler, out: *InstructionBuffer, scope: *Scope, body_source: []const u8) KError!void {
         const split = splitLambdaBodyHead(body_source) orelse return error.Parse;
+        if (try self.scanIndexedAssignmentStatement(split.head)) |assignment| {
+            try self.compileIndexedAssignmentInto(out, scope, assignment, split.tail == null);
+            if (split.tail) |tail| try self.compileLambdaBodyInto(out, scope, tail);
+            return;
+        }
         if (try self.scanLocalAssignmentStatement(split.head)) |assignment| {
-            const tail_source = split.tail orelse assignment.ident.text;
-            try self.compileLocalBindingInto(out, scope, assignment.ident, assignment.rhs_source, tail_source);
+            switch (assignment.mode) {
+                .bind => {
+                    const tail_source = split.tail orelse assignment.ident.text;
+                    try self.compileLocalBindingInto(out, scope, assignment.ident, assignment.rhs_source, tail_source);
+                },
+                .modified => {
+                    try self.compileModifiedAssignmentInto(out, scope, assignment, split.tail == null);
+                    if (split.tail) |tail| try self.compileLambdaBodyInto(out, scope, tail);
+                },
+                .explicit_global => {
+                    try self.compileExplicitGlobalAssignmentInto(out, scope, assignment, split.tail == null);
+                    if (split.tail) |tail| try self.compileLambdaBodyInto(out, scope, tail);
+                },
+            }
             return;
         }
         if (split.tail) |tail| {
@@ -34853,7 +41569,87 @@ const Compiler = struct {
             try self.compileLambdaBodyInto(out, scope, tail);
             return;
         }
-        try self.compileExprSliceInto(out, scope, split.head);
+        var final_candidates = self.consume_candidates;
+        try final_candidates.mergeFrom(try self.directAmendBaseConsumeCandidates(scope, split.head));
+        if (scope.param_binding_kind == .frame_local) try addScopeParamConsumeCandidates(&final_candidates, scope);
+        const final_control_before = out.control_flow_op_count;
+        const updated_final_candidates = try self.compileExprSliceIntoWithConsumeCandidates(out, scope, split.head, final_candidates);
+        self.consume_candidates = updated_final_candidates;
+        if (out.control_flow_op_count == final_control_before) patchConsumeCandidates(out, updated_final_candidates);
+    }
+
+    fn compileIndexedAssignmentInto(
+        self: *Compiler,
+        out: *InstructionBuffer,
+        scope: *Scope,
+        assignment: IndexedAssignment,
+        want_result: bool,
+    ) KError!void {
+        const selector_start = out.byte_len;
+        _ = try self.compileExprSliceIntoWithConsumeCandidates(out, scope, assignment.selector_source, .{});
+        const selector_simple = if (out.last_simple) |simple|
+            if (simple.start() >= selector_start and simple.end() == out.byte_len) simple else null
+        else
+            null;
+        const rhs_start = out.byte_len;
+        _ = try self.compileExprSliceIntoWithConsumeCandidates(out, scope, assignment.rhs_source, .{});
+        const rhs_simple = if (out.last_simple) |simple|
+            if (simple.start() >= rhs_start and simple.end() == out.byte_len) simple else null
+        else
+            null;
+
+        switch (try scope.resolveLoad(assignment.ident)) {
+            .local => |slot| {
+                if (selector_simple) |selector| {
+                    if (rhs_simple) |rhs| {
+                        if (try out.tryShapeIndexedAssignLocalSources(slot, assignment.mode, assignment.builtin, want_result, selector, rhs)) return;
+                    }
+                }
+                try out.emitIndexedAssignLocal(slot, assignment.mode, assignment.builtin, want_result);
+            },
+            .inline_local => |slot| try out.emitIndexedAssignInlineLocal(slot, assignment.mode, assignment.builtin, want_result),
+            .global => {
+                const slot = try self.globalSlot(assignment.ident.text);
+                if (selector_simple) |selector| {
+                    if (rhs_simple) |rhs| {
+                        if (try out.tryShapeIndexedAssignGlobalSources(slot, assignment.mode, assignment.builtin, want_result, selector, rhs)) return;
+                    }
+                }
+                try out.emitIndexedAssignGlobal(slot, assignment.mode, assignment.builtin, want_result);
+            },
+        }
+    }
+
+    fn compileExplicitGlobalAssignmentInto(
+        self: *Compiler,
+        out: *InstructionBuffer,
+        scope: *Scope,
+        assignment: LocalAssignment,
+        want_result: bool,
+    ) KError!void {
+        _ = try self.compileExprSliceIntoWithConsumeCandidates(out, scope, assignment.rhs_source, .{});
+        try out.emitStoreGlobal(try self.globalSlot(assignment.ident.text), want_result);
+    }
+
+    fn compileModifiedAssignmentInto(
+        self: *Compiler,
+        out: *InstructionBuffer,
+        scope: *Scope,
+        assignment: LocalAssignment,
+        want_result: bool,
+    ) KError!void {
+        const rhs_start = out.byte_len;
+        _ = try self.compileExprSliceIntoWithConsumeCandidates(out, scope, assignment.rhs_source, .{});
+        const rhs_simple = if (out.last_simple) |simple|
+            if (simple.start() >= rhs_start and simple.end() == out.byte_len) simple else null
+        else
+            null;
+
+        switch (try scope.resolveLoad(assignment.ident)) {
+            .local => |slot| try out.emitModifiedAssignLocal(slot, assignment.builtin, want_result, rhs_simple),
+            .inline_local => |slot| try out.emitModifiedAssignInlineLocal(slot, assignment.builtin, want_result),
+            .global => try out.emitModifiedAssignGlobal(try self.globalSlot(assignment.ident.text), assignment.builtin, want_result, rhs_simple),
+        }
     }
 
     fn compileLocalBindingInto(
@@ -34864,23 +41660,10 @@ const Compiler = struct {
         rhs_source: []const u8,
         body_source: []const u8,
     ) KError!void {
-        const max_inline_local_binding_body_len = 256;
-        var explicit_names: [max_explicit_params]IdentRef = undefined;
-        var hoisted_sources: [max_explicit_params]CaptureSource = undefined;
-        const maybe_explicit_count = if (body_source.len <= max_inline_local_binding_body_len)
-            self.collectInlineLocalBindingParams(parent, ident, body_source, &explicit_names, &hoisted_sources) catch |err| switch (err) {
-                error.Unsupported => null,
-                else => return err,
-            }
-        else
-            null;
-
         if (parent.param_binding_kind == .frame_local) {
             var rhs_candidates = ConsumeCandidates{};
             try rhs_candidates.addResolved(try parent.resolveLoad(ident));
-            if (maybe_explicit_count) |explicit_count| {
-                try addScopeParamConsumeCandidatesExceptSources(&rhs_candidates, parent, hoisted_sources[1..explicit_count]);
-            }
+            try addLocalBindingRhsConsumeCandidates(&rhs_candidates, parent, rhs_source, body_source);
             const rhs_control_before = out.control_flow_op_count;
             const updated_rhs_candidates = try self.compileExprSliceIntoWithConsumeCandidates(out, parent, rhs_source, rhs_candidates);
             if (out.control_flow_op_count == rhs_control_before) patchConsumeCandidates(out, updated_rhs_candidates);
@@ -34890,137 +41673,14 @@ const Compiler = struct {
             return;
         }
 
+        const rhs_control_before = out.control_flow_op_count;
         var rhs_candidates = ConsumeCandidates{};
         try rhs_candidates.addResolved(try parent.resolveLoad(ident));
-        if (maybe_explicit_count) |explicit_count| {
-            try addScopeParamConsumeCandidatesExceptSources(&rhs_candidates, parent, hoisted_sources[1..explicit_count]);
-            const rhs_control_before = out.control_flow_op_count;
-            const updated_rhs_candidates = try self.compileExprSliceIntoWithConsumeCandidates(out, parent, rhs_source, rhs_candidates);
-            if (out.control_flow_op_count == rhs_control_before) patchConsumeCandidates(out, updated_rhs_candidates);
-
-            var hoist_candidates = ConsumeCandidates{};
-            var hoisted_idx: usize = 1;
-            while (hoisted_idx < explicit_count) : (hoisted_idx += 1) {
-                const source = hoisted_sources[hoisted_idx];
-                try hoist_candidates.addCaptureSource(source);
-                try self.emitCaptureSourceTransfer(out, source);
-            }
-            patchConsumeCandidates(out, hoist_candidates);
-
-            var body_consume_candidates = ConsumeCandidates{};
-            try body_consume_candidates.addInlineLocal(0);
-            try self.inlineLambdaCallFromBodySource(
-                out,
-                parent,
-                false,
-                explicit_names[0..explicit_count],
-                body_source,
-                explicit_count,
-                body_consume_candidates,
-            );
-            _ = try out.tryShapeArgmaxSuffix();
-            return;
-        }
-
-        const fallback_explicit_names = [_]IdentRef{ident};
-        try self.emitLambdaValueFromBodySource(out, parent, false, &fallback_explicit_names, body_source);
-        const rhs_control_before = out.control_flow_op_count;
+        try addLocalBindingRhsConsumeCandidates(&rhs_candidates, parent, rhs_source, body_source);
         const updated_rhs_candidates = try self.compileExprSliceIntoWithConsumeCandidates(out, parent, rhs_source, rhs_candidates);
         if (out.control_flow_op_count == rhs_control_before) patchConsumeCandidates(out, updated_rhs_candidates);
-        try out.appendShapedCall1();
-    }
-
-    fn collectInlineLocalBindingParams(
-        self: *Compiler,
-        parent: *Scope,
-        ident: IdentRef,
-        body_source: []const u8,
-        explicit_out: *[max_explicit_params]IdentRef,
-        source_out: *[max_explicit_params]CaptureSource,
-    ) KError!u8 {
-        var scope = Scope{
-            .parent = parent,
-            .allow_implicit_params = false,
-        };
-        defer scope.deinit(self.session.allocator);
-        try scope.declareParam(ident);
-
-        var temp_instructions = InstructionBuffer{};
-        try self.compileLambdaBodyInto(&temp_instructions, &scope, body_source);
-
-        var count: u8 = 0;
-        explicit_out[count] = ident;
-        source_out[count] = .{ .local = 0 };
-        count += 1;
-        for (scope.capture_bindings[0..scope.capture_count]) |binding| {
-            switch (binding.source) {
-                .local, .inline_local => {
-                    if (count >= max_explicit_params) return error.Unsupported;
-                    explicit_out[count] = binding.ident;
-                    source_out[count] = binding.source;
-                    count += 1;
-                },
-                .capture => {},
-            }
-        }
-        return count;
-    }
-
-    fn emitCaptureSourceLoad(self: *Compiler, out: *InstructionBuffer, source: CaptureSource) KError!void {
-        _ = self;
-        switch (source) {
-            .local => |slot| try out.emitLoadLocal(slot),
-            .inline_local => |slot| try out.emitLoadInlineLocal(slot),
-            .capture => |slot| try out.emitLoadCapture(slot),
-        }
-    }
-
-    fn emitCaptureSourceTransfer(self: *Compiler, out: *InstructionBuffer, source: CaptureSource) KError!void {
-        _ = self;
-        switch (source) {
-            .local => |slot| {
-                try out.appendRawOp(.take_local);
-                try out.appendPoolByte(slot);
-            },
-            .inline_local => |slot| {
-                try out.appendRawOp(.take_inline_local);
-                try out.appendPoolByte(slot);
-            },
-            .capture => |slot| try out.emitLoadCapture(slot),
-        }
-    }
-
-    fn inlineLambdaCallFromBodySource(
-        self: *Compiler,
-        out: *InstructionBuffer,
-        parent: *Scope,
-        allow_implicit_params: bool,
-        explicit_names: []const IdentRef,
-        body_source: []const u8,
-        argc: u8,
-        body_consume_candidates: ConsumeCandidates,
-    ) KError!void {
-        var scope = Scope{
-            .parent = parent,
-            .allow_implicit_params = allow_implicit_params,
-            .param_binding_kind = .inline_local,
-        };
-        defer scope.deinit(self.session.allocator);
-        for (explicit_names) |name| try scope.declareParam(name);
-
-        const call_start = out.byte_len;
-        try out.appendOp(.enter_inline);
-        try out.appendByte(argc);
-        const body_start = out.byte_len;
-        var combined_candidates = body_consume_candidates;
-        try combined_candidates.mergeFrom(try self.directAmendBaseConsumeCandidates(&scope, body_source));
-        const body_control_before = out.control_flow_op_count;
-        const updated_body_candidates = try self.compileLambdaBodyIntoWithConsumeCandidates(out, &scope, body_source, combined_candidates);
-        if (argc != scope.arity) return error.Arity;
-        if (try self.tryShapeInlineCall(out, call_start, body_start, argc)) return;
-        if (out.control_flow_op_count == body_control_before) patchConsumeCandidates(out, updated_body_candidates);
-        try out.appendOp(.leave_inline);
-        try out.appendByte(argc);
+        _ = try parent.declareShadowLocal(ident);
+        try self.compileLambdaBodyInto(out, parent, body_source);
     }
 
     fn scanLocalAssignmentStatement(self: *Compiler, source_slice: []const u8) KError!?LocalAssignment {
@@ -35031,26 +41691,136 @@ const Compiler = struct {
             self.compile_mode,
         );
         const scanned = statement_compiler.scanIdentifierAt(statement_compiler.index) orelse return null;
-        const after = skipSpacesInSource(source_slice, scanned.next_index);
-        if (after >= source_slice.len or source_slice[after] != ':') return null;
-        const rhs_start = skipSpacesInSource(source_slice, after + 1);
+        var after = skipSpacesInSource(source_slice, scanned.next_index);
+        if (after >= source_slice.len) return null;
+
+        var mode: NameAssignmentMode = .bind;
+        var builtin: BuiltinId = .add;
+        if (source_slice[after] == ':') {
+            if (after + 1 < source_slice.len and source_slice[after + 1] == ':') {
+                mode = .explicit_global;
+                after += 2;
+            } else {
+                after += 1;
+            }
+        } else if (indexedAssignmentBuiltin(source_slice[after])) |id| {
+            mode = .modified;
+            builtin = id;
+            after = skipSpacesInSource(source_slice, after + 1);
+            if (after >= source_slice.len or source_slice[after] != ':') return null;
+            after += 1;
+        } else {
+            return null;
+        }
+
+        const rhs_start = skipSpacesInSource(source_slice, after);
         if (rhs_start >= source_slice.len) return error.Parse;
         const rhs_source = std.mem.trim(u8, source_slice[rhs_start..], " \t\r\n");
         if (rhs_source.len == 0) return error.Parse;
         return .{
             .ident = scanned.ident,
             .rhs_source = rhs_source,
+            .mode = mode,
+            .builtin = builtin,
+        };
+    }
+
+    fn findIndexedAssignmentClose(source_slice: []const u8, open_index: usize) ?usize {
+        if (open_index >= source_slice.len or source_slice[open_index] != '[') return null;
+        var index = open_index + 1;
+        var bracket_depth: usize = 1;
+        var paren_depth: usize = 0;
+        var brace_depth: usize = 0;
+        while (index < source_slice.len) : (index += 1) {
+            switch (source_slice[index]) {
+                '"' => {
+                    index += 1;
+                    while (index < source_slice.len and source_slice[index] != '"') : (index += 1) {}
+                    if (index >= source_slice.len) return null;
+                },
+                '[' => bracket_depth += 1,
+                ']' => {
+                    if (bracket_depth == 0) return null;
+                    bracket_depth -= 1;
+                    if (bracket_depth == 0 and paren_depth == 0 and brace_depth == 0) return index;
+                },
+                '(' => paren_depth += 1,
+                ')' => {
+                    if (paren_depth == 0) return null;
+                    paren_depth -= 1;
+                },
+                '{' => brace_depth += 1,
+                '}' => {
+                    if (brace_depth == 0) return null;
+                    brace_depth -= 1;
+                },
+                else => {},
+            }
+        }
+        return null;
+    }
+
+    fn indexedAssignmentBuiltin(ch: u8) ?BuiltinId {
+        return switch (ch) {
+            '+', '-', '*', '%', '&', '|' => builtinFromChar(ch),
+            else => null,
+        };
+    }
+
+    fn scanIndexedAssignmentStatement(self: *Compiler, source_slice: []const u8) KError!?IndexedAssignment {
+        var statement_compiler = try Compiler.init(
+            self.session,
+            source_slice,
+            self.code_allocator,
+            self.compile_mode,
+        );
+        const scanned = statement_compiler.scanIdentifierAt(statement_compiler.index) orelse return null;
+        const open_index = skipSpacesInSource(source_slice, scanned.next_index);
+        if (open_index >= source_slice.len or source_slice[open_index] != '[') return null;
+        const close_index = findIndexedAssignmentClose(source_slice, open_index) orelse return error.Parse;
+        const selector_source = std.mem.trim(u8, source_slice[open_index + 1 .. close_index], " \t\r\n");
+
+        var after = skipSpacesInSource(source_slice, close_index + 1);
+        if (after >= source_slice.len) return null;
+
+        var mode: AmendMode = .assign;
+        var builtin: BuiltinId = .add;
+        if (source_slice[after] == ':') {
+            after += 1;
+        } else if (indexedAssignmentBuiltin(source_slice[after])) |id| {
+            mode = .binary;
+            builtin = id;
+            after = skipSpacesInSource(source_slice, after + 1);
+            if (after >= source_slice.len or source_slice[after] != ':') return null;
+            after += 1;
+        } else {
+            return null;
+        }
+
+        if (selector_source.len == 0) return error.Parse;
+
+        const rhs_start = skipSpacesInSource(source_slice, after);
+        if (rhs_start >= source_slice.len) return error.Parse;
+        const rhs_source = std.mem.trim(u8, source_slice[rhs_start..], " \t\r\n");
+        if (rhs_source.len == 0) return error.Parse;
+        return .{
+            .ident = scanned.ident,
+            .selector_source = selector_source,
+            .rhs_source = rhs_source,
+            .mode = mode,
+            .builtin = builtin,
         };
     }
 
     fn lambdaBodyStartsWithLocalBinding(self: *Compiler, body_source: []const u8) KError!bool {
         const split = splitLambdaBodyHead(body_source) orelse return error.Parse;
-        return (try self.scanLocalAssignmentStatement(split.head)) != null;
+        const assignment = (try self.scanLocalAssignmentStatement(split.head)) orelse return false;
+        return assignment.mode == .bind;
     }
 
     fn emitGlobalLoadByName(self: *Compiler, out: *InstructionBuffer, name: []const u8) KError!void {
         try out.appendOp(.load_global);
-        try out.appendByte(try out.internGlobal(try self.globalSlot(name)));
+        try out.appendGlobalSlot(try self.globalSlot(name));
     }
 
     fn emitSimpleAtom(self: *Compiler, out: *InstructionBuffer, scope: *Scope, atom: SimpleAtom) KError!void {
@@ -35198,7 +41968,7 @@ const Compiler = struct {
             const arg_simples = [_]ProducedValue{ arg0_simple, arg1_simple };
             if (!(try out.tryShapeGlobalCallSlotsFromSimples(slot, arg_simples[0..], &self.consume_candidates))) {
                 try out.appendOp(.call_global2);
-                try out.appendByte(try out.internGlobal(slot));
+                try out.appendGlobalSlot(slot);
             }
             return true;
         }
@@ -35284,14 +42054,14 @@ const Compiler = struct {
         }
         switch (op) {
             ',' => try out.appendOp(.concat),
-            '=' => try out.appendOp(.equal),
-            '<' => try out.appendOp(.less),
-            '>' => try out.appendOp(.more),
+            '=' => try out.appendShapedDyad(.equal),
+            '<' => try out.appendShapedDyad(.less),
+            '>' => try out.appendShapedDyad(.more),
             '+' => try out.appendShapedDyad(.add),
             '-' => try out.appendShapedDyad(.sub),
             '!' => try out.appendOp(.mod),
-            '&' => try out.appendOp(.minimum),
-            '|' => try out.appendOp(.maximum),
+            '&' => try out.appendShapedDyad(.minimum),
+            '|' => try out.appendShapedDyad(.maximum),
             '#' => try out.appendOp(.take),
             '_' => try out.appendOp(.drop),
             '^' => try out.appendOp(.fill_without),
@@ -35313,6 +42083,9 @@ const Compiler = struct {
         const left_start = out.byte_len;
         const left_form = try self.parseUnary(out, scope);
         if (try self.tryParseParenthesizedVerbialDyad(out, scope, left_start, left_form)) {
+            return .nounish;
+        }
+        if (try self.tryParseUnparenthesizedVerbialDyad(out, scope, left_start, left_form)) {
             return .nounish;
         }
         if (self.startsJuxtapositionOperand(left_form)) {
@@ -35346,6 +42119,30 @@ const Compiler = struct {
         return true;
     }
 
+    fn tryParseUnparenthesizedVerbialDyad(self: *Compiler, out: *InstructionBuffer, scope: *Scope, left_start: usize, left_form: ExprForm) KError!bool {
+        if (left_form != .nounish) return false;
+        const ch = self.peekByte() orelse return false;
+        if (ch != '{' and !(isIdentStart(ch) and builtinFromChar(ch) == null)) return false;
+
+        const saved_index = self.index;
+        const saved_out = out.mark();
+        const left_end = out.byte_len;
+
+        const callee_form = try self.parsePostfix(out, scope);
+        const callee_end = out.byte_len;
+
+        if (callee_form != .verbial or !self.startsJuxtapositionOperand(callee_form)) {
+            self.index = saved_index;
+            out.restore(saved_out);
+            return false;
+        }
+
+        _ = try self.parseExpr(out, scope);
+        out.rotateRangeLeft(left_start, left_end, callee_end);
+        try out.appendOp(.call2);
+        return true;
+    }
+
     fn parseUnary(self: *Compiler, out: *InstructionBuffer, scope: *Scope) KError!ExprForm {
         if (self.peekStartsSignedNumericLiteral()) {
             try self.emitNumericLiteralOrVector(out);
@@ -35354,7 +42151,7 @@ const Compiler = struct {
         if (self.peekPrimaryUnaryOp()) |op| {
             _ = self.consumeByte();
             if (op == '+' or op == '-' or op == '%' or op == '$' or op == '?' or op == '.') {
-                _ = try self.parseUnary(out, scope);
+                _ = try self.parseDyadExpr(out, scope);
                 switch (op) {
                     '+' => try out.appendOp(.transpose),
                     '-' => try out.appendShapedMonad(.negate),
@@ -35388,6 +42185,93 @@ const Compiler = struct {
     fn parsePostfix(self: *Compiler, out: *InstructionBuffer, scope: *Scope) KError!ExprForm {
         const primary = try self.parsePrimary(out, scope);
         return try self.parsePostfixTail(out, scope, primary.pending, primary.form);
+    }
+
+    fn findParenthesizedInfixProjection(self: *const Compiler) ?struct { op_index: usize, close_index: usize, builtin: BuiltinId } {
+        if (self.index >= self.source.len or self.source[self.index] != '(') return null;
+        const body_start = skipSpacesInSource(self.source, self.index + 1);
+        if (body_start >= self.source.len) return null;
+
+        var index = body_start;
+        var paren_depth: usize = 0;
+        var bracket_depth: usize = 0;
+        var brace_depth: usize = 0;
+        while (index < self.source.len) : (index += 1) {
+            const ch = self.source[index];
+            switch (ch) {
+                '"' => {
+                    index += 1;
+                    while (index < self.source.len and self.source[index] != '"') : (index += 1) {}
+                    if (index >= self.source.len) return null;
+                },
+                '(' => paren_depth += 1,
+                ')' => {
+                    if (paren_depth != 0) {
+                        paren_depth -= 1;
+                        continue;
+                    }
+                    return null;
+                },
+                '[' => bracket_depth += 1,
+                ']' => {
+                    if (bracket_depth == 0) return null;
+                    bracket_depth -= 1;
+                },
+                '{' => brace_depth += 1,
+                '}' => {
+                    if (brace_depth == 0) return null;
+                    brace_depth -= 1;
+                },
+                ';' => {
+                    if (paren_depth == 0 and bracket_depth == 0 and brace_depth == 0) return null;
+                },
+                else => {
+                    if (paren_depth != 0 or bracket_depth != 0 or brace_depth != 0) continue;
+                    const builtin = builtinFromChar(ch) orelse continue;
+                    if (index == body_start) continue;
+                    const after = skipSpacesInSource(self.source, index + 1);
+                    if (after < self.source.len and self.source[after] == ')') {
+                        return .{ .op_index = index, .close_index = after, .builtin = builtin };
+                    }
+                },
+            }
+        }
+        return null;
+    }
+
+    fn tryParseParenthesizedInfixProjection(self: *Compiler, out: *InstructionBuffer, scope: *Scope) KError!bool {
+        const projection = self.findParenthesizedInfixProjection() orelse return false;
+        const left_source = std.mem.trim(u8, self.source[self.index + 1 .. projection.op_index], " \t\r\n");
+        if (left_source.len == 0) return false;
+
+        const saved_out = out.mark();
+        const saved_candidates = self.consume_candidates;
+        const left_start = out.byte_len;
+        var left_compiler = try Compiler.init(
+            self.session,
+            left_source,
+            self.code_allocator,
+            self.compile_mode,
+        );
+        left_compiler.consume_candidates = self.consume_candidates;
+        const left_form = if (try left_compiler.tryCompileSimpleExprSlice(out, scope, left_source)) blk: {
+            left_compiler.index = left_compiler.source.len;
+            break :blk ExprForm.nounish;
+        } else try left_compiler.parseExpr(out, scope);
+        if (!left_compiler.atEnd() or left_form != .nounish) {
+            out.restore(saved_out);
+            self.consume_candidates = saved_candidates;
+            return false;
+        }
+        self.consume_candidates = left_compiler.consume_candidates;
+        const left_end = out.byte_len;
+        try self.emitPendingPrimary(out, scope, .{ .builtin = projection.builtin });
+        out.rotateRangeLeft(left_start, left_end, out.byte_len);
+        try out.appendOp(.make_projection);
+        try out.appendByte(2);
+        try out.appendU64(@as(u64, 1) << 1);
+        self.index = skipSpacesInSource(self.source, projection.close_index + 1);
+        return true;
     }
 
     fn scanProjectionSlots(self: *const Compiler, start_index: usize) KError!ProjectionSlotSummary {
@@ -35518,7 +42402,7 @@ const Compiler = struct {
             }
 
             var argc: u8 = 0;
-            var arg_simples: [4]ProducedValue = undefined;
+            var arg_simples: [max_shaped_call_args]ProducedValue = undefined;
             var arg_simples_valid = true;
             if (needs_projection) {
                 for (0..slot_summary.slot_count) |slot_idx| {
@@ -35600,30 +42484,31 @@ const Compiler = struct {
                     arg_simples[0..argc]
                 else
                     &[_]ProducedValue{};
-                switch (argc) {
-                    1 => {
-                        if (!(arg_simples_valid and try out.tryShapeGlobalCallSlotsFromSimples(slot, simple_args, &self.consume_candidates))) {
+                if (arg_simples_valid and argc == 1 and try out.tryShapeGlobalIndexSource(slot, simple_args[0], &self.consume_candidates)) {
+                    pending = .none;
+                    form = .nounish;
+                    continue;
+                }
+                if (!(arg_simples_valid and try out.tryShapeGlobalCallSlotsFromSimples(slot, simple_args, &self.consume_candidates))) {
+                    switch (argc) {
+                        1 => {
                             try out.appendOp(.call_global1);
-                            try out.appendByte(try out.internGlobal(slot));
-                        }
-                    },
-                    2 => {
-                        if (!(arg_simples_valid and try out.tryShapeGlobalCallSlotsFromSimples(slot, simple_args, &self.consume_candidates))) {
+                            try out.appendGlobalSlot(slot);
+                        },
+                        2 => {
                             try out.appendOp(.call_global2);
-                            try out.appendByte(try out.internGlobal(slot));
-                        }
-                    },
-                    3, 4 => {
-                        if (!(arg_simples_valid and try out.tryShapeGlobalCallSlotsFromSimples(slot, simple_args, &self.consume_candidates))) {
+                            try out.appendGlobalSlot(slot);
+                        },
+                        3, 4 => {
                             try out.appendOp(if (argc == 3) .call_global3 else .call_global4);
-                            try out.appendByte(try out.internGlobal(slot));
-                        }
-                    },
-                    else => {
-                        try out.appendOp(.call_global);
-                        try out.appendByte(try out.internGlobal(slot));
-                        try out.appendByte(argc);
-                    },
+                            try out.appendGlobalSlot(slot);
+                        },
+                        else => {
+                            try out.appendOp(.call_global);
+                            try out.appendGlobalSlot(slot);
+                            try out.appendByte(argc);
+                        },
+                    }
                 }
             } else if (lambda_source) |lambda| {
                 try self.inlineLambdaCall(out, scope, lambda, argc);
@@ -35818,6 +42703,9 @@ const Compiler = struct {
 
         switch (ch) {
             '(' => {
+                if (try self.tryParseParenthesizedInfixProjection(out, scope)) {
+                    return .{ .pending = .none, .form = .verbial };
+                }
                 _ = self.consumeByte();
                 const form = try self.parseExpr(out, scope);
                 var count: u8 = 1;
@@ -35953,9 +42841,7 @@ const Compiler = struct {
         _ = try self.parseExpr(out, scope);
         try self.expectChar(';');
 
-        try out.appendOp(.jump_if_false);
-        const false_jump_patch = out.byte_len;
-        try out.appendU16(0);
+        const false_jump_patch = try out.emitJumpIfFalsePlaceholder();
 
         _ = try self.parseExpr(out, scope);
         try out.appendOp(.jump);
@@ -36006,22 +42892,24 @@ const Compiler = struct {
     }
 
     fn inlineLambdaCall(self: *Compiler, out: *InstructionBuffer, parent: *Scope, lambda: ParsedLambda, argc: u8) KError!void {
+        _ = parent;
         var scope = Scope{
-            .parent = parent,
             .allow_implicit_params = lambda.allow_implicit_params,
             .param_binding_kind = .inline_local,
         };
         defer scope.deinit(self.session.allocator);
         try self.declareParsedLambdaParams(&scope, lambda);
+        if (scope.frame_slot_count < argc) scope.frame_slot_count = argc;
 
         const call_start = out.byte_len;
         try out.appendOp(.enter_inline);
         try out.appendByte(argc);
         const body_start = out.byte_len;
         const body_source = self.source[lambda.body_start..lambda.body_end];
+        const local_count_before = scope.local_count;
         try self.compileLambdaBodyInto(out, &scope, body_source);
         if (argc != scope.arity) return error.Arity;
-        if (try self.tryShapeInlineCall(out, call_start, body_start, argc)) return;
+        if (scope.local_count == local_count_before and try self.tryShapeInlineCall(out, call_start, body_start, argc)) return;
         try out.appendOp(.leave_inline);
         try out.appendByte(argc);
     }
@@ -36070,81 +42958,23 @@ const Compiler = struct {
                 }
             }
 
-            if (body.len == 2) {
-                const op: ?Op = switch (body[0]) {
-                    @intFromEnum(Op.neg_capture) => .inline_call_negate_capture,
-                    @intFromEnum(Op.sqrt_capture) => .inline_call_sqrt_capture,
-                    else => null,
-                };
-                if (op) |shaped| {
-                    out.byte_len = call_start;
-                    out.invalidateSimple();
-                    try out.appendOp(shaped);
-                    try out.appendByte(body[1]);
-                    return true;
-                }
-            }
-
-            if (body.len == 3 and body[0] == @intFromEnum(Op.load_global) and body[2] == @intFromEnum(Op.negate)) {
+            if (body.len == 4 and body[0] == @intFromEnum(Op.load_global) and body[3] == @intFromEnum(Op.negate)) {
                 out.byte_len = call_start;
                 out.invalidateSimple();
                 try out.appendOp(.inline_call_negate_global);
-                try out.appendByte(body[1]);
+                try out.appendGlobalSlot(Session.directReadU16(body, 1) orelse return false);
                 return true;
             }
-            if (body.len == 3 and body[0] == @intFromEnum(Op.load_global) and body[2] == @intFromEnum(Op.sqrt)) {
+            if (body.len == 4 and body[0] == @intFromEnum(Op.load_global) and body[3] == @intFromEnum(Op.sqrt)) {
                 out.byte_len = call_start;
                 out.invalidateSimple();
                 try out.appendOp(.inline_call_sqrt_global);
-                try out.appendByte(body[1]);
+                try out.appendGlobalSlot(Session.directReadU16(body, 1) orelse return false);
                 return true;
             }
 
-            if (body.len == 3 and body[0] == @intFromEnum(Op.add_capture_inline_local) and body[2] == 0) {
-                out.byte_len = call_start;
-                out.invalidateSimple();
-                try out.appendOp(.inline_call_add_capture);
-                try out.appendByte(body[1]);
-                return true;
-            }
-            if (body.len == 3 and body[0] == @intFromEnum(Op.add_inline_local_capture) and body[1] == 0) {
-                out.byte_len = call_start;
-                out.invalidateSimple();
-                try out.appendOp(.inline_call_add_arg_capture);
-                try out.appendByte(body[2]);
-                return true;
-            }
-            if (body.len == 3 and body[0] == @intFromEnum(Op.sub_capture_inline_local) and body[2] == 0) {
-                out.byte_len = call_start;
-                out.invalidateSimple();
-                try out.appendOp(.inline_call_sub_capture);
-                try out.appendByte(body[1]);
-                return true;
-            }
-            if (body.len == 3 and body[0] == @intFromEnum(Op.sub_inline_local_capture) and body[1] == 0) {
-                out.byte_len = call_start;
-                out.invalidateSimple();
-                try out.appendOp(.inline_call_sub_arg_capture);
-                try out.appendByte(body[2]);
-                return true;
-            }
-            if (body.len == 3 and body[0] == @intFromEnum(Op.mul_capture_inline_local) and body[2] == 0) {
-                out.byte_len = call_start;
-                out.invalidateSimple();
-                try out.appendOp(.inline_call_mul_capture);
-                try out.appendByte(body[1]);
-                return true;
-            }
-            if (body.len == 3 and body[0] == @intFromEnum(Op.mul_inline_local_capture) and body[1] == 0) {
-                out.byte_len = call_start;
-                out.invalidateSimple();
-                try out.appendOp(.inline_call_mul_arg_capture);
-                try out.appendByte(body[2]);
-                return true;
-            }
-
-            if (body.len == 5 and body[0] == @intFromEnum(Op.load_global) and body[2] == @intFromEnum(Op.load_inline_local) and body[3] == 0) {
-                const op: ?Op = switch (body[4]) {
+            if (body.len == 6 and body[0] == @intFromEnum(Op.load_global) and body[3] == @intFromEnum(Op.load_inline_local) and body[4] == 0) {
+                const op: ?Op = switch (body[5]) {
                     @intFromEnum(Op.add) => .inline_call_add_global,
                     @intFromEnum(Op.sub) => .inline_call_sub_global,
                     @intFromEnum(Op.mul) => .inline_call_mul_global,
@@ -36154,13 +42984,13 @@ const Compiler = struct {
                     out.byte_len = call_start;
                     out.invalidateSimple();
                     try out.appendOp(shaped);
-                    try out.appendByte(body[1]);
+                    try out.appendGlobalSlot(Session.directReadU16(body, 1) orelse return false);
                     return true;
                 }
             }
 
-            if (body.len == 5 and body[0] == @intFromEnum(Op.load_inline_local) and body[1] == 0 and body[2] == @intFromEnum(Op.load_global)) {
-                const op: ?Op = switch (body[4]) {
+            if (body.len == 6 and body[0] == @intFromEnum(Op.load_inline_local) and body[1] == 0 and body[2] == @intFromEnum(Op.load_global)) {
+                const op: ?Op = switch (body[5]) {
                     @intFromEnum(Op.add) => .inline_call_add_arg_global,
                     @intFromEnum(Op.sub) => .inline_call_sub_arg_global,
                     @intFromEnum(Op.mul) => .inline_call_mul_arg_global,
@@ -36170,7 +43000,7 @@ const Compiler = struct {
                     out.byte_len = call_start;
                     out.invalidateSimple();
                     try out.appendOp(shaped);
-                    try out.appendByte(body[3]);
+                    try out.appendGlobalSlot(Session.directReadU16(body, 3) orelse return false);
                     return true;
                 }
             }
@@ -36194,8 +43024,8 @@ const Compiler = struct {
         explicit_names: []const IdentRef,
         body_source: []const u8,
     ) KError!void {
+        _ = parent;
         var scope = Scope{
-            .parent = parent,
             .allow_implicit_params = allow_implicit_params,
         };
         defer scope.deinit(self.session.allocator);
@@ -36226,36 +43056,18 @@ const Compiler = struct {
             self.assignCodeProfile(scratch_code, .lambda, body_source);
             break :blk scratch_code;
         } else try self.finalizeCode(scope.arity, scope.frame_slot_count, body, .lambda, body_source);
-        const template = try self.code_allocator.create(LambdaTemplate);
-        const captures = if (scope.capture_count == 0)
-            &[_]CaptureSource{}
-        else blk: {
-            const owned = try self.code_allocator.alloc(CaptureSource, scope.capture_count);
-            for (scope.capture_bindings[0..scope.capture_count], 0..) |binding, idx| {
-                owned[idx] = binding.source;
-            }
-            break :blk owned;
-        };
-        template.* = .{
+        const closure = try self.code_allocator.create(Closure);
+        closure.* = .{
+            .header = HeapHeader.init(.closure, switch (self.compile_mode) {
+                .frozen => .frozen,
+                .scratch => .scratch,
+            }),
+            .kind = .plain,
             .code = code,
-            .captures = captures,
+            .captures = &[_]Value{},
         };
-        if (scope.capture_count == 0) {
-            const closure = try self.code_allocator.create(Closure);
-            closure.* = .{
-                .header = HeapHeader.init(.closure, switch (self.compile_mode) {
-                    .frozen => .frozen,
-                    .scratch => .scratch,
-                }),
-                .code = code,
-                .captures = &[_]Value{},
-            };
-            try out.appendOp(.const_value);
-            try out.appendByte(try out.internConstant(Value.closure(closure)));
-            return;
-        }
-        try out.appendOp(.make_lambda);
-        try out.appendByte(try out.internTemplate(template));
+        try out.appendOp(.const_value);
+        try out.appendByte(try out.internConstant(Value.closure(closure)));
     }
 
     fn emitLambdaValue(self: *Compiler, out: *InstructionBuffer, parent: *Scope, lambda: ParsedLambda) KError!void {
@@ -36310,6 +43122,7 @@ const Compiler = struct {
             code.profile_kind = .none;
             code.profile_source = "";
             code.profile_id = sampling_profile_no_code;
+            assignCompactKProfile(code);
             return;
         }
         const trimmed = std.mem.trim(u8, source, " \t\r\n");
@@ -36317,6 +43130,7 @@ const Compiler = struct {
         code.profile_source = trimmed;
         if (self.compile_mode != .frozen) {
             code.profile_id = sampling_profile_no_code;
+            assignCompactKProfile(code);
             return;
         }
         if (code.profile_id != sampling_profile_no_code) {
@@ -36325,6 +43139,7 @@ const Compiler = struct {
         }
         const id = self.session.nextSamplingProfileCodeId();
         code.profile_id = id;
+        assignCompactKProfile(code);
         self.session.rememberSamplingProfileCodeInfo(id, code.profile_kind, code.profile_source);
     }
 
@@ -36405,10 +43220,6 @@ const Compiler = struct {
                 try self.emitResolvedLoad(out, .{ .inline_local = slot });
                 return .none;
             },
-            .capture => |slot| {
-                try self.emitResolvedLoad(out, .{ .capture = slot });
-                return .none;
-            },
             .global => return .{ .global = try self.globalSlot(ident.text) },
         }
     }
@@ -36422,7 +43233,7 @@ const Compiler = struct {
             .none => {},
             .global => |slot| {
                 try out.appendOp(.load_global);
-                try out.appendByte(try out.internGlobal(slot));
+                try out.appendGlobalSlot(slot);
             },
             .builtin => |id| {
                 try out.appendOp(.const_builtin);
@@ -36779,6 +43590,72 @@ fn splitLambdaBodyHead(source: []const u8) ?BodyStatementSplit {
     };
 }
 
+fn splitWholeCondSpecialForm(source: []const u8) ?ConditionalSlices {
+    const text = std.mem.trim(u8, source, " \t\r\n");
+    if (text.len < 4 or text[0] != '$' or text[1] != '[') return null;
+
+    var part_start = skipSpacesInSource(text, 2);
+    var part_index: u8 = 0;
+    var parts: [3][]const u8 = undefined;
+    var index = part_start;
+    var paren_depth: usize = 0;
+    var bracket_depth: usize = 0;
+    var brace_depth: usize = 0;
+
+    while (index < text.len) : (index += 1) {
+        switch (text[index]) {
+            '"' => {
+                index += 1;
+                while (index < text.len and text[index] != '"') : (index += 1) {}
+                if (index >= text.len) return null;
+            },
+            '(' => paren_depth += 1,
+            ')' => {
+                if (paren_depth == 0) return null;
+                paren_depth -= 1;
+            },
+            '[' => bracket_depth += 1,
+            ']' => {
+                if (bracket_depth != 0) {
+                    bracket_depth -= 1;
+                    continue;
+                }
+                if (paren_depth != 0 or brace_depth != 0 or part_index != 2) return null;
+                const part = std.mem.trim(u8, text[part_start..index], " \t\r\n");
+                if (part.len == 0) return null;
+                parts[part_index] = part;
+                if (skipSpacesInSource(text, index + 1) != text.len) return null;
+                return .{
+                    .condition = parts[0],
+                    .then_branch = parts[1],
+                    .else_branch = parts[2],
+                };
+            },
+            '{' => brace_depth += 1,
+            '}' => {
+                if (brace_depth == 0) return null;
+                brace_depth -= 1;
+            },
+            ';' => {
+                if (paren_depth == 0 and bracket_depth == 0 and brace_depth == 0) {
+                    if (part_index >= 2) return null;
+                    const part = std.mem.trim(u8, text[part_start..index], " \t\r\n");
+                    if (part.len == 0) return null;
+                    parts[part_index] = part;
+                    part_index += 1;
+                    part_start = skipSpacesInSource(text, index + 1);
+                    index = part_start;
+                    if (index >= text.len) return null;
+                    index -= 1;
+                }
+            },
+            else => {},
+        }
+    }
+
+    return null;
+}
+
 fn builtinFromChar(ch: u8) ?BuiltinId {
     return switch (ch) {
         '+' => .add,
@@ -36828,6 +43705,7 @@ fn builtinFromName(name: []const u8) ?BuiltinId {
     if (std.mem.eql(u8, name, "fill")) return .null_fill_without;
     if (std.mem.eql(u8, name, "without")) return .null_fill_without;
     if (std.mem.eql(u8, name, "except")) return .null_fill_without;
+    if (std.mem.eql(u8, name, "sort")) return .sort;
     if (std.mem.eql(u8, name, "grad")) return .grad;
     if (std.mem.eql(u8, name, "valuegrad")) return .valuegrad;
     if (std.mem.eql(u8, name, "prng")) return .prng;

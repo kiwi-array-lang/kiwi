@@ -498,3 +498,9 @@ fn runtimeDevicePreference(preference: DevicePreference) runtime.DevicePreferenc
 pub fn initContext(preference: DevicePreference) Error!Context {
     return runtime.Context.init(runtimeDevicePreference(preference));
 }
+
+pub fn deviceAvailable(preference: DevicePreference) bool {
+    var ctx = initContext(preference) catch return false;
+    ctx.deinit();
+    return true;
+}

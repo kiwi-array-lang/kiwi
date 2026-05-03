@@ -145,6 +145,7 @@ pub const ProfileRequest = struct {
 pub const DebugRequest = enum {
     audit_dense_autodiff,
     find_lookup_stages,
+    layout,
 };
 
 pub const CliRequest = union(enum) {
@@ -247,8 +248,48 @@ fn run() !void {
                 if (!enable_debug_cli) return invalidArgument();
                 try bench_tools.auditFindLookupCli(allocator, parsed.target_batch_ms, parsed.vector_size);
             },
+            .layout => {
+                if (!enable_debug_cli) return invalidArgument();
+                try printLayoutDebug();
+            },
         },
     }
+}
+
+fn printLayoutDebug() !void {
+    const facts = runtime.debugRuntimeLayoutFacts();
+    const writer = std.fs.File.stdout().deprecatedWriter();
+    try writer.print(
+        "value size={d} align={d}\n" ++
+            "heap_header size={d} align={d}\n" ++
+            "host_text size={d} align={d}\n" ++
+            "host_string_view size={d} align={d}\n" ++
+            "host_string_list size={d} align={d}\n" ++
+            "host_dense_array size={d} align={d}\n" ++
+            "host_boxed_array size={d} align={d}\n" ++
+            "backend_array size={d} align={d}\n" ++
+            "numeric_array size={d} align={d}\n",
+        .{
+            facts.value_size,
+            facts.value_align,
+            facts.heap_header_size,
+            facts.heap_header_align,
+            facts.host_text_size,
+            facts.host_text_align,
+            facts.host_string_view_size,
+            facts.host_string_view_align,
+            facts.host_string_list_size,
+            facts.host_string_list_align,
+            facts.host_dense_array_size,
+            facts.host_dense_array_align,
+            facts.host_boxed_array_size,
+            facts.host_boxed_array_align,
+            facts.backend_array_size,
+            facts.backend_array_align,
+            facts.numeric_array_size,
+            facts.numeric_array_align,
+        },
+    );
 }
 
 pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !CliOptions {
@@ -430,6 +471,8 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Cli
                     debug_request = .audit_dense_autodiff;
                 } else if (std.mem.eql(u8, arg, "find-lookup-stages")) {
                     debug_request = .find_lookup_stages;
+                } else if (std.mem.eql(u8, arg, "layout")) {
+                    debug_request = .layout;
                 } else {
                     return invalidArgument();
                 }
@@ -494,8 +537,8 @@ fn usage() !void {
     }
     if (comptime enable_debug_cli) {
         try stderr.print(
-            "  {s} debug audit-dense-autodiff\n  {s} debug [--target-batch-ms N] [--size N] find-lookup-stages\n",
-            .{ cli_invocation, cli_invocation },
+            "  {s} debug audit-dense-autodiff\n  {s} debug [--target-batch-ms N] [--size N] find-lookup-stages\n  {s} debug layout\n",
+            .{ cli_invocation, cli_invocation, cli_invocation },
         );
     }
     return error.InvalidArgument;
@@ -680,6 +723,7 @@ fn replSession(session: *runtime.Session, allocator: std.mem.Allocator) !void {
                     try writeRuntimeError(session, stderr, err);
                     continue;
                 };
+                if (!shouldEchoEvalLine(trimmed)) continue;
                 const text = try session.renderValue(value);
                 defer allocator.free(text);
                 try stdout.print("{s}\n", .{text});

@@ -871,6 +871,33 @@ int binary_array(mlx_array* out, mlx_array a, mlx_array b, mlx_stream s, Fn&& fn
   }
 }
 
+std::vector<array> gelu_approx_impl(const std::vector<array>& inputs) {
+  const auto& x = inputs[0];
+  const auto half = array(0.5f, x.dtype());
+  const auto one = array(1.0f, x.dtype());
+  const auto coeff = array(0.044715f, x.dtype());
+  const auto sqrt_2_over_pi = array(std::sqrt(2.0f / static_cast<float>(M_PI)), x.dtype());
+  const auto x3 = mlx::core::power(x, array(3.0f, x.dtype()));
+  auto out = half * x * (one + mlx::core::tanh(sqrt_2_over_pi * (x + coeff * x3)));
+  return {mlx::core::astype(out, x.dtype())};
+}
+
+std::vector<array> mlp_dense_impl(const std::vector<array>& inputs) {
+  const auto& x = inputs[0];
+  const auto& gate_w = inputs[1];
+  const auto& up_w = inputs[2];
+  const auto& down_w = inputs[3];
+  auto gate = mlx::core::matmul(x, gate_w);
+  auto up = mlx::core::matmul(x, up_w);
+  const auto half = array(0.5f, gate.dtype());
+  const auto one = array(1.0f, gate.dtype());
+  const auto coeff = array(0.044715f, gate.dtype());
+  const auto sqrt_2_over_pi = array(std::sqrt(2.0f / static_cast<float>(M_PI)), gate.dtype());
+  const auto gate3 = mlx::core::power(gate, array(3.0f, gate.dtype()));
+  auto geglu = half * gate * (one + mlx::core::tanh(sqrt_2_over_pi * (gate + coeff * gate3))) * up;
+  return {mlx::core::astype(mlx::core::matmul(geglu, down_w), x.dtype())};
+}
+
 } // namespace
 
 extern "C" mlx_string mlx_string_new(void) {
@@ -2138,19 +2165,12 @@ extern "C" int mlxc_sigmoid(mlx_array* res, const mlx_array a, const mlx_stream 
 
 extern "C" int mlxc_gelu_approx(mlx_array* res, const mlx_array a, const mlx_stream s) {
   try {
-    static auto compiled = mlx::core::compile(
-        [](const std::vector<array>& inputs) -> std::vector<array> {
-          const auto& x = inputs[0];
-          const auto half = array(0.5f, x.dtype());
-          const auto one = array(1.0f, x.dtype());
-          const auto coeff = array(0.044715f, x.dtype());
-          const auto sqrt_2_over_pi = array(std::sqrt(2.0f / static_cast<float>(M_PI)), x.dtype());
-          const auto x3 = mlx::core::power(x, array(3.0f, x.dtype()));
-          auto out = half * x * (one + mlx::core::tanh(sqrt_2_over_pi * (x + coeff * x3)));
-          return {mlx::core::astype(out, x.dtype())};
-        },
-        true);
+#if defined(__linux__)
+    auto outputs = gelu_approx_impl({get_array(a)});
+#else
+    static auto compiled = mlx::core::compile(gelu_approx_impl, true);
     auto outputs = compiled({get_array(a)});
+#endif
     return replace_array(res, outputs[0]);
   } catch (std::exception& e) {
     mlx_error(e.what());
@@ -2166,24 +2186,12 @@ extern "C" int mlxc_mlp_dense(
     const mlx_array down_w,
     const mlx_stream s) {
   try {
-    static auto compiled = mlx::core::compile(
-        [](const std::vector<array>& inputs) -> std::vector<array> {
-          const auto& x = inputs[0];
-          const auto& gate_w = inputs[1];
-          const auto& up_w = inputs[2];
-          const auto& down_w = inputs[3];
-          auto gate = mlx::core::matmul(x, gate_w);
-          auto up = mlx::core::matmul(x, up_w);
-          const auto half = array(0.5f, gate.dtype());
-          const auto one = array(1.0f, gate.dtype());
-          const auto coeff = array(0.044715f, gate.dtype());
-          const auto sqrt_2_over_pi = array(std::sqrt(2.0f / static_cast<float>(M_PI)), gate.dtype());
-          const auto gate3 = mlx::core::power(gate, array(3.0f, gate.dtype()));
-          auto geglu = half * gate * (one + mlx::core::tanh(sqrt_2_over_pi * (gate + coeff * gate3))) * up;
-          return {mlx::core::astype(mlx::core::matmul(geglu, down_w), x.dtype())};
-        },
-        true);
+#if defined(__linux__)
+    auto outputs = mlp_dense_impl({get_array(x), get_array(gate_w), get_array(up_w), get_array(down_w)});
+#else
+    static auto compiled = mlx::core::compile(mlp_dense_impl, true);
     auto outputs = compiled({get_array(x), get_array(gate_w), get_array(up_w), get_array(down_w)});
+#endif
     return replace_array(res, outputs[0]);
   } catch (std::exception& e) {
     mlx_error(e.what());

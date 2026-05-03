@@ -6,23 +6,51 @@
 
 `kiwi` is a tiny k-like array language implementation that can lower to `mlx` and `webgpu`.
 
-## Requirements
+## Get Kiwi
+
+Download CLI binaries for macOS and Linux from
+[GitHub Releases](https://github.com/kiwi-array-lang/kiwi/releases).
+
+Apple apps for iOS, iPadOS, macOS, and watchOS are available on the
+[App Store](https://apps.apple.com/app/kiwi-programming/id6761279677).
+
+## Try Kiwi
+
+Try Kiwi in the browser at [kiwilang.com/repl](https://kiwilang.com/repl/).
+
+With the CLI installed:
+
+```sh
+kiwi
+kiwi path/to/file.k
+```
+
+Running `kiwi` without a file starts the local REPL.
+
+## Build From Source
+
+### Requirements
 
 - Zig on `PATH` or `ZIG_BIN` set explicitly
 - CMake for MLX dependency builds
 - a supported host toolchain for Zig and MLX
 
-## Quick Start
+### Standalone Host CLI
+
+Build the standalone host CLI:
 
 ```sh
-scripts/build_public_cli.sh
+scripts/bootstrap_duckdb.sh
+zig build -Dpublic-cli=true -Druntime-backend=host -Dstrip-instrumentation=true -Doptimize=ReleaseFast
 ```
 
-Build from source:
+### MLX Backend
+
+Bootstrap MLX and build with the native MLX backend:
 
 ```sh
 KIWI_MLX_BACKEND=cpu scripts/bootstrap_deps.sh
-zig build
+zig build -Druntime-backend=mlx
 ```
 
 `scripts/bootstrap_deps.sh` now also bootstraps a repo-local DuckDB into
