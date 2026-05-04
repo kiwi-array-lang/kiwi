@@ -993,45 +993,86 @@ fn execSourceQuiet(session: *runtime.Session, path: []const u8, source: []const 
 }
 
 fn execSourceLineByLine(session: *runtime.Session, path: []const u8, source: []const u8, out_writer: anytype, err_writer: anytype) !void {
-    var lines = std.mem.tokenizeAny(u8, source, "\n");
+    var lines = std.mem.splitScalar(u8, source, '\n');
     var line_no: usize = 0;
+    var statement_start_line: usize = 0;
+    var pending = std.ArrayList(u8).empty;
+    defer pending.deinit(session.allocator);
+    var depth = ScriptDepth{};
+
     while (lines.next()) |raw| {
         line_no += 1;
-        const parsed = parseLine(raw) catch |err| {
-            try writeRuntimeErrorAt(null, err_writer, path, line_no, err);
+        const line = sanitizeLine(raw) orelse continue;
+        if (pending.items.len == 0) {
+            statement_start_line = line_no;
+            depth = .{};
+        } else {
+            try pending.append(session.allocator, '\n');
+        }
+        try pending.appendSlice(session.allocator, line);
+        if (!updateScriptDepth(line, &depth)) {
+            try writeRuntimeErrorAt(null, err_writer, path, line_no, error.Parse);
+            return error.ScriptFailed;
+        }
+        if (!depth.isZero()) continue;
+
+        const statement_text = pending.items;
+        const parsed = parseLine(statement_text) catch |err| {
+            try writeRuntimeErrorAt(null, err_writer, path, statement_start_line, err);
             return error.ScriptFailed;
         };
         switch (parsed) {
-            .skip => continue,
+            .skip => {},
             .eval => |clean| {
                 const value = session.evalSource(clean) catch |err| {
-                    try writeRuntimeErrorAt(session, err_writer, path, line_no, err);
+                    try writeRuntimeErrorAt(session, err_writer, path, statement_start_line, err);
                     return error.ScriptFailed;
                 };
-                if (!shouldEchoEvalLine(clean)) continue;
-                const text = try session.renderValue(value);
-                defer session.allocator.free(text);
-                try out_writer.print("{s}\n", .{text});
+                if (shouldEchoEvalLine(clean)) {
+                    const text = try session.renderValue(value);
+                    defer session.allocator.free(text);
+                    try out_writer.print("{s}\n", .{text});
+                }
             },
             .timing => |request| {
                 const text = evalTiming(session, session.allocator, request) catch |err| {
-                    try writeRuntimeErrorAt(session, err_writer, path, line_no, err);
+                    try writeRuntimeErrorAt(session, err_writer, path, statement_start_line, err);
                     return error.ScriptFailed;
                 };
                 defer session.allocator.free(text);
                 try out_writer.print("{s}\n", .{text});
             },
         }
+        pending.clearRetainingCapacity();
+    }
+
+    if (pending.items.len != 0) {
+        try writeRuntimeErrorAt(null, err_writer, path, statement_start_line, error.Parse);
+        return error.ScriptFailed;
     }
 }
 
 fn execSourceLineByLineQuiet(session: *runtime.Session, path: []const u8, source: []const u8) !void {
     _ = path;
-    var lines = std.mem.tokenizeAny(u8, source, "\n");
+    var lines = std.mem.splitScalar(u8, source, '\n');
+    var pending = std.ArrayList(u8).empty;
+    defer pending.deinit(session.allocator);
+    var depth = ScriptDepth{};
+
     while (lines.next()) |raw| {
-        const parsed = try parseLine(raw);
+        const line = sanitizeLine(raw) orelse continue;
+        if (pending.items.len == 0) {
+            depth = .{};
+        } else {
+            try pending.append(session.allocator, '\n');
+        }
+        try pending.appendSlice(session.allocator, line);
+        if (!updateScriptDepth(line, &depth)) return error.Parse;
+        if (!depth.isZero()) continue;
+
+        const parsed = try parseLine(pending.items);
         switch (parsed) {
-            .skip => continue,
+            .skip => {},
             .eval => |clean| {
                 const value = try session.evalSource(clean);
                 if (shouldEchoEvalLine(clean)) try session.forceValue(value);
@@ -1040,7 +1081,10 @@ fn execSourceLineByLineQuiet(session: *runtime.Session, path: []const u8, source
                 _ = try runTimingRequest(session, request);
             },
         }
+        pending.clearRetainingCapacity();
     }
+
+    if (pending.items.len != 0) return error.Parse;
 }
 
 fn sanitizeScript(allocator: std.mem.Allocator, source: []const u8) ?[]u8 {
@@ -1049,6 +1093,7 @@ fn sanitizeScript(allocator: std.mem.Allocator, source: []const u8) ?[]u8 {
     defer cleaned.deinit(allocator);
     var saw_eval = false;
     var statement_count: usize = 0;
+    var depth = ScriptDepth{};
 
     while (lines.next()) |raw| {
         const line = sanitizeLine(raw) orelse continue;
@@ -1056,11 +1101,52 @@ fn sanitizeScript(allocator: std.mem.Allocator, source: []const u8) ?[]u8 {
         if (saw_eval) cleaned.append(allocator, '\n') catch return null;
         cleaned.appendSlice(allocator, line) catch return null;
         saw_eval = true;
-        statement_count += 1;
+        if (!updateScriptDepth(line, &depth)) return null;
+        if (depth.isZero()) statement_count += 1;
     }
 
-    if (!saw_eval or statement_count != 1) return null;
+    if (!saw_eval or statement_count != 1 or !depth.isZero()) return null;
     return cleaned.toOwnedSlice(allocator) catch null;
+}
+
+const ScriptDepth = struct {
+    paren: usize = 0,
+    bracket: usize = 0,
+    brace: usize = 0,
+
+    fn isZero(self: ScriptDepth) bool {
+        return self.paren == 0 and self.bracket == 0 and self.brace == 0;
+    }
+};
+
+fn updateScriptDepth(line: []const u8, depth: *ScriptDepth) bool {
+    var idx: usize = 0;
+    while (idx < line.len) : (idx += 1) {
+        switch (line[idx]) {
+            '"' => {
+                idx += 1;
+                while (idx < line.len and line[idx] != '"') : (idx += 1) {}
+                if (idx >= line.len) return false;
+            },
+            '(' => depth.paren += 1,
+            ')' => {
+                if (depth.paren == 0) return false;
+                depth.paren -= 1;
+            },
+            '[' => depth.bracket += 1,
+            ']' => {
+                if (depth.bracket == 0) return false;
+                depth.bracket -= 1;
+            },
+            '{' => depth.brace += 1,
+            '}' => {
+                if (depth.brace == 0) return false;
+                depth.brace -= 1;
+            },
+            else => {},
+        }
+    }
+    return true;
 }
 
 fn shouldEchoEvalLine(line: []const u8) bool {

@@ -1001,6 +1001,7 @@ const ClosureKind = enum(u8) {
     plain,
     projection,
     inner_product,
+    composition,
     each,
     fold,
     scan,
@@ -1033,7 +1034,7 @@ const ClosureKind = enum(u8) {
             .each_prior => .each_prior,
             .grad => .grad,
             .valuegrad => .valuegrad,
-            .plain, .projection, .inner_product => null,
+            .plain, .projection, .inner_product, .composition => null,
         };
     }
 };
@@ -1389,6 +1390,11 @@ comptime {
 const HostDenseElem = enum(u8) {
     int,
     float,
+};
+
+const RenderMode = enum(u8) {
+    top,
+    nested,
 };
 
 const HostIntStorageKind = enum(u8) {
@@ -3190,6 +3196,16 @@ fn boxedArrayItems(value: Value) ?[]const Value {
     return value.asHostBoxedArray().items;
 }
 
+fn boxedItemsCanNumericNormalize(items: []const Value) bool {
+    for (items) |item| {
+        switch (item.tag()) {
+            .int, .bool, .float => {},
+            else => if (valueNumericMode(item) == null) return false,
+        }
+    }
+    return true;
+}
+
 fn valueNumericMatrixShape(value: Value) ?NumericMatrixShape {
     if (value.tag() != .array or valueNumericMode(value) == null) return null;
     const shape = valueNonVectorNumericShape(value) orelse return null;
@@ -4683,6 +4699,7 @@ pub const SamplingProfileCodeKind = enum(u8) {
     derived_valuegrad,
     projection,
     inner_product,
+    composition,
 };
 
 pub const SamplingProfileCodeInfo = struct {
@@ -4727,6 +4744,7 @@ const sampling_profile_code_id_derived_grad: u16 = 7;
 const sampling_profile_code_id_derived_valuegrad: u16 = 8;
 const sampling_profile_code_id_projection: u16 = 9;
 const sampling_profile_code_id_inner_product: u16 = 10;
+const sampling_profile_code_id_composition: u16 = 11;
 const sampling_profile_dynamic_code_id_base: u16 = 32;
 
 fn staticSamplingProfileCodeInfo(id: u16) ?SamplingProfileCodeInfo {
@@ -4781,6 +4799,11 @@ fn staticSamplingProfileCodeInfo(id: u16) ?SamplingProfileCodeInfo {
             .kind = .inner_product,
             .source = "inner_product",
         },
+        sampling_profile_code_id_composition => .{
+            .id = id,
+            .kind = .composition,
+            .source = "composition",
+        },
         else => null,
     };
 }
@@ -4816,6 +4839,7 @@ const derived_each_left_bytes = &[_]u8{4};
 const derived_each_prior_bytes = &[_]u8{5};
 const derived_grad_bytes = &[_]u8{6};
 const derived_valuegrad_bytes = &[_]u8{7};
+const composition_code_bytes = &[_]u8{253};
 const inner_product_code_bytes = &[_]u8{254};
 const projection_code_bytes = &[_]u8{255};
 
@@ -6156,6 +6180,15 @@ const inner_product_code = Code{
     .profile_id = sampling_profile_code_id_inner_product,
     .profile_kind = .inner_product,
     .profile_source = "inner_product",
+};
+const composition_code = Code{
+    .arity = 0,
+    .frame_slot_count = 0,
+    .bytes = composition_code_bytes,
+    .constants = empty_code_constants,
+    .profile_id = sampling_profile_code_id_composition,
+    .profile_kind = .composition,
+    .profile_source = "composition",
 };
 
 fn derivedCode(kind: DerivedVerbKind) *const Code {
@@ -7996,22 +8029,33 @@ pub const Session = struct {
     pub fn renderValue(self: *Session, value: Value) anyerror![]u8 {
         var profile_scope = self.beginSamplingProfileScope(.render);
         defer profile_scope.end();
+        return self.renderValueMode(value, .top);
+    }
+
+    fn renderValueMode(self: *Session, value: Value, mode: RenderMode) anyerror![]u8 {
         return switch (value.tag()) {
             .int => std.fmt.allocPrint(self.allocator, "{d}", .{value.asInt()}),
             .float => formatFloat(self.allocator, value.asFloat()),
             .bool => std.fmt.allocPrint(self.allocator, "{d}b", .{@intFromBool(value.asBool())}),
             .builtin => std.fmt.allocPrint(self.allocator, "{c}", .{builtinChar(value.asBuiltin())}),
-            .closure => std.fmt.allocPrint(self.allocator, "{{...}}", .{}),
-            .array => self.renderArray(value),
+            .closure => self.renderClosure(value),
+            .array => self.renderArrayMode(value, mode),
         };
     }
 
-    fn renderArray(self: *Session, value: Value) anyerror![]u8 {
-        if (valueNumericHandle(value)) |handle| return self.renderNumericArray(handle);
+    fn renderClosure(self: *Session, value: Value) anyerror![]u8 {
+        var out = std.ArrayList(u8).empty;
+        errdefer out.deinit(self.allocator);
+        if (try self.appendCallableText(&out, value)) return try out.toOwnedSlice(self.allocator);
+        return try std.fmt.allocPrint(self.allocator, "{{...}}", .{});
+    }
+
+    fn renderArrayMode(self: *Session, value: Value, mode: RenderMode) anyerror![]u8 {
+        if (valueNumericHandle(value)) |handle| return self.renderNumericArray(handle, mode);
         const kind = value.arrayKind();
         return switch (kind) {
             .host_dense_array => self.renderHostArray(value.asHostDenseArray()),
-            .host_boxed_array => self.renderHostBoxedArray(value.asHostBoxedArray()),
+            .host_boxed_array => self.renderHostBoxedArray(value.asHostBoxedArray(), mode),
             .host_string => self.renderHostString(value.asHostString()),
             .host_symbol => self.renderHostSymbol(value.asHostSymbol()),
             .host_string_list => self.renderHostStringList(value.asHostStringList()),
@@ -8019,7 +8063,7 @@ pub const Session = struct {
             .host_relation => self.renderHostRelation(value.asHostRelation()),
             .host_keyed_store => self.renderHostKeyedStore(value.asHostKeyedStore()),
             .host_table_scalar => self.renderHostTableScalar(valueAsHostTableScalar(value)),
-            .backend_array => self.renderBackendArray(value.asBackendArray()),
+            .backend_array => self.renderBackendArray(value.asBackendArray(), mode),
             else => error.Internal,
         };
     }
@@ -8030,124 +8074,165 @@ pub const Session = struct {
         try out.appendSlice(allocator, part);
     }
 
-    fn renderNumericArray(self: *Session, handle: *const NumericArray) anyerror![]u8 {
+    fn appendRenderedNumericFlatItem(self: *Session, out: *std.ArrayList(u8), value: Value, idx: usize, mode: HostDenseElem) !void {
+        switch (mode) {
+            .int => try out.writer(self.allocator).print("{d}", .{try numericIntAt(value, idx)}),
+            .float => try appendRenderedFloat(out, self.allocator, try numericFloatAt(value, idx)),
+        }
+    }
+
+    fn appendRenderedNumericFlatVector(self: *Session, out: *std.ArrayList(u8), value: Value, base: usize, len: usize, mode: HostDenseElem) !void {
+        if (len == 0 and mode == .int) {
+            try out.appendSlice(self.allocator, "!0");
+            return;
+        }
+        if (len == 1) try out.append(self.allocator, ',');
+        for (0..len) |idx| {
+            if (idx != 0) try out.append(self.allocator, ' ');
+            try self.appendRenderedNumericFlatItem(out, value, base + idx, mode);
+        }
+    }
+
+    fn appendRenderedNumericPrototypeFlatVector(self: *Session, out: *std.ArrayList(u8), len: usize, mode: HostDenseElem) !void {
+        if (len == 0) {
+            try out.appendSlice(self.allocator, if (mode == .float) "0#0.0" else "!0");
+            return;
+        }
+        if (len == 1) try out.append(self.allocator, ',');
+        for (0..len) |idx| {
+            if (idx != 0) try out.append(self.allocator, ' ');
+            try out.appendSlice(self.allocator, if (mode == .float) "0.0" else "0");
+        }
+    }
+
+    fn numericShapeDimsElementCount(dims: []const i32) anyerror!usize {
+        var total: usize = 1;
+        for (dims) |dim| {
+            if (dim < 0) return error.Internal;
+            total = std.math.mul(usize, total, @as(usize, @intCast(dim))) catch return error.Unsupported;
+        }
+        return total;
+    }
+
+    fn appendRenderedNumericPrototypeShape(self: *Session, out: *std.ArrayList(u8), shape: []const i32, elem_mode: HostDenseElem) anyerror!void {
+        if (shape.len <= 1) {
+            const len: usize = if (shape.len == 0) 1 else @intCast(shape[0]);
+            try self.appendRenderedNumericPrototypeFlatVector(out, len, elem_mode);
+            return;
+        }
+
+        const first: usize = @intCast(shape[0]);
+        if (first == 0) {
+            try out.appendSlice(self.allocator, "0#,");
+            try self.appendRenderedNumericPrototypeShape(out, shape[1..], elem_mode);
+            return;
+        }
+        if (first == 1) {
+            try out.append(self.allocator, ',');
+            try self.appendRenderedNumericPrototypeShape(out, shape[1..], elem_mode);
+            return;
+        }
+
+        try out.append(self.allocator, '(');
+        for (0..first) |idx| {
+            if (idx != 0) try out.append(self.allocator, ';');
+            try self.appendRenderedNumericPrototypeShape(out, shape[1..], elem_mode);
+        }
+        try out.append(self.allocator, ')');
+    }
+
+    fn appendRenderedNumericShape(
+        self: *Session,
+        out: *std.ArrayList(u8),
+        value: Value,
+        shape: []const i32,
+        base: usize,
+        elem_mode: HostDenseElem,
+        render_mode: RenderMode,
+    ) anyerror!void {
+        if (shape.len <= 1) {
+            const len: usize = if (shape.len == 0) 1 else @intCast(shape[0]);
+            try self.appendRenderedNumericFlatVector(out, value, base, len, elem_mode);
+            return;
+        }
+
+        const first: usize = @intCast(shape[0]);
+        const block_len = try numericShapeDimsElementCount(shape[1..]);
+        if (first == 0) {
+            try out.appendSlice(self.allocator, "0#,");
+            try self.appendRenderedNumericPrototypeShape(out, shape[1..], elem_mode);
+            return;
+        }
+        if (first == 1) {
+            try out.append(self.allocator, ',');
+            try self.appendRenderedNumericShape(out, value, shape[1..], base, elem_mode, .nested);
+            return;
+        }
+
+        try out.append(self.allocator, '(');
+        for (0..first) |idx| {
+            if (idx != 0) {
+                if (render_mode == .top) {
+                    try out.appendSlice(self.allocator, "\n ");
+                } else {
+                    try out.append(self.allocator, ';');
+                }
+            }
+            try self.appendRenderedNumericShape(out, value, shape[1..], base + idx * block_len, elem_mode, .nested);
+        }
+        try out.append(self.allocator, ')');
+    }
+
+    fn renderNumericArrayShape(self: *Session, value: Value, shape: []const i32, elem_mode: HostDenseElem, render_mode: RenderMode) ![]u8 {
+        var out = std.ArrayList(u8).empty;
+        errdefer out.deinit(self.allocator);
+        try self.appendRenderedNumericShape(&out, value, shape, 0, elem_mode, render_mode);
+        return try out.toOwnedSlice(self.allocator);
+    }
+
+    fn appendRenderedHostBitVector(self: *Session, out: *std.ArrayList(u8), words: []const u64, base: usize, len: usize) !void {
+        if (len == 1) try out.append(self.allocator, ',');
+        for (0..len) |idx| try out.append(self.allocator, if (bitGet(words, base + idx)) '1' else '0');
+        try out.append(self.allocator, 'b');
+    }
+
+    fn renderNumericArray(self: *Session, handle: *const NumericArray, render_mode: RenderMode) anyerror![]u8 {
         return switch (handle.activeKind()) {
-            .host_dense_array => self.renderHostNumericArray(handle, numericHostAttachment(handle) orelse return error.Internal),
-            .backend_array => self.renderBackendArray(numericBackendAttachment(handle) orelse return error.Internal),
+            .host_dense_array => self.renderHostNumericArray(handle, numericHostAttachment(handle) orelse return error.Internal, render_mode),
+            .backend_array => self.renderBackendArray(numericBackendAttachment(handle) orelse return error.Internal, render_mode),
             .numeric_array => blk: {
                 const value = Value.array(@constCast(handle));
                 if (!numericHasHostAttachment(handle) and hasBackendRealization(value)) {
                     _ = try tryEnsureHostRealizationForHandle(self, @constCast(handle)) orelse return error.Type;
-                    break :blk try self.renderNumericArray(handle);
+                    break :blk try self.renderNumericArray(handle, render_mode);
                 }
                 const mode = valueNumericMode(Value.array(@constCast(handle))) orelse return error.Type;
                 const len = numericFlatLen(value) orelse return error.Type;
-                if (handle.rank <= 1) {
-                    if (len == 0 and mode == .int) return try self.allocator.dupe(u8, "!0");
-                    var out = std.ArrayList(u8).empty;
-                    errdefer out.deinit(self.allocator);
-                    for (0..len) |idx| {
-                        if (idx != 0) try out.append(self.allocator, ' ');
-                        switch (mode) {
-                            .int => try out.writer(self.allocator).print("{d}", .{try numericIntAt(value, idx)}),
-                            .float => try appendRenderedFloat(&out, self.allocator, try numericFloatAt(value, idx)),
-                        }
-                    }
-                    break :blk out.toOwnedSlice(self.allocator);
-                }
-                if (handle.rank == 2) {
-                    const rows: usize = @intCast(handle.shape[0]);
-                    const cols: usize = @intCast(handle.shape[1]);
-                    if (rows * cols != len) return error.Internal;
-                    if (cols == 0 and mode == .int) {
-                        var out = std.ArrayList(u8).empty;
-                        errdefer out.deinit(self.allocator);
-                        for (0..rows) |row| {
-                            if (row != 0) try out.append(self.allocator, '\n');
-                            try out.appendSlice(self.allocator, "!0");
-                        }
-                        break :blk out.toOwnedSlice(self.allocator);
-                    }
-                    var out = std.ArrayList(u8).empty;
-                    errdefer out.deinit(self.allocator);
-                    for (0..rows) |row| {
-                        if (row != 0) try out.append(self.allocator, '\n');
-                        const base = row * cols;
-                        for (0..cols) |col| {
-                            if (col != 0) try out.append(self.allocator, ' ');
-                            switch (mode) {
-                                .int => try out.writer(self.allocator).print("{d}", .{try numericIntAt(value, base + col)}),
-                                .float => try appendRenderedFloat(&out, self.allocator, try numericFloatAt(value, base + col)),
-                            }
-                        }
-                    }
-                    break :blk out.toOwnedSlice(self.allocator);
-                }
-                return error.Unsupported;
+                if (handle.rank == 0) return error.Internal;
+                if (try numericShapeDimsElementCount(handle.shapeSlice()) != len) return error.Internal;
+                break :blk try self.renderNumericArrayShape(value, handle.shapeSlice(), mode, render_mode);
             },
             else => error.Internal,
         };
     }
 
-    fn renderHostNumericArray(self: *Session, handle: *const NumericArray, array: *const HostDenseArray) anyerror![]u8 {
-        if (handle.rank <= 1) return self.renderHostArray(array);
-        if (handle.rank != 2) return error.Unsupported;
-
-        const rows: usize = @intCast(handle.shape[0]);
-        const cols: usize = @intCast(handle.shape[1]);
-        if (rows * cols != array.len()) return error.Internal;
-
-        if (cols == 0) switch (array.storage) {
-            .int8, .int16, .int32, .int64 => {
+    fn renderHostNumericArray(self: *Session, handle: *const NumericArray, array: *const HostDenseArray, render_mode: RenderMode) anyerror![]u8 {
+        const value = Value.array(@constCast(handle));
+        const mode = valueNumericMode(value) orelse return error.Type;
+        if (handle.rank <= 1) {
+            if (array.storage == .bit) {
                 var out = std.ArrayList(u8).empty;
                 errdefer out.deinit(self.allocator);
-                for (0..rows) |row| {
-                    if (row != 0) try out.append(self.allocator, '\n');
-                    try out.appendSlice(self.allocator, "!0");
-                }
+                try self.appendRenderedHostBitVector(&out, array.storage.bit, 0, array.logical_len);
                 return try out.toOwnedSlice(self.allocator);
-            },
-            else => {},
-        };
-
-        var out = std.ArrayList(u8).empty;
-        errdefer out.deinit(self.allocator);
-
-        switch (array.storage) {
-            .bit => |words| {
-                for (0..rows) |row| {
-                    if (row != 0) try out.append(self.allocator, '\n');
-                    const base = row * cols;
-                    for (0..cols) |col| try out.append(self.allocator, if (bitGet(words, base + col)) '1' else '0');
-                    try out.append(self.allocator, 'b');
-                }
-            },
-            .int8, .int16, .int32, .int64 => {
-                const view = hostIntArrayView(array) orelse return error.Type;
-                for (0..rows) |row| {
-                    if (row != 0) try out.append(self.allocator, '\n');
-                    const base = row * cols;
-                    for (0..cols) |col| {
-                        if (col != 0) try out.append(self.allocator, ' ');
-                        try out.writer(self.allocator).print("{d}", .{hostIntViewItem(view, base + col)});
-                    }
-                }
-            },
-            .float64 => |items| {
-                for (0..rows) |row| {
-                    if (row != 0) try out.append(self.allocator, '\n');
-                    const base = row * cols;
-                    for (0..cols) |col| {
-                        if (col != 0) try out.append(self.allocator, ' ');
-                        const part = try formatFloat(self.allocator, items[base + col]);
-                        defer self.allocator.free(part);
-                        try out.appendSlice(self.allocator, part);
-                    }
-                }
-            },
+            }
+            var out = std.ArrayList(u8).empty;
+            errdefer out.deinit(self.allocator);
+            try self.appendRenderedNumericFlatVector(&out, value, 0, array.len(), mode);
+            return try out.toOwnedSlice(self.allocator);
         }
-
-        return try out.toOwnedSlice(self.allocator);
+        if (try numericShapeDimsElementCount(handle.shapeSlice()) != array.len()) return error.Internal;
+        return try self.renderNumericArrayShape(value, handle.shapeSlice(), mode, render_mode);
     }
 
     fn renderHostString(self: *Session, text: *const HostText) anyerror![]u8 {
@@ -8618,31 +8703,36 @@ pub const Session = struct {
         return try out.toOwnedSlice(self.allocator);
     }
 
-    fn renderHostBoxedArray(self: *Session, array: *const HostBoxedArray) anyerror![]u8 {
+    fn renderHostBoxedArray(self: *Session, array: *const HostBoxedArray, render_mode: RenderMode) anyerror![]u8 {
         var out = std.ArrayList(u8).empty;
         errdefer out.deinit(self.allocator);
 
         if (array.items.len == 1) {
             try out.append(self.allocator, ',');
             const item = array.items[0];
-            const wrap = valueNonVectorNumericShape(item) != null;
-            if (wrap) try out.append(self.allocator, '(');
-            const part = try self.renderValue(item);
+            const part = try self.renderValueMode(item, .nested);
             defer self.allocator.free(part);
             try out.appendSlice(self.allocator, part);
-            if (wrap) try out.append(self.allocator, ')');
         } else if (isRenderableMatrix(array.items)) {
+            if (render_mode == .top) try out.append(self.allocator, '(');
             for (array.items, 0..) |item, idx| {
-                if (idx != 0) try out.append(self.allocator, '\n');
-                const part = try self.renderValue(item);
+                if (idx != 0) {
+                    if (render_mode == .top) {
+                        try out.appendSlice(self.allocator, "\n ");
+                    } else {
+                        try out.append(self.allocator, ';');
+                    }
+                }
+                const part = try self.renderValueMode(item, .nested);
                 defer self.allocator.free(part);
                 try out.appendSlice(self.allocator, part);
             }
+            if (render_mode == .top) try out.append(self.allocator, ')');
         } else {
             try out.append(self.allocator, '(');
             for (array.items, 0..) |item, idx| {
                 if (idx != 0) try out.append(self.allocator, ';');
-                const part = try self.renderValue(item);
+                const part = try self.renderValueMode(item, .nested);
                 defer self.allocator.free(part);
                 try out.appendSlice(self.allocator, part);
             }
@@ -8652,13 +8742,13 @@ pub const Session = struct {
         return try out.toOwnedSlice(self.allocator);
     }
 
-    fn renderBackendArray(self: *Session, array: *const BackendArray) anyerror![]u8 {
+    fn renderBackendArray(self: *Session, array: *const BackendArray, render_mode: RenderMode) anyerror![]u8 {
         return runtime_backend_render.renderBackendArray(.{
             .Session = Session,
             .BackendArray = BackendArray,
             .c = c,
             .formatFloat = formatFloat,
-        }, self, array);
+        }, self, array, render_mode == .top);
     }
 
     fn managedFloat(self: *Session, value: f64) !Value {
@@ -8684,7 +8774,23 @@ pub const Session = struct {
     }
 
     fn enlistValue(self: *Session, value: Value) !Value {
-        return try self.createManagedHostBoxedArray(&.{value});
+        return switch (value.tag()) {
+            .int => try self.createManagedHostIntArray(&[_]i64{value.asInt()}),
+            .bool => try self.createManagedHostBitArray(&[_]bool{value.asBool()}),
+            .float => try self.createManagedHostFloatArray(&[_]f64{value.asFloat()}),
+            else => try self.createManagedHostBoxedArray(&.{value}),
+        };
+    }
+
+    fn frozenEmptyHostBoxedArray(self: *Session) !Value {
+        const array = try self.arena.allocator().create(HostBoxedArray);
+        const items = try self.arena.allocator().alloc(Value, 0);
+        array.* = .{
+            .header = HeapHeader.init(.host_boxed_array, .frozen),
+            .logical_len = 0,
+            .items = items,
+        };
+        return Value.array(array);
     }
 
     fn scratchInt(self: *Session, value: i64) !Value {
@@ -8776,6 +8882,20 @@ pub const Session = struct {
             .header = HeapHeader.init(.closure, .frozen),
             .kind = .inner_product,
             .code = &inner_product_code,
+            .captures = captures,
+        };
+        return closure;
+    }
+
+    fn allocFrozenCompositionClosure(self: *Session, outer: Value, inner: Value) !*Closure {
+        const captures = try self.arena.allocator().alloc(Value, 2);
+        captures[0] = try self.freezeConstantValue(outer);
+        captures[1] = try self.freezeConstantValue(inner);
+        const closure = try self.arena.allocator().create(Closure);
+        closure.* = .{
+            .header = HeapHeader.init(.closure, .frozen),
+            .kind = .composition,
+            .code = &composition_code,
             .captures = captures,
         };
         return closure;
@@ -14007,6 +14127,16 @@ pub const Session = struct {
         };
     }
 
+    fn compositionInfoFromClosure(self: *Session, closure: *const Closure) KError!?CompositionInfo {
+        _ = self;
+        if (closure.kind != .composition) return null;
+        if (closure.captures.len != 2) return error.Internal;
+        return .{
+            .outer = closure.captures[0],
+            .inner = closure.captures[1],
+        };
+    }
+
     fn tryApplyDirectDerivedClosure2(self: *Session, closure: *const Closure, arg0: Value, arg1: Value) KError!?Value {
         if (try self.innerProductInfoFromClosure(closure)) |info| {
             if (info.reduce != .add or info.map != .mul) return null;
@@ -14863,6 +14993,12 @@ pub const Session = struct {
         return try self.invokeValueInCurrentRun(info.callee, apply_args);
     }
 
+    fn applyCompositionClosure(self: *Session, info: CompositionInfo, args: []const Value) KError!Value {
+        const inner_result = try self.invokeValueInCurrentRun(info.inner, args);
+        defer self.releaseValue(inner_result);
+        return try self.invokeValueInCurrentRun(info.outer, &[_]Value{inner_result});
+    }
+
     fn applyDerivedClosure(self: *Session, closure: *const Closure, args: []const Value) KError!?Value {
         if (!closureMayUseDerivedApply(closure)) return null;
         if (self.debugDetailedProbeActive()) self.debug_apply_derived_closure_count += 1;
@@ -14871,6 +15007,9 @@ pub const Session = struct {
         }
         if (try self.innerProductInfoFromClosure(closure)) |info| {
             return try self.applyInnerProductClosure(info, args);
+        }
+        if (try self.compositionInfoFromClosure(closure)) |info| {
+            return try self.applyCompositionClosure(info, args);
         }
         const kind = closureDerivedKind(closure) orelse return null;
         return try self.applyDerivedKind(kind, closure.captures, args);
@@ -18834,7 +18973,7 @@ pub const Session = struct {
         return switch (args.len) {
             0 => error.Arity,
             1 => self.applyMonad(op, args[0]),
-            2 => self.applyDyad(op, args[0], args[1]),
+            2 => self.applyDyad(if (op == .unique) .find else op, args[0], args[1]),
             else => error.Arity,
         };
     }
@@ -24242,12 +24381,154 @@ pub const Session = struct {
     }
 
     fn stringifyValue(self: *Session, value: Value) KError!Value {
+        if (stringSourceInfo(value) != null) {
+            return try self.bytesValue(value);
+        }
+        if (derivedSequenceLen(value)) |len| {
+            return try self.stringifySequenceValue(value, len);
+        }
+        return try self.stringifyScalarValue(value);
+    }
+
+    fn stringifySequenceValue(self: *Session, value: Value, len: usize) KError!Value {
+        if (len == 0) return try self.createManagedHostTextListFromValues(&.{});
+
+        var out = std.ArrayList(Value).empty;
+        defer {
+            for (out.items) |item| self.releaseValue(item);
+            out.deinit(self.allocator);
+        }
+        try out.ensureTotalCapacity(self.allocator, len);
+        for (0..len) |idx| {
+            const item = try self.derivedSequenceItemValue(value, idx);
+            defer self.releaseValue(item);
+            try out.append(self.allocator, try self.stringifyValue(item));
+        }
+        return try self.makeArrayFromValues(out.items);
+    }
+
+    fn stringifyScalarValue(self: *Session, value: Value) KError!Value {
+        switch (value.tag()) {
+            .int => {
+                const rendered = try std.fmt.allocPrint(self.allocator, "{d}", .{value.asInt()});
+                defer self.allocator.free(rendered);
+                return try self.managedHostString(rendered);
+            },
+            .float => {
+                const rendered = try formatFloat(self.allocator, value.asFloat());
+                defer self.allocator.free(rendered);
+                return try self.managedHostString(rendered);
+            },
+            .bool => return try self.managedHostString(if (value.asBool()) "1" else "0"),
+            .builtin => {
+                const bytes = [_]u8{builtinChar(value.asBuiltin())};
+                return try self.managedHostString(&bytes);
+            },
+            .closure => {
+                if (try self.stringifyCallableTextValue(value)) |text_value| return text_value;
+            },
+            .array => {
+                if (symbolBytes(value)) |text| return try self.managedHostString(text);
+            },
+        }
         const rendered = self.renderValue(value) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.Internal,
         };
         defer self.allocator.free(rendered);
         return try self.managedHostString(rendered);
+    }
+
+    fn stringifyCallableTextValue(self: *Session, value: Value) KError!?Value {
+        var out = std.ArrayList(u8).empty;
+        errdefer out.deinit(self.allocator);
+        if (!try self.appendCallableText(&out, value)) return null;
+        const text = try out.toOwnedSlice(self.allocator);
+        defer self.allocator.free(text);
+        return try self.managedHostString(text);
+    }
+
+    fn appendCallableText(self: *Session, out: *std.ArrayList(u8), value: Value) KError!bool {
+        switch (value.tag()) {
+            .builtin => {
+                try out.append(self.allocator, builtinChar(value.asBuiltin()));
+                return true;
+            },
+            .closure => {
+                const closure = value.asClosure();
+                if (closureIsInnerProduct(closure)) {
+                    const info = try self.innerProductInfoFromClosure(closure) orelse return false;
+                    try out.append(self.allocator, builtinChar(info.reduce));
+                    try out.append(self.allocator, '/');
+                    try out.append(self.allocator, builtinChar(info.map));
+                    return true;
+                }
+                if (try self.compositionInfoFromClosure(closure)) |info| {
+                    if (!try self.appendCallableText(out, info.outer)) return false;
+                    try out.append(self.allocator, ':');
+                    if (!try self.appendCallableText(out, info.inner)) return false;
+                    return true;
+                }
+                if (closureIsProjection(closure)) {
+                    return try self.appendProjectionClosureText(out, closure);
+                }
+                if (closureDerivedKind(closure)) |kind| {
+                    if (closure.captures.len != 1) return false;
+                    if (!try self.appendCallableText(out, closure.captures[0])) return false;
+                    try self.appendDerivedVerbText(out, kind);
+                    return true;
+                }
+                if (closure.code.profile_source.len != 0) {
+                    if (closure.code.profile_kind == .lambda) try out.append(self.allocator, '{');
+                    try out.appendSlice(self.allocator, closure.code.profile_source);
+                    if (closure.code.profile_kind == .lambda) try out.append(self.allocator, '}');
+                    return true;
+                }
+                return false;
+            },
+            else => return false,
+        }
+    }
+
+    fn appendDerivedVerbText(self: *Session, out: *std.ArrayList(u8), kind: DerivedVerbKind) !void {
+        try out.appendSlice(self.allocator, switch (kind) {
+            .each => "'",
+            .fold => "/",
+            .scan => "\\",
+            .each_right => "/:",
+            .each_left => "\\:",
+            .each_prior => "':",
+            .grad => "grad",
+            .valuegrad => "valuegrad",
+        });
+    }
+
+    fn appendProjectionClosureText(self: *Session, out: *std.ArrayList(u8), closure: *const Closure) KError!bool {
+        const info = try self.projectionInfoFromClosure(closure) orelse return false;
+        if (info.callee.tag() == .builtin and info.slot_count == 2 and info.hole_mask == 0b10) {
+            try self.appendProjectionSlotText(out, info.slot_values[0]);
+            try out.append(self.allocator, builtinChar(info.callee.asBuiltin()));
+            return true;
+        }
+        if (!try self.appendCallableText(out, info.callee)) return false;
+        try out.append(self.allocator, '[');
+        for (0..info.slot_count) |idx| {
+            if (idx != 0) try out.append(self.allocator, ';');
+            if (((info.hole_mask >> @intCast(idx)) & 1) == 0) {
+                try self.appendProjectionSlotText(out, info.slot_values[idx]);
+            }
+        }
+        try out.append(self.allocator, ']');
+        return true;
+    }
+
+    fn appendProjectionSlotText(self: *Session, out: *std.ArrayList(u8), value: Value) KError!void {
+        const rendered = self.renderValue(value) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.Internal,
+        };
+        defer self.allocator.free(rendered);
+        out.appendSlice(self.allocator, rendered) catch return error.OutOfMemory;
     }
 
     fn castTagBytes(value: Value) ?[]const u8 {
@@ -29816,7 +30097,11 @@ pub const Session = struct {
             len - @min(@as(usize, @intCast(-raw_count)), len);
         const start: usize = if (raw_count >= 0) drop_count else 0;
         const end: usize = if (raw_count >= 0) len else drop_count;
-        return try self.createManagedHostBoxedArray(array.items[start..end]);
+        const items = array.items[start..end];
+        if (items.len != 0 and boxedItemsCanNumericNormalize(items)) {
+            return try self.makeArrayFromValues(items);
+        }
+        return try self.createManagedHostBoxedArray(items);
     }
 
     fn dropHostStringList(self: *Session, raw_count: i64, list: *const HostStringList) KError!Value {
@@ -39651,6 +39936,8 @@ const ParsedLambda = struct {
     allow_implicit_params: bool = true,
     explicit_names: [max_explicit_params]IdentRef = undefined,
     explicit_count: u8 = 0,
+    source_start: usize = 0,
+    source_end: usize = 0,
     body_start: usize = 0,
     body_end: usize = 0,
 
@@ -39683,6 +39970,10 @@ const ParsedPrimary = struct {
     form: ExprForm,
 };
 
+const ParenthesizedListScan = struct {
+    close_index: usize,
+};
+
 const ProjectionSlotSummary = struct {
     slot_count: u8,
     hole_count: u8,
@@ -39702,6 +39993,11 @@ const ProjectionInfo = struct {
     slot_count: usize,
     hole_mask: u64,
     slot_values: []const Value,
+};
+
+const CompositionInfo = struct {
+    outer: Value,
+    inner: Value,
 };
 
 const BodyStatementSplit = struct {
@@ -41993,6 +42289,23 @@ const Compiler = struct {
         return try self.parseDyadExpr(out, scope);
     }
 
+    fn atTrailingDyadProjectionHole(self: *const Compiler) bool {
+        if (self.index >= self.source.len) return true;
+        return switch (self.source[self.index]) {
+            ')', ']', ';' => true,
+            else => false,
+        };
+    }
+
+    fn emitTrailingDyadProjection(self: *Compiler, out: *InstructionBuffer, scope: *Scope, left_start: usize, left_end: usize, op: u8) KError!void {
+        const builtin = builtinFromDyadChar(op) orelse return error.Parse;
+        try self.emitPendingPrimary(out, scope, .{ .builtin = builtin });
+        out.rotateRangeLeft(left_start, left_end, out.byte_len);
+        try out.appendOp(.make_projection);
+        try out.appendByte(2);
+        try out.appendU64(@as(u64, 1) << 1);
+    }
+
     fn parseDyadExpr(self: *Compiler, out: *InstructionBuffer, scope: *Scope) KError!ExprForm {
         const left_start = out.byte_len;
         const left_form = try self.parseApply(out, scope);
@@ -42000,6 +42313,10 @@ const Compiler = struct {
         const left_simple = out.last_simple;
         const op = self.peekDyadOp() orelse return left_form;
         _ = self.consumeByte();
+        if (self.atTrailingDyadProjectionHole()) {
+            try self.emitTrailingDyadProjection(out, scope, left_start, left_end, op);
+            return .verbial;
+        }
         if (op != '.' and op != '@' and self.startsDerivedVerb()) {
             const primary = try self.parseBuiltinPrimaryFromConsumedChar(op);
             _ = try self.parsePostfixTail(out, scope, primary.pending, primary.form);
@@ -42143,10 +42460,43 @@ const Compiler = struct {
         return true;
     }
 
+    fn tryParseBuiltinCompositionPrimary(self: *Compiler) KError!?ParsedPrimary {
+        var builtins: [16]BuiltinId = undefined;
+        var count: usize = 0;
+        var index = self.index;
+
+        while (true) {
+            index = skipSpacesInSource(self.source, index);
+            if (index >= self.source.len) break;
+            const ch = self.source[index];
+            if (ch == '-' and index + 1 < self.source.len and std.ascii.isDigit(self.source[index + 1])) break;
+            const builtin = builtinFromChar(ch) orelse break;
+            if (count >= builtins.len) return error.Unsupported;
+            builtins[count] = builtin;
+            count += 1;
+            index += 1;
+        }
+
+        if (count < 2) return null;
+        self.index = skipSpacesInSource(self.source, index);
+
+        var value = Value.builtin(builtins[count - 1]);
+        var idx = count - 1;
+        while (idx > 0) {
+            idx -= 1;
+            value = Value.closure(try self.session.allocFrozenCompositionClosure(Value.builtin(builtins[idx]), value));
+        }
+
+        return .{ .pending = .{ .const_value = value }, .form = .verbial };
+    }
+
     fn parseUnary(self: *Compiler, out: *InstructionBuffer, scope: *Scope) KError!ExprForm {
         if (self.peekStartsSignedNumericLiteral()) {
             try self.emitNumericLiteralOrVector(out);
             return .nounish;
+        }
+        if (try self.tryParseBuiltinCompositionPrimary()) |primary| {
+            return try self.parsePostfixTail(out, scope, primary.pending, primary.form);
         }
         if (self.peekPrimaryUnaryOp()) |op| {
             _ = self.consumeByte();
@@ -42227,7 +42577,7 @@ const Compiler = struct {
                 },
                 else => {
                     if (paren_depth != 0 or bracket_depth != 0 or brace_depth != 0) continue;
-                    const builtin = builtinFromChar(ch) orelse continue;
+                    const builtin = builtinFromDyadChar(ch) orelse continue;
                     if (index == body_start) continue;
                     const after = skipSpacesInSource(self.source, index + 1);
                     if (after < self.source.len and self.source[after] == ')') {
@@ -42271,6 +42621,132 @@ const Compiler = struct {
         try out.appendByte(2);
         try out.appendU64(@as(u64, 1) << 1);
         self.index = skipSpacesInSource(self.source, projection.close_index + 1);
+        return true;
+    }
+
+    fn scanParenthesizedList(self: *const Compiler) ?ParenthesizedListScan {
+        if (self.index >= self.source.len or self.source[self.index] != '(') return null;
+
+        var index = self.index + 1;
+        var paren_depth: usize = 0;
+        var bracket_depth: usize = 0;
+        var brace_depth: usize = 0;
+        var has_separator = false;
+        while (index < self.source.len) : (index += 1) {
+            switch (self.source[index]) {
+                '"' => {
+                    index += 1;
+                    while (index < self.source.len and self.source[index] != '"') : (index += 1) {}
+                    if (index >= self.source.len) return null;
+                },
+                '(' => paren_depth += 1,
+                ')' => {
+                    if (paren_depth != 0) {
+                        paren_depth -= 1;
+                        continue;
+                    }
+                    if (!has_separator) return null;
+                    return .{ .close_index = index };
+                },
+                '[' => bracket_depth += 1,
+                ']' => {
+                    if (bracket_depth == 0) return null;
+                    bracket_depth -= 1;
+                },
+                '{' => brace_depth += 1,
+                '}' => {
+                    if (brace_depth == 0) return null;
+                    brace_depth -= 1;
+                },
+                '\n' => {
+                    if (paren_depth == 0 and bracket_depth == 0 and brace_depth == 0) {
+                        const next = skipSpacesInSource(self.source, index + 1);
+                        if (next < self.source.len and self.source[next] != ')' and self.source[next] != ';') {
+                            has_separator = true;
+                        }
+                    }
+                },
+                else => {},
+            }
+        }
+        return null;
+    }
+
+    fn isParenthesizedListSeparator(self: *const Compiler, index: usize, paren_depth: usize, bracket_depth: usize, brace_depth: usize) bool {
+        if (paren_depth != 0 or bracket_depth != 0 or brace_depth != 0) return false;
+        return switch (self.source[index]) {
+            '\n' => blk: {
+                const next = skipSpacesInSource(self.source, index + 1);
+                break :blk next < self.source.len and self.source[next] != ')' and self.source[next] != ';';
+            },
+            else => false,
+        };
+    }
+
+    fn parseParenthesizedListItemInto(self: *Compiler, out: *InstructionBuffer, scope: *Scope, item: []const u8) KError!void {
+        var item_compiler = try Compiler.init(
+            self.session,
+            item,
+            self.code_allocator,
+            self.compile_mode,
+        );
+        item_compiler.consume_candidates = self.consume_candidates;
+        _ = try item_compiler.parseExpr(out, scope);
+        if (!item_compiler.atEnd()) return error.Parse;
+        self.consume_candidates = item_compiler.consume_candidates;
+    }
+
+    fn tryParseParenthesizedList(self: *Compiler, out: *InstructionBuffer, scope: *Scope) KError!bool {
+        const scan = self.scanParenthesizedList() orelse return false;
+
+        var item_start = skipSpacesInSource(self.source, self.index + 1);
+        var index = item_start;
+        var paren_depth: usize = 0;
+        var bracket_depth: usize = 0;
+        var brace_depth: usize = 0;
+        var count: u8 = 0;
+
+        while (index <= scan.close_index) {
+            if (index == scan.close_index or self.isParenthesizedListSeparator(index, paren_depth, bracket_depth, brace_depth)) {
+                const item = std.mem.trim(u8, self.source[item_start..index], " \t\r\n");
+                if (item.len == 0) return error.Parse;
+                try self.parseParenthesizedListItemInto(out, scope, item);
+                count = std.math.add(u8, count, 1) catch return error.Unsupported;
+                if (index == scan.close_index) break;
+                item_start = skipSpacesInSource(self.source, index + 1);
+                index = item_start;
+                continue;
+            }
+
+            switch (self.source[index]) {
+                '"' => {
+                    index += 1;
+                    while (index < scan.close_index and self.source[index] != '"') : (index += 1) {}
+                    if (index >= scan.close_index) return error.Parse;
+                },
+                '(' => paren_depth += 1,
+                ')' => {
+                    if (paren_depth == 0) return error.Parse;
+                    paren_depth -= 1;
+                },
+                '[' => bracket_depth += 1,
+                ']' => {
+                    if (bracket_depth == 0) return error.Parse;
+                    bracket_depth -= 1;
+                },
+                '{' => brace_depth += 1,
+                '}' => {
+                    if (brace_depth == 0) return error.Parse;
+                    brace_depth -= 1;
+                },
+                else => {},
+            }
+            index += 1;
+        }
+
+        try out.appendOp(.make_vector);
+        try out.appendByte(count);
+        self.index = skipSpacesInSource(self.source, scan.close_index + 1);
         return true;
     }
 
@@ -42626,8 +43102,9 @@ const Compiler = struct {
                     .contains => try out.appendOp(.contains),
                     .split => try out.appendOp(.split),
                     .join => try out.appendOp(.join),
+                    .unique => try out.appendOp(.find),
                     .find => try out.appendOp(.find),
-                    .reverse, .grade_up, .grade_down, .take, .drop, .reshape, .stringify, .bytes, .utf8, .char, .unique, .tokenize, .detokenize, .eval_string, .grad, .valuegrad, .prng, .load, .save, .sql, .register, .rotcache, .rotcacheupdate, .rotcacheview, .rope, .ropeflat, .ropecisflat, .rmsnorm, .layernorm, .gelu, .geluapprox, .mlpdense, .conv2d, .convtranspose2d, .upsamplenearest2d, .groupnorm, .softmax, .sdpa, .sam3boxrpb, .sdpamask, .sdpaflat => return false,
+                    .reverse, .grade_up, .grade_down, .take, .drop, .reshape, .stringify, .bytes, .utf8, .char, .tokenize, .detokenize, .eval_string, .grad, .valuegrad, .prng, .load, .save, .sql, .register, .rotcache, .rotcacheupdate, .rotcacheview, .rope, .ropeflat, .ropecisflat, .rmsnorm, .layernorm, .gelu, .geluapprox, .mlpdense, .conv2d, .convtranspose2d, .upsamplenearest2d, .groupnorm, .softmax, .sdpa, .sam3boxrpb, .sdpamask, .sdpaflat => return false,
                 }
                 return true;
             },
@@ -42706,7 +43183,14 @@ const Compiler = struct {
                 if (try self.tryParseParenthesizedInfixProjection(out, scope)) {
                     return .{ .pending = .none, .form = .verbial };
                 }
+                if (try self.tryParseParenthesizedList(out, scope)) {
+                    return .{ .pending = .none, .form = .nounish };
+                }
                 _ = self.consumeByte();
+                if (self.matchChar(')')) {
+                    try self.emitEmptyBoxedArray(out);
+                    return .{ .pending = .none, .form = .nounish };
+                }
                 const form = try self.parseExpr(out, scope);
                 var count: u8 = 1;
                 if (self.matchChar(';')) {
@@ -42789,7 +43273,7 @@ const Compiler = struct {
                 out.noteArrayValue(vector_start, out.byte_len, null);
                 return .{ .pending = .none, .form = .nounish };
             },
-            '+', '-', '*', '%', '!', '&', '|', '<', '>', '~', ',', '#', '_', '^', '=' => {
+            '+', '-', '*', '%', '!', '&', '|', '<', '>', '~', ',', '#', '_', '^', '=', '$', '?' => {
                 if (try self.tryParseBuiltinInnerProduct()) |inner_product| {
                     return .{ .pending = inner_product, .form = .verbial };
                 }
@@ -42868,12 +43352,13 @@ const Compiler = struct {
 
     fn parseSymbolLiteralValue(self: *Compiler) KError!Value {
         if (!self.matchChar('`')) return error.Parse;
-        const ident = self.scanIdentifier() orelse return error.Parse;
+        const ident = self.scanIdentifier() orelse return try self.session.frozenHostSymbol("");
         return try self.session.frozenHostSymbol(ident.text);
     }
 
     fn parseLambdaSource(self: *Compiler) KError!ParsedLambda {
         var lambda = ParsedLambda{};
+        lambda.source_start = self.index;
         if (self.matchChar('[')) {
             lambda.allow_implicit_params = false;
             if (!self.matchChar(']')) {
@@ -42887,6 +43372,7 @@ const Compiler = struct {
         }
         lambda.body_start = self.index;
         lambda.body_end = try self.findLambdaBodyEnd(lambda.body_start);
+        lambda.source_end = lambda.body_end;
         self.index = skipSpacesInSource(self.source, lambda.body_end + 1);
         return lambda;
     }
@@ -43023,6 +43509,7 @@ const Compiler = struct {
         allow_implicit_params: bool,
         explicit_names: []const IdentRef,
         body_source: []const u8,
+        display_source: []const u8,
     ) KError!void {
         _ = parent;
         var scope = Scope{
@@ -43053,9 +43540,9 @@ const Compiler = struct {
 
         const code = if (self.compile_mode == .scratch) blk: {
             const scratch_code = lambda_scratch.?.finalize(scope.arity, scope.frame_slot_count);
-            self.assignCodeProfile(scratch_code, .lambda, body_source);
+            self.assignCodeProfile(scratch_code, .lambda, display_source);
             break :blk scratch_code;
-        } else try self.finalizeCode(scope.arity, scope.frame_slot_count, body, .lambda, body_source);
+        } else try self.finalizeCode(scope.arity, scope.frame_slot_count, body, .lambda, display_source);
         const closure = try self.code_allocator.create(Closure);
         closure.* = .{
             .header = HeapHeader.init(.closure, switch (self.compile_mode) {
@@ -43077,6 +43564,7 @@ const Compiler = struct {
             lambda.allow_implicit_params,
             lambda.explicit_names[0..lambda.explicit_count],
             self.source[lambda.body_start..lambda.body_end],
+            self.source[lambda.source_start..lambda.source_end],
         );
     }
 
@@ -43118,14 +43606,14 @@ const Compiler = struct {
     }
 
     fn assignCodeProfile(self: *Compiler, code: *Code, kind: SamplingProfileCodeKind, source: []const u8) void {
+        const trimmed = std.mem.trim(u8, source, " \t\r\n");
         if (comptime !enable_sampling_profile) {
-            code.profile_kind = .none;
-            code.profile_source = "";
+            code.profile_kind = if (kind == .lambda) .lambda else .none;
+            code.profile_source = if (kind == .lambda) trimmed else "";
             code.profile_id = sampling_profile_no_code;
             assignCompactKProfile(code);
             return;
         }
-        const trimmed = std.mem.trim(u8, source, " \t\r\n");
         code.profile_kind = kind;
         code.profile_source = trimmed;
         if (self.compile_mode != .frozen) {
@@ -43247,6 +43735,11 @@ const Compiler = struct {
         }
     }
 
+    fn emitEmptyBoxedArray(self: *Compiler, out: *InstructionBuffer) KError!void {
+        try out.appendOp(.const_value);
+        try out.appendByte(try out.internConstant(try self.session.frozenEmptyHostBoxedArray()));
+    }
+
     fn peekPrimaryUnaryOp(self: *const Compiler) ?u8 {
         return self.peekPrimaryUnaryOpAt(self.index);
     }
@@ -43264,6 +43757,22 @@ const Compiler = struct {
         return ch;
     }
 
+    fn peekEnlistUnaryOpAt(self: *const Compiler, index: usize) ?u8 {
+        if (index >= self.source.len or self.source[index] != ',') return null;
+        const next = skipSpacesInSource(self.source, index + 1);
+        if (next >= self.source.len) return null;
+        const follower = self.source[next];
+        if (follower == ',' or self.peekPrimaryUnaryOpAt(next) != null) return ',';
+        if (follower == '$') {
+            const after = skipSpacesInSource(self.source, next + 1);
+            if (after < self.source.len and self.source[after] == '[') return ',';
+        }
+        return switch (follower) {
+            '0'...'9', '(', '{', '[', '"', '`' => ',',
+            else => if (isIdentStart(follower) and builtinFromChar(follower) == null) ',' else null,
+        };
+    }
+
     fn startsJuxtapositionOperand(self: *const Compiler, left_form: ExprForm) bool {
         if (self.index >= self.source.len) return false;
         if (self.source[self.index] == '$') {
@@ -43275,7 +43784,7 @@ const Compiler = struct {
             else => isIdentStart(self.source[self.index]) and builtinFromChar(self.source[self.index]) == null,
         }) return true;
         if (left_form != .verbial) return false;
-        const op = self.peekPrimaryUnaryOp() orelse return false;
+        const op = self.peekPrimaryUnaryOp() orelse self.peekEnlistUnaryOpAt(self.index) orelse return false;
         return op != '.';
     }
 
@@ -43335,7 +43844,7 @@ const Compiler = struct {
 
     fn peekStartsSignedNumericLiteral(self: *const Compiler) bool {
         if (self.index >= self.source.len or self.source[self.index] != '-') return false;
-        const next = skipSpacesInSource(self.source, self.index + 1);
+        const next = self.index + 1;
         return next < self.source.len and std.ascii.isDigit(self.source[next]);
     }
 
@@ -43348,7 +43857,7 @@ const Compiler = struct {
 
     fn emitSignedNumber(self: *Compiler, out: *InstructionBuffer) KError!void {
         if (!self.peekStartsSignedNumericLiteral()) return error.Parse;
-        const digit_start = skipSpacesInSource(self.source, self.index + 1);
+        const digit_start = self.index + 1;
         const scanned = scanNumericLiteral(self.source, digit_start) orelse return error.Parse;
         self.index = scanned.next;
 
@@ -43673,6 +44182,31 @@ fn builtinFromChar(ch: u8) ?BuiltinId {
         '_' => .floor,
         '^' => .null_fill_without,
         '=' => .equal,
+        '$' => .stringify,
+        '?' => .unique,
+        else => null,
+    };
+}
+
+fn builtinFromDyadChar(ch: u8) ?BuiltinId {
+    return switch (ch) {
+        '+' => .add,
+        '-' => .sub,
+        '*' => .mul,
+        '%' => .div,
+        '!' => .iota,
+        '&' => .minimum,
+        '|' => .maximum,
+        '<' => .less,
+        '>' => .more,
+        '~' => .not,
+        ',' => .concat,
+        '#' => .take,
+        '_' => .drop,
+        '^' => .null_fill_without,
+        '=' => .equal,
+        '$' => .cast,
+        '?' => .find,
         else => null,
     };
 }
