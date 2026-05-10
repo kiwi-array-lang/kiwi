@@ -14,9 +14,11 @@ PLATFORM="${PLATFORM:-linux/amd64}"
 BASE_IMAGE="${KIWILANG_COLAB_BASE_IMAGE:-$KIWI_CUDA_12_8_BASE_IMAGE}"
 IMAGE_TAG="${KIWILANG_COLAB_IMAGE_TAG:-$KIWI_HOSTED_NOTEBOOK_CUDA_IMAGE_TAG}"
 MLX_ARCH="${MLX_ARCH:-x86_64}"
+MLX_SOURCE_DEPS_DIR="${MLX_SOURCE_DEPS_DIR:-$WORKSPACE_ROOT/.artifacts/mlx/linux-${MLX_ARCH}-cuda-colab128-source-deps}"
 MLX_INSTALL_PREFIX="${MLX_INSTALL_PREFIX:-$WORKSPACE_ROOT/.artifacts/mlx/linux-${MLX_ARCH}-cuda-colab128-install}"
 MLX_BUILD_DIR="${MLX_BUILD_DIR:-$WORKSPACE_ROOT/.artifacts/mlx/linux-${MLX_ARCH}-cuda-colab128-build}"
 DUCKDB_DEPS_DIR="${DUCKDB_DEPS_DIR:-$WORKSPACE_ROOT/.artifacts/duckdb/linux-${MLX_ARCH}-cuda-colab128}"
+MLX_LOCK_FILE="${MLX_LOCK_FILE:-}"
 WHEEL_DIST_DIR="${KIWILANG_WHEEL_DIST_DIR:-$KIWI_ROOT/out/python-wheels/colab-cuda128}"
 REPAIRED_DIST_DIR="${KIWILANG_REPAIRED_WHEEL_DIST_DIR:-$KIWI_ROOT/out/python-wheels/colab-cuda128-repaired}"
 MLXC_MINI_BRIDGE_LIB="${MLXC_MINI_BRIDGE_LIB:-kiwi_mlx_bridge}"
@@ -54,6 +56,49 @@ sha256_file() {
 
 json_escape() {
   printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+DOCKER_VOLUME_ARGS=()
+DOCKER_VOLUME_PATHS=()
+
+append_docker_volume_for_path() {
+  local path="$1"
+  local mount_path
+  local existing
+
+  [[ -n "$path" ]] || return 0
+  mount_path="$path"
+  if [[ -f "$mount_path" ]]; then
+    mount_path="$(dirname "$mount_path")"
+  fi
+  while [[ ! -d "$mount_path" && "$mount_path" != "/" ]]; do
+    mount_path="$(dirname "$mount_path")"
+  done
+  [[ -d "$mount_path" && "$mount_path" != "/" ]] || return 0
+  mount_path="$(cd "$mount_path" && pwd)"
+
+  if (( ${#DOCKER_VOLUME_PATHS[@]} > 0 )); then
+    for existing in "${DOCKER_VOLUME_PATHS[@]}"; do
+      case "$mount_path/" in
+        "$existing"/*) return 0 ;;
+      esac
+    done
+  fi
+
+  DOCKER_VOLUME_PATHS+=("$mount_path")
+  DOCKER_VOLUME_ARGS+=("-v" "$mount_path:$mount_path")
+}
+
+prepare_docker_volume_args() {
+  DOCKER_VOLUME_ARGS=()
+  DOCKER_VOLUME_PATHS=()
+  append_docker_volume_for_path "$WORKSPACE_ROOT"
+  append_docker_volume_for_path "$MLX_SOURCE_DEPS_DIR"
+  append_docker_volume_for_path "$MLX_INSTALL_PREFIX"
+  append_docker_volume_for_path "$MLX_BUILD_DIR"
+  append_docker_volume_for_path "$DUCKDB_DEPS_DIR"
+  append_docker_volume_for_path "$WHEEL_DIST_DIR"
+  append_docker_volume_for_path "$REPAIRED_DIST_DIR"
 }
 
 verify_wheel_payload() {
@@ -138,6 +183,12 @@ if ! docker info >/dev/null 2>&1; then
   exit 1
 fi
 
+if [[ -z "$MLX_LOCK_FILE" && -f "$KIWI_ROOT/deps.public.lock.toml" ]]; then
+  MLX_LOCK_FILE="$KIWI_ROOT/deps.public.lock.toml"
+elif [[ -z "$MLX_LOCK_FILE" && -f "$KIWI_ROOT/deps.lock.toml" ]]; then
+  MLX_LOCK_FILE="$KIWI_ROOT/deps.lock.toml"
+fi
+
 docker build \
   --platform "$PLATFORM" \
   --build-arg BASE_IMAGE="$BASE_IMAGE" \
@@ -149,6 +200,7 @@ mkdir -p "$WHEEL_DIST_DIR" "$REPAIRED_DIST_DIR"
 if [[ "$REPAIR_WHEEL" == "0" ]]; then
   rm -f "$REPAIRED_DIST_DIR"/kiwilang-*.whl
 fi
+prepare_docker_volume_args
 
 docker run \
   --rm \
@@ -170,22 +222,32 @@ docker run \
   -e KIWILANG_WHEEL_RUNTIME_BACKEND=mlx \
   -e KIWI_SOURCE_ROOT="$KIWI_ROOT" \
   -e KIWI_DUCKDB_PREFIX="$DUCKDB_DEPS_DIR/duckdb" \
+  -e KIWI_MLX_C_INCLUDE="$MLX_SOURCE_DEPS_DIR/mlx-c" \
+  -e KIWI_MLX_SOURCE_DEPS_DIR="$MLX_SOURCE_DEPS_DIR" \
   -e KIWI_MLX_PREFIX="$MLX_INSTALL_PREFIX" \
+  -e KIWI_PUBLIC_LOCK_FILE="$MLX_LOCK_FILE" \
   -e MLX_BACKEND=cuda \
   -e MLX_BUILD_DIR="$MLX_BUILD_DIR" \
+  -e MLX_C_INCLUDE_ROOT="$MLX_SOURCE_DEPS_DIR/mlx-c" \
   -e MLX_CUDA_ARCHITECTURES="$CUDA_ARCHITECTURES" \
   -e MLX_INSTALL_PREFIX="$MLX_INSTALL_PREFIX" \
+  -e MLX_SRC_DIR="$MLX_SOURCE_DEPS_DIR/src/mlx" \
   -e MLXC_MINI_BRIDGE_LIB="$MLXC_MINI_BRIDGE_LIB" \
   -e AUDITWHEEL_PLAT="$AUDITWHEEL_PLAT" \
   -e UV_PROJECT_ENVIRONMENT=/tmp/kiwilang-colab-uv \
-  -v "$WORKSPACE_ROOT:$WORKSPACE_ROOT" \
+  "${DOCKER_VOLUME_ARGS[@]}" \
   -w "$WORKSPACE_ROOT" \
   "$IMAGE_TAG" \
   bash -lc '
     set -euo pipefail
     export LD_LIBRARY_PATH="$MLX_INSTALL_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-    if [[ ! -d vendor/mlx && ! -d .deps/src/mlx ]]; then
-      bash "$KIWI_SOURCE_ROOT/scripts/bootstrap_deps.sh" --fetch-only
+    if [[ ! -d "$MLX_SRC_DIR" || ! -d "$MLX_C_INCLUDE_ROOT/mlx" ]]; then
+      bootstrap_args=(--fetch-only)
+      if [[ -n "$KIWI_PUBLIC_LOCK_FILE" ]]; then
+        bootstrap_args+=(--lock-file "$KIWI_PUBLIC_LOCK_FILE")
+      fi
+      KIWI_DEPS_DIR="$KIWI_MLX_SOURCE_DEPS_DIR" \
+        bash "$KIWI_SOURCE_ROOT/scripts/bootstrap_deps.sh" "${bootstrap_args[@]}"
     fi
     scripts/build_linux_mlx.sh
     bash scripts/build_linux_mlxc_mini_bridge.sh "$MLX_INSTALL_PREFIX" "$MLXC_MINI_BRIDGE_LIB"

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "kiwilang"
-version = "0.2.32"
+version = "0.2.33"
 description = "Python bridge and native runtime payload for Kiwi."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -12,7 +12,7 @@ dependencies = []
 
 [project.optional-dependencies]
 notebook = ["ipython>=8"]
-jupyter = ["kiwilang-jupyter-kernel==0.2.32"]
+jupyter = ["kiwilang-jupyter-kernel==0.2.33"]
 
 [dependency-groups]
 dev = [

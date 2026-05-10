@@ -343,13 +343,13 @@ wheels = [
 
 [[package]]
 name = "kiwilang"
-version = "0.2.31"
+version = "0.2.33"
 source = { editable = "../runtime" }
 
 [package.metadata]
 requires-dist = [
     { name = "ipython", marker = "extra == 'notebook'", specifier = ">=8" },
-    { name = "kiwilang-jupyter-kernel", marker = "extra == 'jupyter'", specifier = "==0.2.31" },
+    { name = "kiwilang-jupyter-kernel", marker = "extra == 'jupyter'", specifier = "==0.2.33" },
 ]
 provides-extras = ["notebook", "jupyter"]
 
@@ -361,7 +361,7 @@ dev = [
 
 [[package]]
 name = "kiwilang-jupyter-kernel"
-version = "0.2.31"
+version = "0.2.33"
 source = { editable = "." }
 dependencies = [
     { name = "ipykernel" },
