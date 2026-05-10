@@ -250,6 +250,12 @@ const placeholder = struct {
             return unsupportedArray();
         }
 
+        pub fn cumsum0ReverseInclusive(ctx: Self.Context, value: Self.Array) Self.Error!Self.Array {
+            _ = ctx;
+            _ = value;
+            return unsupportedArray();
+        }
+
         pub fn add(ctx: Self.Context, left: Self.Array, right: Self.Array) Self.Error!Self.Array {
             _ = ctx;
             _ = left;

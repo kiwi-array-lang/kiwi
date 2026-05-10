@@ -44,6 +44,10 @@ typedef struct {
   kiwi_autograd_path_e autograd_path;
   char* text_ptr;
   uintptr_t text_len;
+  char* display_mime_ptr;
+  uintptr_t display_mime_len;
+  char* display_data_ptr;
+  uintptr_t display_data_len;
 } kiwi_eval_result_s;
 
 kiwi_session_t* kiwi_session_create(kiwi_device_preference_e device);

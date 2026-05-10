@@ -1,6 +1,7 @@
 const builtin = @import("builtin");
 const std = @import("std");
 const runtime_device = @import("device.zig");
+const repl_meta = @import("repl_meta.zig");
 const runtime = @import("runtime.zig");
 
 pub const debug = if (builtin.target.os.tag == .ios or builtin.target.os.tag == .watchos)
@@ -19,6 +20,7 @@ const ParsedLine = union(enum) {
     skip,
     eval: []const u8,
     timing: TimingRequest,
+    meta: repl_meta.Command,
 };
 
 pub const kiwi_device_preference_e = enum(c_int) {
@@ -55,6 +57,10 @@ pub const kiwi_eval_result_s = extern struct {
     autograd_path: kiwi_autograd_path_e,
     text_ptr: ?[*]u8,
     text_len: usize,
+    display_mime_ptr: ?[*]u8,
+    display_mime_len: usize,
+    display_data_ptr: ?[*]u8,
+    display_data_len: usize,
 };
 
 pub const kiwi_session = struct {
@@ -104,6 +110,30 @@ pub const kiwi_session = struct {
                     .text = rendered,
                 };
             },
+            .meta => |command| blk: {
+                switch (command) {
+                    .exit => break :blk .{
+                        .status = .ok,
+                        .echoed = false,
+                        .autograd_path = .none,
+                        .text = null,
+                    },
+                    .help => |text| {
+                        const rendered = std.heap.c_allocator.dupe(u8, text) catch break :blk .{
+                            .status = .oom,
+                            .echoed = false,
+                            .autograd_path = .none,
+                            .text = null,
+                        };
+                        break :blk .{
+                            .status = .ok,
+                            .echoed = true,
+                            .autograd_path = autogradPathFromRuntime(&self.session),
+                            .text = rendered,
+                        };
+                    },
+                }
+            },
             .eval => |expr| blk: {
                 const value = self.session.evalSource(expr) catch |err| {
                     break :blk errorEvalOwned(&self.session, err);
@@ -128,6 +158,10 @@ pub const kiwi_session = struct {
                     owned.autograd_path = .none;
                     break :blk owned;
                 };
+                if (displayPayloadForValue(&self.session, value)) |display| {
+                    owned.display_mime = display.mime;
+                    owned.display_data = display.data;
+                }
                 break :blk owned;
             },
         };
@@ -135,6 +169,11 @@ pub const kiwi_session = struct {
 
     pub fn setGlobalFloatArray(self: *kiwi_session, name: []const u8, data: []const f32, dims: []const i32) kiwi_status_e {
         self.session.setGlobalHostFloatArray(name, data, dims) catch |err| return statusFromError(err);
+        return .ok;
+    }
+
+    pub fn setGlobalMlxFloatArray(self: *kiwi_session, name: []const u8, data: []const f32, dims: []const i32) kiwi_status_e {
+        self.session.setGlobalMlxFloatArray(name, data, dims) catch |err| return statusFromError(err);
         return .ok;
     }
 
@@ -154,27 +193,44 @@ pub const EvalOwned = struct {
     echoed: bool,
     autograd_path: kiwi_autograd_path_e,
     text: ?[]u8,
+    display_mime: ?[]u8 = null,
+    display_data: ?[]u8 = null,
 
     pub fn intoC(self: *EvalOwned) kiwi_eval_result_s {
-        if (self.text) |buf| {
-            self.text = null;
-            return .{
-                .status = self.status,
-                .echoed = self.echoed,
-                .autograd_path = self.autograd_path,
-                .text_ptr = buf.ptr,
-                .text_len = buf.len,
-            };
-        }
+        const text = self.text;
+        const display_mime = self.display_mime;
+        const display_data = self.display_data;
+        self.text = null;
+        self.display_mime = null;
+        self.display_data = null;
         return .{
             .status = self.status,
             .echoed = self.echoed,
             .autograd_path = self.autograd_path,
-            .text_ptr = null,
-            .text_len = 0,
+            .text_ptr = if (text) |buf| buf.ptr else null,
+            .text_len = if (text) |buf| buf.len else 0,
+            .display_mime_ptr = if (display_mime) |buf| buf.ptr else null,
+            .display_mime_len = if (display_mime) |buf| buf.len else 0,
+            .display_data_ptr = if (display_data) |buf| buf.ptr else null,
+            .display_data_len = if (display_data) |buf| buf.len else 0,
         };
     }
 };
+
+const DisplayPayloadOwned = struct {
+    mime: []u8,
+    data: []u8,
+};
+
+fn displayPayloadForValue(session: *runtime.Session, value: runtime.Value) ?DisplayPayloadOwned {
+    const bundle = session.displayMimeBundleForValue(value) orelse return null;
+    const mime = std.heap.c_allocator.dupe(u8, bundle.mime) catch return null;
+    const data = std.heap.c_allocator.dupe(u8, bundle.data) catch {
+        std.heap.c_allocator.free(mime);
+        return null;
+    };
+    return .{ .mime = mime, .data = data };
+}
 
 fn diagnosticTextOwned(session: *runtime.Session) ?[]u8 {
     const detail = session.lastErrorText() orelse return null;
@@ -258,6 +314,7 @@ fn dimsSlice(dims: ?[*]const i32, ndim: usize) ?[]const i32 {
 
 fn parseLine(raw: []const u8) !ParsedLine {
     const line = sanitizeLine(raw) orelse return .skip;
+    if (repl_meta.command(line)) |command| return .{ .meta = command };
     if (!std.mem.startsWith(u8, line, "\\t")) return .{ .eval = line };
 
     var expr = line[2..];
@@ -379,6 +436,10 @@ pub export fn kiwi_session_eval(session: ?*kiwi_session, source: ?[*]const u8, s
         .autograd_path = .none,
         .text_ptr = null,
         .text_len = 0,
+        .display_mime_ptr = null,
+        .display_mime_len = 0,
+        .display_data_ptr = null,
+        .display_data_len = 0,
     };
     const ptr = source orelse return .{
         .status = .parse,
@@ -386,6 +447,10 @@ pub export fn kiwi_session_eval(session: ?*kiwi_session, source: ?[*]const u8, s
         .autograd_path = .none,
         .text_ptr = null,
         .text_len = 0,
+        .display_mime_ptr = null,
+        .display_mime_len = 0,
+        .display_data_ptr = null,
+        .display_data_len = 0,
     };
     var result = handle.evalOwned(ptr[0..source_len]);
     return result.intoC();
@@ -405,6 +470,22 @@ pub export fn kiwi_session_set_global_float_array(
     const count = elementCount(dims_buf) catch |err| return statusFromError(err);
     const data_buf: []const f32 = if (count == 0) &.{} else (data orelse return .type)[0..count];
     return handle.setGlobalFloatArray(name_buf, data_buf, dims_buf);
+}
+
+pub export fn kiwi_session_set_global_mlx_float_array(
+    session: ?*kiwi_session,
+    name: ?[*]const u8,
+    name_len: usize,
+    data: ?[*]const f32,
+    dims: ?[*]const i32,
+    ndim: usize,
+) kiwi_status_e {
+    const handle = session orelse return .@"error";
+    const name_buf = nameSlice(name, name_len) orelse return .name;
+    const dims_buf = dimsSlice(dims, ndim) orelse return .rank;
+    const count = elementCount(dims_buf) catch |err| return statusFromError(err);
+    const data_buf: []const f32 = if (count == 0) &.{} else (data orelse return .type)[0..count];
+    return handle.setGlobalMlxFloatArray(name_buf, data_buf, dims_buf);
 }
 
 pub export fn kiwi_session_set_global_int_array(
@@ -442,6 +523,12 @@ pub export fn kiwi_session_set_global_bool_array(
 pub export fn kiwi_eval_result_free(result: kiwi_eval_result_s) void {
     if (result.text_ptr) |ptr| {
         std.heap.c_allocator.free(ptr[0..result.text_len]);
+    }
+    if (result.display_mime_ptr) |ptr| {
+        std.heap.c_allocator.free(ptr[0..result.display_mime_len]);
+    }
+    if (result.display_data_ptr) |ptr| {
+        std.heap.c_allocator.free(ptr[0..result.display_data_len]);
     }
 }
 

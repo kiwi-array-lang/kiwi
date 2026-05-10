@@ -1,0 +1,6 @@
+.venv/
+.zig-cache/
+zig-out/
+.ipynb_checkpoints/
+__pycache__/
+src/*.egg-info/

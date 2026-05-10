@@ -3,6 +3,7 @@ const build_options = @import("build_options");
 const runtime_device = @import("device.zig");
 const profile = @import("profile.zig");
 const probe = @import("probe.zig");
+const repl_meta = @import("repl_meta.zig");
 const repl_input = @import("repl_input.zig");
 const runtime = @import("runtime.zig");
 const version = @import("version.zig");
@@ -105,6 +106,7 @@ const ParsedLine = union(enum) {
     skip,
     eval: []const u8,
     timing: TimingRequest,
+    meta: repl_meta.Command,
 };
 
 pub const ExecInput = union(enum) {
@@ -116,6 +118,7 @@ pub const ExecInput = union(enum) {
 pub const ExecRequest = struct {
     input: ExecInput,
     interactive: bool,
+    argv: []const []const u8 = &.{},
 };
 
 pub const BenchRequest = struct {
@@ -296,6 +299,7 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Cli
     var options = CliOptions{ .request = .repl };
     var mode: enum { auto, exec, bench, probe, profile, debug } = .auto;
     var exec_input: ?ExecInput = null;
+    var exec_argv: []const []const u8 = &.{};
     var interactive = false;
     var bench_case: ?[]const u8 = null;
     var probe_input: ?ExecInput = null;
@@ -314,6 +318,11 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Cli
     var idx: usize = 0;
     while (idx < args.len) : (idx += 1) {
         const arg = args[idx];
+
+        if (mode == .exec and exec_input != null) {
+            exec_argv = args[idx..];
+            break;
+        }
 
         if (std.mem.eql(u8, arg, "--version")) {
             if (mode != .auto or exec_input != null) return invalidArgument();
@@ -482,10 +491,10 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Cli
 
     options.request = switch (mode) {
         .auto => if (exec_input) |input|
-            .{ .exec = .{ .input = input, .interactive = interactive } }
+            .{ .exec = .{ .input = input, .interactive = interactive, .argv = exec_argv } }
         else
             .repl,
-        .exec => .{ .exec = .{ .input = exec_input orelse return invalidArgument(), .interactive = interactive } },
+        .exec => .{ .exec = .{ .input = exec_input orelse return invalidArgument(), .interactive = interactive, .argv = exec_argv } },
         .bench => .{ .bench = .{ .case_name = bench_case orelse return invalidArgument() } },
         .probe => .{ .probe = .{
             .input = probe_input orelse return invalidArgument(),
@@ -508,7 +517,7 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Cli
 fn usage() !void {
     const stderr = std.fs.File.stderr().deprecatedWriter();
     try stderr.print(
-        "{s} {s}\n\nusage:\n  {s}\n  {s} --version\n  {s} [--device cpu|gpu] [--backend auto|host|mlx_cpu|mlx_gpu] [-i] [-e source | file.k | -]\n",
+        "{s} {s}\n\nusage:\n  {s}\n  {s} --version\n  {s} [--device cpu|gpu] [--backend auto|host|mlx_cpu|mlx_gpu] [-i] [-e source | file.k | -] [args...]\n",
         .{
             cli_invocation,
             version.string,
@@ -718,7 +727,6 @@ fn replSession(session: *runtime.Session, allocator: std.mem.Allocator) !void {
         switch (parsed) {
             .skip => continue,
             .eval => |trimmed| {
-                if (std.mem.eql(u8, trimmed, "\\\\") or std.mem.eql(u8, trimmed, "\\q") or std.mem.eql(u8, trimmed, "quit") or std.mem.eql(u8, trimmed, "exit")) return;
                 const value = session.evalSource(trimmed) catch |err| {
                     try writeRuntimeError(session, stderr, err);
                     continue;
@@ -727,6 +735,10 @@ fn replSession(session: *runtime.Session, allocator: std.mem.Allocator) !void {
                 const text = try session.renderValue(value);
                 defer allocator.free(text);
                 try stdout.print("{s}\n", .{text});
+            },
+            .meta => |command| switch (command) {
+                .exit => return,
+                .help => |text| try stdout.print("{s}\n", .{text}),
             },
             .timing => |request| {
                 const text = evalTiming(session, allocator, request) catch |err| {
@@ -744,6 +756,7 @@ fn executeRequest(allocator: std.mem.Allocator, device: runtime_device.DevicePre
     var session = try runtime.Session.initWithDevice(allocator, device);
     defer session.deinit();
     configureDenseBackendMode(&session, backend_mode);
+    try session.setGlobalHostStringList("x", request.argv);
 
     const exec_result = switch (request.input) {
         .expr => |source| execBufferedSource(&session, allocator, "<expr>", source, device, backend_mode),
@@ -1034,6 +1047,10 @@ fn execSourceLineByLine(session: *runtime.Session, path: []const u8, source: []c
                     try out_writer.print("{s}\n", .{text});
                 }
             },
+            .meta => |command| switch (command) {
+                .exit => return,
+                .help => |text| try out_writer.print("{s}\n", .{text}),
+            },
             .timing => |request| {
                 const text = evalTiming(session, session.allocator, request) catch |err| {
                     try writeRuntimeErrorAt(session, err_writer, path, statement_start_line, err);
@@ -1076,6 +1093,10 @@ fn execSourceLineByLineQuiet(session: *runtime.Session, path: []const u8, source
             .eval => |clean| {
                 const value = try session.evalSource(clean);
                 if (shouldEchoEvalLine(clean)) try session.forceValue(value);
+            },
+            .meta => |command| switch (command) {
+                .exit => return,
+                .help => {},
             },
             .timing => |request| {
                 _ = try runTimingRequest(session, request);
@@ -1201,6 +1222,7 @@ fn isIdentContinue(ch: u8) bool {
 fn parseLine(raw: []const u8) !ParsedLine {
     const maybe_line = sanitizeLine(raw);
     const line = maybe_line orelse return .skip;
+    if (repl_meta.command(line)) |command| return .{ .meta = command };
     if (!std.mem.startsWith(u8, line, "\\t")) return .{ .eval = line };
 
     var expr = line[2..];

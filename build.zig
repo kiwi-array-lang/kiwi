@@ -34,6 +34,10 @@ const wasm_base_export_symbols = &.{
     "kiwi_render_last_value",
     "kiwi_last_rendered_ptr",
     "kiwi_last_rendered_len",
+    "kiwi_last_display_mime_ptr",
+    "kiwi_last_display_mime_len",
+    "kiwi_last_display_data_ptr",
+    "kiwi_last_display_data_len",
 };
 
 const wasm_webgpu_export_symbols = &.{
@@ -57,6 +61,10 @@ const wasm_webgpu_export_symbols = &.{
     "kiwi_render_last_value",
     "kiwi_last_rendered_ptr",
     "kiwi_last_rendered_len",
+    "kiwi_last_display_mime_ptr",
+    "kiwi_last_display_mime_len",
+    "kiwi_last_display_data_ptr",
+    "kiwi_last_display_data_len",
     "kiwi_force_backend_surface",
 };
 

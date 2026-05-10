@@ -1,6 +1,7 @@
 const std = @import("std");
 const build_options = @import("build_options");
 const runtime_device = @import("device.zig");
+const repl_meta = @import("repl_meta.zig");
 const runtime = @import("runtime.zig");
 
 const page_size: usize = 64 * 1024;
@@ -11,6 +12,8 @@ var session: ?runtime.Session = null;
 var last_value: ?runtime.Value = null;
 var last_array_info: ?runtime.WasmArrayInfo = null;
 var last_rendered: ?[]u8 = null;
+var last_display_mime: ?[]u8 = null;
+var last_display_data: ?[]u8 = null;
 var last_echo: bool = false;
 var last_error_buf: [512]u8 = [_]u8{0} ** 512;
 var last_error_len: u32 = 0;
@@ -58,8 +61,16 @@ fn clearLastRendered() void {
     last_rendered = null;
 }
 
+fn clearLastDisplay() void {
+    if (last_display_mime) |mime| std.heap.wasm_allocator.free(mime);
+    if (last_display_data) |data| std.heap.wasm_allocator.free(data);
+    last_display_mime = null;
+    last_display_data = null;
+}
+
 fn clearLastValue() void {
     clearLastRendered();
+    clearLastDisplay();
     last_value = null;
     last_array_info = null;
     last_echo = false;
@@ -89,6 +100,30 @@ fn ensureLastRendered() i32 {
         return 1;
     };
     return 0;
+}
+
+fn ensureLastDisplay() bool {
+    if (last_display_mime != null and last_display_data != null) return true;
+    clearLastDisplay();
+
+    const active = &(session orelse return false);
+    const value = last_value orelse return false;
+    const bundle = active.displayMimeBundleForValue(value) orelse return false;
+
+    const mime = std.heap.wasm_allocator.dupe(u8, bundle.mime) catch |err| {
+        setLastError(active, err);
+        return false;
+    };
+
+    const data = std.heap.wasm_allocator.dupe(u8, bundle.data) catch |err| {
+        std.heap.wasm_allocator.free(mime);
+        setLastError(active, err);
+        return false;
+    };
+
+    last_display_mime = mime;
+    last_display_data = data;
+    return true;
 }
 
 fn deviceFromInt(raw: u32) runtime_device.DevicePreference {
@@ -196,6 +231,22 @@ pub export fn kiwi_eval(ptr: u32, len: u32) i32 {
         return 1;
     });
     const source = bytesAt(ptr, len);
+    if (repl_meta.command(source)) |command| {
+        switch (command) {
+            .exit => {
+                last_echo = false;
+                return 0;
+            },
+            .help => |text| {
+                last_rendered = std.heap.wasm_allocator.dupe(u8, text) catch {
+                    setLastError(active, error.OutOfMemory);
+                    return 1;
+                };
+                last_echo = true;
+                return 0;
+            },
+        }
+    }
     const result = active.evalSource(source) catch |err| {
         setLastError(active, err);
         return 1;
@@ -303,6 +354,26 @@ pub export fn kiwi_last_rendered_ptr() u32 {
 pub export fn kiwi_last_rendered_len() u32 {
     if (ensureLastRendered() != 0) return 0;
     return @intCast(last_rendered.?.len);
+}
+
+pub export fn kiwi_last_display_mime_ptr() u32 {
+    if (!ensureLastDisplay()) return 0;
+    return @intCast(@intFromPtr(last_display_mime.?.ptr));
+}
+
+pub export fn kiwi_last_display_mime_len() u32 {
+    if (!ensureLastDisplay()) return 0;
+    return @intCast(last_display_mime.?.len);
+}
+
+pub export fn kiwi_last_display_data_ptr() u32 {
+    if (!ensureLastDisplay()) return 0;
+    return @intCast(@intFromPtr(last_display_data.?.ptr));
+}
+
+pub export fn kiwi_last_display_data_len() u32 {
+    if (!ensureLastDisplay()) return 0;
+    return @intCast(last_display_data.?.len);
 }
 
 pub export fn kiwi_force_backend_surface() i32 {

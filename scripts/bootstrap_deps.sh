@@ -39,7 +39,7 @@ environment:
   - KIWI_MLX_METAL_KERNEL_PROFILE=default|kiwi_minimal|kiwi_core
     (default: default; `kiwi_minimal` and `kiwi_core` are experimental
     size-reduction profiles)
-  - KIWI_DEPS_DIR=<path> (default: .deps under kiwi-zig-main)
+  - KIWI_DEPS_DIR=<path> (default: .deps under the repository root)
   - KIWI_DUCKDB_VERSION=<version> (default: 1.5.2)
   - KIWI_DUCKDB_URL=<asset-url> (override the default release asset)
 EOF

@@ -83,16 +83,12 @@ pub const ProbeResult = struct {
     indexed_assign_count: usize,
     indexed_assign_global_count: usize,
     indexed_assign_local_count: usize,
-    indexed_assign_inline_local_count: usize,
     owned_amend_count: usize,
     local_release_skip_count: usize,
     local_release_taken_count: usize,
-    frame_drop_fast_count: usize,
-    frame_drop_fallback_count: usize,
-    frame_push_count: usize,
-    frame_push_known_release_count: usize,
-    frame_reuse_known_release_count: usize,
-    frame_finish_count: usize,
+    code_opcode_total_count: usize,
+    code_opcode_top_counts: [runtime.debug_top_opcode_count]runtime.DebugCodeOpCount,
+    code_opcode_family_counts: [runtime.debug_opcode_family_count]runtime.DebugOpcodeFamilyCount,
     jump_if_false_count: usize,
     jump_if_false_scalar_count: usize,
     inline_scalar_dyad_attempt_count: usize,
@@ -102,28 +98,30 @@ pub const ProbeResult = struct {
     global_call_slots_count: usize,
     global_call_slots_fast_count: usize,
     global_call_slots_fallback_count: usize,
-    compact_k_run_count: usize,
-    compact_k_tail_continue_count: usize,
-    compact_k_global_call_count: usize,
-    compact_k_global_call_compact_count: usize,
-    compact_k_global_call_fallback_count: usize,
-    compact_k_global_call_fallback_no_compact_count: usize,
-    compact_k_global_call_fallback_arity_count: usize,
-    compact_k_global_call_fallback_direct_mask_count: usize,
-    compact_k_global_call_fallback_other_reason_count: usize,
-    compact_k_global_call_fallback_builtin_count: usize,
-    compact_k_global_call_fallback_closure_count: usize,
-    compact_k_global_call_fallback_array_count: usize,
-    compact_k_global_call_fallback_other_kind_count: usize,
-    compact_k_frame_fallback_count: usize,
-    compact_k_indexed_assign_sources_count: usize,
-    compact_k_indexed_assign_stack_count: usize,
-    vm_call1_local_local_count: usize,
-    vm_call1_tail_local_local_count: usize,
-    vm_call1_local_local_op_count: usize,
-    vm_call1_tail_local_local_op_count: usize,
-    vm_call1_local_local_op_const_count: usize,
-    vm_call1_tail_local_local_op_const_count: usize,
+    code_run_count: usize,
+    code_tail_continue_count: usize,
+    code_global_call_count: usize,
+    code_global_call_direct_count: usize,
+    code_global_call_fallback_count: usize,
+    code_global_call_fallback_no_code_count: usize,
+    code_global_call_fallback_arity_count: usize,
+    code_global_call_fallback_other_reason_count: usize,
+    code_global_call_fallback_builtin_count: usize,
+    code_global_call_fallback_closure_count: usize,
+    code_global_call_fallback_array_count: usize,
+    code_global_call_fallback_other_kind_count: usize,
+    code_compile_count: usize,
+    code_compile_success_count: usize,
+    code_compile_miss_arity_or_local_limit_count: usize,
+    code_compile_miss_body_size_count: usize,
+    code_compile_miss_invalid_code_count: usize,
+    code_compile_miss_unsupported_opcode_or_operand_count: usize,
+    code_compile_miss_target_or_offset_count: usize,
+    code_compile_miss_code_body_size_count: usize,
+    code_compile_miss_stack_size_count: usize,
+    code_compile_unsupported_opcode_top_counts: [runtime.debug_top_opcode_count]runtime.DebugNameCount,
+    code_indexed_assign_sources_count: usize,
+    code_indexed_assign_stack_count: usize,
     host_fold_fast_count: usize,
     host_scan_fast_count: usize,
     host_fold_scan_miss_unsupported_builtin_count: usize,
@@ -184,13 +182,7 @@ pub const ProbeResult = struct {
     reshape_view_release_count: usize,
     transpose_view_alloc_count: usize,
     transpose_view_release_count: usize,
-    direct_closure1_hit_count: usize,
-    direct_closure2_hit_count: usize,
-    direct_closure3_hit_count: usize,
-    direct_closure_miss_not_frozen_count: usize,
-    direct_closure_miss_captures_count: usize,
-    direct_closure_miss_unsupported_shape_count: usize,
-    run_closure_mode_count: usize,
+    structured_derived2_hit_count: usize,
     apply_derived_closure_count: usize,
     apply_projection_count: usize,
     autograd_builtin_grad_count: usize,
@@ -325,16 +317,12 @@ pub fn collectProbeResult(session: *runtime.Session, name: []const u8, err_name:
         .indexed_assign_count = session.debugIndexedAssignCount(),
         .indexed_assign_global_count = session.debugIndexedAssignGlobalCount(),
         .indexed_assign_local_count = session.debugIndexedAssignLocalCount(),
-        .indexed_assign_inline_local_count = session.debugIndexedAssignInlineLocalCount(),
         .owned_amend_count = session.debugOwnedAmendCount(),
         .local_release_skip_count = session.debugLocalReleaseSkipCount(),
         .local_release_taken_count = session.debugLocalReleaseTakenCount(),
-        .frame_drop_fast_count = session.debugFrameDropFastCount(),
-        .frame_drop_fallback_count = session.debugFrameDropFallbackCount(),
-        .frame_push_count = session.debugFramePushCount(),
-        .frame_push_known_release_count = session.debugFramePushKnownReleaseCount(),
-        .frame_reuse_known_release_count = session.debugFrameReuseKnownReleaseCount(),
-        .frame_finish_count = session.debugFrameFinishCount(),
+        .code_opcode_total_count = session.debugCodeOpcodeTotalCount(),
+        .code_opcode_top_counts = session.debugCodeOpcodeTopCounts(),
+        .code_opcode_family_counts = session.debugCodeOpcodeFamilyCounts(),
         .jump_if_false_count = session.debugJumpIfFalseCount(),
         .jump_if_false_scalar_count = session.debugJumpIfFalseScalarCount(),
         .inline_scalar_dyad_attempt_count = session.debugInlineScalarDyadAttemptCount(),
@@ -344,28 +332,30 @@ pub fn collectProbeResult(session: *runtime.Session, name: []const u8, err_name:
         .global_call_slots_count = session.debugGlobalCallSlotsCount(),
         .global_call_slots_fast_count = session.debugGlobalCallSlotsFastCount(),
         .global_call_slots_fallback_count = session.debugGlobalCallSlotsFallbackCount(),
-        .compact_k_run_count = session.debugCompactKRunCount(),
-        .compact_k_tail_continue_count = session.debugCompactKTailContinueCount(),
-        .compact_k_global_call_count = session.debugCompactKGlobalCallCount(),
-        .compact_k_global_call_compact_count = session.debugCompactKGlobalCallCompactCount(),
-        .compact_k_global_call_fallback_count = session.debugCompactKGlobalCallFallbackCount(),
-        .compact_k_global_call_fallback_no_compact_count = session.debugCompactKGlobalCallFallbackReasonCount(.no_compact),
-        .compact_k_global_call_fallback_arity_count = session.debugCompactKGlobalCallFallbackReasonCount(.arity),
-        .compact_k_global_call_fallback_direct_mask_count = session.debugCompactKGlobalCallFallbackReasonCount(.direct_mask),
-        .compact_k_global_call_fallback_other_reason_count = session.debugCompactKGlobalCallFallbackReasonCount(.other),
-        .compact_k_global_call_fallback_builtin_count = session.debugCompactKGlobalCallFallbackKindCount(.builtin),
-        .compact_k_global_call_fallback_closure_count = session.debugCompactKGlobalCallFallbackKindCount(.closure),
-        .compact_k_global_call_fallback_array_count = session.debugCompactKGlobalCallFallbackKindCount(.array),
-        .compact_k_global_call_fallback_other_kind_count = session.debugCompactKGlobalCallFallbackKindCount(.other),
-        .compact_k_frame_fallback_count = session.debugCompactKFrameFallbackCount(),
-        .compact_k_indexed_assign_sources_count = session.debugCompactKIndexedAssignSourcesCount(),
-        .compact_k_indexed_assign_stack_count = session.debugCompactKIndexedAssignStackCount(),
-        .vm_call1_local_local_count = session.debugVmCall1LocalKindCount(.local_local),
-        .vm_call1_tail_local_local_count = session.debugVmCall1LocalKindCount(.tail_local_local),
-        .vm_call1_local_local_op_count = session.debugVmCall1LocalKindCount(.local_local_op),
-        .vm_call1_tail_local_local_op_count = session.debugVmCall1LocalKindCount(.tail_local_local_op),
-        .vm_call1_local_local_op_const_count = session.debugVmCall1LocalKindCount(.local_local_op_const),
-        .vm_call1_tail_local_local_op_const_count = session.debugVmCall1LocalKindCount(.tail_local_local_op_const),
+        .code_run_count = session.debugCodeRunCount(),
+        .code_tail_continue_count = session.debugCodeTailContinueCount(),
+        .code_global_call_count = session.debugCodeGlobalCallCount(),
+        .code_global_call_direct_count = session.debugCodeGlobalCallDirectCount(),
+        .code_global_call_fallback_count = session.debugCodeGlobalCallFallbackCount(),
+        .code_global_call_fallback_no_code_count = session.debugCodeGlobalCallFallbackReasonCount(.no_code),
+        .code_global_call_fallback_arity_count = session.debugCodeGlobalCallFallbackReasonCount(.arity),
+        .code_global_call_fallback_other_reason_count = session.debugCodeGlobalCallFallbackReasonCount(.other),
+        .code_global_call_fallback_builtin_count = session.debugCodeGlobalCallFallbackKindCount(.builtin),
+        .code_global_call_fallback_closure_count = session.debugCodeGlobalCallFallbackKindCount(.closure),
+        .code_global_call_fallback_array_count = session.debugCodeGlobalCallFallbackKindCount(.array),
+        .code_global_call_fallback_other_kind_count = session.debugCodeGlobalCallFallbackKindCount(.other),
+        .code_compile_count = session.debugCodeCompileCount(),
+        .code_compile_success_count = session.debugCodeCompileSuccessCount(),
+        .code_compile_miss_arity_or_local_limit_count = session.debugCodeCompileMissCount(.arity_or_local_limit),
+        .code_compile_miss_body_size_count = session.debugCodeCompileMissCount(.body_size),
+        .code_compile_miss_invalid_code_count = session.debugCodeCompileMissCount(.invalid_code),
+        .code_compile_miss_unsupported_opcode_or_operand_count = session.debugCodeCompileMissCount(.unsupported_opcode_or_operand),
+        .code_compile_miss_target_or_offset_count = session.debugCodeCompileMissCount(.target_or_offset),
+        .code_compile_miss_code_body_size_count = session.debugCodeCompileMissCount(.code_body_size),
+        .code_compile_miss_stack_size_count = session.debugCodeCompileMissCount(.stack_size),
+        .code_compile_unsupported_opcode_top_counts = session.debugCodeCompileUnsupportedOpcodeTopCounts(),
+        .code_indexed_assign_sources_count = session.debugCodeIndexedAssignSourcesCount(),
+        .code_indexed_assign_stack_count = session.debugCodeIndexedAssignStackCount(),
         .host_fold_fast_count = session.debugHostFoldFastCount(),
         .host_scan_fast_count = session.debugHostScanFastCount(),
         .host_fold_scan_miss_unsupported_builtin_count = session.debugHostFoldScanMissCount(.unsupported_builtin),
@@ -426,13 +416,7 @@ pub fn collectProbeResult(session: *runtime.Session, name: []const u8, err_name:
         .reshape_view_release_count = session.debugNumericStructuralReleaseCount(.reshape_view),
         .transpose_view_alloc_count = session.debugNumericStructuralAllocCount(.transpose_view),
         .transpose_view_release_count = session.debugNumericStructuralReleaseCount(.transpose_view),
-        .direct_closure1_hit_count = session.debugDirectClosure1HitCount(),
-        .direct_closure2_hit_count = session.debugDirectClosure2HitCount(),
-        .direct_closure3_hit_count = session.debugDirectClosure3HitCount(),
-        .direct_closure_miss_not_frozen_count = session.debugDirectClosureMissNotFrozenCount(),
-        .direct_closure_miss_captures_count = session.debugDirectClosureMissCapturesCount(),
-        .direct_closure_miss_unsupported_shape_count = session.debugDirectClosureMissUnsupportedShapeCount(),
-        .run_closure_mode_count = session.debugRunClosureModeCount(),
+        .structured_derived2_hit_count = session.debugStructuredDerived2HitCount(),
         .apply_derived_closure_count = session.debugApplyDerivedClosureCount(),
         .apply_projection_count = session.debugApplyProjectionCount(),
         .autograd_builtin_grad_count = session.debugAutogradBuiltinGradCount(),
@@ -560,16 +544,28 @@ pub fn writeProbeResultText(writer: anytype, result: ProbeResult) !void {
     try writer.print("indexed_assign_count={d}\n", .{result.indexed_assign_count});
     try writer.print("indexed_assign_global_count={d}\n", .{result.indexed_assign_global_count});
     try writer.print("indexed_assign_local_count={d}\n", .{result.indexed_assign_local_count});
-    try writer.print("indexed_assign_inline_local_count={d}\n", .{result.indexed_assign_inline_local_count});
     try writer.print("owned_amend_count={d}\n", .{result.owned_amend_count});
     try writer.print("local_release_skip_count={d}\n", .{result.local_release_skip_count});
     try writer.print("local_release_taken_count={d}\n", .{result.local_release_taken_count});
-    try writer.print("frame_drop_fast_count={d}\n", .{result.frame_drop_fast_count});
-    try writer.print("frame_drop_fallback_count={d}\n", .{result.frame_drop_fallback_count});
-    try writer.print("frame_push_count={d}\n", .{result.frame_push_count});
-    try writer.print("frame_push_known_release_count={d}\n", .{result.frame_push_known_release_count});
-    try writer.print("frame_reuse_known_release_count={d}\n", .{result.frame_reuse_known_release_count});
-    try writer.print("frame_finish_count={d}\n", .{result.frame_finish_count});
+    try writer.print("code_opcode_total_count={d}\n", .{result.code_opcode_total_count});
+    try writer.writeAll("code_opcode_top_counts=");
+    var first_compact_op = true;
+    for (result.code_opcode_top_counts) |entry| {
+        if (entry.count == 0) continue;
+        if (!first_compact_op) try writer.writeByte(',');
+        first_compact_op = false;
+        try writer.print("{s}[{d}]:{d}", .{ entry.name, entry.opcode, entry.count });
+    }
+    try writer.writeByte('\n');
+    try writer.writeAll("code_opcode_family_counts=");
+    var first_compact_family = true;
+    for (result.code_opcode_family_counts) |entry| {
+        if (entry.count == 0) continue;
+        if (!first_compact_family) try writer.writeByte(',');
+        first_compact_family = false;
+        try writer.print("{s}:{d}", .{ entry.name, entry.count });
+    }
+    try writer.writeByte('\n');
     try writer.print("jump_if_false_count={d}\n", .{result.jump_if_false_count});
     try writer.print("jump_if_false_scalar_count={d}\n", .{result.jump_if_false_scalar_count});
     try writer.print("inline_scalar_dyad_attempt_count={d}\n", .{result.inline_scalar_dyad_attempt_count});
@@ -579,28 +575,38 @@ pub fn writeProbeResultText(writer: anytype, result: ProbeResult) !void {
     try writer.print("global_call_slots_count={d}\n", .{result.global_call_slots_count});
     try writer.print("global_call_slots_fast_count={d}\n", .{result.global_call_slots_fast_count});
     try writer.print("global_call_slots_fallback_count={d}\n", .{result.global_call_slots_fallback_count});
-    try writer.print("compact_k_run_count={d}\n", .{result.compact_k_run_count});
-    try writer.print("compact_k_tail_continue_count={d}\n", .{result.compact_k_tail_continue_count});
-    try writer.print("compact_k_global_call_count={d}\n", .{result.compact_k_global_call_count});
-    try writer.print("compact_k_global_call_compact_count={d}\n", .{result.compact_k_global_call_compact_count});
-    try writer.print("compact_k_global_call_fallback_count={d}\n", .{result.compact_k_global_call_fallback_count});
-    try writer.print("compact_k_global_call_fallback_no_compact_count={d}\n", .{result.compact_k_global_call_fallback_no_compact_count});
-    try writer.print("compact_k_global_call_fallback_arity_count={d}\n", .{result.compact_k_global_call_fallback_arity_count});
-    try writer.print("compact_k_global_call_fallback_direct_mask_count={d}\n", .{result.compact_k_global_call_fallback_direct_mask_count});
-    try writer.print("compact_k_global_call_fallback_other_reason_count={d}\n", .{result.compact_k_global_call_fallback_other_reason_count});
-    try writer.print("compact_k_global_call_fallback_builtin_count={d}\n", .{result.compact_k_global_call_fallback_builtin_count});
-    try writer.print("compact_k_global_call_fallback_closure_count={d}\n", .{result.compact_k_global_call_fallback_closure_count});
-    try writer.print("compact_k_global_call_fallback_array_count={d}\n", .{result.compact_k_global_call_fallback_array_count});
-    try writer.print("compact_k_global_call_fallback_other_kind_count={d}\n", .{result.compact_k_global_call_fallback_other_kind_count});
-    try writer.print("compact_k_frame_fallback_count={d}\n", .{result.compact_k_frame_fallback_count});
-    try writer.print("compact_k_indexed_assign_sources_count={d}\n", .{result.compact_k_indexed_assign_sources_count});
-    try writer.print("compact_k_indexed_assign_stack_count={d}\n", .{result.compact_k_indexed_assign_stack_count});
-    try writer.print("vm_call1_local_local_count={d}\n", .{result.vm_call1_local_local_count});
-    try writer.print("vm_call1_tail_local_local_count={d}\n", .{result.vm_call1_tail_local_local_count});
-    try writer.print("vm_call1_local_local_op_count={d}\n", .{result.vm_call1_local_local_op_count});
-    try writer.print("vm_call1_tail_local_local_op_count={d}\n", .{result.vm_call1_tail_local_local_op_count});
-    try writer.print("vm_call1_local_local_op_const_count={d}\n", .{result.vm_call1_local_local_op_const_count});
-    try writer.print("vm_call1_tail_local_local_op_const_count={d}\n", .{result.vm_call1_tail_local_local_op_const_count});
+    try writer.print("code_run_count={d}\n", .{result.code_run_count});
+    try writer.print("code_tail_continue_count={d}\n", .{result.code_tail_continue_count});
+    try writer.print("code_global_call_count={d}\n", .{result.code_global_call_count});
+    try writer.print("code_global_call_direct_count={d}\n", .{result.code_global_call_direct_count});
+    try writer.print("code_global_call_fallback_count={d}\n", .{result.code_global_call_fallback_count});
+    try writer.print("code_global_call_fallback_no_code_count={d}\n", .{result.code_global_call_fallback_no_code_count});
+    try writer.print("code_global_call_fallback_arity_count={d}\n", .{result.code_global_call_fallback_arity_count});
+    try writer.print("code_global_call_fallback_other_reason_count={d}\n", .{result.code_global_call_fallback_other_reason_count});
+    try writer.print("code_global_call_fallback_builtin_count={d}\n", .{result.code_global_call_fallback_builtin_count});
+    try writer.print("code_global_call_fallback_closure_count={d}\n", .{result.code_global_call_fallback_closure_count});
+    try writer.print("code_global_call_fallback_array_count={d}\n", .{result.code_global_call_fallback_array_count});
+    try writer.print("code_global_call_fallback_other_kind_count={d}\n", .{result.code_global_call_fallback_other_kind_count});
+    try writer.print("code_compile_count={d}\n", .{result.code_compile_count});
+    try writer.print("code_compile_success_count={d}\n", .{result.code_compile_success_count});
+    try writer.print("code_compile_miss_arity_or_local_limit_count={d}\n", .{result.code_compile_miss_arity_or_local_limit_count});
+    try writer.print("code_compile_miss_body_size_count={d}\n", .{result.code_compile_miss_body_size_count});
+    try writer.print("code_compile_miss_invalid_code_count={d}\n", .{result.code_compile_miss_invalid_code_count});
+    try writer.print("code_compile_miss_unsupported_opcode_or_operand_count={d}\n", .{result.code_compile_miss_unsupported_opcode_or_operand_count});
+    try writer.print("code_compile_miss_target_or_offset_count={d}\n", .{result.code_compile_miss_target_or_offset_count});
+    try writer.print("code_compile_miss_code_body_size_count={d}\n", .{result.code_compile_miss_code_body_size_count});
+    try writer.print("code_compile_miss_stack_size_count={d}\n", .{result.code_compile_miss_stack_size_count});
+    try writer.writeAll("code_compile_unsupported_opcode_top_counts=");
+    var first_compact_compile_op = true;
+    for (result.code_compile_unsupported_opcode_top_counts) |entry| {
+        if (entry.count == 0) continue;
+        if (!first_compact_compile_op) try writer.writeByte(',');
+        first_compact_compile_op = false;
+        try writer.print("{s}:{d}", .{ entry.name, entry.count });
+    }
+    try writer.writeByte('\n');
+    try writer.print("code_indexed_assign_sources_count={d}\n", .{result.code_indexed_assign_sources_count});
+    try writer.print("code_indexed_assign_stack_count={d}\n", .{result.code_indexed_assign_stack_count});
     try writer.print("host_fold_fast_count={d}\n", .{result.host_fold_fast_count});
     try writer.print("host_scan_fast_count={d}\n", .{result.host_scan_fast_count});
     try writer.print("host_fold_scan_miss_unsupported_builtin_count={d}\n", .{result.host_fold_scan_miss_unsupported_builtin_count});
@@ -661,13 +667,7 @@ pub fn writeProbeResultText(writer: anytype, result: ProbeResult) !void {
     try writer.print("reshape_view_release_count={d}\n", .{result.reshape_view_release_count});
     try writer.print("transpose_view_alloc_count={d}\n", .{result.transpose_view_alloc_count});
     try writer.print("transpose_view_release_count={d}\n", .{result.transpose_view_release_count});
-    try writer.print("direct_closure1_hit_count={d}\n", .{result.direct_closure1_hit_count});
-    try writer.print("direct_closure2_hit_count={d}\n", .{result.direct_closure2_hit_count});
-    try writer.print("direct_closure3_hit_count={d}\n", .{result.direct_closure3_hit_count});
-    try writer.print("direct_closure_miss_not_frozen_count={d}\n", .{result.direct_closure_miss_not_frozen_count});
-    try writer.print("direct_closure_miss_captures_count={d}\n", .{result.direct_closure_miss_captures_count});
-    try writer.print("direct_closure_miss_unsupported_shape_count={d}\n", .{result.direct_closure_miss_unsupported_shape_count});
-    try writer.print("run_closure_mode_count={d}\n", .{result.run_closure_mode_count});
+    try writer.print("structured_derived2_hit_count={d}\n", .{result.structured_derived2_hit_count});
     try writer.print("apply_derived_closure_count={d}\n", .{result.apply_derived_closure_count});
     try writer.print("apply_projection_count={d}\n", .{result.apply_projection_count});
     try writer.print("autograd_builtin_grad_count={d}\n", .{result.autograd_builtin_grad_count});

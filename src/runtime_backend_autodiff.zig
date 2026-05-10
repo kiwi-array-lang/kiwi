@@ -179,11 +179,7 @@ fn executeDenseAutodiffProgramMlx(
             .scan_add => |src| {
                 var incoming = takeOwnedMlxArray(api, &adjoint[rev]);
                 defer incoming.deinit();
-                var reversed = api.mlx.Array.reverse0(ctx.*, incoming) catch |err| return api.mapMlxError(err);
-                defer reversed.deinit();
-                var suffix = api.mlx.Array.cumsum0Inclusive(ctx.*, reversed) catch |err| return api.mapMlxError(err);
-                defer suffix.deinit();
-                const term = api.mlx.Array.reverse0(ctx.*, suffix) catch |err| return api.mapMlxError(err);
+                const term = api.mlx.Array.cumsum0ReverseInclusive(ctx.*, incoming) catch |err| return api.mapMlxError(err);
                 try accumulateOwnedMlxAdjoint(api, ctx, &adjoint[src], term);
             },
             .unary_map => |value| {

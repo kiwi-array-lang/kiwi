@@ -546,6 +546,14 @@ pub const Array = struct {
         return initFromHandle(kiwi_bridge_cumsum0_inclusive(value.handle), if (value.dtype() == c.MLX_BOOL) c.MLX_INT32 else value.dtype());
     }
 
+    pub fn cumsum0ReverseInclusive(ctx: Context, value: Array) Error!Array {
+        var reversed = try reverse0(ctx, value);
+        defer reversed.deinit();
+        var suffix = try cumsum0Inclusive(ctx, reversed);
+        defer suffix.deinit();
+        return reverse0(ctx, suffix);
+    }
+
     pub fn cumprod0Inclusive(ctx: Context, value: Array) Error!Array {
         _ = ctx;
         return initFromHandle(kiwi_bridge_scan_axis0_inclusive(value.handle, @intFromEnum(AxisOp.mul)), if (value.dtype() == c.MLX_BOOL) c.MLX_INT32 else value.dtype());

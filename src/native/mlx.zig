@@ -726,6 +726,12 @@ pub const Array = struct {
         return .{ .handle = out };
     }
 
+    pub fn cumsum0ReverseInclusive(ctx: Context, value: Array) Error!Array {
+        var out = c.mlx_array_new();
+        try check(c.mlx_cumsum(&out, value.handle, 0, true, true, ctx.stream));
+        return .{ .handle = out };
+    }
+
     pub fn cumprod0Inclusive(ctx: Context, value: Array) Error!Array {
         var out = c.mlx_array_new();
         try check(mlxc_cumprod0_inclusive(&out, value.handle, ctx.stream));

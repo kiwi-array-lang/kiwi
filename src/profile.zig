@@ -3,7 +3,7 @@ const runtime = @import("runtime.zig");
 
 pub const default_sample_hz: usize = 1000;
 pub const label_sample_count = runtime.sampling_profile_label_count;
-pub const op_sample_count = std.meta.fields(runtime.DebugOp).len;
+pub const op_sample_count = runtime.sampling_profile_op_count;
 pub const max_function_results = 12;
 pub const max_code_results = 12;
 
@@ -60,7 +60,7 @@ const Sampler = struct {
         const state = self.session.samplingProfileState();
         self.label_counts[@intFromEnum(state.label)] += 1;
         if (state.op) |op| {
-            self.op_counts[@intFromEnum(op)] += 1;
+            self.op_counts[op] += 1;
         }
         if (state.callable_slot != runtime.sampling_profile_no_callable_slot and state.callable_slot < self.function_counts.len) {
             self.function_counts[state.callable_slot] += 1;
@@ -164,9 +164,9 @@ fn makeLabelCounts(counts: [label_sample_count]usize) [label_sample_count]NamedC
 
 fn makeOpCounts(counts: [op_sample_count]usize) [op_sample_count]NamedCount {
     var result: [op_sample_count]NamedCount = undefined;
-    inline for (std.meta.fields(runtime.DebugOp), 0..) |field, idx| {
+    for (0..op_sample_count) |idx| {
         result[idx] = .{
-            .name = field.name,
+            .name = runtime.debugCodeOpName(@intCast(idx)),
             .count = counts[idx],
         };
     }

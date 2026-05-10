@@ -27,6 +27,22 @@ kiwi path/to/file.k
 
 Running `kiwi` without a file starts the local REPL.
 
+## Jupyter
+
+The Jupyter kernel lives in [`python/jupyter/`](python/jupyter). It uses the shared
+`libkiwi_bridge` session API and can display Vega-Lite output emitted as JSON
+through Kiwi's `` `j@`` encoder.
+
+In a fresh public checkout, bootstrap MLX first with
+`KIWI_MLX_BACKEND=cpu scripts/bootstrap_deps.sh` unless `.deps/mlx` and
+`.deps/mlx-c` already exist.
+
+```sh
+cd python/jupyter
+uv sync --managed-python --python 3.14.2 --group dev
+uv run --managed-python python -m kiwi_jupyter_kernel.install --user
+```
+
 ## Build From Source
 
 ### Requirements
