@@ -3,6 +3,7 @@ const build_options = @import("build_options");
 const runtime_device = @import("device.zig");
 const repl_meta = @import("repl_meta.zig");
 const runtime = @import("runtime.zig");
+const syntax_tokens = @import("syntax_tokens.zig");
 
 const page_size: usize = 64 * 1024;
 const wasm_exports_accelerator_handles = build_options.wasm_exports_accelerator_handles;
@@ -36,6 +37,13 @@ fn bytesAt(ptr: u32, len: u32) []u8 {
     const base: usize = @intCast(ptr);
     const count: usize = @intCast(len);
     const many: [*]u8 = @ptrFromInt(base);
+    return many[0..count];
+}
+
+fn syntaxTokensAt(ptr: u32, len: u32) []syntax_tokens.Token {
+    const base: usize = @intCast(ptr);
+    const count: usize = @intCast(len);
+    const many: [*]syntax_tokens.Token = @ptrFromInt(base);
     return many[0..count];
 }
 
@@ -144,6 +152,44 @@ fn isIdentContinue(ch: u8) bool {
 
 fn isTopLevelAssignment(line: []const u8) bool {
     const trimmed = std.mem.trim(u8, line, " \t\r");
+    return isSingleTopLevelAssignment(lastTopLevelStatementSlice(trimmed));
+}
+
+fn lastTopLevelStatementSlice(trimmed: []const u8) []const u8 {
+    var idx: usize = 0;
+    var segment_start: usize = 0;
+    var paren_depth: usize = 0;
+    var bracket_depth: usize = 0;
+    var brace_depth: usize = 0;
+    while (idx < trimmed.len) : (idx += 1) {
+        switch (trimmed[idx]) {
+            '"' => {
+                idx += 1;
+                while (idx < trimmed.len and trimmed[idx] != '"') : (idx += 1) {}
+                if (idx >= trimmed.len) break;
+            },
+            '(' => paren_depth += 1,
+            ')' => {
+                if (paren_depth != 0) paren_depth -= 1;
+            },
+            '[' => bracket_depth += 1,
+            ']' => {
+                if (bracket_depth != 0) bracket_depth -= 1;
+            },
+            '{' => brace_depth += 1,
+            '}' => {
+                if (brace_depth != 0) brace_depth -= 1;
+            },
+            ';' => {
+                if (paren_depth == 0 and bracket_depth == 0 and brace_depth == 0) segment_start = idx + 1;
+            },
+            else => {},
+        }
+    }
+    return std.mem.trim(u8, trimmed[segment_start..], " \t\r");
+}
+
+fn isSingleTopLevelAssignment(trimmed: []const u8) bool {
     if (trimmed.len == 0 or !isIdentStart(trimmed[0])) return false;
 
     var idx: usize = 0;
@@ -152,6 +198,11 @@ fn isTopLevelAssignment(line: []const u8) bool {
     var brace_depth: usize = 0;
     while (idx < trimmed.len) : (idx += 1) {
         switch (trimmed[idx]) {
+            '"' => {
+                idx += 1;
+                while (idx < trimmed.len and trimmed[idx] != '"') : (idx += 1) {}
+                if (idx >= trimmed.len) break;
+            },
             '(' => paren_depth += 1,
             ')' => {
                 if (paren_depth != 0) paren_depth -= 1;
@@ -195,6 +246,19 @@ pub export fn kiwi_alloc_bytes(len: u32, alignment: u32) u32 {
 
 pub export fn kiwi_reset_input_arena() void {
     heap_offset = 4096;
+}
+
+pub export fn kiwi_syntax_tokenize(ptr: u32, len: u32, out_ptr: u32, out_capacity: u32) u32 {
+    if (ptr == 0 and len != 0) return 0;
+    const source = if (len == 0) &[_]u8{} else bytesAt(ptr, len);
+    var empty: [0]syntax_tokens.Token = .{};
+    const output = if (out_ptr == 0 or out_capacity == 0)
+        empty[0..]
+    else
+        syntaxTokensAt(out_ptr, out_capacity);
+    var buffer = syntax_tokens.TokenBuffer{ .tokens = output };
+    syntax_tokens.tokenize(source, &buffer);
+    return std.math.cast(u32, buffer.total) orelse std.math.maxInt(u32);
 }
 
 pub export fn kiwi_init(device: u32) i32 {

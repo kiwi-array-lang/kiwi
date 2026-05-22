@@ -1,10 +1,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
+import sys
 
 import pytest
 
-from kiwilang.notebook import (
+RUNTIME_ROOT = Path(__file__).resolve().parents[1]
+RUNTIME_SRC = RUNTIME_ROOT / "src"
+if str(RUNTIME_SRC) not in sys.path:
+    sys.path.insert(0, str(RUNTIME_SRC))
+
+from kiwi_array.notebook import (
     CellOutput,
     KiwiNotebookError,
     SmokeCheck,

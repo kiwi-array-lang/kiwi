@@ -84,6 +84,10 @@ const bench_tools = if (enable_bench_cli) @import("bench_internal.zig") else str
         return error.InvalidArgument;
     }
 
+    pub fn auditHostCompareCli(_: std.mem.Allocator, _: f64, _: usize) !void {
+        return error.InvalidArgument;
+    }
+
     pub fn resolveVectorSize(_: []const u8, requested_size: usize) usize {
         return requested_size;
     }
@@ -148,11 +152,13 @@ pub const ProfileRequest = struct {
 pub const DebugRequest = enum {
     audit_dense_autodiff,
     find_lookup_stages,
+    host_compare_stages,
     layout,
 };
 
 pub const CliRequest = union(enum) {
     repl,
+    help,
     version,
     exec: ExecRequest,
     bench: BenchRequest,
@@ -231,6 +237,7 @@ fn run() !void {
 
     switch (parsed.request) {
         .repl => try repl(allocator, device, parsed.backend_mode),
+        .help => try help(std.fs.File.stdout().deprecatedWriter()),
         .version => try std.fs.File.stdout().deprecatedWriter().print("{s}\n", .{version.string}),
         .exec => |request| try executeRequest(allocator, device, parsed.backend_mode, request),
         .bench => |request| {
@@ -250,6 +257,10 @@ fn run() !void {
             .find_lookup_stages => {
                 if (!enable_debug_cli) return invalidArgument();
                 try bench_tools.auditFindLookupCli(allocator, parsed.target_batch_ms, parsed.vector_size);
+            },
+            .host_compare_stages => {
+                if (!enable_debug_cli) return invalidArgument();
+                try bench_tools.auditHostCompareCli(allocator, parsed.target_batch_ms, parsed.vector_size);
             },
             .layout => {
                 if (!enable_debug_cli) return invalidArgument();
@@ -327,6 +338,11 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Cli
         if (std.mem.eql(u8, arg, "--version")) {
             if (mode != .auto or exec_input != null) return invalidArgument();
             options.request = .version;
+            return options;
+        }
+        if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+            if (mode != .auto or exec_input != null) return invalidArgument();
+            options.request = .help;
             return options;
         }
         if (std.mem.eql(u8, arg, "--device")) {
@@ -455,6 +471,7 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Cli
 
         switch (mode) {
             .auto => {
+                if (looksLikeUnknownOption(arg)) return invalidArgument();
                 exec_input = if (std.mem.eql(u8, arg, "-")) .stdin else .{ .path = arg };
                 mode = .exec;
             },
@@ -468,10 +485,12 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Cli
             },
             .probe => {
                 if (probe_input != null) return invalidArgument();
+                if (looksLikeUnknownOption(arg)) return invalidArgument();
                 probe_input = if (std.mem.eql(u8, arg, "-")) .stdin else .{ .path = arg };
             },
             .profile => {
                 if (profile_input != null) return invalidArgument();
+                if (looksLikeUnknownOption(arg)) return invalidArgument();
                 profile_input = if (std.mem.eql(u8, arg, "-")) .stdin else .{ .path = arg };
             },
             .debug => {
@@ -480,6 +499,8 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Cli
                     debug_request = .audit_dense_autodiff;
                 } else if (std.mem.eql(u8, arg, "find-lookup-stages")) {
                     debug_request = .find_lookup_stages;
+                } else if (std.mem.eql(u8, arg, "host-compare-stages")) {
+                    debug_request = .host_compare_stages;
                 } else if (std.mem.eql(u8, arg, "layout")) {
                     debug_request = .layout;
                 } else {
@@ -514,42 +535,83 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Cli
     return options;
 }
 
-fn usage() !void {
-    const stderr = std.fs.File.stderr().deprecatedWriter();
-    try stderr.print(
-        "{s} {s}\n\nusage:\n  {s}\n  {s} --version\n  {s} [--device cpu|gpu] [--backend auto|host|mlx_cpu|mlx_gpu] [-i] [-e source | file.k | -] [args...]\n",
+fn looksLikeUnknownOption(arg: []const u8) bool {
+    return arg.len > 1 and arg[0] == '-';
+}
+
+fn writeUsage(writer: anytype) !void {
+    try writer.print(
+        "{s} {s}\n\nusage:\n  {s}\n  {s} -h | --help\n  {s} --version\n  {s} [--device cpu|gpu] [--backend auto|host|mlx_cpu|mlx_gpu] [-i] [-e source | file.k | -] [args...]\n",
         .{
             cli_invocation,
             version.string,
             cli_invocation,
             cli_invocation,
             cli_invocation,
+            cli_invocation,
         },
     );
     if (comptime enable_bench_cli) {
-        try stderr.print(
+        try writer.print(
             "  {s} bench [--device cpu|gpu] [--backend auto|host|mlx_cpu|mlx_gpu] [--target-batch-ms N] [--size N] [--matmul-size N] case  (case: name, all, all-full, or stress)\n",
             .{cli_invocation},
         );
     }
     if (comptime enable_probe_cli) {
-        try stderr.print(
+        try writer.print(
             "  {s} probe [--device cpu|gpu] [--backend auto|host|mlx_cpu|mlx_gpu] [--setup source] [--setup-file path.k] [--json] [--json-out path] [-e source | file.k | -]\n",
             .{cli_invocation},
         );
     }
     if (comptime enable_profile_cli) {
-        try stderr.print(
+        try writer.print(
             "  {s} profile [--device cpu|gpu] [--backend auto|host|mlx_cpu|mlx_gpu] [--hz N] [--json] [--json-out path] [-e source | file.k | -]\n",
             .{cli_invocation},
         );
     }
     if (comptime enable_debug_cli) {
-        try stderr.print(
-            "  {s} debug audit-dense-autodiff\n  {s} debug [--target-batch-ms N] [--size N] find-lookup-stages\n  {s} debug layout\n",
-            .{ cli_invocation, cli_invocation, cli_invocation },
+        try writer.print(
+            "  {s} debug audit-dense-autodiff\n  {s} debug [--target-batch-ms N] [--size N] find-lookup-stages\n  {s} debug [--target-batch-ms N] [--size N] host-compare-stages\n  {s} debug layout\n",
+            .{ cli_invocation, cli_invocation, cli_invocation, cli_invocation },
         );
     }
+}
+
+fn help(writer: anytype) !void {
+    try writeUsage(writer);
+    try writer.print(
+        "\nexamples:\n" ++
+            "  {s} -e '1+2'\n" ++
+            "  {s} -e '!5'\n" ++
+            "  {s} -e '+/!10'\n" ++
+            "  {s} -e '\",\"/(\"a\";\"b\")'\n" ++
+            "  {s} -e '\",\"\\\"a,b,c\"'\n" ++
+            "  {s} -e '1<#\",\"\\\"a,b\"'\n" ++
+            "  printf 'x:41\\nx+1\\n' | {s} -\n" ++
+            "  {s} script.k\n\n" ++
+            "notes:\n" ++
+            "  Kiwi is a small K-like array language.\n" ++
+            "  Use -e for inline source, file.k for files, and - for stdin.\n" ++
+            "  Extra args after the source are exposed to Kiwi as global x.\n" ++
+            "  Strings use byte primitives: sep\\src split, sep/xs join, 1<#needle\\src contains.\n" ++
+            "  In the REPL or a script, a bare backslash prints this refcard.\n\n" ++
+            "{s}\n",
+        .{
+            cli_invocation,
+            cli_invocation,
+            cli_invocation,
+            cli_invocation,
+            cli_invocation,
+            cli_invocation,
+            cli_invocation,
+            cli_invocation,
+            repl_meta.compact_refcard,
+        },
+    );
+}
+
+fn usage() !void {
+    try writeUsage(std.fs.File.stderr().deprecatedWriter());
     return error.InvalidArgument;
 }
 
@@ -926,7 +988,14 @@ fn execInputLabel(input: ExecInput) []const u8 {
 }
 
 fn readSourceFromFile(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
-    const file = try std.fs.cwd().openFile(path, .{});
+    const file = std.fs.cwd().openFile(path, .{}) catch |err| {
+        const stderr = std.fs.File.stderr().deprecatedWriter();
+        switch (err) {
+            error.FileNotFound => try stderr.print("{s}: {s}: file not found\n", .{ cli_invocation, path }),
+            else => try stderr.print("{s}: {s}: cannot read file ({s})\n", .{ cli_invocation, path, @errorName(err) }),
+        }
+        return error.ScriptFailed;
+    };
     defer file.close();
     return try file.readToEndAlloc(allocator, max_source_bytes);
 }
@@ -1176,6 +1245,44 @@ fn shouldEchoEvalLine(line: []const u8) bool {
 
 fn isTopLevelAssignment(line: []const u8) bool {
     const trimmed = std.mem.trim(u8, line, " \t\r");
+    return isSingleTopLevelAssignment(lastTopLevelStatementSlice(trimmed));
+}
+
+fn lastTopLevelStatementSlice(trimmed: []const u8) []const u8 {
+    var idx: usize = 0;
+    var segment_start: usize = 0;
+    var paren_depth: usize = 0;
+    var bracket_depth: usize = 0;
+    var brace_depth: usize = 0;
+    while (idx < trimmed.len) : (idx += 1) {
+        switch (trimmed[idx]) {
+            '"' => {
+                idx += 1;
+                while (idx < trimmed.len and trimmed[idx] != '"') : (idx += 1) {}
+                if (idx >= trimmed.len) break;
+            },
+            '(' => paren_depth += 1,
+            ')' => {
+                if (paren_depth != 0) paren_depth -= 1;
+            },
+            '[' => bracket_depth += 1,
+            ']' => {
+                if (bracket_depth != 0) bracket_depth -= 1;
+            },
+            '{' => brace_depth += 1,
+            '}' => {
+                if (brace_depth != 0) brace_depth -= 1;
+            },
+            ';' => {
+                if (paren_depth == 0 and bracket_depth == 0 and brace_depth == 0) segment_start = idx + 1;
+            },
+            else => {},
+        }
+    }
+    return std.mem.trim(u8, trimmed[segment_start..], " \t\r");
+}
+
+fn isSingleTopLevelAssignment(trimmed: []const u8) bool {
     if (trimmed.len == 0 or !isIdentStart(trimmed[0])) return false;
 
     var idx: usize = 0;
@@ -1184,6 +1291,11 @@ fn isTopLevelAssignment(line: []const u8) bool {
     var brace_depth: usize = 0;
     while (idx < trimmed.len) : (idx += 1) {
         switch (trimmed[idx]) {
+            '"' => {
+                idx += 1;
+                while (idx < trimmed.len and trimmed[idx] != '"') : (idx += 1) {}
+                if (idx >= trimmed.len) break;
+            },
             '(' => paren_depth += 1,
             ')' => {
                 if (paren_depth != 0) paren_depth -= 1;
@@ -1271,10 +1383,13 @@ fn evalTiming(session: *runtime.Session, allocator: std.mem.Allocator, request: 
 }
 
 fn runTimingRequest(session: *runtime.Session, request: TimingRequest) !u64 {
+    session.clearLastErrorText();
+    const code = try session.compile(request.expr);
+
     const started = monotonicNanos();
     var idx: usize = 0;
     while (idx < request.loops) : (idx += 1) {
-        const value = try session.evalSource(request.expr);
+        const value = try session.evalCode(code);
         try session.forceValue(value);
     }
     return monotonicNanos() - started;

@@ -22,7 +22,7 @@ def default_workspace_root() -> Path:
 
 
 WORKSPACE_ROOT = default_workspace_root()
-RUNTIME_PACKAGE = KIWI_ROOT / "python" / "runtime" / "src" / "kiwilang"
+RUNTIME_PACKAGE = KIWI_ROOT / "python" / "host" / "src" / "kiwi_array_host"
 LINUX_TOOLCHAIN_RUNTIME_NAMES = {
     "libgcc_s.so.1",
     "libstdc++.so.6",
@@ -46,6 +46,10 @@ def host_library_name(base: str) -> str:
     if system == "Windows":
         return f"{base}.dll"
     return f"lib{base}.so"
+
+
+def host_executable_name(base: str) -> str:
+    return f"{base}.exe" if platform.system() == "Windows" else base
 
 
 def default_mlx_prefix() -> Path:
@@ -149,6 +153,23 @@ def normalize_macos_rpaths(binary: Path) -> None:
         subprocess.run(["install_name_tool", "-add_rpath", wanted, str(binary)], check=True)
 
 
+def normalize_macos_library_rpaths(lib_dir: Path) -> None:
+    if platform.system() != "Darwin":
+        return
+    bundled_names = {
+        child.name
+        for child in lib_dir.iterdir()
+        if is_runtime_library(child)
+    }
+    for child in sorted(lib_dir.iterdir()):
+        if not is_runtime_library(child):
+            continue
+        bundled_deps = set(dynamic_dependency_names(child)) & bundled_names
+        bundled_deps.discard(child.name)
+        if bundled_deps:
+            normalize_macos_rpaths(child)
+
+
 def normalize_linux_rpath(binary: Path, rpath: str) -> None:
     if platform.system() != "Linux" or not shutil.which("patchelf"):
         return
@@ -164,11 +185,56 @@ def normalize_linux_library_rpaths(lib_dir: Path) -> None:
             normalize_linux_rpath(child, rpath)
 
 
+def dynamic_dependency_names(binary: Path) -> list[str]:
+    system = platform.system()
+    if system == "Darwin" and shutil.which("otool"):
+        result = subprocess.run(
+            ["otool", "-L", str(binary)],
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+        )
+        names = []
+        for raw_line in result.stdout.splitlines()[1:]:
+            value = raw_line.strip().split(" ", 1)[0]
+            if value:
+                names.append(Path(value).name)
+        return names
+    if system == "Linux" and shutil.which("readelf"):
+        result = subprocess.run(
+            ["readelf", "-d", str(binary)],
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+        )
+        names = []
+        marker = "Shared library: ["
+        for line in result.stdout.splitlines():
+            if marker not in line:
+                continue
+            names.append(line.split(marker, 1)[1].split("]", 1)[0])
+        return names
+    return []
+
+
+def assert_host_payload(binary: Path) -> None:
+    mlx_deps = [
+        name
+        for name in dynamic_dependency_names(binary)
+        if name.startswith("libmlx") or name.startswith("libkiwi_mlx_bridge")
+    ]
+    if mlx_deps:
+        deps = ", ".join(sorted(set(mlx_deps)))
+        raise RuntimeError(
+            f"host runtime payload cannot depend on MLX libraries: {binary} links {deps}"
+        )
+
+
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Stage native libraries into the kiwilang wheel package.")
+    parser = argparse.ArgumentParser(description="Stage native libraries into a Kiwi Array wheel package.")
     parser.add_argument("--prefix", type=Path, default=KIWI_ROOT / "zig-out", help="Kiwi install prefix containing libkiwi_bridge.")
     parser.add_argument("--runtime-backend", choices=("host", "mlx"), default="mlx", help="Runtime backend staged into the wheel.")
-    parser.add_argument("--runtime-package", type=Path, default=RUNTIME_PACKAGE, help="kiwilang package directory to receive native payloads.")
+    parser.add_argument("--runtime-package", type=Path, default=RUNTIME_PACKAGE, help="Python package directory to receive native payloads.")
     parser.add_argument("--mlx-prefix", type=Path, default=default_mlx_prefix(), help="MLX install prefix.")
     parser.add_argument("--duckdb-prefix", type=Path, default=default_duckdb_prefix(), help="DuckDB install prefix.")
     parser.add_argument("--bridge-lib", type=Path, help="Explicit libkiwi_bridge path.")
@@ -180,13 +246,25 @@ def main() -> int:
     args = parse_args()
     native_dir = args.runtime_package / "native"
     lib_dir = args.runtime_package / "lib"
+    bin_dir = args.runtime_package / "bin"
+    clean_payload_dir(bin_dir)
     clean_payload_dir(native_dir)
     clean_payload_dir(lib_dir)
+
+    cli = args.prefix / "bin" / host_executable_name("kiwi")
+    staged_cli = copy_required(cli, bin_dir)
+    staged_cli.chmod(staged_cli.stat().st_mode | 0o111)
+    normalize_macos_rpaths(staged_cli)
+    normalize_linux_rpath(staged_cli, "$ORIGIN/../lib")
+    if args.runtime_backend == "host":
+        assert_host_payload(staged_cli)
 
     bridge = args.bridge_lib or args.prefix / "lib" / host_library_name("kiwi_bridge")
     staged_bridge = copy_required(bridge, native_dir)
     normalize_macos_rpaths(staged_bridge)
     normalize_linux_rpath(staged_bridge, "$ORIGIN/../lib")
+    if args.runtime_backend == "host":
+        assert_host_payload(staged_bridge)
 
     copy_prefix_runtime_libraries(args.prefix, lib_dir)
     copy_prefix_runtime_libraries(args.duckdb_prefix, lib_dir)
@@ -211,7 +289,9 @@ def main() -> int:
             raise FileNotFoundError(f"required libduckdb not found. Searched: {joined}")
 
     normalize_linux_library_rpaths(lib_dir)
+    normalize_macos_library_rpaths(lib_dir)
 
+    print(f"staged native CLI: {staged_cli}")
     print(f"staged native bridge: {staged_bridge}")
     print(f"staged runtime libs: {lib_dir}")
     return 0

@@ -1,0 +1,126 @@
+diff --git a/mlx/backend/cuda/CMakeLists.txt b/mlx/backend/cuda/CMakeLists.txt
+--- a/mlx/backend/cuda/CMakeLists.txt
++++ b/mlx/backend/cuda/CMakeLists.txt
+@@ -37,28 +37,23 @@ target_sources(
+           ${CMAKE_CURRENT_SOURCE_DIR}/cudnn_utils.cpp
+           ${CMAKE_CURRENT_SOURCE_DIR}/device_info.cpp
+           ${CMAKE_CURRENT_SOURCE_DIR}/custom_kernel.cpp
+           ${CMAKE_CURRENT_SOURCE_DIR}/device.cpp
+-          ${CMAKE_CURRENT_SOURCE_DIR}/distributed.cu
+           ${CMAKE_CURRENT_SOURCE_DIR}/eval.cpp
+           ${CMAKE_CURRENT_SOURCE_DIR}/event.cu
+-          ${CMAKE_CURRENT_SOURCE_DIR}/fft.cu
+           ${CMAKE_CURRENT_SOURCE_DIR}/fence.cpp
+           ${CMAKE_CURRENT_SOURCE_DIR}/gemms/block_mask.cu
+           ${CMAKE_CURRENT_SOURCE_DIR}/gemms/gemv.cu
+           ${CMAKE_CURRENT_SOURCE_DIR}/gemms/cublas_gemm.cpp
+           ${CMAKE_CURRENT_SOURCE_DIR}/gemms/gather_gemm.cu
+           ${CMAKE_CURRENT_SOURCE_DIR}/gemms/grouped_gemm_unaligned.cu
+-          ${CMAKE_CURRENT_SOURCE_DIR}/hadamard.cu
+           ${CMAKE_CURRENT_SOURCE_DIR}/jit_module.cpp
+           ${CMAKE_CURRENT_SOURCE_DIR}/indexing.cpp
+           ${CMAKE_CURRENT_SOURCE_DIR}/kernel_utils.cu
+           ${CMAKE_CURRENT_SOURCE_DIR}/matmul.cpp
+           ${CMAKE_CURRENT_SOURCE_DIR}/load.cpp
+           ${CMAKE_CURRENT_SOURCE_DIR}/layer_norm.cu
+-          ${CMAKE_CURRENT_SOURCE_DIR}/logsumexp.cu
+           ${CMAKE_CURRENT_SOURCE_DIR}/primitives.cpp
+-          ${CMAKE_CURRENT_SOURCE_DIR}/random.cu
+           ${CMAKE_CURRENT_SOURCE_DIR}/reduce.cu
+           ${CMAKE_CURRENT_SOURCE_DIR}/reduce/all_reduce.cu
+           ${CMAKE_CURRENT_SOURCE_DIR}/reduce/col_reduce.cu
+           ${CMAKE_CURRENT_SOURCE_DIR}/reduce/init_reduce.cu
+@@ -82,13 +77,19 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/unary)
+ if(MLX_KIWI_CUDA_RUNTIME_PROFILE)
+   target_sources(
+     mlx PRIVATE
++                ${CMAKE_CURRENT_SOURCE_DIR}/kiwi_disabled_runtime.cpp
+                 ${CMAKE_CURRENT_SOURCE_DIR}/quantized/kiwi_disabled_quantized.cpp)
+   target_compile_definitions(mlx PRIVATE MLX_KIWI_CUDA_RUNTIME_PROFILE)
+ else()
+   target_sources(
+     mlx
+-    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/quantized/affine_quantize.cu
++    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/distributed.cu
++            ${CMAKE_CURRENT_SOURCE_DIR}/fft.cu
++            ${CMAKE_CURRENT_SOURCE_DIR}/hadamard.cu
++            ${CMAKE_CURRENT_SOURCE_DIR}/logsumexp.cu
++            ${CMAKE_CURRENT_SOURCE_DIR}/random.cu
++            ${CMAKE_CURRENT_SOURCE_DIR}/quantized/affine_quantize.cu
+             ${CMAKE_CURRENT_SOURCE_DIR}/quantized/fp_quantize.cu
+             ${CMAKE_CURRENT_SOURCE_DIR}/quantized/quantized.cpp
+             ${CMAKE_CURRENT_SOURCE_DIR}/quantized/qqmm.cpp
+             ${CMAKE_CURRENT_SOURCE_DIR}/quantized/qqmm_utils.cu
+@@ -280,8 +281,10 @@ target_include_directories(mlx PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
+ # Use cublasLt.
+ target_link_libraries(mlx PRIVATE CUDA::cublasLt)
+
+-# Use cuFFT.
+-target_link_libraries(mlx PRIVATE CUDA::cufft)
++if(NOT MLX_KIWI_CUDA_RUNTIME_PROFILE)
++  # Use cuFFT.
++  target_link_libraries(mlx PRIVATE CUDA::cufft)
++endif()
+
+ # Use NVRTC and driver APIs.
+ target_link_libraries(mlx PRIVATE CUDA::nvrtc CUDA::cuda_driver)
+diff --git a/mlx/backend/cuda/kiwi_disabled_runtime.cpp b/mlx/backend/cuda/kiwi_disabled_runtime.cpp
+new file mode 100644
+--- /dev/null
++++ b/mlx/backend/cuda/kiwi_disabled_runtime.cpp
+@@ -0,0 +1,54 @@
++#include "mlx/distributed/primitives.h"
++#include "mlx/primitives.h"
++
++#include <stdexcept>
++#include <string>
++
++namespace mlx::core {
++namespace {
++[[noreturn]] void throw_disabled_cuda_primitive(const char* primitive) {
++  throw std::runtime_error(
++      std::string("[kiwi_runtime] MLX CUDA primitive is not included in this "
++                  "build: ") +
++      primitive);
++}
++} // namespace
++
++void FFT::eval_gpu(const std::vector<array>&, array&) {
++  throw_disabled_cuda_primitive("FFT");
++}
++
++void Hadamard::eval_gpu(const std::vector<array>&, array&) {
++  throw_disabled_cuda_primitive("Hadamard");
++}
++
++void LogSumExp::eval_gpu(const std::vector<array>&, array&) {
++  throw_disabled_cuda_primitive("LogSumExp");
++}
++
++void RandomBits::eval_gpu(const std::vector<array>&, array&) {
++  throw_disabled_cuda_primitive("RandomBits");
++}
++
++namespace distributed {
++
++void AllReduce::eval_gpu(
++    const std::vector<array>&,
++    std::vector<array>&) {
++  throw_disabled_cuda_primitive("AllReduce");
++}
++
++void AllGather::eval_gpu(
++    const std::vector<array>&,
++    std::vector<array>&) {
++  throw_disabled_cuda_primitive("AllGather");
++}
++
++void ReduceScatter::eval_gpu(
++    const std::vector<array>&,
++    std::vector<array>&) {
++  throw_disabled_cuda_primitive("ReduceScatter");
++}
++
++} // namespace distributed
++} // namespace mlx::core
++} // namespace mlx::core

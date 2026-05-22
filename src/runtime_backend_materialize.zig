@@ -40,7 +40,7 @@ pub fn createHostDenseArrayFromBackendArray(
             });
             break :blk host;
         },
-        api.c.MLX_INT32, api.c.MLX_INT64, api.c.MLX_UINT32 => blk: {
+        api.c.MLX_INT32 => blk: {
             const items = owned.readInts(self.allocator) catch |err| return api.mapMlxError(err);
             defer self.allocator.free(items);
 
@@ -57,12 +57,52 @@ pub fn createHostDenseArrayFromBackendArray(
             api.hostDenseSetCachedIntRange(host, analysis.range);
             break :blk host;
         },
-        api.c.MLX_FLOAT16, api.c.MLX_FLOAT32, api.c.MLX_FLOAT64, api.c.MLX_BFLOAT16 => blk: {
+        api.c.MLX_UINT32 => blk: {
+            const items = owned.readUInt32s(self.allocator) catch |err| return api.mapMlxError(err);
+            defer self.allocator.free(items);
+
+            var values = try self.allocator.alloc(i64, items.len);
+            defer self.allocator.free(values);
+            for (items, 0..) |item, idx| values[idx] = item;
+
+            const analysis = api.analyzeIntSlice(values);
+            var out = try api.allocOwnedHostIntResult(self, owner, analysis.kind, len);
+            for (values, 0..) |item, idx| try api.hostIntResultSet(&out, idx, item);
+            const host = api.hostIntResultArrayPtr(&out);
+            if (analysis.kind == .bit) api.bitClearUnusedTail(host.storage.bit, host.logical_len);
+            api.hostDenseSetFlags(host, analysis.flags);
+            api.hostDenseSetCachedIntRange(host, analysis.range);
+            break :blk host;
+        },
+        api.c.MLX_INT64 => blk: {
+            const items = owned.readInt64s(self.allocator) catch |err| return api.mapMlxError(err);
+            defer self.allocator.free(items);
+
+            const analysis = api.analyzeIntSlice(items);
+            var out = try api.allocOwnedHostIntResult(self, owner, analysis.kind, len);
+            for (items, 0..) |item, idx| try api.hostIntResultSet(&out, idx, item);
+            const host = api.hostIntResultArrayPtr(&out);
+            if (analysis.kind == .bit) api.bitClearUnusedTail(host.storage.bit, host.logical_len);
+            api.hostDenseSetFlags(host, analysis.flags);
+            api.hostDenseSetCachedIntRange(host, analysis.range);
+            break :blk host;
+        },
+        api.c.MLX_FLOAT16, api.c.MLX_FLOAT32, api.c.MLX_BFLOAT16 => blk: {
             const items = owned.readFloats(self.allocator) catch |err| return api.mapMlxError(err);
             defer self.allocator.free(items);
 
+            const out = try api.allocOwnedHostFloat32Result(self, owner, len);
+            @memcpy(out.items, items);
+            const analysis = api.analyzeFloatSlice32(out.items);
+            api.hostDenseSetFlags(out.array, analysis.flags);
+            break :blk out.array;
+        },
+        api.c.MLX_FLOAT64 => blk: {
+            const items = owned.readFloat64s(self.allocator) catch |err| return api.mapMlxError(err);
+            defer self.allocator.free(items);
+
             const out = try api.allocOwnedHostFloatResult(self, owner, len);
-            for (items, 0..) |item, idx| out.items[idx] = @floatCast(item);
+            @memcpy(out.items, items);
             const analysis = api.analyzeFloatSlice(out.items);
             api.hostDenseSetFlags(out.array, analysis.flags);
             break :blk out.array;

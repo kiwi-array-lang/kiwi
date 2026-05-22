@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=82", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kiwi-array-metal"
+version = "0.2.50"
+description = "MLX Metal native runtime payload for Kiwi Array."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[dependency-groups]
+dev = [
+  "build>=1.2",
+]
+
+[project.entry-points."kiwi_array.runtimes"]
+metal = "kiwi_array_metal:runtime_descriptor"
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+kiwi_array_metal = ["bin/*", "native/*", "lib/*", "licenses/*"]

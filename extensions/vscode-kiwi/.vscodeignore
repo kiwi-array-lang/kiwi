@@ -1,0 +1,8 @@
+.vscode/**
+.vscode-test/**
+node_modules/**
+test/**
+npm-debug.log
+yarn.lock
+pnpm-lock.yaml
+*.vsix

@@ -1,0 +1,212 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 041a476c..fc967a29 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -42,6 +42,13 @@ option(MLX_BUILD_GGUF "Include support for GGUF format" ON)
+ option(MLX_BUILD_SAFETENSORS "Include support for safetensors format" ON)
+ option(MLX_BUILD_PYTHON_STUBS "Build stub files for python bindings" ON)
+ option(MLX_METAL_JIT "Use JIT compilation for Metal kernels" OFF)
++set(
++  MLX_METAL_KERNEL_PROFILE
++  "default"
++  CACHE STRING
++        "Precompiled Metal kernel profile to build (default or kiwi_runtime)")
++set_property(
++  CACHE MLX_METAL_KERNEL_PROFILE PROPERTY STRINGS default kiwi_runtime)
+ option(MLX_USE_CCACHE "Use CCache for compilation cache when available" ON)
+ option(BUILD_SHARED_LIBS "Build mlx as a shared library" OFF)
+ option(USE_SYSTEM_FMT "Use system's provided fmt library" OFF)
+diff --git a/mlx/backend/metal/kernels/CMakeLists.txt b/mlx/backend/metal/kernels/CMakeLists.txt
+index 8d3d8a19..b5ea55c6 100644
+--- a/mlx/backend/metal/kernels/CMakeLists.txt
++++ b/mlx/backend/metal/kernels/CMakeLists.txt
+@@ -9,6 +9,52 @@ set(BASE_HEADERS
+     logging.h
+     utils.h)
+
++string(TOLOWER "${MLX_METAL_KERNEL_PROFILE}" MLX_METAL_KERNEL_PROFILE_NORMALIZED)
++set(MLX_KIWI_FILTER_METAL_KERNELS OFF)
++set(MLX_KIWI_ACTIVE_METAL_KERNELS)
++
++set(MLX_KIWI_RUNTIME_METAL_KERNELS
++    arg_reduce
++    arange
++    binary
++    binary_two
++    conv
++    copy
++    fence
++    gemv
++    gemv_masked
++    layer_norm
++    rms_norm
++    rope
++    reduce
++    scaled_dot_product_attention
++    scan
++    softmax
++    sort
++    ternary
++    unary
++    steel/attn/kernels/steel_attention
++    steel/conv/kernels/steel_conv
++    steel/conv/kernels/steel_conv_3d
++    steel/conv/kernels/steel_conv_general
++    steel/gemm/kernels/steel_gemm_fused
++    steel/gemm/kernels/steel_gemm_gather
++    steel/gemm/kernels/steel_gemm_masked
++    steel/gemm/kernels/steel_gemm_splitk
++    steel/gemm/kernels/steel_gemm_segmented)
++
++if(MLX_METAL_KERNEL_PROFILE_NORMALIZED STREQUAL "kiwi_runtime")
++  set(MLX_KIWI_FILTER_METAL_KERNELS ON)
++  set(MLX_KIWI_ACTIVE_METAL_KERNELS ${MLX_KIWI_RUNTIME_METAL_KERNELS})
++  message(
++    STATUS
++      "Building MLX Metal kernels with kiwi_runtime precompiled profile")
++elseif(NOT MLX_METAL_KERNEL_PROFILE_NORMALIZED STREQUAL "default")
++  message(
++    FATAL_ERROR
++      "Unsupported MLX_METAL_KERNEL_PROFILE: ${MLX_METAL_KERNEL_PROFILE}")
++endif()
++
+ function(build_kernel_base TARGET SRCFILE DEPS)
+   set(METAL_FLAGS
+       -x
+@@ -46,16 +92,27 @@ function(build_kernel KERNEL)
+       PARENT_SCOPE)
+ endfunction(build_kernel)
+
+-build_kernel(arg_reduce)
+-build_kernel(conv steel/conv/params.h)
+-build_kernel(gemv steel/utils.h)
+-build_kernel(layer_norm)
+-build_kernel(random)
+-build_kernel(rms_norm)
+-build_kernel(rope)
+-build_kernel(scaled_dot_product_attention sdpa_vector.h)
++function(build_profile_kernel KERNEL)
++  if(MLX_KIWI_FILTER_METAL_KERNELS)
++    list(FIND MLX_KIWI_ACTIVE_METAL_KERNELS "${KERNEL}" KERNEL_ENABLED_INDEX)
++    if(KERNEL_ENABLED_INDEX EQUAL -1)
++      return()
++    endif()
++  endif()
++  build_kernel(${KERNEL} ${ARGN})
++  set(KERNEL_AIR ${KERNEL_AIR} PARENT_SCOPE)
++endfunction(build_profile_kernel)
++
++build_profile_kernel(arg_reduce)
++build_profile_kernel(conv steel/conv/params.h)
++build_profile_kernel(gemv steel/utils.h)
++build_profile_kernel(layer_norm)
++build_profile_kernel(random)
++build_profile_kernel(rms_norm)
++build_profile_kernel(rope)
++build_profile_kernel(scaled_dot_product_attention sdpa_vector.h)
+ if(MLX_METAL_VERSION GREATER_EQUAL 320)
+-  build_kernel(fence)
++  build_profile_kernel(fence)
+ endif()
+
+ set(STEEL_HEADERS
+@@ -121,12 +178,12 @@ set(STEEL_NAX_ATTN_HEADERS
+     steel/attn/kernels/steel_attention_nax.h)
+
+ if(NOT MLX_METAL_JIT)
+-  build_kernel(arange arange.h)
+-  build_kernel(binary binary.h binary_ops.h)
+-  build_kernel(binary_two binary_two.h)
+-  build_kernel(copy copy.h)
+-  build_kernel(fft fft.h fft/radix.h fft/readwrite.h)
+-  build_kernel(
++  build_profile_kernel(arange arange.h)
++  build_profile_kernel(binary binary.h binary_ops.h)
++  build_profile_kernel(binary_two binary_two.h)
++  build_profile_kernel(copy copy.h)
++  build_profile_kernel(fft fft.h fft/radix.h fft/readwrite.h)
++  build_profile_kernel(
+     reduce
+     atomic.h
+     reduction/ops.h
+@@ -134,41 +191,45 @@ if(NOT MLX_METAL_JIT)
+     reduction/reduce_all.h
+     reduction/reduce_col.h
+     reduction/reduce_row.h)
+-  build_kernel(quantized quantized.h quantized_utils.h ${STEEL_HEADERS})
+-  build_kernel(fp_quantized fp4.h fp8.h fp_quantized.h quantized_utils.h
+-               ${STEEL_HEADERS})
+-  build_kernel(scan scan.h)
+-  build_kernel(softmax softmax.h)
+-  build_kernel(logsumexp logsumexp.h)
+-  build_kernel(sort sort.h)
+-  build_kernel(ternary ternary.h ternary_ops.h)
+-  build_kernel(unary unary.h unary_ops.h)
+-  build_kernel(steel/conv/kernels/steel_conv ${STEEL_HEADERS})
+-  build_kernel(steel/conv/kernels/steel_conv_3d ${STEEL_HEADERS})
+-  build_kernel(steel/conv/kernels/steel_conv_general ${STEEL_HEADERS})
+-  build_kernel(steel/gemm/kernels/steel_gemm_fused ${STEEL_HEADERS})
+-  build_kernel(steel/gemm/kernels/steel_gemm_gather ${STEEL_HEADERS})
+-  build_kernel(steel/gemm/kernels/steel_gemm_masked ${STEEL_HEADERS})
+-  build_kernel(steel/gemm/kernels/steel_gemm_splitk ${STEEL_HEADERS})
+-  build_kernel(steel/gemm/kernels/steel_gemm_segmented ${STEEL_HEADERS})
+-  build_kernel(gemv_masked steel/utils.h)
+-  build_kernel(steel/attn/kernels/steel_attention ${STEEL_ATTN_HEADERS})
+-
+-  if((MLX_METAL_VERSION GREATER_EQUAL 400) AND (MACOS_SDK_VERSION GREATER_EQUAL
+-                                                26.2))
+-
+-    build_kernel(steel/gemm/kernels/steel_gemm_fused_nax ${STEEL_NAX_HEADERS})
+-    build_kernel(steel/gemm/kernels/steel_gemm_gather_nax ${STEEL_NAX_HEADERS})
+-    build_kernel(steel/gemm/kernels/steel_gemm_splitk_nax ${STEEL_NAX_HEADERS})
+-    build_kernel(steel/gemm/kernels/steel_gemm_segmented_nax
+-                 ${STEEL_NAX_HEADERS})
+-
+-    build_kernel(quantized_nax quantized_nax.h ${STEEL_NAX_HEADERS})
+-    build_kernel(fp_quantized_nax fp4.h fp8.h fp_quantized_nax.h
+-                 ${STEEL_NAX_HEADERS})
+-
+-    build_kernel(steel/attn/kernels/steel_attention_nax
+-                 ${STEEL_NAX_ATTN_HEADERS})
++  build_profile_kernel(quantized quantized.h quantized_utils.h ${STEEL_HEADERS})
++  build_profile_kernel(fp_quantized fp4.h fp8.h fp_quantized.h quantized_utils.h
++                       ${STEEL_HEADERS})
++  build_profile_kernel(scan scan.h)
++  build_profile_kernel(softmax softmax.h)
++  build_profile_kernel(logsumexp logsumexp.h)
++  build_profile_kernel(sort sort.h)
++  build_profile_kernel(ternary ternary.h ternary_ops.h)
++  build_profile_kernel(unary unary.h unary_ops.h)
++  build_profile_kernel(steel/conv/kernels/steel_conv ${STEEL_HEADERS})
++  build_profile_kernel(steel/conv/kernels/steel_conv_3d ${STEEL_HEADERS})
++  build_profile_kernel(steel/conv/kernels/steel_conv_general ${STEEL_HEADERS})
++  build_profile_kernel(steel/gemm/kernels/steel_gemm_fused ${STEEL_HEADERS})
++  build_profile_kernel(steel/gemm/kernels/steel_gemm_gather ${STEEL_HEADERS})
++  build_profile_kernel(steel/gemm/kernels/steel_gemm_masked ${STEEL_HEADERS})
++  build_profile_kernel(steel/gemm/kernels/steel_gemm_splitk ${STEEL_HEADERS})
++  build_profile_kernel(steel/gemm/kernels/steel_gemm_segmented ${STEEL_HEADERS})
++  build_profile_kernel(gemv_masked steel/utils.h)
++  build_profile_kernel(steel/attn/kernels/steel_attention ${STEEL_ATTN_HEADERS})
++
++  if((NOT MLX_KIWI_FILTER_METAL_KERNELS) AND (MLX_METAL_VERSION GREATER_EQUAL
++                                              400) AND
++     (MACOS_SDK_VERSION GREATER_EQUAL 26.2))
++
++    build_profile_kernel(steel/gemm/kernels/steel_gemm_fused_nax
++                         ${STEEL_NAX_HEADERS})
++    build_profile_kernel(steel/gemm/kernels/steel_gemm_gather_nax
++                         ${STEEL_NAX_HEADERS})
++    build_profile_kernel(steel/gemm/kernels/steel_gemm_splitk_nax
++                         ${STEEL_NAX_HEADERS})
++    build_profile_kernel(steel/gemm/kernels/steel_gemm_segmented_nax
++                         ${STEEL_NAX_HEADERS})
++
++    build_profile_kernel(quantized_nax quantized_nax.h ${STEEL_NAX_HEADERS})
++    build_profile_kernel(fp_quantized_nax fp4.h fp8.h fp_quantized_nax.h
++                         ${STEEL_NAX_HEADERS})
++
++    build_profile_kernel(steel/attn/kernels/steel_attention_nax
++                         ${STEEL_NAX_ATTN_HEADERS})
+
+   else()
+     target_compile_definitions(mlx PRIVATE MLX_METAL_NO_NAX)

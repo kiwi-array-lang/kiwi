@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=82", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kiwi-array-jupyter"
+version = "0.2.50"
+description = "Jupyter kernel for Kiwi."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "kiwi-array==0.2.50",
+  "ipykernel>=6.29",
+  "jupyter_client>=8.6",
+  "jupyter_core>=5.7",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=8.3",
+  "jupyter_kernel_test>=0.7",
+]
+
+[project.scripts]
+kiwi-array-jupyter-install = "kiwi_array_jupyter_kernel.install:main"
+kiwi-array-jupyter-kernel-install = "kiwi_array_jupyter_kernel.install:main"
+kiwi-jupyter-kernel-install = "kiwi_array_jupyter_kernel.install:main"
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+kiwi_array_jupyter_kernel = ["assets/*.png"]

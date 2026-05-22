@@ -18,6 +18,54 @@ pub const enable_sampling_profile = build_options.enable_sampling_profile;
 const enable_string_instrumentation = build_options.enable_string_instrumentation;
 const runtime_has_mlx = build_options.runtime_has_mlx;
 const runtime_has_duckdb = build_options.runtime_has_duckdb;
+const kiwi_int_null: i64 = std.math.minInt(i64);
+const kiwi_float_null_bits: u64 = 0x7ff8_0000_0000_0000;
+const all_axis_selector_symbol = "\x00kiwi.all_axis";
+const selector_path_marker_symbol = "\x00kiwi.selector_path";
+
+fn kiwiFloatNull() f64 {
+    return @as(f64, @bitCast(kiwi_float_null_bits));
+}
+
+fn kiwiFloat32Null() f32 {
+    return std.math.nan(f32);
+}
+
+fn isKiwiIntNull(value: i64) bool {
+    return value == kiwi_int_null;
+}
+
+fn signedByteToInt(value: u8) i64 {
+    return @intCast(@as(i8, @bitCast(value)));
+}
+
+const SequenceBounds = struct {
+    start: usize,
+    end: usize,
+};
+
+fn dropSliceBounds(raw_count: i64, len: usize) SequenceBounds {
+    if (isKiwiIntNull(raw_count)) return .{ .start = 0, .end = 0 };
+    const drop_count: usize = if (raw_count >= 0)
+        @min(std.math.cast(usize, raw_count) orelse len, len)
+    else blk: {
+        const magnitude = std.math.cast(usize, -@as(i128, raw_count)) orelse len;
+        break :blk len - @min(magnitude, len);
+    };
+    return if (raw_count >= 0)
+        .{ .start = drop_count, .end = len }
+    else
+        .{ .start = 0, .end = drop_count };
+}
+
+fn isKiwiFloatNull(value: f64) bool {
+    return std.math.isNan(value);
+}
+
+fn isKiwiFloat32Null(value: f32) bool {
+    return std.math.isNan(value);
+}
+
 const duckdb_runtime = if (runtime_has_duckdb)
     @import("duckdb_runtime.zig")
 else
@@ -251,6 +299,45 @@ else
 
         pub const TypeId = enum(u8) {
             invalid = 0,
+            boolean = 1,
+            tinyint = 2,
+            smallint = 3,
+            integer = 4,
+            bigint = 5,
+            utinyint = 6,
+            usmallint = 7,
+            uinteger = 8,
+            ubigint = 9,
+            float = 10,
+            double = 11,
+            timestamp = 12,
+            date = 13,
+            time = 14,
+            interval = 15,
+            hugeint = 16,
+            varchar = 17,
+            blob = 18,
+            decimal = 19,
+            timestamp_s = 20,
+            timestamp_ms = 21,
+            timestamp_ns = 22,
+            enum_type = 23,
+            list = 24,
+            struct_type = 25,
+            map = 26,
+            uuid = 27,
+            union_type = 28,
+            bit = 29,
+            time_tz = 30,
+            timestamp_tz = 31,
+            uhugeint = 32,
+            array = 33,
+            any = 34,
+            bignum = 35,
+            sqlnull = 36,
+            string_literal = 37,
+            integer_literal = 38,
+            time_ns = 39,
         };
 
         pub const DataChunk = struct {
@@ -258,6 +345,14 @@ else
 
             pub fn rowCount(_: *const DataChunk) usize {
                 return 0;
+            }
+
+            pub fn vectorData(_: *const DataChunk, _: usize) !*const anyopaque {
+                return error.Unsupported;
+            }
+
+            pub fn validity(_: *const DataChunk, _: usize) ?[*]const u64 {
+                return null;
             }
 
             pub fn rowIsValid(_: *const DataChunk, _: usize, _: usize) bool {
@@ -346,6 +441,7 @@ pub const BuiltinId = enum(u8) {
     contains,
     split,
     join,
+    type_of,
     bytes,
     utf8,
     char,
@@ -446,6 +542,18 @@ fn stringPerfNow() i128 {
         return std.time.nanoTimestamp();
     }
     return 0;
+}
+
+fn stringPerfElapsedSince(start: i128) u64 {
+    if (comptime !enable_string_instrumentation) return 0;
+    const now = stringPerfNow();
+    if (now <= start) return 0;
+    return std.math.cast(u64, now - start) orelse std.math.maxInt(u64);
+}
+
+fn stringPerfAdd(counter: *u64, start: i128) void {
+    if (comptime !enable_string_instrumentation) return;
+    counter.* = std.math.add(u64, counter.*, stringPerfElapsedSince(start)) catch std.math.maxInt(u64);
 }
 
 pub const DensePlanReason = enum(u8) {
@@ -715,6 +823,7 @@ fn densePlanReasonLabel(reason: DensePlanReason) []const u8 {
 pub const ValueTag = enum(u8) {
     int,
     float,
+    float32,
     bool,
     builtin,
     closure,
@@ -735,6 +844,7 @@ pub const Value = struct {
     const bool_tag: u64 = 0xfff2 << tag_shift;
     const builtin_tag: u64 = 0xfff3 << tag_shift;
     const closure_tag: u64 = 0xfff4 << tag_shift;
+    const float32_tag: u64 = 0xfff5 << tag_shift;
     const boxed_int_tag: u64 = 0xfff6 << tag_shift;
     const array_tag: u64 = 0xfff7 << tag_shift;
     const canonical_nan_raw: u64 = 0x7ff8_0000_0000_0000;
@@ -746,6 +856,7 @@ pub const Value = struct {
         host_string,
         host_symbol,
         host_string_list,
+        host_symbol_list,
         host_string_view,
         host_relation,
         host_keyed_store,
@@ -763,6 +874,12 @@ pub const Value = struct {
     pub fn float(value: f64) Value {
         const raw: u64 = @bitCast(value);
         return .{ .raw = if (isReservedTag(raw)) canonical_nan_raw else raw };
+    }
+
+    pub fn float32(value: f32) Value {
+        return .{
+            .raw = float32_tag | @as(u64, @as(u32, @bitCast(value))),
+        };
     }
 
     pub fn fromBool(value: bool) Value {
@@ -801,6 +918,7 @@ pub const Value = struct {
             bool_tag => .bool,
             builtin_tag => .builtin,
             closure_tag => .closure,
+            float32_tag => .float32,
             boxed_int_tag => .int,
             array_tag => .array,
             else => .float,
@@ -816,8 +934,18 @@ pub const Value = struct {
     }
 
     pub fn asFloat(self: Value) f64 {
-        std.debug.assert(self.tag() == .float);
-        return @bitCast(self.raw);
+        return switch (self.raw & tag_mask) {
+            float32_tag => @floatCast(self.asFloat32()),
+            else => blk: {
+                std.debug.assert(self.tag() == .float);
+                break :blk @as(f64, @bitCast(self.raw));
+            },
+        };
+    }
+
+    pub fn asFloat32(self: Value) f32 {
+        std.debug.assert((self.raw & tag_mask) == float32_tag);
+        return @bitCast(@as(u32, @intCast(self.raw & 0xffff_ffff)));
     }
 
     pub fn asBool(self: Value) bool {
@@ -857,6 +985,7 @@ pub const Value = struct {
             .host_string,
             .host_symbol,
             .host_string_list,
+            .host_symbol_list,
             .host_string_view,
             .host_relation,
             .host_keyed_store,
@@ -907,7 +1036,7 @@ pub const Value = struct {
     }
 
     pub fn asHostStringList(self: Value) *const HostStringList {
-        std.debug.assert(self.arrayKind() == .host_string_list);
+        std.debug.assert(self.arrayKind() == .host_string_list or self.arrayKind() == .host_symbol_list);
         const ptr: *const HostStringList = @ptrFromInt(rawPtr(self.arrayPtrRaw()));
         return ptr;
     }
@@ -945,6 +1074,7 @@ pub const Value = struct {
             .host_string => .host_string,
             .host_symbol => .host_symbol,
             .host_string_list => .host_string_list,
+            .host_symbol_list => .host_symbol_list,
             .host_string_view => .host_string_view,
             .host_relation => .host_relation,
             .host_keyed_store => .host_keyed_store,
@@ -977,6 +1107,7 @@ pub const Value = struct {
             bool_tag,
             builtin_tag,
             closure_tag,
+            float32_tag,
             boxed_int_tag,
             array_tag,
             => true,
@@ -1054,6 +1185,7 @@ const HeapKind = enum(u8) {
     host_string,
     host_symbol,
     host_string_list,
+    host_symbol_list,
     host_string_view,
     host_relation,
     host_keyed_store,
@@ -1112,12 +1244,19 @@ const HostStringListStorage = union(enum) {
     },
 };
 
+const HostStringListDisplay = enum(u8) {
+    list,
+    char_rows,
+    split_list,
+};
+
 const HostStringList = struct {
     header: HeapHeader align(8),
     len: usize,
     bytes_len: usize,
     base: ?*HostText,
     storage: HostStringListStorage,
+    display: HostStringListDisplay = .list,
 };
 
 const HostStringView = struct {
@@ -1176,12 +1315,36 @@ const TableColumnBuilder = struct {
     name: Value,
     source_type: duckdb_runtime.TypeId,
     kind: HostTableColumnKind,
+    row_count: usize = 0,
     bool_values: std.ArrayList(bool) = .empty,
     int_values: std.ArrayList(i64) = .empty,
+    float32_values: std.ArrayList(f32) = .empty,
     float_values: std.ArrayList(f64) = .empty,
     string_values: std.ArrayList([]u8) = .empty,
     validity: std.ArrayList(bool) = .empty,
     saw_null: bool = false,
+};
+
+const DirectTableColumnStorage = union(enum) {
+    boolean: HostBitAlloc,
+    int8: HostDenseAlloc(i8),
+    int16: HostDenseAlloc(i16),
+    int32: HostDenseAlloc(i32),
+    int64: HostDenseAlloc(i64),
+    float32: HostFloat32Result,
+    float64: HostFloatResult,
+};
+
+const DirectTableColumnBuilder = struct {
+    name: Value,
+    source_type: duckdb_runtime.TypeId,
+    kind: HostTableColumnKind,
+    storage: DirectTableColumnStorage,
+    data: ?Value,
+    validity_storage: ?HostBitAlloc = null,
+    validity: ?Value = null,
+    total_rows: usize,
+    row_count: usize = 0,
 };
 
 const HostKeyedLayout = enum(u8) {
@@ -1320,10 +1483,16 @@ fn hostStringViewBytes(view: *const HostStringView) []const u8 {
 const HostStringSource = struct {
     base: *HostText,
     span: HostTextSpan,
+    is_vector: bool,
 
     fn bytes(self: HostStringSource) []const u8 {
         return hostTextSpanBytes(self.base, self.span);
     }
+};
+
+const HostStringAlloc = struct {
+    value: Value,
+    bytes: []u8,
 };
 
 fn stringSourceInfo(value: Value) ?HostStringSource {
@@ -1334,6 +1503,7 @@ fn stringSourceInfo(value: Value) ?HostStringSource {
             return .{
                 .base = @constCast(text),
                 .span = .{ .start = 0, .len = text.len },
+                .is_vector = text.len != 1,
             };
         },
         .host_string_view => {
@@ -1341,6 +1511,36 @@ fn stringSourceInfo(value: Value) ?HostStringSource {
             return .{
                 .base = view.base,
                 .span = view.span,
+                .is_vector = view.span.len != 1,
+            };
+        },
+        else => null,
+    };
+}
+
+fn boxedSingletonCharSourceInfo(value: Value) ?HostStringSource {
+    if (value.tag() != .array or value.arrayKind() != .host_boxed_array) return null;
+    const array = value.asHostBoxedArray();
+    if (array.len() != 1) return null;
+    const item = array.items[0];
+    if (item.tag() != .array) return null;
+    return switch (item.arrayKind()) {
+        .host_string => {
+            const text = item.asHostString();
+            if (text.len != 1) return null;
+            return .{
+                .base = @constCast(text),
+                .span = .{ .start = 0, .len = text.len },
+                .is_vector = true,
+            };
+        },
+        .host_string_view => {
+            const view = item.asHostStringView();
+            if (view.span.len != 1) return null;
+            return .{
+                .base = view.base,
+                .span = view.span,
+                .is_vector = true,
             };
         },
         else => null,
@@ -1365,14 +1565,29 @@ fn hostStringListIsContiguousBaseViews(list: *const HostStringList) bool {
     };
 }
 
-fn countScalarSplits(src: []const u8, sep: u8) usize {
-    var parts: usize = 1;
+const ScalarSplitStats = struct {
+    parts: usize,
+    bytes_len: usize,
+};
+
+fn isGrowlerLineSeparatorBytes(sep: []const u8) bool {
+    return std.mem.eql(u8, sep, "\n") or std.mem.eql(u8, sep, "\\n");
+}
+
+fn countScalarSplits(src: []const u8, sep: u8) ScalarSplitStats {
+    var parts: usize = 0;
+    var bytes_len: usize = 0;
     var start: usize = 0;
     while (std.mem.indexOfScalarPos(u8, src, start, sep)) |idx| {
         parts += 1;
+        bytes_len += idx - start;
         start = idx + 1;
     }
-    return parts;
+    if (src.len != start or (sep != '\n' and parts != 0)) {
+        parts += 1;
+        bytes_len += src.len - start;
+    }
+    return .{ .parts = parts, .bytes_len = bytes_len };
 }
 
 comptime {
@@ -1404,6 +1619,7 @@ const HostDenseStorageKind = enum(u8) {
     int16,
     int32,
     int64,
+    float32,
     float64,
 };
 
@@ -1413,6 +1629,7 @@ const HostDenseStorage = union(HostDenseStorageKind) {
     int16: []i16,
     int32: []i32,
     int64: []i64,
+    float32: []f32,
     float64: []f64,
 };
 
@@ -1463,6 +1680,7 @@ const HostBoxedArray = struct {
     header: HeapHeader align(8),
     logical_len: usize,
     items: []Value,
+    prototype: ?Value = null,
 
     fn len(self: *const HostBoxedArray) usize {
         return self.logical_len;
@@ -1474,7 +1692,7 @@ const host_bit_word_bits = @bitSizeOf(u64);
 fn hostDenseNumericMode(array: *const HostDenseArray) HostDenseElem {
     return switch (array.storage) {
         .bit, .int8, .int16, .int32, .int64 => .int,
-        .float64 => .float,
+        .float32, .float64 => .float,
     };
 }
 
@@ -1485,6 +1703,7 @@ fn hostDenseStorageCapacityLen(array: *const HostDenseArray) usize {
         .int16 => |items| items.len,
         .int32 => |items| items.len,
         .int64 => |items| items.len,
+        .float32 => |items| items.len,
         .float64 => |items| items.len,
     };
 }
@@ -1506,6 +1725,7 @@ fn hostDenseStorageElemBytes(kind: HostDenseStorageKind) usize {
         .int16 => @sizeOf(i16),
         .int32 => @sizeOf(i32),
         .int64 => @sizeOf(i64),
+        .float32 => @sizeOf(f32),
         .float64 => @sizeOf(f64),
     };
 }
@@ -1573,12 +1793,18 @@ pub const DebugHostStorageTag = enum {
     int16,
     int32,
     int64,
+    float32,
     float64,
 };
 
 pub fn debugActiveHostStorageTag(value: Value) ?DebugHostStorageTag {
     if (value.tag() != .array or value.activeArrayKind() != .host_dense_array) return null;
     return @enumFromInt(@intFromEnum(std.meta.activeTag(hostDenseIfPresent(value).?.storage)));
+}
+
+pub fn debugHostStorageTagIfPresent(value: Value) ?DebugHostStorageTag {
+    const host = hostDenseIfPresent(value) orelse return null;
+    return @enumFromInt(@intFromEnum(std.meta.activeTag(host.storage)));
 }
 
 pub fn debugStringBytes(value: Value) ?[]const u8 {
@@ -1610,6 +1836,15 @@ pub fn debugActiveHostFloatSlice(value: Value) ?[]const f64 {
     const host = hostDenseIfPresent(value).?;
     return switch (host.storage) {
         .float64 => |items| hostDenseLogicalItems(f64, host, items),
+        else => null,
+    };
+}
+
+pub fn debugActiveHostFloat32Slice(value: Value) ?[]const f32 {
+    if (value.tag() != .array or value.activeArrayKind() != .host_dense_array) return null;
+    const host = hostDenseIfPresent(value).?;
+    return switch (host.storage) {
+        .float32 => |items| hostDenseLogicalItems(f32, host, items),
         else => null,
     };
 }
@@ -1819,6 +2054,22 @@ const NumericShapeSnapshot = struct {
 
     fn shapeSlice(self: *const NumericShapeSnapshot) []const i32 {
         return self.shape[0..self.rank];
+    }
+};
+
+const ReshapeShapeSnapshot = struct {
+    rank: u8 = 0,
+    shape: [numeric_array_max_rank]i64 = [_]i64{0} ** numeric_array_max_rank,
+
+    fn shapeSlice(self: *const ReshapeShapeSnapshot) []const i64 {
+        return self.shape[0..self.rank];
+    }
+
+    fn hasNullDim(self: *const ReshapeShapeSnapshot) bool {
+        for (self.shapeSlice()) |dim| {
+            if (isKiwiIntNull(dim)) return true;
+        }
+        return false;
     }
 };
 
@@ -2320,6 +2571,19 @@ pub fn debugNumericStructuralTag(value: Value) ?DebugNumericStructuralTag {
     return numericArrayStructuralTag(handle);
 }
 
+pub fn debugNumericFlatSliceDepth(value: Value) ?usize {
+    var handle = valueNumericHandle(value) orelse return null;
+    if (!numericArrayIsFlatSlice(handle)) return null;
+
+    var depth: usize = 0;
+    while (numericArrayIsFlatSlice(handle)) {
+        depth += 1;
+        const source = numericArrayFlatSliceSource(handle) orelse return null;
+        handle = valueNumericHandle(source) orelse break;
+    }
+    return depth;
+}
+
 fn debugBackendArrayForValue(value: Value) ?mlx.Array {
     if (value.tag() != .array) return null;
     return switch (value.arraySubkind()) {
@@ -2436,7 +2700,7 @@ fn numericHandleSupportsStructuralFlatItemsWithoutHost(handle: *const NumericArr
 
 fn sourceSupportsHostDense(source: Value) bool {
     return switch (source.tag()) {
-        .int, .bool, .float => true,
+        .int, .bool, .float, .float32 => true,
         .array => switch (source.arraySubkind()) {
             .host_dense_array => true,
             .numeric_array => true,
@@ -2449,7 +2713,7 @@ fn sourceSupportsHostDense(source: Value) bool {
 
 fn sourceSupportsCheapHostDense(source: Value) bool {
     return switch (source.tag()) {
-        .int, .bool, .float => true,
+        .int, .bool, .float, .float32 => true,
         .array => switch (source.arraySubkind()) {
             .host_dense_array => true,
             .numeric_array => handleSupportsCheapHostDense(source.asNumericArray()),
@@ -2628,16 +2892,26 @@ fn tryCreateManagedStackedBackendArray(self: *Session, values: []const Value, sh
     for (values) |value| try arrays.append(self.allocator, try self.materializeBackendArray(value));
 
     var saw_float = false;
+    var saw_float64 = false;
     var saw_non_bool_int = false;
+    var saw_int64 = false;
     for (arrays.items) |array| switch (array.dtype()) {
-        c.MLX_FLOAT16, c.MLX_FLOAT32, c.MLX_FLOAT64, c.MLX_BFLOAT16 => saw_float = true,
+        c.MLX_FLOAT64 => {
+            saw_float = true;
+            saw_float64 = true;
+        },
+        c.MLX_FLOAT16, c.MLX_FLOAT32, c.MLX_BFLOAT16 => saw_float = true,
         c.MLX_BOOL => {},
+        c.MLX_INT64 => {
+            saw_non_bool_int = true;
+            saw_int64 = true;
+        },
         else => saw_non_bool_int = true,
     };
     const target_dtype: c.mlx_dtype = if (saw_float)
-        c.MLX_FLOAT32
+        if (saw_float64) c.MLX_FLOAT64 else c.MLX_FLOAT32
     else if (saw_non_bool_int)
-        c.MLX_INT32
+        if (saw_int64) c.MLX_INT64 else c.MLX_INT32
     else
         c.MLX_BOOL;
 
@@ -2659,6 +2933,43 @@ fn tryCreateManagedStackedBackendArray(self: *Session, values: []const Value, sh
     return try self.wrapManagedBackendArray(reshaped);
 }
 
+fn tryCreateOwnedStackedBitArray(
+    self: *Session,
+    owner: HeapOwner,
+    values: []const Value,
+    item_len: usize,
+    shape: NumericShapeSnapshot,
+) KError!?Value {
+    if (values.len == 0) return null;
+    for (values) |value| {
+        const bits = valueNumericBitSlice(value) orelse return null;
+        if (bits.len != item_len) return null;
+    }
+
+    const total_len = std.math.mul(usize, values.len, item_len) catch return error.Unsupported;
+    var out = try self.allocHostBitArrayUninitialized(owner, total_len);
+    if (item_len % host_bit_word_bits == 0) {
+        const row_words = item_len / host_bit_word_bits;
+        var dst_word: usize = 0;
+        for (values) |value| {
+            const bits = valueNumericBitSlice(value) orelse return error.Type;
+            @memcpy(out.words[dst_word .. dst_word + row_words], bits.words[0..row_words]);
+            dst_word += row_words;
+        }
+    } else {
+        var dst_start: usize = 0;
+        for (values) |value| {
+            const bits = valueNumericBitSlice(value) orelse return error.Type;
+            bitCopyRange(out.words, dst_start, bits, 0, item_len);
+            dst_start += item_len;
+        }
+    }
+
+    const metadata = analyzeBitSlice(.{ .words = out.words, .len = out.len });
+    const value = try self.finishManagedHostBitAlloc(out, metadata.flags, metadata.range);
+    return try applyNonVectorNumericShapeToValue(self, value, shape);
+}
+
 fn createOwnedStackedNumericArray(self: *Session, owner: HeapOwner, values: []const Value, mode: HostDenseElem, item_shape: NumericShapeSnapshot) KError!Value {
     const item_len = try numericShapeSnapshotElementCount(item_shape);
     const total_len = std.math.mul(usize, values.len, item_len) catch return error.Unsupported;
@@ -2666,6 +2977,7 @@ fn createOwnedStackedNumericArray(self: *Session, owner: HeapOwner, values: []co
 
     return switch (mode) {
         .int => blk: {
+            if (try tryCreateOwnedStackedBitArray(self, owner, values, item_len, shape)) |value| break :blk value;
             const data = try self.allocator.alloc(i64, total_len);
             defer self.allocator.free(data);
             var out_idx: usize = 0;
@@ -2679,6 +2991,27 @@ fn createOwnedStackedNumericArray(self: *Session, owner: HeapOwner, values: []co
             break :blk try applyNonVectorNumericShapeToValue(self, stacked, shape);
         },
         .float => blk: {
+            var all_float32 = true;
+            for (values) |value| {
+                if (valueNumericFloat32Slice(value) == null) {
+                    all_float32 = false;
+                    break;
+                }
+            }
+            if (all_float32) {
+                const out = try self.allocOwnedHostFloat32Result(owner, total_len);
+                var out_idx: usize = 0;
+                for (values) |value| {
+                    const items = valueNumericFloat32Slice(value) orelse return error.Type;
+                    @memcpy(out.items[out_idx .. out_idx + items.len], items);
+                    out_idx += items.len;
+                }
+                const analysis = analyzeFloatSlice32(out.items);
+                hostDenseSetFlags(out.array, analysis.flags);
+                const stacked = try out.value(self);
+                break :blk try applyNonVectorNumericShapeToValue(self, stacked, shape);
+            }
+
             const data = try self.allocator.alloc(f64, total_len);
             defer self.allocator.free(data);
             var out_idx: usize = 0;
@@ -2700,15 +3033,34 @@ fn createManagedStackedNumericArray(self: *Session, values: []const Value, mode:
     return try createOwnedStackedNumericArray(self, .managed, values, mode, item_shape);
 }
 
+fn numericFloatScalarValueAt(self: *Session, value: Value, idx: usize) KError!Value {
+    const item = try numericFloatAt(value, idx);
+    return switch (valueFloatStorageKind(value) orelse .float64) {
+        .float32 => try self.float32Value(@floatCast(item)),
+        .float64 => try self.floatValue(item),
+    };
+}
+
+fn numericFloatPrototypeScalarValueFor(self: *Session, value: Value) KError!Value {
+    return switch (valueFloatStorageKind(value) orelse .float64) {
+        .float32 => try self.float32NullValue(),
+        .float64 => try self.floatNullValue(),
+    };
+}
+
 fn numericStructuralScalarIndexValue(self: *Session, view: NumericStructuralView, raw_index: i64) KError!?Value {
     const handle = view.handle;
     if (numericArrayIsFlatSlice(handle)) {
         const source = numericArrayFlatSliceSource(handle) orelse return error.Type;
         const len = numericVectorLen(Value.array(@constCast(handle))) orelse return error.Type;
-        const idx = try normalizeIndex(raw_index, len);
-        return switch (valueNumericMode(source) orelse return error.Type) {
+        const mode = valueNumericMode(source) orelse return error.Type;
+        const idx = normalizeIndexOrNull(raw_index, len) orelse return switch (mode) {
+            .int => try self.numericPrototypeScalarValue(mode),
+            .float => try numericFloatPrototypeScalarValueFor(self, source),
+        };
+        return switch (mode) {
             .int => try self.intValue(try numericIntAt(source, (numericArrayFlatSliceStart(handle) orelse return error.Type) + idx)),
-            .float => try self.floatValue(try numericFloatAt(source, (numericArrayFlatSliceStart(handle) orelse return error.Type) + idx)),
+            .float => try numericFloatScalarValueAt(self, source, (numericArrayFlatSliceStart(handle) orelse return error.Type) + idx),
         };
     }
     if (numericArrayIsFlatConcat(handle)) {
@@ -2716,25 +3068,33 @@ fn numericStructuralScalarIndexValue(self: *Session, view: NumericStructuralView
         const right = numericArrayFlatConcatRight(handle) orelse return error.Type;
         const left_len = numericVectorLen(left) orelse return error.Type;
         const total_len = left_len + (numericVectorLen(right) orelse return error.Type);
-        const idx = try normalizeIndex(raw_index, total_len);
+        const mode = valueNumericMode(Value.array(@constCast(handle))) orelse return error.Type;
+        const idx = normalizeIndexOrNull(raw_index, total_len) orelse return switch (mode) {
+            .int => try self.numericPrototypeScalarValue(mode),
+            .float => try numericFloatPrototypeScalarValueFor(self, Value.array(@constCast(handle))),
+        };
         if (idx < left_len) {
             return switch (valueNumericMode(left) orelse return error.Type) {
                 .int => try self.intValue(try numericIntAt(left, idx)),
-                .float => try self.floatValue(try numericFloatAt(left, idx)),
+                .float => try numericFloatScalarValueAt(self, left, idx),
             };
         }
         const right_idx = idx - left_len;
         return switch (valueNumericMode(right) orelse return error.Type) {
             .int => try self.intValue(try numericIntAt(right, right_idx)),
-            .float => try self.floatValue(try numericFloatAt(right, right_idx)),
+            .float => try numericFloatScalarValueAt(self, right, right_idx),
         };
     }
     if (numericArrayIsFlatSegments(handle)) {
         const len = numericVectorLen(Value.array(@constCast(handle))) orelse return error.Type;
-        const idx = try normalizeIndex(raw_index, len);
-        return switch (valueNumericMode(Value.array(@constCast(handle))) orelse return error.Type) {
+        const mode = valueNumericMode(Value.array(@constCast(handle))) orelse return error.Type;
+        const idx = normalizeIndexOrNull(raw_index, len) orelse return switch (mode) {
+            .int => try self.numericPrototypeScalarValue(mode),
+            .float => try numericFloatPrototypeScalarValueFor(self, Value.array(@constCast(handle))),
+        };
+        return switch (mode) {
             .int => try self.intValue(try numericIntAt(Value.array(@constCast(handle)), idx)),
-            .float => try self.floatValue(try numericFloatAt(Value.array(@constCast(handle)), idx)),
+            .float => try numericFloatScalarValueAt(self, Value.array(@constCast(handle)), idx),
         };
     }
     if (numericArrayIsFirstAxisConcat(handle)) {
@@ -2788,7 +3148,7 @@ fn numericStructuralScalarIndexValue(self: *Session, view: NumericStructuralView
             numericShapeTailSnapshot(handle),
         );
     }
-    const idx = try normalizeIndex(raw_index, numericArrayRangeLen(handle));
+    const idx = normalizeIndexOrNull(raw_index, numericArrayRangeLen(handle)) orelse return try self.intNullValue();
     return try self.intValue(try numericArrayRangeIotaValueAt(handle, idx));
 }
 
@@ -2931,7 +3291,7 @@ fn numericStructuralTakeValue(self: *Session, view: NumericStructuralView, raw_c
     const count: usize = @intCast(@abs(raw_count));
     if (count == 0) return try newRangeIotaValue(self, .managed, 0);
     const len = numericArrayRangeLen(handle);
-    if (len == 0) return error.Type;
+    if (len == 0) return try self.takeEmptyNumericPrototypeValue(raw_count, .int);
     if (count <= len) {
         const start = if (raw_count >= 0) 0 else len - count;
         return try numericStructuralContiguousSliceValue(self, view, .{ .start = start, .len = count });
@@ -2946,13 +3306,8 @@ fn numericStructuralDropValue(self: *Session, view: NumericStructuralView, raw_c
         @as(usize, @intCast(handle.shape[0]))
     else
         numericArrayRangeLen(handle);
-    const drop_count: usize = if (raw_count >= 0)
-        @min(@as(usize, @intCast(raw_count)), len)
-    else
-        len - @min(@as(usize, @intCast(-raw_count)), len);
-    const start: usize = if (raw_count >= 0) drop_count else 0;
-    const end: usize = if (raw_count >= 0) len else drop_count;
-    return try numericStructuralContiguousSliceValue(self, view, .{ .start = start, .len = end - start });
+    const bounds = dropSliceBounds(raw_count, len);
+    return try numericStructuralContiguousSliceValue(self, view, .{ .start = bounds.start, .len = bounds.end - bounds.start });
 }
 
 fn numericStructuralDenseMonadValue(self: *Session, value: Value, view: NumericStructuralView, op: BuiltinId) KError!?Value {
@@ -3056,9 +3411,21 @@ fn numericValueArithmeticSliceValue(self: *Session, value: Value, slice: Arithme
     if (NumericStructuralView.init(value)) |structural| {
         if (try numericStructuralArithmeticSliceValue(self, structural, slice)) |result| return result;
     }
-    if (slice.step != 1) return null;
-    _ = numericVectorLen(value) orelse return null;
-    return try newFlatSliceValue(self, value, slice.start, slice.len);
+    const vector_len = numericVectorLen(value) orelse return null;
+    if (slice.step == 1) return try newFlatSliceValue(self, value, slice.start, slice.len);
+    if (slice.step != -1) return null;
+    if (slice.len == 0) return try newFlatSliceValue(self, value, 0, 0);
+    if (slice.start >= vector_len) return error.Type;
+    if (slice.len == vector_len and slice.start + 1 == vector_len) {
+        return try self.reverseValue(value);
+    }
+    const last_i64 = @as(i64, @intCast(slice.start)) - @as(i64, @intCast(slice.len - 1));
+    if (last_i64 < 0) return error.Type;
+    const contiguous = try newFlatSliceValue(self, value, @intCast(last_i64), slice.len);
+    errdefer self.releaseValue(contiguous);
+    const result = try self.reverseValue(contiguous);
+    self.releaseValue(contiguous);
+    return result;
 }
 
 fn numericValueFirstAxisContiguousSliceValue(self: *Session, value: Value, slice: ContiguousIndexSlice) KError!?Value {
@@ -3684,6 +4051,14 @@ fn valueNumericBitSlice(value: Value) ?HostBitSlice {
     };
 }
 
+fn valueNumericFloat32Slice(value: Value) ?[]const f32 {
+    const array = hostDenseIfPresent(value) orelse return null;
+    return switch (array.storage) {
+        .float32 => |items| hostDenseLogicalItems(f32, array, items),
+        else => null,
+    };
+}
+
 fn tryConcatStructuredNumericMatrix(self: *Session, left: Value, right: Value, shape: NumericMatrixShape) KError!?Value {
     const left_handle = valueRangeIotaHandle(left) orelse return null;
     const right_handle = valueRangeIotaHandle(right) orelse return null;
@@ -3818,58 +4193,58 @@ fn exactIntFromFloat(value: f64) ?i64 {
     return @intFromFloat(truncated);
 }
 
-const HostFloatSqueezeAnalysis = struct {
+const ScalarNumericClass = enum { int, float };
+
+fn scalarNumericClass(value: Value) ?ScalarNumericClass {
+    return switch (value.tag()) {
+        .int, .bool => .int,
+        .float, .float32 => .float,
+        else => null,
+    };
+}
+
+fn scalarNumericItemsHaveSingleClass(items: []const Value) bool {
+    if (items.len == 0) return false;
+    const first = scalarNumericClass(items[0]) orelse return false;
+    for (items[1..]) |item| {
+        const class = scalarNumericClass(item) orelse return false;
+        if (class != first) return false;
+    }
+    return true;
+}
+
+const HostFloatAnalysis = struct {
     flags: u8,
-    int_analysis: ?HostIntAnalysis,
 };
 
-fn analyzeFloatSlice(items: []const f64) HostFloatSqueezeAnalysis {
+fn analyzeFloatSlice(items: []const f64) HostFloatAnalysis {
+    return analyzeFloatSliceTyped(f64, items);
+}
+
+fn analyzeFloatSlice32(items: []const f32) HostFloatAnalysis {
+    return analyzeFloatSliceTyped(f32, items);
+}
+
+fn analyzeFloatSliceTyped(comptime T: type, items: []const T) HostFloatAnalysis {
     if (items.len == 0) {
         return .{
             .flags = host_dense_flag_normalized | host_dense_flag_asc | host_dense_flag_dsc,
-            .int_analysis = .{
-                .range = .{ .min = 0, .max = 0 },
-                .kind = .int8,
-                .flags = host_dense_flag_normalized | host_dense_flag_asc | host_dense_flag_dsc,
-            },
         };
     }
 
     var asc = true;
     var dsc = true;
     var prev = items[0];
-    var all_int = true;
-    var min_value: i64 = 0;
-    var max_value: i64 = 0;
     for (items, 0..) |item, idx| {
         if (idx != 0) {
             if (prev > item) asc = false;
             if (prev < item) dsc = false;
             prev = item;
         }
-
-        if (all_int) {
-            const int_value = exactIntFromFloat(item) orelse {
-                all_int = false;
-                continue;
-            };
-            if (idx == 0) {
-                min_value = int_value;
-                max_value = int_value;
-            } else {
-                min_value = @min(min_value, int_value);
-                max_value = @max(max_value, int_value);
-            }
-        }
     }
 
     return .{
         .flags = host_dense_flag_normalized | orderFlagsFromMonotonic(asc, dsc),
-        .int_analysis = if (all_int) .{
-            .range = .{ .min = min_value, .max = max_value },
-            .kind = hostIntStorageKindForRange(min_value, max_value),
-            .flags = host_dense_flag_normalized | orderFlagsFromMonotonic(asc, dsc),
-        } else null,
     };
 }
 
@@ -3939,8 +4314,17 @@ fn bitWordMasked(words: []const u64, len: usize, word_idx: usize) u64 {
 }
 
 fn bitCountTrue(items: HostBitSlice) usize {
+    const full_words = items.len / host_bit_word_bits;
+    std.debug.assert(full_words <= items.words.len);
+
     var total: usize = 0;
-    for (items.words, 0..) |_, word_idx| total += @popCount(bitWordMasked(items.words, items.len, word_idx));
+    for (items.words[0..full_words]) |word| total += @popCount(word);
+
+    const tail = items.len % host_bit_word_bits;
+    if (tail != 0) {
+        std.debug.assert(full_words < items.words.len);
+        total += @popCount(items.words[full_words] & bitLowMask(tail));
+    }
     return total;
 }
 
@@ -4079,6 +4463,361 @@ fn analyzeBitSlice(items: HostBitSlice) BitDenseMetadata {
         }
     }
     return stats.metadata();
+}
+
+const ByteMaskSelect = struct {
+    count: u8,
+    offsets: [8]u8,
+};
+
+const StringMaskByteVec = @Vector(8, u8);
+const StringMaskByteShuffle = @Vector(8, i32);
+// Useful for A/B tests, but slower than the scalar byte-table copy on the current
+// 1 MiB space-squeeze workload because the mask is runtime-selected.
+const enable_string_mask_byte_shuffle = false;
+const enable_string_mask_neon = zig_builtin.target.cpu.arch == .aarch64;
+const enable_host_int_sum_vectorized = zig_builtin.target.cpu.arch == .aarch64 or zig_builtin.target.cpu.arch == .x86_64;
+const host_int_sum_vector_min_len = 64;
+const enable_host_find_vectorized = zig_builtin.target.cpu.arch == .aarch64 or zig_builtin.target.cpu.arch == .x86_64;
+const host_find_vector_min_len = 64;
+const enable_host_compare_vectorized = zig_builtin.target.cpu.arch == .aarch64 or zig_builtin.target.cpu.arch == .x86_64;
+const host_compare_vector_min_len = 64;
+const enable_host_dense_dyad_vectorized = false;
+const host_dense_dyad_vector_min_len = 262_144;
+const enable_host_accelerate_blas = switch (zig_builtin.target.os.tag) {
+    .macos, .ios, .watchos, .tvos, .visionos => zig_builtin.target.cpu.arch != .wasm32,
+    else => false,
+};
+const host_accelerate_blas_max_dim: usize = std.math.maxInt(i32);
+const host_accelerate_dot_min_len: usize = 64;
+const enable_host_mask_compress_neon = zig_builtin.target.cpu.arch == .aarch64;
+const host_mask_compress_vector_min_len = 64;
+const enable_host_where_neon = zig_builtin.target.cpu.arch == .aarch64;
+const host_where_vector_min_len = 64;
+const enable_host_minmax_scan_fast_path = true;
+const host_compare_op_equal: i32 = 0;
+const host_compare_op_less: i32 = 1;
+const host_compare_op_more: i32 = 2;
+const host_dyad_op_add: i32 = 1;
+const host_dyad_op_sub: i32 = 2;
+const host_dyad_op_mul: i32 = 3;
+const host_dyad_op_div: i32 = 4;
+const host_dyad_op_min: i32 = 5;
+const host_dyad_op_max: i32 = 6;
+
+const HostCompareSummary = extern struct {
+    saw_one: u8,
+    saw_zero: u8,
+    asc: u8,
+    dsc: u8,
+    has_prev: u8,
+    first: u8,
+    prev_last: u8,
+};
+
+const HostIntSumDispatch = extern struct {
+    sum_i8: *const fn ([*]const i8, usize) callconv(.c) i64,
+    sum_i16: *const fn ([*]const i16, usize) callconv(.c) i64,
+    sum_i32: *const fn ([*]const i32, usize) callconv(.c) i64,
+    sum_i64: *const fn ([*]const i64, usize) callconv(.c) i64,
+    name: [*c]const u8,
+};
+
+extern fn kiwi_host_int_sum_dispatch() callconv(.c) *const HostIntSumDispatch;
+
+extern fn kiwi_string_mask_compress_neon(
+    dst: [*]u8,
+    dst_len: usize,
+    src: [*]const u8,
+    mask_words: [*]const u64,
+    mask_len: usize,
+) callconv(.c) usize;
+
+extern fn kiwi_host_mask_compress_i32_neon(
+    dst: [*]i32,
+    dst_len: usize,
+    src: [*]const i32,
+    mask_words: [*]const u64,
+    mask_len: usize,
+) callconv(.c) usize;
+
+extern fn kiwi_host_where_i32_neon(
+    dst: [*]i32,
+    dst_len: usize,
+    mask_words: [*]const u64,
+    mask_len: usize,
+) callconv(.c) usize;
+
+extern fn kiwi_host_find_i8(items: [*]const i8, len: usize, query: i8) callconv(.c) usize;
+extern fn kiwi_host_find_i16(items: [*]const i16, len: usize, query: i16) callconv(.c) usize;
+extern fn kiwi_host_find_i32(items: [*]const i32, len: usize, query: i32) callconv(.c) usize;
+extern fn kiwi_host_find_i64(items: [*]const i64, len: usize, query: i64) callconv(.c) usize;
+extern fn kiwi_host_find_f64(items: [*]const f64, len: usize, query: f64) callconv(.c) usize;
+
+extern fn kiwi_host_compare_i8_array(out: [*]u64, left: [*]const i8, right: [*]const i8, len: usize, op: i32) callconv(.c) void;
+extern fn kiwi_host_compare_i16_array(out: [*]u64, left: [*]const i16, right: [*]const i16, len: usize, op: i32) callconv(.c) void;
+extern fn kiwi_host_compare_i32_array(out: [*]u64, left: [*]const i32, right: [*]const i32, len: usize, op: i32) callconv(.c) void;
+extern fn kiwi_host_compare_i64_array(out: [*]u64, left: [*]const i64, right: [*]const i64, len: usize, op: i32) callconv(.c) void;
+extern fn kiwi_host_compare_f64_array(out: [*]u64, left: [*]const f64, right: [*]const f64, len: usize, op: i32) callconv(.c) void;
+extern fn kiwi_host_compare_int_mixed_array(out: [*]u64, left: *const anyopaque, left_width: i32, right: *const anyopaque, right_width: i32, len: usize, op: i32) callconv(.c) void;
+extern fn kiwi_host_compare_int_f64_array(out: [*]u64, int_items: *const anyopaque, int_width: i32, float_items: [*]const f64, len: usize, int_left: i32, op: i32) callconv(.c) void;
+extern fn kiwi_host_compare_i8_scalar(out: [*]u64, items: [*]const i8, len: usize, scalar: i8, scalar_left: i32, op: i32) callconv(.c) void;
+extern fn kiwi_host_compare_i16_scalar(out: [*]u64, items: [*]const i16, len: usize, scalar: i16, scalar_left: i32, op: i32) callconv(.c) void;
+extern fn kiwi_host_compare_i32_scalar(out: [*]u64, items: [*]const i32, len: usize, scalar: i32, scalar_left: i32, op: i32) callconv(.c) void;
+extern fn kiwi_host_compare_i64_scalar(out: [*]u64, items: [*]const i64, len: usize, scalar: i64, scalar_left: i32, op: i32) callconv(.c) void;
+extern fn kiwi_host_compare_f64_scalar(out: [*]u64, items: [*]const f64, len: usize, scalar: f64, scalar_left: i32, op: i32) callconv(.c) void;
+extern fn kiwi_host_compare_last_summary(out: *HostCompareSummary) callconv(.c) void;
+extern fn kiwi_host_dyad_f64_array(out: [*]f64, left: [*]const f64, right: [*]const f64, len: usize, op: i32) callconv(.c) i32;
+extern fn kiwi_host_dyad_f64_scalar(out: [*]f64, scalar: f64, items: [*]const f64, len: usize, scalar_left: i32, op: i32) callconv(.c) i32;
+extern fn kiwi_host_dyad_int_array(out: *anyopaque, left: *const anyopaque, right: *const anyopaque, len: usize, width: i32, op: i32) callconv(.c) i32;
+extern fn kiwi_host_dyad_int_scalar(out: *anyopaque, scalar: i64, items: *const anyopaque, len: usize, width: i32, scalar_left: i32, op: i32) callconv(.c) i32;
+extern fn kiwi_host_blas_sgemm_rowmajor(out: [*]f32, left: [*]const f32, right: [*]const f32, rows: usize, cols: usize, inner: usize) callconv(.c) i32;
+extern fn kiwi_host_blas_dgemm_rowmajor(out: [*]f64, left: [*]const f64, right: [*]const f64, rows: usize, cols: usize, inner: usize) callconv(.c) i32;
+extern fn kiwi_host_blas_sdot(out: *f32, left: [*]const f32, right: [*]const f32, len: usize) callconv(.c) i32;
+extern fn kiwi_host_blas_ddot(out: *f64, left: [*]const f64, right: [*]const f64, len: usize) callconv(.c) i32;
+
+fn hostCompareSummaryMetadata(summary: HostCompareSummary) BitDenseMetadata {
+    return .{
+        .flags = host_dense_flag_normalized | orderFlagsFromMonotonic(summary.asc != 0, summary.dsc != 0),
+        .range = .{
+            .min = if (summary.saw_one == 0) 0 else if (summary.saw_zero != 0) 0 else 1,
+            .max = if (summary.saw_one != 0) 1 else 0,
+        },
+    };
+}
+
+fn initByteMaskSelectTable() [256]ByteMaskSelect {
+    @setEvalBranchQuota(4_000);
+    var table: [256]ByteMaskSelect = undefined;
+    for (0..table.len) |mask| {
+        var offsets = [_]u8{0} ** 8;
+        var count: u8 = 0;
+        for (0..8) |bit_idx| {
+            if (((mask >> bit_idx) & 1) != 0) {
+                offsets[@as(usize, count)] = @intCast(bit_idx);
+                count += 1;
+            }
+        }
+        table[mask] = .{
+            .count = count,
+            .offsets = offsets,
+        };
+    }
+    return table;
+}
+
+const byte_mask_select_table = initByteMaskSelectTable();
+
+fn shuffleStringMaskByte(comptime mask_byte: u8, src: StringMaskByteVec) StringMaskByteVec {
+    const entry = byte_mask_select_table[mask_byte];
+    const offsets = entry.offsets;
+    const shuffle: StringMaskByteShuffle = .{
+        @as(i32, offsets[0]),
+        @as(i32, offsets[1]),
+        @as(i32, offsets[2]),
+        @as(i32, offsets[3]),
+        @as(i32, offsets[4]),
+        @as(i32, offsets[5]),
+        @as(i32, offsets[6]),
+        @as(i32, offsets[7]),
+    };
+    return @shuffle(u8, src, @as(StringMaskByteVec, undefined), shuffle);
+}
+
+fn compressStringMaskByteShuffle(mask_byte: u8, src: StringMaskByteVec) StringMaskByteVec {
+    return switch (mask_byte) {
+        inline 0...255 => |case_mask| shuffleStringMaskByte(case_mask, src),
+    };
+}
+
+fn copyStringMaskByteInBoundsScalar(out: []u8, out_idx: *usize, bytes: []const u8, source_base: usize, mask_byte: u8) void {
+    const entry = byte_mask_select_table[mask_byte];
+    if (entry.count == 0) return;
+
+    const dst_base = out_idx.*;
+    const dst: [*]u8 = out.ptr + dst_base;
+    const src: [*]const u8 = bytes.ptr + source_base;
+    const offsets = entry.offsets;
+    switch (entry.count) {
+        1 => dst[0] = src[@as(usize, offsets[0])],
+        2 => {
+            dst[0] = src[@as(usize, offsets[0])];
+            dst[1] = src[@as(usize, offsets[1])];
+        },
+        3 => {
+            dst[0] = src[@as(usize, offsets[0])];
+            dst[1] = src[@as(usize, offsets[1])];
+            dst[2] = src[@as(usize, offsets[2])];
+        },
+        4 => {
+            dst[0] = src[@as(usize, offsets[0])];
+            dst[1] = src[@as(usize, offsets[1])];
+            dst[2] = src[@as(usize, offsets[2])];
+            dst[3] = src[@as(usize, offsets[3])];
+        },
+        5 => {
+            dst[0] = src[@as(usize, offsets[0])];
+            dst[1] = src[@as(usize, offsets[1])];
+            dst[2] = src[@as(usize, offsets[2])];
+            dst[3] = src[@as(usize, offsets[3])];
+            dst[4] = src[@as(usize, offsets[4])];
+        },
+        6 => {
+            dst[0] = src[@as(usize, offsets[0])];
+            dst[1] = src[@as(usize, offsets[1])];
+            dst[2] = src[@as(usize, offsets[2])];
+            dst[3] = src[@as(usize, offsets[3])];
+            dst[4] = src[@as(usize, offsets[4])];
+            dst[5] = src[@as(usize, offsets[5])];
+        },
+        7 => {
+            dst[0] = src[@as(usize, offsets[0])];
+            dst[1] = src[@as(usize, offsets[1])];
+            dst[2] = src[@as(usize, offsets[2])];
+            dst[3] = src[@as(usize, offsets[3])];
+            dst[4] = src[@as(usize, offsets[4])];
+            dst[5] = src[@as(usize, offsets[5])];
+            dst[6] = src[@as(usize, offsets[6])];
+        },
+        8 => @memcpy(out[dst_base..][0..8], bytes[source_base..][0..8]),
+        else => unreachable,
+    }
+    out_idx.* = dst_base + @as(usize, entry.count);
+}
+
+fn copyStringMaskByteInBounds(out: []u8, out_idx: *usize, bytes: []const u8, source_base: usize, mask_byte: u8) void {
+    if (comptime !enable_string_mask_byte_shuffle) {
+        copyStringMaskByteInBoundsScalar(out, out_idx, bytes, source_base, mask_byte);
+        return;
+    }
+
+    const entry = byte_mask_select_table[mask_byte];
+    if (entry.count == 0) return;
+
+    if (entry.count == 8) {
+        const dst_base = out_idx.*;
+        @memcpy(out[dst_base..][0..8], bytes[source_base..][0..8]);
+        out_idx.* = dst_base + 8;
+        return;
+    }
+
+    if (source_base + 8 > bytes.len) {
+        copyStringMaskByteInBoundsScalar(out, out_idx, bytes, source_base, mask_byte);
+        return;
+    }
+
+    const dst_base = out_idx.*;
+    const src_arr: [8]u8 = bytes[source_base..][0..8].*;
+    const src_vec: StringMaskByteVec = @bitCast(src_arr);
+    const packed_vec = compressStringMaskByteShuffle(mask_byte, src_vec);
+    const packed_arr: [8]u8 = @bitCast(packed_vec);
+
+    if (dst_base + 8 <= out.len) {
+        @memcpy(out[dst_base..][0..8], packed_arr[0..]);
+    } else {
+        const count: usize = entry.count;
+        @memcpy(out[dst_base..][0..count], packed_arr[0..count]);
+    }
+    out_idx.* = dst_base + @as(usize, entry.count);
+}
+
+fn copyStringWhereBitMaskBytesInBounds(out: []u8, bytes: []const u8, mask: HostBitSlice) void {
+    var out_idx: usize = 0;
+    for (mask.words, 0..) |_, word_idx| {
+        const word_base = word_idx * host_bit_word_bits;
+        const active = bitWordActiveLen(mask.len, word_idx, mask.words.len);
+        const word = bitWordMasked(mask.words, mask.len, word_idx);
+        var bit_idx: usize = 0;
+        while (bit_idx + 8 <= active) : (bit_idx += 8) {
+            const mask_byte: u8 = @truncate((word >> @intCast(bit_idx)) & 0xff);
+            copyStringMaskByteInBounds(out, &out_idx, bytes, word_base + bit_idx, mask_byte);
+        }
+        if (bit_idx < active) {
+            const tail_bits = active - bit_idx;
+            const mask_byte: u8 = @truncate((word >> @intCast(bit_idx)) & bitLowMask(tail_bits));
+            copyStringMaskByteInBounds(out, &out_idx, bytes, word_base + bit_idx, mask_byte);
+        }
+    }
+    std.debug.assert(out_idx == out.len);
+}
+
+fn copyStringWhereBitMaskScalarPadded(out: []u8, bytes: []const u8, mask: HostBitSlice) void {
+    var out_idx: usize = 0;
+    for (mask.words, 0..) |_, word_idx| {
+        const word_base = word_idx * host_bit_word_bits;
+        var selected = bitWordMasked(mask.words, mask.len, word_idx);
+        while (selected != 0) {
+            const bit_idx: usize = @intCast(@ctz(selected));
+            const source_idx = word_base + bit_idx;
+            out[out_idx] = if (source_idx < bytes.len) bytes[source_idx] else ' ';
+            out_idx += 1;
+            selected &= selected - 1;
+        }
+    }
+    std.debug.assert(out_idx == out.len);
+}
+
+fn stringByteEqMask32(left_bytes: []const u8, right_bytes: []const u8, start: usize, left_scalar: bool, right_scalar: bool) u32 {
+    const lane_count = dense_host_simd_bytes / @sizeOf(u8);
+    comptime std.debug.assert(lane_count == 32);
+    const Vec = @Vector(lane_count, u8);
+    const lhs: Vec = if (left_scalar)
+        @as(Vec, @splat(left_bytes[0]))
+    else
+        left_bytes[start..][0..lane_count].*;
+    const rhs: Vec = if (right_scalar)
+        @as(Vec, @splat(right_bytes[0]))
+    else
+        right_bytes[start..][0..lane_count].*;
+    return @bitCast(lhs == rhs);
+}
+
+fn stringByteEqAt(left_bytes: []const u8, right_bytes: []const u8, idx: usize, left_scalar: bool, right_scalar: bool) bool {
+    const lhs = if (left_scalar) left_bytes[0] else left_bytes[idx];
+    const rhs = if (right_scalar) right_bytes[0] else right_bytes[idx];
+    return lhs == rhs;
+}
+
+fn fillStringByteEqWords(out: *HostBitAlloc, left_bytes: []const u8, right_bytes: []const u8) BitDenseMetadata {
+    const len = out.len;
+    const left_scalar = left_bytes.len == 1;
+    const right_scalar = right_bytes.len == 1;
+    var saw_one = false;
+    var saw_zero = false;
+
+    for (out.words, 0..) |*out_word, word_idx| {
+        const active_len = bitWordActiveLen(len, word_idx, out.words.len);
+        const word_base = word_idx * host_bit_word_bits;
+        var bit_idx: usize = 0;
+        var word: u64 = 0;
+
+        if (comptime enable_string_byte_simd) {
+            while (bit_idx + 32 <= active_len) : (bit_idx += 32) {
+                const mask = stringByteEqMask32(left_bytes, right_bytes, word_base + bit_idx, left_scalar, right_scalar);
+                word |= @as(u64, mask) << @intCast(bit_idx);
+            }
+        }
+        while (bit_idx < active_len) : (bit_idx += 1) {
+            if (stringByteEqAt(left_bytes, right_bytes, word_base + bit_idx, left_scalar, right_scalar)) {
+                word |= @as(u64, 1) << @intCast(bit_idx);
+            }
+        }
+
+        out_word.* = word;
+        const active_mask = bitLowMask(active_len);
+        const masked = word & active_mask;
+        if (masked != 0) saw_one = true;
+        if (masked != active_mask) saw_zero = true;
+    }
+
+    const constant = len <= 1 or !saw_one or !saw_zero;
+    return .{
+        .flags = host_dense_flag_normalized | if (constant) host_dense_flag_asc | host_dense_flag_dsc else 0,
+        .range = .{
+            .min = if (!saw_one) 0 else if (saw_zero) 0 else 1,
+            .max = if (saw_one) 1 else 0,
+        },
+    };
 }
 
 fn fillBitNotWords(out: []u64, items: HostBitSlice) void {
@@ -4560,6 +5299,7 @@ fn debugCodeOpcodeFamily(raw: u8) DebugOpcodeFamily {
         ck_tail_index_global_source_u8,
         ck_index_local_source_u8,
         ck_tail_index_local_source_u8,
+        ck_index_where_mask_stack_u8,
         ck_amend_u8,
         ck_deep_amend_u8,
         => .index_amend,
@@ -4770,6 +5510,7 @@ const AmendMode = enum(u8) {
 
 pub const Code = struct {
     arity: u8,
+    required_arity: u8 = 0,
     frame_slot_count: u8 = 0,
     local_count: u8 = 0,
     operand_stack_slot_count: u8 = 0,
@@ -4899,6 +5640,7 @@ const ckm_argmax: u8 = 0x1a;
 const ckm_load: u8 = 0x1b;
 const ckm_sql: u8 = 0x1c;
 const ckm_rotcacheview: u8 = 0x1d;
+const ckm_type_of: u8 = 0x1e;
 
 const ckd_identity: u8 = 0x00;
 const ckd_add: u8 = 0x01;
@@ -4989,6 +5731,7 @@ const ck_modify_local_stack_u8: u8 = ck_fixed_base + 0x44;
 const ck_modify_local_const_i64: u8 = ck_fixed_base + 0x45;
 const ck_call_stack_u8: u8 = ck_fixed_base + 0x46;
 const ck_call_builtin_derived2_u8: u8 = ck_fixed_base + 0x47;
+const ck_index_where_mask_stack_u8: u8 = ck_fixed_base + 0x48;
 
 const compact_call_tail_bit: u8 = 0x80;
 const compact_call_store_local_bit: u8 = 0x40;
@@ -5055,6 +5798,7 @@ fn compactMonadIdForBuiltinCall(builtin: BuiltinId) ?u8 {
         .stringify => ckm_stringify,
         .unique => ckm_unique,
         .eval_string => ckm_eval_string,
+        .type_of => ckm_type_of,
         else => null,
     };
 }
@@ -5117,6 +5861,7 @@ fn compactMonadBuiltin(id: u8) ?BuiltinId {
         ckm_load => .load,
         ckm_sql => .sql,
         ckm_rotcacheview => .rotcacheview,
+        ckm_type_of => .type_of,
         else => null,
     };
 }
@@ -5181,6 +5926,7 @@ fn compactMonadDebugName(id: u8) []const u8 {
         ckm_load => "monad_load",
         ckm_sql => "monad_sql",
         ckm_rotcacheview => "monad_rotcacheview",
+        ckm_type_of => "monad_type_of",
         else => "monad_unknown",
     };
 }
@@ -5287,6 +6033,7 @@ pub fn debugCodeOpName(raw: u8) []const u8 {
         ck_modify_local_const_i64 => "modify_local_const",
         ck_call_stack_u8 => "call_stack",
         ck_call_builtin_derived2_u8 => "call_builtin_derived2",
+        ck_index_where_mask_stack_u8 => "index_where_mask_stack",
         else => "unknown",
     };
 }
@@ -5305,7 +6052,7 @@ fn compactInstructionLen(bytes: []const u8, start: usize) ?usize {
         ck_const_i8 => ip += 1,
         ck_const_i64 => ip += 8,
         ck_const_value_u8, ck_const_builtin_u8, ck_jump_u8, ck_jump_if_false_u8, ck_make_vector_u8, ck_make_adverb_u8, ck_amend_u8, ck_deep_amend_u8, ck_call_stack_u8 => ip += 1,
-        ck_const_false, ck_const_true, ck_discard, ck_return => {},
+        ck_const_false, ck_const_true, ck_discard, ck_return, ck_index_where_mask_stack_u8 => {},
         ck_jump_if_false_equal_local_const_i64, ck_jump_if_false_less_local_const_i64, ck_jump_if_false_more_local_const_i64 => ip += 10,
         ck_load_global_u8, ck_store_global_u8 => ip += 1,
         ck_modify_global_stack_u8, ck_modify_local_stack_u8 => ip += 3,
@@ -5406,14 +6153,15 @@ fn compactArgSourceLen(bytes: []const u8, ip: *usize) ?usize {
     return ip.* - start;
 }
 
-fn directCodeFromEmitter(arity: u8, frame_slot_count: u8, instructions: *const CodeEmitter, constants: []const Value) ?Code {
-    if (frame_slot_count > max_code_frame_slots or arity > max_explicit_params) return null;
+fn directCodeFromEmitter(arity: u8, required_arity: u8, frame_slot_count: u8, instructions: *const CodeEmitter, constants: []const Value) ?Code {
+    if (frame_slot_count > max_code_frame_slots or arity > max_explicit_params or required_arity > arity) return null;
     const bytes = instructions.directCompactSlice() orelse return null;
     if (bytes.len > std.math.maxInt(u8)) return null;
     const max_stack = instructions.directCompactMaxStack() orelse return null;
     const local_count: u8 = if (frame_slot_count == 0 and arity != 0) arity else frame_slot_count;
     return .{
         .arity = arity,
+        .required_arity = required_arity,
         .frame_slot_count = frame_slot_count,
         .local_count = local_count,
         .operand_stack_slot_count = max_stack,
@@ -5667,6 +6415,10 @@ fn compactStackState(bytes: []const u8) ?CompactStackState {
                 pop_count = 2;
                 push_count = 1;
             },
+            ck_index_where_mask_stack_u8 => {
+                pop_count = 2;
+                push_count = 1;
+            },
             else => return null,
         }
 
@@ -5818,6 +6570,16 @@ fn codeForPlainClosure(closure: *const Closure, argc: usize) ?*const Code {
     return closure.code;
 }
 
+fn codeCanRunWithArgLen(code: *const Code, argc: usize) bool {
+    if (code.arity == argc) return true;
+    return code.arity == 1 and argc == 0 and code.required_arity == 0;
+}
+
+fn codeRunArgs(code: *const Code, args: []const Value) []const Value {
+    if (code.arity == 0 and args.len == 1) return &[_]Value{};
+    return args;
+}
+
 fn codeAcceptsArgs(compact: *const Code, args: []const Value) bool {
     return compact.arity == args.len;
 }
@@ -5826,6 +6588,14 @@ fn codeForPlainClosureArgs(closure: *const Closure, args: []const Value) ?*const
     const compact = codeForPlainClosure(closure, args.len) orelse return null;
     if (!codeAcceptsArgs(compact, args)) return null;
     return compact;
+}
+
+fn codeForRunnablePlainClosureArgs(closure: *const Closure, args: []const Value) ?*const Code {
+    if (!closureIsCompactPlainGlobal(closure)) return null;
+    const compact = closure.code;
+    if (codeCanRunWithArgLen(compact, args.len)) return compact;
+    if (compact.arity == 0 and args.len == 1) return compact;
+    return null;
 }
 
 fn codeForGlobalCellCall(cell: *const GlobalCell, argc: u8) ?*const Code {
@@ -5859,9 +6629,10 @@ const ScratchCode = struct {
         };
     }
 
-    fn finalize(self: *ScratchCode, arity: u8, frame_slot_count: u8) KError!*Code {
+    fn finalize(self: *ScratchCode, arity: u8, required_arity: u8, frame_slot_count: u8) KError!*Code {
         self.code = directCodeFromEmitter(
             arity,
+            required_arity,
             frame_slot_count,
             &self.instructions,
             self.instructions.constantSlice(),
@@ -5870,10 +6641,10 @@ const ScratchCode = struct {
     }
 };
 
-fn duplicateCodeFromEmitter(allocator: std.mem.Allocator, arity: u8, frame_slot_count: u8, instructions: *const CodeEmitter) !*Code {
+fn duplicateCodeFromEmitter(allocator: std.mem.Allocator, arity: u8, required_arity: u8, frame_slot_count: u8, instructions: *const CodeEmitter) !*Code {
     const code = try allocator.create(Code);
     const constants = try allocator.dupe(Value, instructions.constantSlice());
-    const direct = directCodeFromEmitter(arity, frame_slot_count, instructions, constants) orelse return error.Unsupported;
+    const direct = directCodeFromEmitter(arity, required_arity, frame_slot_count, instructions, constants) orelse return error.Unsupported;
     code.* = direct;
     code.bytes = try allocator.dupe(u8, direct.bytes);
     code.constants = constants;
@@ -6069,6 +6840,10 @@ pub const Session = struct {
     debug_apply_scan_generic_count: usize = 0,
     debug_apply_each_right_generic_count: usize = 0,
     debug_apply_each_left_generic_count: usize = 0,
+    debug_apply_each_prior_fast_bit_count: usize = 0,
+    debug_apply_each_prior_fast_bit_element_count: usize = 0,
+    debug_apply_each_prior_generic_count: usize = 0,
+    debug_apply_each_prior_generic_element_count: usize = 0,
     debug_apply_each_right_fast_string_contains_count: usize = 0,
     debug_apply_each_fast_unary_lifted_count: usize = 0,
     debug_apply_each_fast_dense_count: usize = 0,
@@ -6468,6 +7243,7 @@ pub const Session = struct {
     pub fn forceValue(self: *Session, value: Value) KError!void {
         _ = self;
         switch (value.tag()) {
+            .float32 => {},
             .array => switch (value.arrayKind()) {
                 .backend_array => {
                     var owned = value.asBackendArray().array.clone() catch |err| return mapMlxError(err);
@@ -6481,7 +7257,7 @@ pub const Session = struct {
                         owned.eval() catch |err| return mapMlxError(err);
                     }
                 },
-                .host_dense_array, .host_boxed_array, .host_string, .host_symbol, .host_string_list, .host_string_view, .host_relation, .host_keyed_store, .host_table_scalar => {},
+                .host_dense_array, .host_boxed_array, .host_string, .host_symbol, .host_string_list, .host_symbol_list, .host_string_view, .host_relation, .host_keyed_store, .host_table_scalar => {},
                 else => return error.Internal,
             },
             .int, .float, .bool, .builtin, .closure => {},
@@ -6706,6 +7482,26 @@ pub const Session = struct {
     pub fn debugApplyEachLeftGenericCount(self: *const Session) usize {
         if (comptime !enable_probe_instrumentation) return 0;
         return self.debug_apply_each_left_generic_count;
+    }
+
+    pub fn debugApplyEachPriorFastBitCount(self: *const Session) usize {
+        if (comptime !enable_probe_instrumentation) return 0;
+        return self.debug_apply_each_prior_fast_bit_count;
+    }
+
+    pub fn debugApplyEachPriorFastBitElementCount(self: *const Session) usize {
+        if (comptime !enable_probe_instrumentation) return 0;
+        return self.debug_apply_each_prior_fast_bit_element_count;
+    }
+
+    pub fn debugApplyEachPriorGenericCount(self: *const Session) usize {
+        if (comptime !enable_probe_instrumentation) return 0;
+        return self.debug_apply_each_prior_generic_count;
+    }
+
+    pub fn debugApplyEachPriorGenericElementCount(self: *const Session) usize {
+        if (comptime !enable_probe_instrumentation) return 0;
+        return self.debug_apply_each_prior_generic_element_count;
     }
 
     pub fn debugApplyEachRightFastStringContainsCount(self: *const Session) usize {
@@ -7241,6 +8037,10 @@ pub const Session = struct {
         self.debug_apply_scan_generic_count = 0;
         self.debug_apply_each_right_generic_count = 0;
         self.debug_apply_each_left_generic_count = 0;
+        self.debug_apply_each_prior_fast_bit_count = 0;
+        self.debug_apply_each_prior_fast_bit_element_count = 0;
+        self.debug_apply_each_prior_generic_count = 0;
+        self.debug_apply_each_prior_generic_element_count = 0;
         self.debug_apply_each_right_fast_string_contains_count = 0;
         self.debug_apply_each_fast_unary_lifted_count = 0;
         self.debug_apply_each_fast_dense_count = 0;
@@ -7507,7 +8307,11 @@ pub const Session = struct {
 
     fn renderValueMode(self: *Session, value: Value, mode: RenderMode) anyerror![]u8 {
         return switch (value.tag()) {
-            .int => std.fmt.allocPrint(self.allocator, "{d}", .{value.asInt()}),
+            .int => if (isKiwiIntNull(value.asInt()))
+                self.allocator.dupe(u8, "0N")
+            else
+                std.fmt.allocPrint(self.allocator, "{d}", .{value.asInt()}),
+            .float32 => formatFloat32Scalar(self.allocator, value.asFloat32()),
             .float => formatFloat(self.allocator, value.asFloat()),
             .bool => std.fmt.allocPrint(self.allocator, "{d}b", .{@intFromBool(value.asBool())}),
             .builtin => std.fmt.allocPrint(self.allocator, "{c}", .{builtinChar(value.asBuiltin())}),
@@ -7531,7 +8335,8 @@ pub const Session = struct {
             .host_boxed_array => self.renderHostBoxedArray(value.asHostBoxedArray(), mode),
             .host_string => self.renderHostString(value.asHostString()),
             .host_symbol => self.renderHostSymbol(value.asHostSymbol()),
-            .host_string_list => self.renderHostStringList(value.asHostStringList()),
+            .host_string_list => self.renderHostStringList(value.asHostStringList(), mode),
+            .host_symbol_list => self.renderHostSymbolList(value.asHostStringList()),
             .host_string_view => self.renderHostStringView(value.asHostStringView()),
             .host_relation => self.renderHostRelation(value.asHostRelation()),
             .host_keyed_store => self.renderHostKeyedStore(value.asHostKeyedStore()),
@@ -7547,9 +8352,17 @@ pub const Session = struct {
         try out.appendSlice(allocator, part);
     }
 
+    fn appendRenderedInt(out: *std.ArrayList(u8), allocator: std.mem.Allocator, value: i64) !void {
+        if (isKiwiIntNull(value)) {
+            try out.appendSlice(allocator, "0N");
+        } else {
+            try out.writer(allocator).print("{d}", .{value});
+        }
+    }
+
     fn appendRenderedNumericFlatItem(self: *Session, out: *std.ArrayList(u8), value: Value, idx: usize, mode: HostDenseElem) !void {
         switch (mode) {
-            .int => try out.writer(self.allocator).print("{d}", .{try numericIntAt(value, idx)}),
+            .int => try appendRenderedInt(out, self.allocator, try numericIntAt(value, idx)),
             .float => try appendRenderedFloat(out, self.allocator, try numericFloatAt(value, idx)),
         }
     }
@@ -7557,6 +8370,10 @@ pub const Session = struct {
     fn appendRenderedNumericFlatVector(self: *Session, out: *std.ArrayList(u8), value: Value, base: usize, len: usize, mode: HostDenseElem) !void {
         if (len == 0 and mode == .int) {
             try out.appendSlice(self.allocator, "!0");
+            return;
+        }
+        if (len == 0 and mode == .float) {
+            try out.appendSlice(self.allocator, "0#0n");
             return;
         }
         if (len == 1) try out.append(self.allocator, ',');
@@ -7568,13 +8385,13 @@ pub const Session = struct {
 
     fn appendRenderedNumericPrototypeFlatVector(self: *Session, out: *std.ArrayList(u8), len: usize, mode: HostDenseElem) !void {
         if (len == 0) {
-            try out.appendSlice(self.allocator, if (mode == .float) "0#0.0" else "!0");
+            try out.appendSlice(self.allocator, if (mode == .float) "0#0n" else "!0");
             return;
         }
         if (len == 1) try out.append(self.allocator, ',');
         for (0..len) |idx| {
             if (idx != 0) try out.append(self.allocator, ' ');
-            try out.appendSlice(self.allocator, if (mode == .float) "0.0" else "0");
+            try out.appendSlice(self.allocator, if (mode == .float) "0n" else "0N");
         }
     }
 
@@ -7664,6 +8481,10 @@ pub const Session = struct {
     }
 
     fn appendRenderedHostBitVector(self: *Session, out: *std.ArrayList(u8), words: []const u64, base: usize, len: usize) !void {
+        if (len == 0) {
+            try out.appendSlice(self.allocator, "!0");
+            return;
+        }
         if (len == 1) try out.append(self.allocator, ',');
         for (0..len) |idx| try out.append(self.allocator, if (bitGet(words, base + idx)) '1' else '0');
         try out.append(self.allocator, 'b');
@@ -7708,16 +8529,88 @@ pub const Session = struct {
         return try self.renderNumericArrayShape(value, handle.shapeSlice(), mode, render_mode);
     }
 
+    fn appendRenderedHexBytes(self: *Session, out: *std.ArrayList(u8), bytes: []const u8) !void {
+        const digits = "0123456789abcdef";
+        try out.appendSlice(self.allocator, "0x");
+        for (bytes) |byte| {
+            try out.append(self.allocator, digits[byte >> 4]);
+            try out.append(self.allocator, digits[byte & 0x0f]);
+        }
+    }
+
+    fn bytesAreUtf8(bytes: []const u8) bool {
+        _ = std.unicode.Utf8View.init(bytes) catch return false;
+        return true;
+    }
+
+    fn appendRenderedHostStringBytes(self: *Session, out: *std.ArrayList(u8), bytes: []const u8) !void {
+        if (!bytesAreUtf8(bytes)) {
+            try self.appendRenderedHexBytes(out, bytes);
+            return;
+        }
+
+        try out.append(self.allocator, '"');
+        for (bytes) |byte| {
+            if (byte == 0) {
+                try out.appendSlice(self.allocator, "\\0");
+            } else {
+                try out.append(self.allocator, byte);
+            }
+        }
+        try out.append(self.allocator, '"');
+    }
+
+    fn symbolBytesNeedQuotes(bytes: []const u8) bool {
+        if (bytes.len == 0) return false;
+        for (bytes) |byte| {
+            if (std.ascii.isAlphanumeric(byte) or byte == '_') continue;
+            return true;
+        }
+        return false;
+    }
+
+    fn appendRenderedHostSymbolBytes(self: *Session, out: *std.ArrayList(u8), bytes: []const u8) !void {
+        try out.append(self.allocator, '`');
+        if (!symbolBytesNeedQuotes(bytes)) {
+            try out.appendSlice(self.allocator, bytes);
+            return;
+        }
+        try out.append(self.allocator, '"');
+        for (bytes) |byte| {
+            if (byte == 0) {
+                try out.appendSlice(self.allocator, "\\0");
+            } else {
+                try out.append(self.allocator, byte);
+            }
+        }
+        try out.append(self.allocator, '"');
+    }
+
+    fn appendRenderedHostCharVectorBytes(self: *Session, out: *std.ArrayList(u8), bytes: []const u8) !void {
+        if (bytes.len == 1) try out.append(self.allocator, ',');
+        try self.appendRenderedHostStringBytes(out, bytes);
+    }
+
+    fn renderHostStringBytes(self: *Session, bytes: []const u8) anyerror![]u8 {
+        var out = std.ArrayList(u8).empty;
+        errdefer out.deinit(self.allocator);
+        try self.appendRenderedHostStringBytes(&out, bytes);
+        return try out.toOwnedSlice(self.allocator);
+    }
+
     fn renderHostString(self: *Session, text: *const HostText) anyerror![]u8 {
-        return std.fmt.allocPrint(self.allocator, "\"{s}\"", .{hostTextBytes(text)});
+        return self.renderHostStringBytes(hostTextBytes(text));
     }
 
     fn renderHostSymbol(self: *Session, text: *const HostText) anyerror![]u8 {
-        return std.fmt.allocPrint(self.allocator, "`{s}", .{hostTextBytes(text)});
+        var out = std.ArrayList(u8).empty;
+        errdefer out.deinit(self.allocator);
+        try self.appendRenderedHostSymbolBytes(&out, hostTextBytes(text));
+        return try out.toOwnedSlice(self.allocator);
     }
 
     fn renderHostStringView(self: *Session, view: *const HostStringView) anyerror![]u8 {
-        return std.fmt.allocPrint(self.allocator, "\"{s}\"", .{hostStringViewBytes(view)});
+        return self.renderHostStringBytes(hostStringViewBytes(view));
     }
 
     fn renderHostRelation(self: *Session, relation: *const HostRelation) anyerror![]u8 {
@@ -7757,10 +8650,11 @@ pub const Session = struct {
     }
 
     fn keyedStoreNameCount(store: *const HostKeyedStore) usize {
-        return derivedSequenceLen(store.names) orelse unreachable;
+        return keyedStoreNamesValueCount(store.names);
     }
 
     fn keyedStoreNameValue(self: *Session, store: *const HostKeyedStore, idx: usize) KError!Value {
+        if (stringSourceInfo(store.names)) |source| return try self.stringIndexScalarValue(source, @intCast(idx));
         return try self.derivedSequenceItemValue(store.names, idx);
     }
 
@@ -7780,7 +8674,7 @@ pub const Session = struct {
                 if (column_idx >= names.len) return "";
                 break :blk symbolBytes(names[column_idx]) orelse stringBytes(names[column_idx]) orelse "";
             },
-            .host_string_list => hostStringListItemBytes(store.names.asHostStringList(), column_idx) catch "",
+            .host_string_list, .host_symbol_list => hostStringListItemBytes(store.names.asHostStringList(), column_idx) catch "",
             else => "",
         };
     }
@@ -8009,7 +8903,7 @@ pub const Session = struct {
             .int => std.fmt.allocPrint(self.allocator, "{d}", .{try numericIntAt(data, @intCast(row))}),
             .float => formatFloat(self.allocator, try numericFloatAt(data, @intCast(row))),
             .string => blk: {
-                const value = try self.hostStringListItemValue(data.asHostStringList(), row);
+                const value = try self.hostTextListItemValue(data, row);
                 defer self.releaseValue(value);
                 break :blk try self.renderValue(value);
             },
@@ -8080,60 +8974,108 @@ pub const Session = struct {
 
     fn renderHostKeyedStore(self: *Session, store: *const HostKeyedStore) anyerror![]u8 {
         if (store.layout == .table) return try self.renderTableStore(store);
-        const keys = try self.renderValueMode(store.names, .nested);
+        const keys = try self.renderKeyedStoreKeySide(store.names);
         defer self.allocator.free(keys);
         const values = try self.renderValueMode(store.values, .nested);
         defer self.allocator.free(values);
         return try std.fmt.allocPrint(self.allocator, "{s}!{s}", .{ keys, values });
     }
 
-    fn renderHostStringList(self: *Session, list: *const HostStringList) anyerror![]u8 {
+    fn renderKeyedStoreKeySide(self: *Session, names: Value) anyerror![]u8 {
+        const rendered = try self.renderValueMode(names, .nested);
+        errdefer self.allocator.free(rendered);
+        if (!keyedStoreKeySideNeedsParens(names)) return rendered;
+        const wrapped = try std.fmt.allocPrint(self.allocator, "({s})", .{rendered});
+        self.allocator.free(rendered);
+        return wrapped;
+    }
+
+    fn keyedStoreKeySideNeedsParens(names: Value) bool {
+        if (names.tag() != .array) return false;
+        const len = derivedSequenceLen(names) orelse return false;
+        return switch (names.arrayKind()) {
+            .host_boxed_array, .host_string => len == 1,
+            .host_string_list => names.asHostStringList().display != .list and len < 2,
+            .host_symbol_list => len < 2,
+            .host_dense_array, .backend_array => len < 2,
+            else => if (valueNumericHandle(names) != null) len < 2 else false,
+        };
+    }
+
+    fn renderHostStringList(self: *Session, list: *const HostStringList, render_mode: RenderMode) anyerror![]u8 {
         var out = std.ArrayList(u8).empty;
         errdefer out.deinit(self.allocator);
-        try out.append(self.allocator, '(');
-        switch (list.storage) {
-            .eager => |items| {
-                for (items, 0..) |item, idx| {
-                    if (idx != 0) try out.append(self.allocator, ';');
-                    try out.writer(self.allocator).print("\"{s}\"", .{hostStringPieceBytes(list.base, item)});
-                }
-            },
-            .split_scalar => |lazy| {
-                const base = list.base orelse unreachable;
-                const src = hostTextBytes(base);
-                var idx: usize = 0;
-                var start: usize = 0;
-                while (std.mem.indexOfScalarPos(u8, src, start, lazy.sep)) |sep_idx| {
-                    if (idx != 0) try out.append(self.allocator, ';');
-                    try out.writer(self.allocator).print("\"{s}\"", .{src[start..sep_idx]});
-                    idx += 1;
-                    start = sep_idx + 1;
-                }
+        if (list.display == .list) {
+            try out.append(self.allocator, '(');
+            for (0..list.len) |idx| {
                 if (idx != 0) try out.append(self.allocator, ';');
-                try out.writer(self.allocator).print("\"{s}\"", .{src[start..]});
-            },
+                try self.appendRenderedHostStringBytes(&out, try hostStringListItemBytes(list, idx));
+            }
+            try out.append(self.allocator, ')');
+            return try out.toOwnedSlice(self.allocator);
+        }
+
+        if (list.len == 0) {
+            try out.appendSlice(self.allocator, "()");
+            return try out.toOwnedSlice(self.allocator);
+        }
+        if (list.len == 1) {
+            try out.append(self.allocator, ',');
+            try self.appendRenderedHostCharVectorBytes(&out, try hostStringListItemBytes(list, 0));
+            return try out.toOwnedSlice(self.allocator);
+        }
+
+        try out.append(self.allocator, '(');
+        for (0..list.len) |idx| {
+            if (idx != 0) {
+                if (render_mode == .top) {
+                    try out.appendSlice(self.allocator, "\n ");
+                } else {
+                    try out.append(self.allocator, ';');
+                }
+            }
+            try self.appendRenderedHostCharVectorBytes(&out, try hostStringListItemBytes(list, idx));
         }
         try out.append(self.allocator, ')');
         return try out.toOwnedSlice(self.allocator);
     }
 
+    fn renderHostSymbolList(self: *Session, list: *const HostStringList) anyerror![]u8 {
+        if (list.len == 0) return try self.allocator.dupe(u8, "0#`");
+
+        var out = std.ArrayList(u8).empty;
+        errdefer out.deinit(self.allocator);
+        if (list.len == 1) try out.append(self.allocator, ',');
+        for (0..list.len) |idx| {
+            try self.appendRenderedHostSymbolBytes(&out, try hostStringListItemBytes(list, idx));
+        }
+        return try out.toOwnedSlice(self.allocator);
+    }
+
     fn hostBoxedArrayAllSymbols(array: *const HostBoxedArray) bool {
-        if (array.items.len == 0) return false;
-        for (array.items) |item| {
+        const items = array.items[0..array.len()];
+        if (items.len == 0) return false;
+        for (items) |item| {
             if (symbolBytes(item) == null) return false;
         }
         return true;
     }
 
     fn hostBoxedArrayUsesTopLevelRows(array: *const HostBoxedArray) bool {
-        if (array.items.len <= 1) return false;
+        const items = array.items[0..array.len()];
+        if (items.len <= 1) return false;
 
         var has_numeric_vector = false;
-        for (array.items) |item| {
+        var has_string_rows = false;
+        for (items) |item| {
             switch (item.tag()) {
                 .int, .bool, .float => {},
                 .array => {
                     if (symbolBytes(item) != null) continue;
+                    if (item.arrayKind() == .host_string_list or item.arrayKind() == .host_symbol_list or item.arrayKind() == .host_boxed_array) {
+                        has_string_rows = true;
+                        continue;
+                    }
                     if (valueNumericMode(item) != null and numericVectorLen(item) != null) {
                         has_numeric_vector = true;
                         continue;
@@ -8143,13 +9085,13 @@ pub const Session = struct {
                 else => return false,
             }
         }
-        return has_numeric_vector;
+        return has_numeric_vector or has_string_rows;
     }
 
     fn renderHostArray(self: *Session, array: *const HostDenseArray) anyerror![]u8 {
         if (array.logical_len == 0) switch (array.storage) {
-            .int8, .int16, .int32, .int64 => return try self.allocator.dupe(u8, "!0"),
-            else => {},
+            .bit, .int8, .int16, .int32, .int64 => return try self.allocator.dupe(u8, "!0"),
+            .float32, .float64 => return try self.allocator.dupe(u8, "0#0n"),
         };
 
         var out = std.ArrayList(u8).empty;
@@ -8163,25 +9105,33 @@ pub const Session = struct {
             .int8 => |items| {
                 for (hostDenseLogicalItems(i8, array, items), 0..) |item, idx| {
                     if (idx != 0) try out.append(self.allocator, ' ');
-                    try out.writer(self.allocator).print("{d}", .{item});
+                    try appendRenderedInt(&out, self.allocator, item);
                 }
             },
             .int16 => |items| {
                 for (hostDenseLogicalItems(i16, array, items), 0..) |item, idx| {
                     if (idx != 0) try out.append(self.allocator, ' ');
-                    try out.writer(self.allocator).print("{d}", .{item});
+                    try appendRenderedInt(&out, self.allocator, item);
                 }
             },
             .int32 => |items| {
                 for (hostDenseLogicalItems(i32, array, items), 0..) |item, idx| {
                     if (idx != 0) try out.append(self.allocator, ' ');
-                    try out.writer(self.allocator).print("{d}", .{item});
+                    try appendRenderedInt(&out, self.allocator, item);
                 }
             },
             .int64 => |items| {
                 for (hostDenseLogicalItems(i64, array, items), 0..) |item, idx| {
                     if (idx != 0) try out.append(self.allocator, ' ');
-                    try out.writer(self.allocator).print("{d}", .{item});
+                    try appendRenderedInt(&out, self.allocator, item);
+                }
+            },
+            .float32 => |items| {
+                for (hostDenseLogicalItems(f32, array, items), 0..) |item, idx| {
+                    if (idx != 0) try out.append(self.allocator, ' ');
+                    const part = try formatFloat(self.allocator, @as(f64, item));
+                    defer self.allocator.free(part);
+                    try out.appendSlice(self.allocator, part);
                 }
             },
             .float64 => |items| {
@@ -8200,22 +9150,39 @@ pub const Session = struct {
     fn renderHostBoxedArray(self: *Session, array: *const HostBoxedArray, render_mode: RenderMode) anyerror![]u8 {
         var out = std.ArrayList(u8).empty;
         errdefer out.deinit(self.allocator);
+        const items = array.items[0..array.len()];
 
-        if (array.items.len > 1 and hostBoxedArrayAllSymbols(array)) {
-            for (array.items) |item| {
+        if (items.len == 0) {
+            if (array.prototype) |prototype| {
+                if (stringBytes(prototype)) |bytes| {
+                    if (bytes.len == 0) {
+                        try out.appendSlice(self.allocator, "()");
+                        return try out.toOwnedSlice(self.allocator);
+                    }
+                }
+                try out.appendSlice(self.allocator, "0#,");
+                const part = try self.renderValueMode(prototype, .nested);
+                defer self.allocator.free(part);
+                try out.appendSlice(self.allocator, part);
+            } else {
+                try out.appendSlice(self.allocator, "()");
+            }
+        } else if (items.len > 1 and hostBoxedArrayAllSymbols(array)) {
+            for (items) |item| {
                 const part = try self.renderValueMode(item, .nested);
                 defer self.allocator.free(part);
                 try out.appendSlice(self.allocator, part);
             }
-        } else if (array.items.len == 1) {
+        } else if (items.len == 1) {
             try out.append(self.allocator, ',');
-            const item = array.items[0];
+            const item = items[0];
             const part = try self.renderValueMode(item, .nested);
             defer self.allocator.free(part);
             try out.appendSlice(self.allocator, part);
-        } else if (isRenderableMatrix(array.items) or (render_mode == .top and hostBoxedArrayUsesTopLevelRows(array))) {
-            if (render_mode == .top) try out.append(self.allocator, '(');
-            for (array.items, 0..) |item, idx| {
+        } else if (isRenderableMatrix(items) or (render_mode == .top and hostBoxedArrayUsesTopLevelRows(array))) {
+            const matrix_like = isRenderableMatrix(items);
+            if (render_mode == .top or matrix_like) try out.append(self.allocator, '(');
+            for (items, 0..) |item, idx| {
                 if (idx != 0) {
                     if (render_mode == .top) {
                         try out.appendSlice(self.allocator, "\n ");
@@ -8227,10 +9194,10 @@ pub const Session = struct {
                 defer self.allocator.free(part);
                 try out.appendSlice(self.allocator, part);
             }
-            if (render_mode == .top) try out.append(self.allocator, ')');
+            if (render_mode == .top or matrix_like) try out.append(self.allocator, ')');
         } else {
             try out.append(self.allocator, '(');
-            for (array.items, 0..) |item, idx| {
+            for (items, 0..) |item, idx| {
                 if (idx != 0) try out.append(self.allocator, ';');
                 const part = try self.renderValueMode(item, .nested);
                 defer self.allocator.free(part);
@@ -8256,9 +9223,19 @@ pub const Session = struct {
         return Value.float(value);
     }
 
+    fn managedFloat32(self: *Session, value: f32) !Value {
+        _ = self;
+        return Value.float32(value);
+    }
+
     fn scratchFloat(self: *Session, value: f64) !Value {
         _ = self;
         return Value.float(value);
+    }
+
+    fn scratchFloat32(self: *Session, value: f32) !Value {
+        _ = self;
+        return Value.float32(value);
     }
 
     fn managedInt(self: *Session, value: i64) !Value {
@@ -8277,6 +9254,7 @@ pub const Session = struct {
         return switch (value.tag()) {
             .int => try self.createManagedHostIntArray(&[_]i64{value.asInt()}),
             .bool => try self.createManagedHostBitArray(&[_]bool{value.asBool()}),
+            .float32 => try self.createManagedHostFloat32Array(&[_]f32{value.asFloat32()}),
             .float => try self.createManagedHostFloatArray(&[_]f64{value.asFloat()}),
             else => try self.createManagedHostBoxedArray(&.{value}),
         };
@@ -8361,10 +9339,10 @@ pub const Session = struct {
 
     fn adverbBaseCanStayFrozen(base: Value) bool {
         return switch (base.tag()) {
+            .int, .bool, .float, .float32 => true,
             .builtin => true,
             .closure => base.asClosure().header.owner == .frozen or base.asClosure().captures.len == 0,
             .array => base.arrayOwner() == .frozen,
-            else => false,
         };
     }
 
@@ -8438,6 +9416,10 @@ pub const Session = struct {
                 const ptr: [*]i64 = @ptrCast(@alignCast(entry.ptr));
                 self.allocator.free(ptr[0..entry.len]);
             },
+            .float32 => {
+                const ptr: [*]f32 = @ptrCast(@alignCast(entry.ptr));
+                self.allocator.free(ptr[0..entry.len]);
+            },
             .float64 => {
                 const ptr: [*]f64 = @ptrCast(@alignCast(entry.ptr));
                 self.allocator.free(ptr[0..entry.len]);
@@ -8492,6 +9474,7 @@ pub const Session = struct {
             .int16 => |items| self.recycleManagedHostDenseBuffer(i16, .int16, items),
             .int32 => |items| self.recycleManagedHostDenseBuffer(i32, .int32, items),
             .int64 => |items| self.recycleManagedHostDenseBuffer(i64, .int64, items),
+            .float32 => |items| self.recycleManagedHostDenseBuffer(f32, .float32, items),
             .float64 => |items| self.recycleManagedHostDenseBuffer(f64, .float64, items),
         }
     }
@@ -8508,6 +9491,7 @@ pub const Session = struct {
             .int16 => .{ .int16 = self.takeManagedHostDenseBuffer(i16, .int16, capacity_len) orelse try self.allocator.alloc(i16, capacity_len) },
             .int32 => .{ .int32 = self.takeManagedHostDenseBuffer(i32, .int32, capacity_len) orelse try self.allocator.alloc(i32, capacity_len) },
             .int64 => .{ .int64 = self.takeManagedHostDenseBuffer(i64, .int64, capacity_len) orelse try self.allocator.alloc(i64, capacity_len) },
+            .float32 => .{ .float32 = self.takeManagedHostDenseBuffer(f32, .float32, capacity_len) orelse try self.allocator.alloc(f32, capacity_len) },
             .float64 => .{ .float64 = self.takeManagedHostDenseBuffer(f64, .float64, capacity_len) orelse try self.allocator.alloc(f64, capacity_len) },
         };
     }
@@ -8533,6 +9517,7 @@ pub const Session = struct {
             .int64 => |items| {
                 for (0..len) |idx| items[idx] = try hostDenseIntAt(array, idx);
             },
+            .float32 => return error.Type,
             .float64 => return error.Type,
         }
     }
@@ -8583,6 +9568,7 @@ pub const Session = struct {
             .int16 => .{ .int16 = storage_items },
             .int32 => .{ .int32 = storage_items },
             .int64 => .{ .int64 = storage_items },
+            .float32 => .{ .float32 = storage_items },
             .float64 => .{ .float64 = storage_items },
         };
         return .{ .array = array, .items = storage_items[0..len] };
@@ -8670,13 +9656,28 @@ pub const Session = struct {
         return .{ .array = out.array, .items = out.items };
     }
 
+    fn allocManagedHostFloat32Result(self: *Session, len: usize) !HostFloat32Result {
+        const out = try self.allocHostArrayTyped(f32, .float32, .managed, len);
+        return .{ .array = out.array, .items = out.items };
+    }
+
     fn allocScratchHostFloatResult(self: *Session, len: usize) !HostFloatResult {
         const out = try self.allocHostArrayTyped(f64, .float64, .scratch, len);
         return .{ .array = out.array, .items = out.items };
     }
 
+    fn allocScratchHostFloat32Result(self: *Session, len: usize) !HostFloat32Result {
+        const out = try self.allocHostArrayTyped(f32, .float32, .scratch, len);
+        return .{ .array = out.array, .items = out.items };
+    }
+
     fn allocFrozenHostFloatResult(self: *Session, len: usize) !HostFloatResult {
         const out = try self.allocHostArrayTyped(f64, .float64, .frozen, len);
+        return .{ .array = out.array, .items = out.items };
+    }
+
+    fn allocFrozenHostFloat32Result(self: *Session, len: usize) !HostFloat32Result {
+        const out = try self.allocHostArrayTyped(f32, .float32, .frozen, len);
         return .{ .array = out.array, .items = out.items };
     }
 
@@ -8698,6 +9699,14 @@ pub const Session = struct {
             .managed => try self.allocManagedHostFloatResult(len),
             .scratch => try self.allocScratchHostFloatResult(len),
             .frozen => try self.allocFrozenHostFloatResult(len),
+        };
+    }
+
+    fn allocOwnedHostFloat32Result(self: *Session, owner: HeapOwner, len: usize) !HostFloat32Result {
+        return switch (owner) {
+            .managed => try self.allocManagedHostFloat32Result(len),
+            .scratch => try self.allocScratchHostFloat32Result(len),
+            .frozen => try self.allocFrozenHostFloat32Result(len),
         };
     }
 
@@ -8786,7 +9795,33 @@ pub const Session = struct {
         };
     }
 
+    fn planHostFloat32UnaryOutput(self: *Session, source_value: Value, len: usize, allow_reuse: bool) !HostFloat32OutputPlan {
+        const maybe_reused = if (allow_reuse) self.tryReuseHostFloat32ArrayResult(source_value) else null;
+        return .{
+            .output = maybe_reused orelse try self.allocScratchHostFloat32Result(len),
+            .reused = maybe_reused != null,
+            .shape = valueNonVectorNumericShape(source_value),
+        };
+    }
+
+    fn planHostFloat32DyadOutput(self: *Session, left_value: Value, right_value: Value, len: usize, allow_reuse: bool) !HostFloat32OutputPlan {
+        const maybe_reused = if (allow_reuse) self.tryReuseHostFloat32DyadResult(left_value, right_value) else null;
+        return .{
+            .output = maybe_reused orelse try self.allocScratchHostFloat32Result(len),
+            .reused = maybe_reused != null,
+            .shape = try nonVectorNumericShapeForDyad(left_value, right_value),
+        };
+    }
+
     fn finishHostFloatOutput(self: *Session, plan: HostFloatOutputPlan, flags: u8) KError!Value {
+        const result_value = try plan.output.value(self);
+        hostDenseSetFlags(plan.output.array, flags);
+        self.invalidateHostDenseCachesForMutation(plan.output.array);
+        const result = try applyNonVectorNumericShapeToValue(self, result_value, plan.shape);
+        return if (plan.reused) self.shareValue(result) else result;
+    }
+
+    fn finishHostFloat32Output(self: *Session, plan: HostFloat32OutputPlan, flags: u8) KError!Value {
         const result_value = try plan.output.value(self);
         hostDenseSetFlags(plan.output.array, flags);
         self.invalidateHostDenseCachesForMutation(plan.output.array);
@@ -8847,6 +9882,24 @@ pub const Session = struct {
         };
     }
 
+    fn tryReuseHostFloat32ArrayResult(self: *Session, value: Value) ?HostFloat32Result {
+        _ = self;
+        const array = if (hostDenseIfPresent(value)) |host|
+            @constCast(host)
+        else
+            return null;
+        if (hostDenseNumericMode(array) != .float) return null;
+        switch (numericPayloadOwner(array)) {
+            .scratch => {},
+            .managed => if (numericPayloadManagedRefCount(array) != 1) return null,
+            .frozen => return null,
+        }
+        return switch (array.storage) {
+            .float32 => |items| .{ .array = array, .items = hostDenseMutableLogicalItems(f32, array, items) },
+            else => null,
+        };
+    }
+
     fn tryReuseHostIntDyadResult(self: *Session, left_value: Value, right_value: Value, kind: HostIntStorageKind) ?HostIntResult {
         const left = self.tryReuseHostIntArrayResult(left_value, kind);
         const right = self.tryReuseHostIntArrayResult(right_value, kind);
@@ -8871,11 +9924,30 @@ pub const Session = struct {
         return right;
     }
 
+    fn tryReuseHostFloat32DyadResult(self: *Session, left_value: Value, right_value: Value) ?HostFloat32Result {
+        const left = self.tryReuseHostFloat32ArrayResult(left_value);
+        const right = self.tryReuseHostFloat32ArrayResult(right_value);
+        if (left) |left_out| {
+            if (right) |right_out| {
+                return if (hostDenseReusePriority(right_out.array) > hostDenseReusePriority(left_out.array)) right_out else left_out;
+            }
+            return left_out;
+        }
+        return right;
+    }
+
     fn ownedConstantFloat(self: *Session, allocator: std.mem.Allocator, owner: HeapOwner, value: f64) !Value {
         _ = self;
         _ = allocator;
         _ = owner;
         return Value.float(value);
+    }
+
+    fn ownedConstantFloat32(self: *Session, allocator: std.mem.Allocator, owner: HeapOwner, value: f32) !Value {
+        _ = self;
+        _ = allocator;
+        _ = owner;
+        return Value.float32(value);
     }
 
     fn ownedConstantInt(self: *Session, allocator: std.mem.Allocator, owner: HeapOwner, value: i64) !Value {
@@ -8895,6 +9967,10 @@ pub const Session = struct {
 
     fn floatValue(self: *Session, value: f64) !Value {
         return try self.scratchFloat(value);
+    }
+
+    fn float32Value(self: *Session, value: f32) !Value {
+        return try self.scratchFloat32(value);
     }
 
     fn internedHostTextMap(self: *Session, kind: HeapKind) *std.StringHashMap(*HostText) {
@@ -8942,11 +10018,27 @@ pub const Session = struct {
         return value;
     }
 
+    fn managedHostCharVector(self: *Session, bytes: []const u8) !Value {
+        if (bytes.len != 1) return try self.managedHostString(bytes);
+
+        const char = try self.managedHostString(bytes);
+        defer self.releaseValue(char);
+        return try self.createManagedHostBoxedArray(&.{char});
+    }
+
     fn frozenHostString(self: *Session, bytes: []const u8) !Value {
         if (self.findInternedHostText(.host_string, bytes)) |value| return value;
         const value = try allocHostText(self.arena.allocator(), .host_string, .frozen, bytes);
         try self.rememberInternedHostText(.host_string, @constCast(value.asHostString()));
         return value;
+    }
+
+    fn createOwnedHostString(self: *Session, owner: HeapOwner, bytes: []const u8) !Value {
+        return switch (owner) {
+            .managed => try self.managedHostString(bytes),
+            .frozen => try self.frozenHostString(bytes),
+            .scratch => try allocHostText(self.scratch_arena.allocator(), .host_string, .scratch, bytes),
+        };
     }
 
     fn managedHostSymbol(self: *Session, bytes: []const u8) !Value {
@@ -8966,6 +10058,14 @@ pub const Session = struct {
         const value = try allocHostText(self.arena.allocator(), .host_symbol, .frozen, bytes);
         try self.rememberInternedHostText(.host_symbol, @constCast(value.asHostSymbol()));
         return value;
+    }
+
+    fn createOwnedHostSymbol(self: *Session, owner: HeapOwner, bytes: []const u8) !Value {
+        return switch (owner) {
+            .managed => try self.managedHostSymbol(bytes),
+            .frozen => try self.frozenHostSymbol(bytes),
+            .scratch => try allocHostText(self.scratch_arena.allocator(), .host_symbol, .scratch, bytes),
+        };
     }
 
     fn managedHostStringView(self: *Session, base: *HostText, span: HostTextSpan) !Value {
@@ -9113,6 +10213,7 @@ pub const Session = struct {
 
         stable.* = .{
             .arity = code.arity,
+            .required_arity = code.required_arity,
             .frame_slot_count = code.frame_slot_count,
             .local_count = code.local_count,
             .operand_stack_slot_count = code.operand_stack_slot_count,
@@ -9156,6 +10257,13 @@ pub const Session = struct {
                 hostDenseSetFlags(try mutableNumericHostArrayValue(self, result), array.flags);
                 break :blk result;
             },
+            .float32 => |items| blk: {
+                const out = try self.allocFrozenHostFloat32Result(items.len);
+                @memcpy(out.items, items);
+                const result = try out.value(self);
+                hostDenseSetFlags(try mutableNumericHostArrayValue(self, result), array.flags);
+                break :blk result;
+            },
         };
     }
 
@@ -9166,10 +10274,15 @@ pub const Session = struct {
         for (array.items, 0..) |item, idx| {
             frozen_items[idx] = try self.freezeConstantValue(item);
         }
+        const frozen_prototype = if (array.prototype) |prototype|
+            try self.freezeConstantValue(prototype)
+        else
+            null;
         frozen_array.* = .{
             .header = HeapHeader.init(.host_boxed_array, .frozen),
             .logical_len = array.items.len,
             .items = frozen_items,
+            .prototype = frozen_prototype,
         };
         return Value.array(frozen_array);
     }
@@ -9181,7 +10294,17 @@ pub const Session = struct {
         for (bytes, 0..) |*item, idx| {
             item.* = try hostStringListItemBytes(list, idx);
         }
-        return try self.createOwnedHostStringListFromSlices(.frozen, bytes);
+        return try self.createOwnedHostTextListFromSlicesKind(.frozen, .host_string_list, .host_string, list.display, bytes);
+    }
+
+    fn freezeHostSymbolListConstant(self: *Session, list: *const HostStringList) KError!Value {
+        if (list.header.owner == .frozen) return Value.array(list);
+        const bytes = try self.allocator.alloc([]const u8, list.len);
+        defer self.allocator.free(bytes);
+        for (bytes, 0..) |*item, idx| {
+            item.* = try hostStringListItemBytes(list, idx);
+        }
+        return try self.createOwnedHostSymbolListFromSlices(.frozen, bytes);
     }
 
     fn freezeArrayConstant(self: *Session, value: Value) KError!Value {
@@ -9200,6 +10323,7 @@ pub const Session = struct {
                 .scratch, .managed => try self.frozenHostSymbol(hostTextBytes(value.asHostSymbol())),
             },
             .host_string_list => try self.freezeHostStringListConstant(value.asHostStringList()),
+            .host_symbol_list => try self.freezeHostSymbolListConstant(value.asHostStringList()),
             .host_dense_array => blk: {
                 const frozen = try self.freezeHostArrayConstant(value.asHostDenseArray());
                 const shaped = try applyNonVectorNumericShapeToValue(self, frozen, valueNonVectorNumericShape(value));
@@ -9308,16 +10432,23 @@ pub const Session = struct {
                 }
 
                 const analysis = analyzeFloatSlice(items);
-                if (analysis.int_analysis) |int_analysis| {
-                    break :blk .{ .float_to_int = .{
-                        .items = items,
-                        .kind = int_analysis.kind,
-                        .flags = int_analysis.flags,
+                break :blk .{ .float = .{
+                    .items = items,
+                    .flags = analysis.flags,
+                } };
+            },
+            .float32 => |items| blk: {
+                const logical_items = hostDenseLogicalItems(f32, array, items);
+                if (hostDenseHasFlag(array, host_dense_flag_normalized)) {
+                    break :blk .{ .float32 = .{
+                        .items = logical_items,
+                        .flags = array.flags | host_dense_flag_normalized,
                     } };
                 }
 
-                break :blk .{ .float = .{
-                    .items = items,
+                const analysis = analyzeFloatSlice32(logical_items);
+                break :blk .{ .float32 = .{
+                    .items = logical_items,
                     .flags = analysis.flags,
                 } };
             },
@@ -9341,11 +10472,11 @@ pub const Session = struct {
                 hostDenseSetFlags(try mutableNumericHostArrayValue(self, result), float_plan.flags);
                 break :blk result;
             },
-            .float_to_int => |int_plan| blk: {
-                var out = try self.allocManagedHostIntResult(int_plan.kind, int_plan.items.len);
-                try copyExactFloatSliceToIntResult(&out, int_plan.items);
+            .float32 => |float_plan| blk: {
+                const out = try self.allocManagedHostFloat32Result(float_plan.items.len);
+                @memcpy(out.items, float_plan.items);
                 const result = try out.value(self);
-                hostDenseSetFlags(try mutableNumericHostArrayValue(self, result), int_plan.flags);
+                hostDenseSetFlags(try mutableNumericHostArrayValue(self, result), float_plan.flags);
                 break :blk result;
             },
         };
@@ -9376,11 +10507,34 @@ pub const Session = struct {
                     const promoted = try self.normalizeHostArrayForPromotion(host);
                     return try applyNonVectorNumericShapeToValue(self, promoted, shape);
                 }
-                if (numericBackendAttachment(handle)) |array| return try self.cloneManagedBackendArray(array.array);
+                if (numericBackendAttachment(handle)) |array| {
+                    const shape = valueNonVectorNumericShape(value);
+                    const promoted = try self.cloneManagedBackendArray(array.array);
+                    return try applyNonVectorNumericShapeToValue(self, promoted, shape);
+                }
                 return error.Internal;
             },
             else => error.Internal,
         };
+    }
+
+    fn tryCreateHostSymbolListFromValues(self: *Session, owner: HeapOwner, values: []const Value) KError!?Value {
+        if (values.len == 0) return null;
+        var all_host_symbols = true;
+        for (values) |value| {
+            if (symbolBytes(value) == null) {
+                all_host_symbols = false;
+                break;
+            }
+        }
+        if (!all_host_symbols) return null;
+
+        const slices = try self.allocator.alloc([]const u8, values.len);
+        defer self.allocator.free(slices);
+        for (values, 0..) |value, idx| {
+            slices[idx] = symbolBytes(value).?;
+        }
+        return try self.createOwnedHostSymbolListFromSlices(owner, slices);
     }
 
     fn makeArrayFromValues(self: *Session, values: []const Value) KError!Value {
@@ -9411,9 +10565,11 @@ pub const Session = struct {
                 }
             }
             if (all_host_strings) return try self.createManagedHostStringList(normalized);
+            if (try self.tryCreateHostSymbolListFromValues(.managed, normalized)) |symbols| return symbols;
         }
 
-        var needs_float = false;
+        var saw_float32 = false;
+        var saw_float64 = false;
         var saw_numeric_array = false;
         var saw_scalar = false;
         var saw_non_numeric_item = false;
@@ -9426,8 +10582,13 @@ pub const Session = struct {
                     saw_scalar = true;
                     if (saw_numeric_array) saw_irregular_numeric_array = true;
                 },
+                .float32 => {
+                    saw_float32 = true;
+                    saw_scalar = true;
+                    if (saw_numeric_array) saw_irregular_numeric_array = true;
+                },
                 .float => {
-                    needs_float = true;
+                    saw_float64 = true;
                     saw_scalar = true;
                     if (saw_numeric_array) saw_irregular_numeric_array = true;
                 },
@@ -9475,12 +10636,13 @@ pub const Session = struct {
             return try self.createManagedHostBoxedArray(normalized);
         }
 
-        if (!needs_float) {
+        if (!saw_float32 and !saw_float64) {
             if (comptime enable_probe_instrumentation) self.debug_make_array_int_result_count += 1;
             return try self.createManagedHostIntArrayFromValues(normalized);
         }
 
         if (comptime enable_probe_instrumentation) self.debug_make_array_float_result_count += 1;
+        if (!saw_float64) return try self.createManagedHostFloat32ArrayFromValues(normalized);
         return try self.createManagedHostFloatArrayFromValues(normalized);
     }
 
@@ -9494,9 +10656,11 @@ pub const Session = struct {
                 }
             }
             if (all_host_strings) return try self.createOwnedHostStringList(owner, values);
+            if (try self.tryCreateHostSymbolListFromValues(owner, values)) |symbols| return symbols;
         }
 
-        var needs_float = false;
+        var saw_float32 = false;
+        var saw_float64 = false;
         var saw_numeric_array = false;
         var saw_scalar = false;
         var saw_non_numeric_item = false;
@@ -9509,8 +10673,13 @@ pub const Session = struct {
                     saw_scalar = true;
                     if (saw_numeric_array) saw_irregular_numeric_array = true;
                 },
+                .float32 => {
+                    saw_float32 = true;
+                    saw_scalar = true;
+                    if (saw_numeric_array) saw_irregular_numeric_array = true;
+                },
                 .float => {
-                    needs_float = true;
+                    saw_float64 = true;
                     saw_scalar = true;
                     if (saw_numeric_array) saw_irregular_numeric_array = true;
                 },
@@ -9543,7 +10712,8 @@ pub const Session = struct {
             return try self.createOwnedHostBoxedArray(owner, values);
         }
 
-        if (!needs_float) return try self.createOwnedHostIntArrayFromValues(owner, values);
+        if (!saw_float32 and !saw_float64) return try self.createOwnedHostIntArrayFromValues(owner, values);
+        if (!saw_float64) return try self.createOwnedHostFloat32ArrayFromValues(owner, values);
         return try self.createOwnedHostFloatArrayFromValues(owner, values);
     }
 
@@ -9553,7 +10723,10 @@ pub const Session = struct {
         const host = try tryEnsureHostRealizationForHandle(self, @constCast(handle)) orelse return error.Type;
         return switch (hostDenseNumericMode(host)) {
             .int => try self.intValue(try hostDenseIntAt(host, 0)),
-            .float => try self.floatValue(try hostDenseFloatAt(host, 0)),
+            .float => switch (hostArrayFloatStorageKind(host) orelse .float64) {
+                .float32 => try self.float32Value(@floatCast(try hostDenseFloatAt(host, 0))),
+                .float64 => try self.floatValue(try hostDenseFloatAt(host, 0)),
+            },
         };
     }
 
@@ -9571,7 +10744,7 @@ pub const Session = struct {
         _ = compile_arena.reset(.retain_capacity);
         self.scratch_code.reset();
         if (try tryCompileTinyTopLevelInto(self, source, compile_arena.allocator(), .scratch, &self.scratch_code.instructions)) {
-            const code = try self.scratch_code.finalize(0, 0);
+            const code = try self.scratch_code.finalize(0, 0, 0);
             self.compilerAssignTopLevelProfile(code, source, .scratch);
             return code;
         }
@@ -9583,7 +10756,7 @@ pub const Session = struct {
         const compile_source = if (own_source) try code_allocator.dupe(u8, source) else source;
         var fast = CodeEmitter{};
         if (try tryCompileTinyTopLevelInto(self, compile_source, code_allocator, .frozen, &fast)) {
-            const code = try duplicateCodeFromEmitter(code_allocator, 0, 0, &fast);
+            const code = try duplicateCodeFromEmitter(code_allocator, 0, 0, 0, &fast);
             self.compilerAssignTopLevelProfile(code, compile_source, .frozen);
             return .{
                 .source = compile_source,
@@ -9639,6 +10812,7 @@ pub const Session = struct {
 
     fn recycleManagedHostBoxedArray(self: *Session, array: *HostBoxedArray) void {
         for (array.items) |item| self.releaseValue(item);
+        if (array.prototype) |prototype| self.releaseValue(prototype);
         self.allocator.free(array.items);
         if (self.free_host_boxed_array_len < self.free_host_boxed_arrays.len) {
             self.free_host_boxed_arrays[self.free_host_boxed_array_len] = array;
@@ -9971,7 +11145,7 @@ pub const Session = struct {
                         self.allocator.destroy(scalar);
                     }
                 },
-                .host_string_list => {
+                .host_string_list, .host_symbol_list => {
                     const list = @constCast(value.asHostStringList());
                     if (list.header.owner != .managed) return;
                     std.debug.assert(list.header.ref_count != 0);
@@ -10054,7 +11228,9 @@ pub const Session = struct {
         if (rows * cols != data.len) return error.Internal;
         _ = try self.backendContext();
         const dims = [_]i32{ @intCast(rows), @intCast(cols) };
-        const value = try self.wrapManagedBackendArray(mlx.Array.fromFloatSlice(data, &dims));
+        var array = mlx.Array.fromFloatSliceChecked(data, &dims) catch |err| return mapMlxError(err);
+        errdefer array.deinit();
+        const value = try self.wrapManagedBackendArray(array);
         defer self.releaseValue(value);
         try self.storeGlobalSlot(try self.internGlobalSlot(name), value);
     }
@@ -10063,7 +11239,9 @@ pub const Session = struct {
         if (comptime !runtime_has_mlx) return error.Unsupported;
         _ = try self.backendContext();
         const dims = [_]i32{@intCast(data.len)};
-        const value = try self.wrapManagedBackendArray(mlx.Array.fromFloatSlice(data, &dims));
+        var array = mlx.Array.fromFloatSliceChecked(data, &dims) catch |err| return mapMlxError(err);
+        errdefer array.deinit();
+        const value = try self.wrapManagedBackendArray(array);
         defer self.releaseValue(value);
         try self.storeGlobalSlot(try self.internGlobalSlot(name), value);
     }
@@ -10074,7 +11252,9 @@ pub const Session = struct {
         var elem_count: usize = 1;
         for (dims) |dim| elem_count *= @intCast(dim);
         if (elem_count != data.len) return error.Internal;
-        const value = try self.wrapManagedBackendArray(mlx.Array.fromFloatSlice(data, dims));
+        var array = mlx.Array.fromFloatSliceChecked(data, dims) catch |err| return mapMlxError(err);
+        errdefer array.deinit();
+        const value = try self.wrapManagedBackendArray(array);
         defer self.releaseValue(value);
         try self.storeGlobalSlot(try self.internGlobalSlot(name), value);
     }
@@ -10087,7 +11267,7 @@ pub const Session = struct {
         const decoded = try self.allocator.alloc(f32, data.len);
         defer self.allocator.free(decoded);
         for (data, 0..) |item, idx| decoded[idx] = bfloat16BitsToFloat32(item);
-        var array = mlx.Array.fromFloatSlice(decoded, &dims);
+        var array = mlx.Array.fromFloatSliceChecked(decoded, &dims) catch |err| return mapMlxError(err);
         errdefer array.deinit();
         try self.castOwnedBackendArrayToDtype(&array, c.MLX_BFLOAT16);
         const value = try self.wrapManagedBackendArray(array);
@@ -10102,7 +11282,7 @@ pub const Session = struct {
         const decoded = try self.allocator.alloc(f32, data.len);
         defer self.allocator.free(decoded);
         for (data, 0..) |item, idx| decoded[idx] = bfloat16BitsToFloat32(item);
-        var array = mlx.Array.fromFloatSlice(decoded, &dims);
+        var array = mlx.Array.fromFloatSliceChecked(decoded, &dims) catch |err| return mapMlxError(err);
         errdefer array.deinit();
         try self.castOwnedBackendArrayToDtype(&array, c.MLX_BFLOAT16);
         const value = try self.wrapManagedBackendArray(array);
@@ -10112,6 +11292,12 @@ pub const Session = struct {
 
     pub fn setGlobalHostFloatArray(self: *Session, name: []const u8, data: []const f32, dims: []const i32) !void {
         const value = try self.createManagedGlobalFloatValue(data, dims);
+        defer self.releaseValue(value);
+        try self.storeGlobalSlot(try self.internGlobalSlot(name), value);
+    }
+
+    pub fn setGlobalHostFloat64Array(self: *Session, name: []const u8, data: []const f64, dims: []const i32) !void {
+        const value = try self.createManagedGlobalFloat64Value(data, dims);
         defer self.releaseValue(value);
         try self.storeGlobalSlot(try self.internGlobalSlot(name), value);
     }
@@ -10176,10 +11362,23 @@ pub const Session = struct {
     }
 
     fn keyedStoreNamesValueCount(names: Value) usize {
+        if (stringSourceInfo(names)) |source| return source.bytes().len;
         return derivedSequenceLen(names) orelse unreachable;
     }
 
     fn keyedStoreNamesValueBytesAt(self: *Session, names: Value, idx: usize) KError!?[]const u8 {
+        if (stringSourceInfo(names)) |source| {
+            const bytes = source.bytes();
+            if (idx >= bytes.len) return null;
+            return bytes[idx .. idx + 1];
+        }
+        if (names.tag() == .array and switch (names.arrayKind()) {
+            .host_string_list, .host_symbol_list => true,
+            else => false,
+        }) {
+            if (idx >= names.asHostStringList().len) return null;
+            return try hostStringListItemBytes(names.asHostStringList(), idx);
+        }
         const item = try self.derivedSequenceItemValue(names, idx);
         defer self.releaseValue(item);
         return keyedLookupNameBytes(item);
@@ -10247,6 +11446,29 @@ pub const Session = struct {
         return try self.createManagedKeyedStore(owned_path, true, names, values_value, null, .dict, 0, lookup);
     }
 
+    fn createHostDictValueFromCharStringKeys(
+        self: *Session,
+        store_path: []const u8,
+        keys_value: Value,
+        values_value: Value,
+    ) !Value {
+        const key_source = stringSourceInfo(keys_value) orelse return error.Type;
+        const value_len = derivedSequenceLen(values_value) orelse return error.Type;
+        if (key_source.bytes().len != value_len) return error.Type;
+
+        const names = try self.retainEscapedValue(keys_value);
+        errdefer self.releaseValue(names);
+
+        const lookup = try self.createKeyedStoreLookupFromNamesValue(names);
+
+        const values = try self.retainEscapedValue(values_value);
+        errdefer self.releaseValue(values);
+
+        const owned_path = try self.allocator.dupe(u8, store_path);
+        errdefer self.allocator.free(owned_path);
+        return try self.createManagedKeyedStore(owned_path, true, names, values, null, .dict, 0, lookup);
+    }
+
     fn createHostDictValueFromKeySequenceValue(
         self: *Session,
         store_path: []const u8,
@@ -10312,11 +11534,19 @@ pub const Session = struct {
             return try self.managedFloat(data[0]);
         }
 
-        const converted = try self.allocator.alloc(f64, data.len);
-        defer self.allocator.free(converted);
-        for (data, 0..) |item, idx| converted[idx] = item;
+        const value = try self.createManagedHostFloat32Array(data);
+        return try applyNonVectorNumericShapeToValue(self, value, try numericShapeSnapshotFromDims(dims));
+    }
 
-        const value = try self.createManagedHostFloatArray(converted);
+    fn createManagedGlobalFloat64Value(self: *Session, data: []const f64, dims: []const i32) KError!Value {
+        const expected_len = try elementCountFromDims(dims);
+        if (expected_len != data.len) return error.Type;
+        if (dims.len == 0) {
+            if (data.len != 1) return error.Type;
+            return try self.floatValue(data[0]);
+        }
+
+        const value = try self.createManagedHostFloatArray(data);
         return try applyNonVectorNumericShapeToValue(self, value, try numericShapeSnapshotFromDims(dims));
     }
 
@@ -10388,7 +11618,7 @@ pub const Session = struct {
     }
 
     fn compactInitOwnedArgs(state: *CodeState, code: *const Code, args: []const Value) KError!void {
-        if (args.len != code.arity or args.len > max_explicit_params or code.local_count > max_code_frame_slots) return error.Arity;
+        if (!codeCanRunWithArgLen(code, args.len) or args.len > max_explicit_params or code.local_count > max_code_frame_slots) return error.Arity;
         state.local_live = 0;
         state.stack_len = 0;
         for (args, 0..) |arg, idx| {
@@ -10398,7 +11628,7 @@ pub const Session = struct {
     }
 
     fn compactInitBorrowedArgs(self: *Session, state: *CodeState, code: *const Code, args: []const Value) KError!void {
-        if (args.len != code.arity or args.len > max_explicit_params or code.local_count > max_code_frame_slots) return error.Arity;
+        if (!codeCanRunWithArgLen(code, args.len) or args.len > max_explicit_params or code.local_count > max_code_frame_slots) return error.Arity;
         state.local_live = 0;
         state.stack_len = 0;
         var initialized: usize = 0;
@@ -10614,6 +11844,12 @@ pub const Session = struct {
         var args_owned = true;
         errdefer if (args_owned) self.releaseOwnedValues(args);
 
+        if (try self.tryApplyAllAxisCallableProjection(callee, args)) |projection| {
+            self.releaseOwnedValues(args);
+            args_owned = false;
+            return projection;
+        }
+
         switch (callee.tag()) {
             .builtin => {
                 const result = try self.applyBuiltinCall(callee.asBuiltin(), args);
@@ -10629,9 +11865,20 @@ pub const Session = struct {
             },
             .closure => {
                 const closure = callee.asClosure();
-                if (codeForPlainClosureArgs(closure, args)) |compact| {
+                if (try self.tryProjectPlainClosureUnderApplication(callee, closure, args)) |projection| {
+                    self.releaseOwnedValues(args);
                     args_owned = false;
-                    return try self.runCodeOwned(compact, args);
+                    return projection;
+                }
+                if (codeForRunnablePlainClosureArgs(closure, args)) |compact| {
+                    const run_args = codeRunArgs(compact, args);
+                    if (run_args.len != args.len) {
+                        self.releaseOwnedValues(args);
+                        args_owned = false;
+                        return try self.runCodeBorrowed(compact, run_args);
+                    }
+                    args_owned = false;
+                    return try self.runCodeOwned(compact, run_args);
                 }
                 if (try self.tryApplyOwnedClosureArgs(closure, args)) |result| {
                     self.releaseOwnedValues(args);
@@ -10659,9 +11906,11 @@ pub const Session = struct {
     fn compactApplyGlobalCallOwned(self: *Session, slot: u8, args: []const Value) KError!Value {
         if (comptime enable_probe_instrumentation) self.debug_code_global_call_count += 1;
         const cell = try self.loadGlobalCell(slot);
-        if (codeForGlobalCellCallArgs(cell, args)) |compact| {
-            if (comptime enable_probe_instrumentation) self.debug_code_global_call_direct_count += 1;
-            return try self.runCodeOwned(compact, args);
+        if (!argsContainAllAxisSelector(args)) {
+            if (codeForGlobalCellCallArgs(cell, args)) |compact| {
+                if (comptime enable_probe_instrumentation) self.debug_code_global_call_direct_count += 1;
+                return try self.runCodeOwned(compact, args);
+            }
         }
         if (comptime enable_probe_instrumentation) self.debug_code_global_call_fallback_count += 1;
         self.noteCodeGlobalCallFallback(cell, @intCast(args.len));
@@ -10750,6 +11999,7 @@ pub const Session = struct {
         return switch (array.storage) {
             .bit => |words| Value.fromBool(bitGet(words, idx)),
             .int8, .int16, .int32, .int64 => try self.intValue(hostIntViewItem(hostIntArrayView(array).?, idx)),
+            .float32 => |items| try self.float32Value(items[idx]),
             .float64 => |items| try self.floatValue(items[idx]),
         };
     }
@@ -10885,7 +12135,13 @@ pub const Session = struct {
         var amended_stored = false;
         errdefer if (!amended_stored) self.releaseCanonicalManagedNumericValue(amended);
 
-        const result: ?Value = if (want_result) try self.applyArrayCall1(amended, selector) else null;
+        const result: ?Value = if (want_result) blk: {
+            if (try self.materializeIndexedSelectorPath(selector)) |selectors| {
+                defer self.releaseArgs(selectors);
+                break :blk try self.deepIndexValue(amended, selectors);
+            }
+            break :blk try self.applyArrayCall1(amended, selector);
+        } else null;
         errdefer if (result) |value| self.releaseValue(value);
 
         switch (target) {
@@ -11302,6 +12558,15 @@ pub const Session = struct {
                     }
                     try compactPush(state, result);
                 },
+                ck_index_where_mask_stack_u8 => {
+                    const mask = try compactPop(state);
+                    const callee = try compactPop(state);
+                    defer self.releaseValue(mask);
+                    defer self.releaseValue(callee);
+                    const result = try self.applyWhereMaskCall(callee, mask);
+                    errdefer self.releaseValue(result);
+                    try compactPush(state, result);
+                },
                 ck_call_global_slots_u8 => {
                     const slot = try compactReadByte(code, &ip);
                     const flags = try compactReadByte(code, &ip);
@@ -11514,8 +12779,7 @@ pub const Session = struct {
                     const base = try compactPop(state);
                     errdefer self.releaseValue(base);
                     const derived = switch (base.tag()) {
-                        .builtin, .closure, .array => Value.closure(try self.allocDerivedClosure(kind, base)),
-                        else => return error.Type,
+                        .int, .bool, .float, .float32, .builtin, .closure, .array => Value.closure(try self.allocDerivedClosure(kind, base)),
                     };
                     self.releaseValue(base);
                     try compactPush(state, derived);
@@ -11530,7 +12794,7 @@ pub const Session = struct {
     }
 
     fn runCodeMode(self: *Session, code: *const Code, args: []const Value, root_results: bool) KError!Value {
-        if (code.arity != args.len) return error.Arity;
+        if (!codeCanRunWithArgLen(code, args.len)) return error.Arity;
         _ = self.scratch_arena.reset(.retain_capacity);
         self.dropStackFrom(0);
         self.stack_len = 0;
@@ -11542,9 +12806,8 @@ pub const Session = struct {
     }
 
     fn runClosureMode(self: *Session, closure: *const Closure, args: []const Value, root_results: bool) KError!Value {
-        if (args.len != closure.code.arity) return error.Arity;
-        if (codeForPlainClosureArgs(closure, args)) |compact| {
-            const result = try self.runCodeBorrowed(compact, args);
+        if (codeForRunnablePlainClosureArgs(closure, args)) |compact| {
+            const result = try self.runCodeBorrowed(compact, codeRunArgs(compact, args));
             return if (root_results) try self.finishResult(result) else result;
         }
         return error.Unsupported;
@@ -11590,13 +12853,22 @@ pub const Session = struct {
         const rhs_float: f64 = @floatFromInt(rhs_const);
         const lhs = if (const_first) rhs_float else left_float;
         const rhs = if (const_first) left_float else rhs_float;
+        const result_kind = scalarFloatStorageKind(left) orelse .float64;
+        const float_result = struct {
+            fn value(session: *Session, kind: HostFloatStorageKind, raw: f64) KError!Value {
+                return switch (kind) {
+                    .float32 => try session.float32Value(@floatCast(raw)),
+                    .float64 => try session.floatValue(raw),
+                };
+            }
+        }.value;
         const result: ?Value = switch (op) {
-            .add => try self.floatValue(lhs + rhs),
-            .sub => try self.floatValue(lhs - rhs),
-            .mul => try self.floatValue(lhs * rhs),
-            .div => try self.floatValue(lhs / rhs),
-            .minimum => try self.floatValue(@min(lhs, rhs)),
-            .maximum => try self.floatValue(@max(lhs, rhs)),
+            .add => try float_result(self, result_kind, lhs + rhs),
+            .sub => try float_result(self, result_kind, lhs - rhs),
+            .mul => try float_result(self, result_kind, lhs * rhs),
+            .div => try float_result(self, result_kind, lhs / rhs),
+            .minimum => try float_result(self, result_kind, @min(lhs, rhs)),
+            .maximum => try float_result(self, result_kind, @max(lhs, rhs)),
             .less => Value.fromBool(lhs < rhs),
             .more => Value.fromBool(lhs > rhs),
             .equal => Value.fromBool(lhs == rhs),
@@ -12129,7 +13401,7 @@ pub const Session = struct {
     fn hostStringListItemValue(self: *Session, list: *const HostStringList, idx: usize) KError!Value {
         if (idx >= list.len) return error.Type;
         if (comptime enable_probe_instrumentation) self.debug_host_string_list_item_value_count += 1;
-        return switch (list.storage) {
+        const item = switch (list.storage) {
             .eager => |items| switch (items[idx]) {
                 .owned => |text| blk: {
                     if (comptime enable_probe_instrumentation) self.debug_host_string_list_item_eager_owned_count += 1;
@@ -12177,6 +13449,30 @@ pub const Session = struct {
                 }, .string_list_split_scalar);
             },
         };
+        if (list.display == .split_list) {
+            if (stringBytes(item)) |bytes| {
+                if (bytes.len == 1) {
+                    const vector = try self.managedHostCharVector(bytes);
+                    self.releaseValue(item);
+                    return vector;
+                }
+            }
+        }
+        return item;
+    }
+
+    fn hostSymbolListItemValue(self: *Session, list: *const HostStringList, idx: usize) KError!Value {
+        return try self.managedHostSymbol(try hostStringListItemBytes(list, idx));
+    }
+
+    fn hostTextListItemValue(self: *Session, value: Value, idx: usize) KError!Value {
+        if (stringSourceInfo(value)) |source| return try self.stringIndexScalarValue(source, @intCast(idx));
+        if (value.tag() != .array) return error.Type;
+        return switch (value.arrayKind()) {
+            .host_string_list => try self.hostStringListItemValue(value.asHostStringList(), idx),
+            .host_symbol_list => try self.hostSymbolListItemValue(value.asHostStringList(), idx),
+            else => error.Type,
+        };
     }
 
     fn derivedSequenceLen(value: Value) ?usize {
@@ -12188,6 +13484,7 @@ pub const Session = struct {
         }
         if (numericVectorLen(value)) |len| return len;
         if (value.arraySubkind() == .host_string_list) return value.asHostStringList().len;
+        if (value.arraySubkind() == .host_symbol_list) return value.asHostStringList().len;
         if (value.arraySubkind() == .host_boxed_array) {
             return value.asHostBoxedArray().len();
         }
@@ -12211,6 +13508,9 @@ pub const Session = struct {
         if (value.arraySubkind() == .host_string_list) {
             return try self.hostStringListItemValue(value.asHostStringList(), idx);
         }
+        if (value.arraySubkind() == .host_symbol_list) {
+            return try self.hostSymbolListItemValue(value.asHostStringList(), idx);
+        }
         if (value.arraySubkind() == .host_boxed_array) {
             return try self.hostBoxedArrayIndexScalar(value.asHostBoxedArray(), @intCast(idx));
         }
@@ -12231,9 +13531,18 @@ pub const Session = struct {
             .float => switch (view) {
                 .scalar_float => |item| blk: {
                     if (idx != 0) return error.Internal;
-                    break :blk try self.floatValue(item);
+                    break :blk switch (valueFloatStorageKind(value) orelse .float64) {
+                        .float32 => try self.float32Value(@floatCast(item)),
+                        .float64 => try self.floatValue(item),
+                    };
                 },
-                .float_array => |items| try self.floatValue(try hostFloatDenseViewItem(items, idx)),
+                .float_array => |items| blk: {
+                    const item = try hostFloatDenseViewItem(items, idx);
+                    break :blk switch (valueFloatStorageKind(value) orelse .float64) {
+                        .float32 => try self.float32Value(@floatCast(item)),
+                        .float64 => try self.floatValue(item),
+                    };
+                },
                 else => error.Type,
             },
         };
@@ -12289,12 +13598,14 @@ pub const Session = struct {
     }
 
     fn applyDerivedBase(self: *Session, callee: Value, args: []const Value) KError!Value {
+        if (try self.tryApplyAllAxisCallableProjection(callee, args)) |projection| return projection;
         return switch (callee.tag()) {
             .builtin => try self.applyBuiltinCall(callee.asBuiltin(), args),
             .array => try self.applyArrayCall(callee, args),
             .closure => blk: {
                 const closure = callee.asClosure();
-                if (codeForPlainClosureArgs(closure, args)) |compact| break :blk try self.runCodeBorrowed(compact, args);
+                if (try self.tryProjectPlainClosureUnderApplication(callee, closure, args)) |projection| break :blk projection;
+                if (codeForRunnablePlainClosureArgs(closure, args)) |compact| break :blk try self.runCodeBorrowed(compact, codeRunArgs(compact, args));
                 if (try self.tryApplyOwnedClosureArgs(closure, args)) |result| break :blk result;
                 break :blk try self.invokeClosureInCurrentRun(callee, closure, args);
             },
@@ -12381,14 +13692,45 @@ pub const Session = struct {
 
     fn deepIndexValue(self: *Session, base: Value, selectors: []const Value) KError!Value {
         if (selectors.len == 0) return self.shareValue(base);
+        if (isAllAxisSelectorValue(selectors[0])) {
+            if (selectors.len == 1) return self.shareValue(base);
+            return try self.deepIndexAllAxisValue(base, selectors[1..]);
+        }
         var current = try self.applyArrayCall1(base, selectors[0]);
         var idx: usize = 1;
         while (idx < selectors.len) : (idx += 1) {
+            if (isAllAxisSelectorValue(selectors[idx])) {
+                if (idx + 1 == selectors.len) return current;
+                const next = try self.deepIndexAllAxisValue(current, selectors[idx + 1 ..]);
+                self.releaseValue(current);
+                return next;
+            }
             const next = try self.applyArrayCall1(current, selectors[idx]);
             self.releaseValue(current);
             current = next;
         }
         return current;
+    }
+
+    fn deepIndexAllAxisValue(self: *Session, base: Value, rest: []const Value) KError!Value {
+        const items = try self.materializeTopLevelItems(base);
+        defer {
+            for (items) |value| self.releaseValue(value);
+            self.allocator.free(items);
+        }
+
+        for (items, 0..) |item, idx| {
+            const selected = try self.deepIndexValue(item, rest);
+            self.releaseValue(items[idx]);
+            items[idx] = selected;
+        }
+
+        const result = try self.makeArrayFromValues(items);
+        if (try self.promoteRenderableMatrixValue(result)) |promoted| {
+            if (promoted.raw != result.raw and isManagedValue(result)) self.releaseValue(result);
+            return promoted;
+        }
+        return result;
     }
 
     const AmendKind = enum {
@@ -12405,7 +13747,91 @@ pub const Session = struct {
         local: u8,
     };
 
+    const SymbolTargetName = struct {
+        bytes: []const u8,
+        owned: bool = false,
+    };
+
+    fn releaseSymbolTargetName(self: *Session, name: SymbolTargetName) void {
+        if (name.owned) self.allocator.free(name.bytes);
+    }
+
+    fn symbolTargetName(self: *Session, value: Value) KError!?SymbolTargetName {
+        if (symbolBytes(value)) |name| return .{ .bytes = name };
+        if (value.tag() != .array or value.arrayKind() != .host_symbol_list) return null;
+        const list = value.asHostStringList();
+        var out = std.ArrayList(u8).empty;
+        errdefer out.deinit(self.allocator);
+        for (0..list.len) |idx| {
+            if (idx != 0) try out.append(self.allocator, '.');
+            try out.appendSlice(self.allocator, try hostStringListItemBytes(list, idx));
+        }
+        return .{ .bytes = try out.toOwnedSlice(self.allocator), .owned = true };
+    }
+
+    fn namespaceChildForParent(parent_path: []const u8, global_name: []const u8) ?[]const u8 {
+        if (parent_path.len == 0) {
+            if (std.mem.indexOfScalar(u8, global_name, '.') != null) return null;
+            return global_name;
+        }
+
+        const dot_index = std.mem.lastIndexOfScalar(u8, global_name, '.') orelse return null;
+        if (!std.mem.eql(u8, global_name[0..dot_index], parent_path)) return null;
+        return global_name[dot_index + 1 ..];
+    }
+
+    fn namespaceKeysValue(self: *Session, value: Value) KError!?Value {
+        const name = (try self.symbolTargetName(value)) orelse return null;
+        defer self.releaseSymbolTargetName(name);
+
+        var children = std.ArrayList([]const u8).empty;
+        defer children.deinit(self.allocator);
+
+        for (self.global_names.items, 0..) |global_name, idx| {
+            if (idx >= self.global_cells.items.len or !self.global_cells.items[idx].initialized) continue;
+            const child = namespaceChildForParent(name.bytes, global_name) orelse continue;
+            var seen = false;
+            for (children.items) |existing| {
+                if (std.mem.eql(u8, existing, child)) {
+                    seen = true;
+                    break;
+                }
+            }
+            if (!seen) try children.append(self.allocator, child);
+        }
+
+        return try self.createManagedHostSymbolListFromSlices(children.items);
+    }
+
+    fn tryApplySymbolTargetAmend(self: *Session, base: Value, selector: Value, kind: AmendKind, func_or_value: Value, arg: Value) KError!?Value {
+        const mode: ShallowAmendMode = switch (kind) {
+            .deep_unary => .unary,
+            .deep_assign => .assign,
+            .deep_binary => .binary,
+            else => return null,
+        };
+        const name = (try self.symbolTargetName(base)) orelse return null;
+        defer self.releaseSymbolTargetName(name);
+
+        const selectors = try self.materializeSelectorPath(selector);
+        defer self.releaseArgs(selectors);
+
+        const slot = try self.internGlobalSlot(name.bytes);
+        const amended = if (selectors.len == 0 and mode == .assign)
+            try self.applyWholeAmend(Value.fromBool(false), mode, func_or_value, arg)
+        else blk: {
+            const current = try self.loadGlobalSlot(slot);
+            break :blk try self.applyDeepAmend(current, selectors, mode, func_or_value, arg);
+        };
+        errdefer self.releaseValue(amended);
+        try self.storeGlobalSlot(slot, amended);
+        return amended;
+    }
+
     fn applyAmend(self: *Session, base: Value, selector: Value, kind: AmendKind, func_or_value: Value, arg: Value) KError!Value {
+        if (try self.tryApplyCallableTryAmend(base, selector, kind, func_or_value)) |result| return result;
+        if (try self.tryApplySymbolTargetAmend(base, selector, kind, func_or_value, arg)) |amended| return amended;
+        if (try self.tryApplyIndexedSelectorPathAmend(base, selector, kind, func_or_value, arg)) |amended| return amended;
         return switch (kind) {
             .unary => try self.applyShallowAmend(base, selector, .unary, func_or_value, arg),
             .assign => try self.applyShallowAmend(base, selector, .assign, func_or_value, arg),
@@ -12424,6 +13850,21 @@ pub const Session = struct {
         };
     }
 
+    fn tryApplyCallableTryAmend(self: *Session, base: Value, selector: Value, kind: AmendKind, handler: Value) KError!?Value {
+        switch (kind) {
+            .unary, .deep_unary => {},
+            .assign, .binary, .deep_assign, .deep_binary => return null,
+        }
+        switch (base.tag()) {
+            .builtin, .closure => {},
+            else => return null,
+        }
+        return self.applyDot(base, selector) catch |err| switch (err) {
+            error.OutOfMemory, error.Internal => err,
+            else => try self.retainEscapedValue(handler),
+        };
+    }
+
     fn applyAmendOwned(self: *Session, base: Value, selector: Value, kind: AmendKind, func_or_value: Value, arg: Value) KError!Value {
         if (comptime enable_probe_instrumentation) self.debug_owned_amend_count += 1;
         errdefer self.releaseCanonicalManagedNumericValue(base);
@@ -12437,6 +13878,33 @@ pub const Session = struct {
         assign,
         binary,
     };
+
+    fn materializeIndexedSelectorPath(self: *Session, selector: Value) KError!?[]Value {
+        const boxed = boxedArrayItems(selector) orelse return null;
+        if (boxed.len == 0 or !isSelectorPathMarkerValue(boxed[0])) return null;
+        const items = try self.allocator.alloc(Value, boxed.len - 1);
+        errdefer self.allocator.free(items);
+        var initialized: usize = 0;
+        errdefer {
+            for (items[0..initialized]) |value| self.releaseValue(value);
+        }
+        for (boxed[1..], 0..) |value, idx| {
+            items[idx] = try self.retainEscapedValue(value);
+            initialized += 1;
+        }
+        return items;
+    }
+
+    fn tryApplyIndexedSelectorPathAmend(self: *Session, base: Value, selector: Value, kind: AmendKind, func_or_value: Value, arg: Value) KError!?Value {
+        const mode: ShallowAmendMode = switch (kind) {
+            .unary, .deep_unary => .unary,
+            .assign, .deep_assign => .assign,
+            .binary, .deep_binary => .binary,
+        };
+        const selectors = (try self.materializeIndexedSelectorPath(selector)) orelse return null;
+        defer self.releaseArgs(selectors);
+        return try self.applyDeepAmend(base, selectors, mode, func_or_value, arg);
+    }
 
     fn materializeSelectorPath(self: *Session, selector: Value) KError![]Value {
         var items = std.ArrayList(Value).empty;
@@ -12453,10 +13921,16 @@ pub const Session = struct {
                 for (boxed) |value| try items.append(self.allocator, try self.retainEscapedValue(value));
             } else switch (selector.arrayKind()) {
                 .host_dense_array, .backend_array, .numeric_array => {
-                    const array = try numericHostArrayValue(self, selector);
-                    const len = array.len();
-                    for (0..len) |idx| {
-                        try items.append(self.allocator, try self.hostDenseIndexScalar(array, @intCast(idx)));
+                    if (valueNonVectorNumericShape(selector) != null) {
+                        const rows = try self.materializeTopLevelItems(selector);
+                        defer self.releaseArgs(rows);
+                        for (rows) |value| try items.append(self.allocator, try self.retainEscapedValue(value));
+                    } else {
+                        const array = try numericHostArrayValue(self, selector);
+                        const len = array.len();
+                        for (0..len) |idx| {
+                            try items.append(self.allocator, try self.hostDenseIndexScalar(array, @intCast(idx)));
+                        }
                     }
                 },
                 else => return error.Type,
@@ -12468,7 +13942,11 @@ pub const Session = struct {
     }
 
     fn applyDeepAmend(self: *Session, base: Value, selectors: []const Value, mode: ShallowAmendMode, func_or_value: Value, arg: Value) KError!Value {
-        if (selectors.len == 0) return error.Type;
+        if (selectors.len == 0) return try self.applyWholeAmend(base, mode, func_or_value, arg);
+        if (isAllAxisSelectorValue(selectors[0])) {
+            if (selectors.len == 1) return try self.applyShallowAmend(base, selectors[0], mode, func_or_value, arg);
+            return try self.applyDeepAmendAllAxis(base, selectors[1..], mode, func_or_value, arg);
+        }
         if (selectors.len == 1) return try self.applyShallowAmend(base, selectors[0], mode, func_or_value, arg);
 
         const selected = try self.applyArrayCall1(base, selectors[0]);
@@ -12476,6 +13954,48 @@ pub const Session = struct {
         const amended = try self.applyDeepAmend(selected, selectors[1..], mode, func_or_value, arg);
         defer self.releaseValue(amended);
         return try self.applyShallowAmend(base, selectors[0], .assign, amended, Value.fromBool(false));
+    }
+
+    fn applyDeepAmendAllAxis(self: *Session, base: Value, rest: []const Value, mode: ShallowAmendMode, func_or_value: Value, arg: Value) KError!Value {
+        const items = try self.materializeTopLevelItems(base);
+        defer {
+            for (items) |value| self.releaseValue(value);
+            self.allocator.free(items);
+        }
+
+        var rhs_items: ?[]Value = null;
+        defer if (rhs_items) |values| {
+            for (values) |value| self.releaseValue(value);
+            self.allocator.free(values);
+        };
+        if (mode != .unary) {
+            const rhs_source = if (mode == .assign) func_or_value else arg;
+            if (rhs_source.tag() == .array) {
+                const maybe = try self.tryMaterializeTopLevelItems(rhs_source);
+                if (maybe) |values| {
+                    if (values.len == items.len) rhs_items = values else {
+                        for (values) |value| self.releaseValue(value);
+                        self.allocator.free(values);
+                    }
+                }
+            }
+        }
+
+        for (items, 0..) |item, idx| {
+            const child_func_or_value = if (mode == .assign)
+                if (rhs_items) |values| values[idx] else func_or_value
+            else
+                func_or_value;
+            const child_arg = if (mode == .binary)
+                if (rhs_items) |values| values[idx] else arg
+            else
+                arg;
+            const amended = try self.applyDeepAmend(item, rest, mode, child_func_or_value, child_arg);
+            self.releaseValue(items[idx]);
+            items[idx] = amended;
+        }
+
+        return try self.rebuildTopLevelItems(base, items);
     }
 
     const DenseAssignRhs = union(enum) {
@@ -12517,7 +14037,10 @@ pub const Session = struct {
         if (rhs_array.len() != selectors_len) return null;
         return switch (hostDenseNumericMode(rhs_array)) {
             .int => .{ .int_vector = hostIntArrayView(rhs_array) orelse return null },
-            .float => .{ .float_vector = rhs_array.storage.float64 },
+            .float => switch (rhs_array.storage) {
+                .float64 => |items| .{ .float_vector = hostDenseLogicalItems(f64, rhs_array, items) },
+                else => null,
+            },
         };
     }
 
@@ -12744,6 +14267,7 @@ pub const Session = struct {
     }
 
     fn tryFastDenseScalarAssignDirect(self: *Session, base: Value, target_idx: usize, rhs_source: Value) KError!?Value {
+        if (valueNumericMode(base) == null) return null;
         if (valueNonVectorNumericShape(base) != null) return null;
         const base_array = try numericHostArrayValue(self, base);
 
@@ -12796,6 +14320,7 @@ pub const Session = struct {
                 try applyDenseAssignIntScalar(&out, target_idx, rhs_int);
                 return try self.finishFastDenseScalarIntAssign(target_idx, .{ .int_scalar = rhs_int }, &out, reused);
             },
+            .float32 => return null,
             .float64 => |base_items| {
                 const rhs_float = denseAssignScalarFloatLike(rhs_source) orelse return null;
                 const rhs: DenseAssignRhs = if (scalarIntLikeValue(rhs_source)) |rhs_int|
@@ -12828,6 +14353,10 @@ pub const Session = struct {
     fn tryFastDenseAssignAmendImpl(self: *Session, base: Value, targets: DenseAssignTargets, rhs_source: Value) KError!?Value {
         const targets_len = denseAssignTargetsLen(targets);
         if (targets_len == 0) {
+            self.recordFastDenseAssignMiss();
+            return null;
+        }
+        if (valueNumericMode(base) == null) {
             self.recordFastDenseAssignMiss();
             return null;
         }
@@ -13009,30 +14538,340 @@ pub const Session = struct {
         return try self.tryFastDenseAssignAmendImpl(base, .{ .slice = selectors }, rhs_source);
     }
 
+    fn applyWholeAmend(self: *Session, base: Value, mode: ShallowAmendMode, func_or_value: Value, arg: Value) KError!Value {
+        return switch (mode) {
+            .assign => try self.retainEscapedValue(func_or_value),
+            .unary => try self.applyValue(func_or_value, &[_]Value{base}),
+            .binary => try self.applyValue(func_or_value, &[_]Value{ base, arg }),
+        };
+    }
+
+    fn tryApplyGroupedShallowAmend(self: *Session, base: Value, selector: Value, mode: ShallowAmendMode, func_or_value: Value, arg: Value) KError!?Value {
+        var owned_groups: ?[]Value = null;
+        defer if (owned_groups) |values| {
+            for (values) |value| self.releaseValue(value);
+            self.allocator.free(values);
+        };
+        const groups = boxedArrayItems(selector) orelse blk: {
+            if (valueNonVectorNumericShape(selector) == null) return null;
+            owned_groups = try self.materializeTopLevelItems(selector);
+            break :blk owned_groups.?;
+        };
+        if (groups.len == 0) return try self.retainEscapedValue(base);
+
+        var rhs_items: ?[]Value = null;
+        defer if (rhs_items) |values| {
+            for (values) |value| self.releaseValue(value);
+            self.allocator.free(values);
+        };
+
+        if (mode != .unary) {
+            const rhs_source = if (mode == .assign) func_or_value else arg;
+            if (rhs_source.tag() == .array) {
+                const maybe = try self.tryMaterializeTopLevelItems(rhs_source);
+                if (maybe) |values| rhs_items = values;
+            }
+        }
+
+        var current = try self.retainEscapedValue(base);
+        errdefer self.releaseValue(current);
+
+        for (groups, 0..) |group, idx| {
+            const group_func_or_value = if (mode == .assign)
+                if (rhs_items) |values| if (values.len == groups.len) values[idx] else func_or_value else func_or_value
+            else
+                func_or_value;
+            const group_arg = if (mode == .binary)
+                if (rhs_items) |values| if (values.len == groups.len) values[idx] else arg else arg
+            else
+                arg;
+            const amended = try self.applyShallowAmend(current, group, mode, group_func_or_value, group_arg);
+            self.releaseValue(current);
+            current = amended;
+        }
+
+        return current;
+    }
+
+    fn findKeyIndexInItems(self: *Session, keys: []const Value, key: Value) KError!?usize {
+        for (keys, 0..) |candidate, idx| {
+            if (try self.valueMatchEqual(candidate, key)) return idx;
+        }
+        return null;
+    }
+
+    fn createKeyArrayFromValues(self: *Session, keys: []const Value) KError!Value {
+        var symbol_slices = std.ArrayList([]const u8).empty;
+        defer symbol_slices.deinit(self.allocator);
+        try symbol_slices.ensureTotalCapacity(self.allocator, keys.len);
+        for (keys) |key| {
+            const bytes = symbolBytes(key) orelse break;
+            try symbol_slices.append(self.allocator, bytes);
+        }
+        if (symbol_slices.items.len == keys.len) return try self.createManagedHostSymbolListFromSlices(symbol_slices.items);
+        return try self.makeArrayFromValues(keys);
+    }
+
+    fn missingDictAmendValue(self: *Session, func: Value, rhs: Value) KError!Value {
+        if (func.tag() == .builtin) {
+            return switch (func.asBuiltin()) {
+                .add, .sub => if (rhs.tag() == .float) try self.floatValue(0) else try self.intValue(0),
+                .mul, .div => if (rhs.tag() == .float) try self.floatValue(1) else try self.intValue(1),
+                else => try self.prototypeLikeValue(rhs),
+            };
+        }
+        return try self.prototypeLikeValue(rhs);
+    }
+
+    fn tryApplyDictShallowAmend(self: *Session, base: Value, selector: Value, mode: ShallowAmendMode, func_or_value: Value, arg: Value) KError!?Value {
+        if (base.tag() != .array or base.arrayKind() != .host_keyed_store) return null;
+        const store = base.asHostKeyedStore();
+        if (store.layout != .dict) return null;
+
+        const selector_items = try self.materializeSequenceItems(selector);
+        defer self.releaseArgs(selector_items);
+        if (selector_items.len == 0) return try self.retainEscapedValue(base);
+
+        var keys = std.ArrayList(Value).empty;
+        var values = std.ArrayList(Value).empty;
+        defer {
+            for (keys.items) |value| self.releaseValue(value);
+            for (values.items) |value| self.releaseValue(value);
+            keys.deinit(self.allocator);
+            values.deinit(self.allocator);
+        }
+
+        const existing_len = keyedStoreNameCount(store);
+        try keys.ensureTotalCapacity(self.allocator, existing_len + selector_items.len);
+        try values.ensureTotalCapacity(self.allocator, existing_len + selector_items.len);
+        for (0..existing_len) |idx| {
+            try keys.append(self.allocator, try self.keyedStoreNameValue(store, idx));
+            try values.append(self.allocator, try self.keyedStoreValueAt(store, idx));
+        }
+
+        var rhs_items: ?[]Value = null;
+        defer if (rhs_items) |items| {
+            for (items) |value| self.releaseValue(value);
+            self.allocator.free(items);
+        };
+
+        const rhs_source = switch (mode) {
+            .assign => func_or_value,
+            .binary => arg,
+            .unary => Value.fromBool(false),
+        };
+        const selector_is_scalar = derivedSequenceLen(selector) == null;
+        if (mode != .unary and rhs_source.tag() == .array) {
+            const maybe = try self.tryMaterializeTopLevelItems(rhs_source);
+            if (maybe) |items| rhs_items = items;
+        }
+
+        for (selector_items, 0..) |key, idx| {
+            const rhs = if (rhs_items) |items|
+                if (!selector_is_scalar and items.len == selector_items.len) items[idx] else rhs_source
+            else
+                rhs_source;
+
+            const existing = try self.findKeyIndexInItems(keys.items, key);
+            const target_idx = existing orelse blk: {
+                try keys.append(self.allocator, try self.retainEscapedValue(key));
+                const placeholder = switch (mode) {
+                    .assign => try self.retainEscapedValue(rhs),
+                    .unary => try self.prototypeLikeValue(store.values),
+                    .binary => try self.missingDictAmendValue(func_or_value, rhs),
+                };
+                try values.append(self.allocator, placeholder);
+                break :blk values.items.len - 1;
+            };
+
+            const current = values.items[target_idx];
+            const next = switch (mode) {
+                .assign => if (existing == null) try self.retainEscapedValue(current) else try self.retainEscapedValue(rhs),
+                .unary => try self.applyValue(func_or_value, &[_]Value{current}),
+                .binary => try self.applyValue(func_or_value, &[_]Value{ current, rhs }),
+            };
+            self.releaseValue(values.items[target_idx]);
+            values.items[target_idx] = next;
+        }
+
+        const keys_value = try self.createKeyArrayFromValues(keys.items);
+        defer self.releaseValue(keys_value);
+        const values_value = try self.makeArrayFromValues(values.items);
+        defer self.releaseValue(values_value);
+        return try self.createHostDictValueFromKeySequenceValue("", keys_value, values_value);
+    }
+
+    fn retainedTableColumnData(self: *Session, store: *const HostKeyedStore, column_idx: usize) KError!Value {
+        return try self.retainEscapedValue(tableColumnData(store, column_idx));
+    }
+
+    fn buildTableColumnFromValue(self: *Session, name: Value, value: Value, row_count: usize) KError!HostTableColumn {
+        const spec = try self.classifyDictTableColumn(value);
+        return try self.buildDictTableColumn(name, spec, row_count);
+    }
+
+    fn tryApplyTableColumnAssign(self: *Session, store: *const HostKeyedStore, selector: Value, rhs: Value) KError!?Value {
+        const name = keyedLookupNameBytes(selector) orelse return null;
+        const existing_idx = store.lookup.get(name);
+        const old_count = keyedStoreNameCount(store);
+        const new_count = old_count + if (existing_idx == null) @as(usize, 1) else 0;
+        const columns = try self.allocator.alloc(HostTableColumn, new_count);
+        var built: usize = 0;
+        errdefer {
+            for (columns[0..built]) |column| {
+                self.releaseValue(column.name);
+                self.releaseValue(column.data);
+                if (column.validity) |mask| self.releaseValue(mask);
+            }
+            self.allocator.free(columns);
+        }
+
+        const metadata = keyedStoreTableMetadata(store);
+        for (0..old_count) |idx| {
+            const column_name = try self.keyedStoreNameValue(store, idx);
+            errdefer self.releaseValue(column_name);
+            if (existing_idx != null and existing_idx.? == idx) {
+                columns[built] = try self.buildTableColumnFromValue(column_name, rhs, store.row_count);
+            } else {
+                columns[built] = .{
+                    .name = try self.retainEscapedValue(column_name),
+                    .data = try self.retainedTableColumnData(store, idx),
+                    .validity = if (metadata[idx].validity) |mask| try self.retainEscapedValue(mask) else null,
+                    .kind = metadata[idx].kind,
+                };
+            }
+            self.releaseValue(column_name);
+            built += 1;
+        }
+
+        if (existing_idx == null) {
+            const column_name = try self.managedHostSymbol(name);
+            errdefer self.releaseValue(column_name);
+            columns[built] = try self.buildTableColumnFromValue(column_name, rhs, store.row_count);
+            self.releaseValue(column_name);
+            built += 1;
+        }
+
+        return try self.createManagedHostTable(store.row_count, columns);
+    }
+
+    fn tableRowAssignColumnRhs(self: *Session, rhs: Value, column_name: []const u8) KError!Value {
+        if (rhs.tag() != .array or rhs.arrayKind() != .host_keyed_store) return error.Type;
+        const rhs_store = rhs.asHostKeyedStore();
+        return switch (rhs_store.layout) {
+            .dict => try self.keyedStoreLookupValue(rhs_store, column_name),
+            .table => try self.keyedStoreLookupValue(rhs_store, column_name),
+        };
+    }
+
+    fn tryApplyTableRowAssign(self: *Session, base: Value, store: *const HostKeyedStore, selector: Value, rhs: Value) KError!?Value {
+        const row_indices = self.collectSelectorIndices(base, selector) catch |err| switch (err) {
+            error.Type => return null,
+            else => return err,
+        };
+        defer self.allocator.free(row_indices);
+        if (row_indices.len == 0) return try self.retainEscapedValue(base);
+
+        const column_count = keyedStoreNameCount(store);
+        const columns = try self.allocator.alloc(HostTableColumn, column_count);
+        var built: usize = 0;
+        errdefer {
+            for (columns[0..built]) |column| {
+                self.releaseValue(column.name);
+                self.releaseValue(column.data);
+                if (column.validity) |mask| self.releaseValue(mask);
+            }
+            self.allocator.free(columns);
+        }
+
+        for (0..column_count) |column_idx| {
+            const column_name = try self.keyedStoreNameValue(store, column_idx);
+            errdefer self.releaseValue(column_name);
+            const column_name_bytes = keyedLookupNameBytes(column_name) orelse return error.Type;
+            const rhs_column = try self.tableRowAssignColumnRhs(rhs, column_name_bytes);
+            defer self.releaseValue(rhs_column);
+
+            var rhs_items: ?[]Value = null;
+            defer if (rhs_items) |items| {
+                for (items) |value| self.releaseValue(value);
+                self.allocator.free(items);
+            };
+            if (rhs_column.tag() == .array) {
+                const maybe = try self.tryMaterializeTopLevelItems(rhs_column);
+                if (maybe) |items| rhs_items = items;
+            }
+
+            const row_values = try self.allocator.alloc(Value, store.row_count);
+            defer self.allocator.free(row_values);
+            var initialized: usize = 0;
+            defer {
+                for (row_values[0..initialized]) |value| self.releaseValue(value);
+            }
+
+            for (0..store.row_count) |row| {
+                row_values[row] = try self.tableCellScalarValue(store, column_idx, row);
+                initialized += 1;
+            }
+
+            for (row_indices, 0..) |row, row_pos| {
+                const replacement = if (rhs_items) |items|
+                    if (items.len == row_indices.len) items[row_pos] else rhs_column
+                else
+                    rhs_column;
+                self.releaseValue(row_values[row]);
+                row_values[row] = try self.retainEscapedValue(replacement);
+            }
+
+            const column_value = try self.makeArrayFromValues(row_values);
+            defer self.releaseValue(column_value);
+            columns[built] = try self.buildTableColumnFromValue(column_name, column_value, store.row_count);
+            self.releaseValue(column_name);
+            built += 1;
+        }
+
+        return try self.createManagedHostTable(store.row_count, columns);
+    }
+
+    fn tryApplyTableShallowAmend(self: *Session, base: Value, selector: Value, mode: ShallowAmendMode, func_or_value: Value, arg: Value) KError!?Value {
+        _ = arg;
+        if (base.tag() != .array or base.arrayKind() != .host_keyed_store) return null;
+        const store = base.asHostKeyedStore();
+        if (store.layout != .table) return null;
+        if (mode != .assign) return null;
+        if (try self.tryApplyTableColumnAssign(store, selector, func_or_value)) |table| return table;
+        return try self.tryApplyTableRowAssign(base, store, selector, func_or_value);
+    }
+
     fn applyShallowAmend(self: *Session, base: Value, selector: Value, mode: ShallowAmendMode, func_or_value: Value, arg: Value) KError!Value {
         if (base.tag() != .array) return error.Type;
+        if (try self.tryApplyDictShallowAmend(base, selector, mode, func_or_value, arg)) |dict| return dict;
+        if (try self.tryApplyTableShallowAmend(base, selector, mode, func_or_value, arg)) |table| return table;
+        if (try self.tryApplyGroupedShallowAmend(base, selector, mode, func_or_value, arg)) |grouped| return grouped;
         var tried_scalar_fast_assign = false;
-        if (mode == .assign) {
+        if (mode == .assign and valueNumericMode(base) != null) {
             if (scalarIntLikeValue(selector)) |raw_index| {
                 tried_scalar_fast_assign = true;
                 const target_idx = try normalizeIndex(raw_index, try self.topLevelLen(base));
                 if (try self.tryFastDenseAssignScalarAmend(base, target_idx, func_or_value)) |fast| return fast;
             }
         }
-        const selectors = try self.collectSelectorIndices(base, selector);
+        const selectors = self.collectSelectorIndices(base, selector) catch |err| switch (err) {
+            error.Type => if (try self.tryApplyNumericMatrixColumnAmend(base, selector, mode, func_or_value, arg)) |matrix| return matrix else return err,
+            else => return err,
+        };
         defer self.allocator.free(selectors);
 
         if (mode == .assign and !tried_scalar_fast_assign) {
             if (try self.tryFastDenseAssignAmend(base, selectors, func_or_value)) |fast| return fast;
         }
 
+        if (selectors.len == 0) return try self.retainEscapedValue(base);
+
         const items = try self.materializeTopLevelItems(base);
         defer {
             for (items) |value| self.releaseValue(value);
             self.allocator.free(items);
         }
-
-        if (selectors.len == 0) return try self.rebuildTopLevelItems(base, items);
 
         var rhs_items: ?[]Value = null;
         defer if (rhs_items) |values| {
@@ -13045,6 +14884,7 @@ pub const Session = struct {
             .binary => arg,
             .unary => Value.fromBool(false),
         };
+        const selector_is_scalar = selector.tag() == .int or selector.tag() == .bool;
         if (mode != .unary and rhs_source.tag() == .array) {
             const maybe = try self.tryMaterializeTopLevelItems(rhs_source);
             if (maybe) |values| rhs_items = values;
@@ -13056,13 +14896,13 @@ pub const Session = struct {
             const current = items[target_idx];
             const next = switch (mode) {
                 .assign => if (rhs_items) |values|
-                    if (values.len == selectors.len) values[idx] else try self.retainEscapedValue(func_or_value)
+                    if (!selector_is_scalar and values.len == selectors.len) try self.retainEscapedValue(values[idx]) else try self.retainEscapedValue(func_or_value)
                 else
                     try self.retainEscapedValue(func_or_value),
                 .unary => try self.applyValue(func_or_value, &[_]Value{current}),
                 .binary => blk: {
                     const rhs = if (rhs_items) |values|
-                        if (values.len == selectors.len) values[idx] else arg
+                        if (!selector_is_scalar and values.len == selectors.len) values[idx] else arg
                     else
                         arg;
                     break :blk try self.applyValue(func_or_value, &[_]Value{ current, rhs });
@@ -13076,29 +14916,49 @@ pub const Session = struct {
     }
 
     fn collectSelectorIndices(self: *Session, base: Value, selector: Value) KError![]usize {
-        const top_len = try self.topLevelLen(base);
+        return try self.collectSelectorIndicesForLen(try self.topLevelLen(base), selector);
+    }
+
+    fn collectSelectorIndicesForLen(self: *Session, top_len: usize, selector: Value) KError![]usize {
         var indices = std.ArrayList(usize).empty;
         defer indices.deinit(self.allocator);
+
+        if (isAllAxisSelectorValue(selector)) {
+            try indices.ensureTotalCapacity(self.allocator, top_len);
+            for (0..top_len) |idx| try indices.append(self.allocator, idx);
+            return try indices.toOwnedSlice(self.allocator);
+        }
 
         switch (selector.tag()) {
             .int, .bool => {
                 try indices.append(self.allocator, try normalizeIndex(scalarIntLikeValue(selector).?, top_len));
             },
             .array => {
-                const array = try numericHostArrayValue(self, selector);
-                if (hostIntArrayView(array)) |view| switch (view) {
-                    .bit => |bits| {
-                        if (bits.len != top_len) return error.Type;
-                        for (0..bits.len) |idx| {
-                            if (!bitGet(bits.words, idx)) continue;
-                            try indices.append(self.allocator, idx);
-                        }
+                if (stringBytes(selector)) |bytes| {
+                    try indices.ensureTotalCapacity(self.allocator, bytes.len);
+                    for (bytes) |byte| try indices.append(self.allocator, try normalizeIndex(@intCast(byte), top_len));
+                } else if (valueHostIntStructuralView(selector)) |view| switch (view) {
+                    .dense => |dense| switch (dense) {
+                        .bit => |bits| {
+                            if (bits.len != top_len) return error.Type;
+                            for (0..bits.len) |idx| {
+                                if (!bitGet(bits.words, idx)) continue;
+                                try indices.append(self.allocator, idx);
+                            }
+                        },
+                        else => {
+                            const len = hostIntArrayViewLen(dense);
+                            try indices.ensureTotalCapacity(self.allocator, len);
+                            for (0..len) |idx| {
+                                try indices.append(self.allocator, try normalizeIndex(hostIntViewItem(dense, idx), top_len));
+                            }
+                        },
                     },
                     else => {
-                        const len = hostIntArrayViewLen(view);
+                        const len = hostIntDenseViewLen(view);
                         try indices.ensureTotalCapacity(self.allocator, len);
                         for (0..len) |idx| {
-                            try indices.append(self.allocator, try normalizeIndex(hostIntViewItem(view, idx), top_len));
+                            try indices.append(self.allocator, try normalizeIndex(try hostIntDenseViewItem(view, idx), top_len));
                         }
                     },
                 } else return error.Type;
@@ -13109,17 +14969,94 @@ pub const Session = struct {
         return try indices.toOwnedSlice(self.allocator);
     }
 
-    fn topLevelLen(self: *Session, value: Value) KError!usize {
-        const array = try numericHostArrayValue(self, value);
-        if (hostDenseNonVectorShape(array)) |shape| {
-            if (shape.rank != 2) return error.Unsupported;
-            return @intCast(shape.shape[0]);
+    fn matrixCellValue(self: *Session, value: Value, row: usize, col: usize) KError!Value {
+        const row_value = try self.applyArrayCall1Scalar(value, @intCast(row));
+        defer self.releaseValue(row_value);
+        return try self.applyArrayCall1Scalar(row_value, @intCast(col));
+    }
+
+    fn tryApplyNumericMatrixColumnAmend(self: *Session, base: Value, selector: Value, mode: ShallowAmendMode, func_or_value: Value, arg: Value) KError!?Value {
+        const shape = valueNumericMatrixShape(base) orelse return null;
+        const rows = shape.rows;
+        const cols = shape.cols;
+        const col_indices = self.collectSelectorIndicesForLen(cols, selector) catch |err| switch (err) {
+            error.Type => return null,
+            else => return err,
+        };
+        defer self.allocator.free(col_indices);
+        if (col_indices.len == 0) return try self.retainEscapedValue(base);
+
+        const total = rows * cols;
+        const items = try self.allocator.alloc(Value, total);
+        defer self.allocator.free(items);
+        var initialized: usize = 0;
+        defer {
+            for (items[0..initialized]) |value| self.releaseValue(value);
         }
-        return array.len();
+
+        switch (valueNumericMode(base) orelse return null) {
+            .int => for (0..total) |idx| {
+                items[idx] = try self.intValue(try numericIntAt(base, idx));
+                initialized += 1;
+            },
+            .float => for (0..total) |idx| {
+                items[idx] = try self.floatValue(try numericFloatAt(base, idx));
+                initialized += 1;
+            },
+        }
+
+        const rhs_source = switch (mode) {
+            .assign => func_or_value,
+            .binary => arg,
+            .unary => Value.fromBool(false),
+        };
+        const rhs_matrix_shape = if (mode != .unary) valueNumericMatrixShape(rhs_source) else null;
+        const rhs_is_matrix = if (rhs_matrix_shape) |rhs_shape|
+            rhs_shape.rows == rows and rhs_shape.cols == col_indices.len
+        else
+            false;
+
+        for (0..rows) |row| {
+            for (col_indices, 0..) |col, col_pos| {
+                const flat_idx = row * cols + col;
+                const current = items[flat_idx];
+                var rhs_cell: ?Value = null;
+                defer if (rhs_cell) |value| self.releaseValue(value);
+                const rhs = if (rhs_is_matrix) blk: {
+                    rhs_cell = try self.matrixCellValue(rhs_source, row, col_pos);
+                    break :blk rhs_cell.?;
+                } else rhs_source;
+
+                const next = switch (mode) {
+                    .assign => try self.retainEscapedValue(rhs),
+                    .unary => try self.applyValue(func_or_value, &[_]Value{current}),
+                    .binary => try self.applyValue(func_or_value, &[_]Value{ current, rhs }),
+                };
+                self.releaseValue(items[flat_idx]);
+                items[flat_idx] = next;
+            }
+        }
+
+        const rebuilt = try self.makeArrayFromValues(items);
+        return try applyNonVectorNumericShapeToValue(self, rebuilt, numericShapeSnapshotMatrix(rows, cols));
+    }
+
+    fn topLevelLen(self: *Session, value: Value) KError!usize {
+        _ = self;
+        if (value.tag() != .array) return error.Type;
+        if (stringSourceInfo(value)) |source| return source.bytes().len;
+        if (value.arrayKind() == .host_keyed_store) {
+            const store = value.asHostKeyedStore();
+            return switch (store.layout) {
+                .dict => keyedStoreNameCount(store),
+                .table => store.row_count,
+            };
+        }
+        if (derivedSequenceLen(value)) |len| return len;
+        return error.Type;
     }
 
     fn materializeTopLevelItems(self: *Session, value: Value) KError![]Value {
-        const array = try numericHostArrayValue(self, value);
         const len = try self.topLevelLen(value);
         const items = try self.allocator.alloc(Value, len);
         errdefer self.allocator.free(items);
@@ -13127,9 +15064,29 @@ pub const Session = struct {
         errdefer {
             for (items[0..initialized]) |item| self.releaseValue(item);
         }
-        for (0..len) |idx| {
-            items[idx] = try self.hostDenseIndexScalar(array, @intCast(idx));
-            initialized += 1;
+
+        if (stringSourceInfo(value)) |source| {
+            for (0..len) |idx| {
+                items[idx] = try self.stringIndexScalarValue(source, @intCast(idx));
+                initialized += 1;
+            }
+        } else if (value.arrayKind() == .host_keyed_store) {
+            const store = value.asHostKeyedStore();
+            switch (store.layout) {
+                .dict => for (0..len) |idx| {
+                    items[idx] = try self.keyedStoreValueAt(store, idx);
+                    initialized += 1;
+                },
+                .table => for (0..len) |idx| {
+                    items[idx] = try self.tableRowDictValue(store, idx);
+                    initialized += 1;
+                },
+            }
+        } else {
+            for (0..len) |idx| {
+                items[idx] = try self.derivedSequenceItemValue(value, idx);
+                initialized += 1;
+            }
         }
         return items;
     }
@@ -13140,6 +15097,92 @@ pub const Session = struct {
     }
 
     fn rebuildTopLevelItems(self: *Session, base: Value, items: []const Value) KError!Value {
+        if (stringSourceInfo(base) != null) {
+            var text_values = std.ArrayList(Value).empty;
+            defer {
+                for (text_values.items) |value| self.releaseValue(value);
+                text_values.deinit(self.allocator);
+            }
+            try text_values.ensureTotalCapacity(self.allocator, items.len);
+
+            var all_text = true;
+            for (items) |item| {
+                if (stringBytes(item) != null) {
+                    try text_values.append(self.allocator, try self.retainEscapedValue(item));
+                } else if (item.tag() == .array and item.arrayKind() == .host_string_list) {
+                    try text_values.append(self.allocator, try self.joinHostStringList(item.asHostStringList(), &.{}));
+                } else {
+                    all_text = false;
+                    break;
+                }
+            }
+
+            if (all_text) {
+                var all_unit_strings = true;
+                for (text_values.items) |item| {
+                    const bytes = stringBytes(item) orelse return error.Internal;
+                    if (bytes.len != 1) {
+                        all_unit_strings = false;
+                        break;
+                    }
+                }
+                if (all_unit_strings) {
+                    const out = try self.allocator.alloc(u8, text_values.items.len);
+                    defer self.allocator.free(out);
+                    for (text_values.items, 0..) |item, idx| out[idx] = stringBytes(item).?[0];
+                    return try self.managedHostString(out);
+                }
+                return try self.createManagedHostStringList(text_values.items);
+            }
+        }
+
+        if (base.tag() == .array and base.arrayKind() == .host_boxed_array) {
+            if (scalarNumericItemsHaveSingleClass(items)) return try self.makeArrayFromValues(items);
+            return try self.createManagedHostBoxedArrayWithPrototype(items, base.asHostBoxedArray().prototype);
+        }
+
+        if (stringSourceInfo(base) != null) {
+            var all_unit_strings = true;
+            for (items) |item| {
+                const bytes = stringBytes(item) orelse {
+                    all_unit_strings = false;
+                    break;
+                };
+                if (bytes.len != 1) {
+                    all_unit_strings = false;
+                    break;
+                }
+            }
+            if (all_unit_strings) {
+                const out = try self.allocator.alloc(u8, items.len);
+                defer self.allocator.free(out);
+                for (items, 0..) |item, idx| out[idx] = stringBytes(item).?[0];
+                return try self.managedHostString(out);
+            }
+        }
+
+        if (base.tag() == .array and base.arrayKind() == .host_string_list) {
+            var all_text = true;
+            for (items) |item| {
+                if (stringBytes(item) == null and symbolBytes(item) == null) {
+                    all_text = false;
+                    break;
+                }
+            }
+            if (all_text) return try self.createManagedHostTextListFromValues(items);
+        }
+
+        if (base.tag() == .array and base.arrayKind() == .host_symbol_list) {
+            var slices = std.ArrayList([]const u8).empty;
+            defer slices.deinit(self.allocator);
+            try slices.ensureTotalCapacity(self.allocator, items.len);
+            for (items) |item| {
+                const bytes = symbolBytes(item) orelse break;
+                try slices.append(self.allocator, bytes);
+            }
+            if (slices.items.len == items.len) return try self.createManagedHostSymbolListFromSlices(slices.items);
+        }
+
         const rebuilt = try self.makeArrayFromValues(items);
         if (try self.promoteRenderableMatrixValue(rebuilt)) |promoted| {
             if (promoted.raw != rebuilt.raw and isManagedValue(rebuilt)) self.releaseValue(rebuilt);
@@ -13162,6 +15205,7 @@ pub const Session = struct {
         var profile_scope = self.beginSamplingProfileScope(.apply_projection);
         defer profile_scope.end();
         if (self.debugDetailedProbeActive()) self.debug_apply_projection_count += 1;
+        if (try self.tryApplyDirectBuiltinProjection(info, args)) |value| return value;
         const full_slot_values = try self.scratch_arena.allocator().alloc(Value, info.slot_count);
         var next_hole_mask: u64 = 0;
         var arg_idx: usize = 0;
@@ -13194,6 +15238,34 @@ pub const Session = struct {
         @memcpy(apply_args[0..info.slot_count], full_slot_values);
         for (args[arg_idx..], 0..) |arg, idx| apply_args[info.slot_count + idx] = arg;
         return try self.applyValue(info.callee, apply_args);
+    }
+
+    fn tryApplyDirectBuiltinProjection(self: *Session, info: ProjectionInfo, args: []const Value) KError!?Value {
+        if (info.callee.tag() != .builtin) return null;
+        if (info.slot_count == 0 or info.slot_count > max_direct_apply_args) return null;
+        const hole_count: usize = @intCast(@popCount(info.hole_mask));
+        if (args.len != hole_count) return null;
+
+        const op = info.callee.asBuiltin();
+        if (!builtinUsesGenericArityDispatch(op)) return null;
+
+        var apply_args: [max_direct_apply_args]Value = undefined;
+        var arg_idx: usize = 0;
+        for (0..info.slot_count) |slot_idx| {
+            if (((info.hole_mask >> @intCast(slot_idx)) & 1) != 0) {
+                apply_args[slot_idx] = args[arg_idx];
+                arg_idx += 1;
+            } else {
+                apply_args[slot_idx] = info.slot_values[slot_idx];
+            }
+        }
+
+        return switch (info.slot_count) {
+            1 => try self.applyMonad(op, apply_args[0]),
+            2 => try self.applyDyad(dyadicBuiltinForGenericCall(op), apply_args[0], apply_args[1]),
+            3 => if (op == .unique or op == .find) try self.insertValue(apply_args[0], apply_args[1], apply_args[2]) else error.Arity,
+            else => error.Arity,
+        };
     }
 
     fn applyCompositionClosure(self: *Session, info: CompositionInfo, args: []const Value) KError!Value {
@@ -13249,6 +15321,7 @@ pub const Session = struct {
             .bytes,
             .utf8,
             .char,
+            .type_of,
             .unique,
             .eval_string,
             .load,
@@ -13293,7 +15366,7 @@ pub const Session = struct {
             .rotcache,
             .rotcacheupdate,
             => true,
-            .exp, .log, .sin, .cos, .tanh, .sigmoid, .iota, .reverse, .grade_up, .grade_down, .take, .drop, .reshape, .cast, .find, .bytes, .utf8, .char, .eval_string, .grad, .valuegrad, .prng, .sql, .rotcacheview, .rope, .ropeflat, .ropecisflat, .rmsnorm, .layernorm, .gelu, .geluapprox, .mlpdense, .conv2d, .convtranspose2d, .upsamplenearest2d, .groupnorm, .softmax, .sdpa, .sam3boxrpb, .sdpamask, .sdpaflat => false,
+            .exp, .log, .sin, .cos, .tanh, .sigmoid, .iota, .reverse, .grade_up, .grade_down, .take, .drop, .reshape, .cast, .find, .bytes, .utf8, .char, .type_of, .eval_string, .grad, .valuegrad, .prng, .sql, .rotcacheview, .rope, .ropeflat, .ropecisflat, .rmsnorm, .layernorm, .gelu, .geluapprox, .mlpdense, .conv2d, .convtranspose2d, .upsamplenearest2d, .groupnorm, .softmax, .sdpa, .sam3boxrpb, .sdpamask, .sdpaflat => false,
         };
     }
 
@@ -13303,10 +15376,32 @@ pub const Session = struct {
             .closure => blk: {
                 const closure = base.asClosure();
                 if (projectionHoleCount(closure)) |hole_count| break :blk hole_count == 1;
-                if (closureDerivedKind(closure) != null) break :blk false;
+                if (closureDerivedKind(closure)) |kind| {
+                    break :blk derivedClosureSupportsMonadicScanBase(kind, closure);
+                }
                 break :blk closure.code.arity == 1;
             },
             .array => true,
+            else => false,
+        };
+    }
+
+    fn derivedClosureSupportsMonadicScanBase(kind: DerivedVerbKind, closure: *const Closure) bool {
+        return switch (kind) {
+            .each_prior => closure.captures.len == 1 and eachPriorRollingBaseSupportsDyad(closure.captures[0]),
+            .each, .fold, .scan, .each_right, .each_left, .grad, .valuegrad => false,
+        };
+    }
+
+    fn eachPriorRollingBaseSupportsDyad(base: Value) bool {
+        return switch (base.tag()) {
+            .builtin => builtinSupportsDyad(base.asBuiltin()),
+            .closure => blk: {
+                const closure = base.asClosure();
+                if (projectionHoleCount(closure)) |hole_count| break :blk hole_count == 2;
+                if (closureDerivedKind(closure) != null) break :blk false;
+                break :blk closure.code.arity == 2;
+            },
             else => false,
         };
     }
@@ -13363,6 +15458,7 @@ pub const Session = struct {
 
     fn applyDerivedKind(self: *Session, kind: DerivedVerbKind, captures: []const Value, args: []const Value) KError!Value {
         if (try self.tryApplyStringDerivedKind(kind, captures, args)) |value| return value;
+        if (try self.tryApplyNumericEncodeDecodeDerivedKind(kind, captures, args)) |value| return value;
         return switch (kind) {
             .each => blk: {
                 if (captures.len != 1) return error.Internal;
@@ -13408,7 +15504,7 @@ pub const Session = struct {
                 else => null,
             };
         }
-        if (stringBytes(captures[0]) != null) {
+        if (stringDelimiterBytes(captures[0]) != null) {
             return switch (kind) {
                 .fold => if (args.len == 1 and isJoinableStringSequence(args[0]))
                     try self.joinValues(captures[0], args[0])
@@ -13433,14 +15529,24 @@ pub const Session = struct {
             defer self.releaseValue(empty);
             return try self.joinValues(empty, args[0]);
         }
-        if (args.len == 2 and stringBytes(args[0]) != null and isJoinableStringSequence(args[1])) {
+        if (args.len == 2 and stringDelimiterBytes(args[0]) != null and isJoinableStringSequence(args[1])) {
             return try self.joinValues(args[0], args[1]);
         }
         return null;
     }
 
+    fn tryApplyNumericEncodeDecodeDerivedKind(self: *Session, kind: DerivedVerbKind, captures: []const Value, args: []const Value) KError!?Value {
+        if (captures.len != 1 or args.len != 1) return null;
+        if (valueNumericMode(captures[0]) != .int) return null;
+        return switch (kind) {
+            .fold => try self.decodeNumericValues(captures[0], args[0]),
+            .scan => try self.encodeNumericValues(captures[0], args[0]),
+            else => null,
+        };
+    }
+
     fn tryApplyStringSplitDerived(self: *Session, args: []const Value) KError!?Value {
-        if (args.len == 2 and stringBytes(args[0]) != null and stringBytes(args[1]) != null) {
+        if (args.len == 2 and stringDelimiterBytes(args[0]) != null and stringBytes(args[1]) != null) {
             return try self.splitValues(args[0], args[1]);
         }
         return null;
@@ -13453,6 +15559,10 @@ pub const Session = struct {
         }
         if (left.tag() != .array or right.tag() != .array) return false;
 
+        const left_vector_len = numericVectorLen(left);
+        const right_vector_len = numericVectorLen(right);
+        if (left_vector_len != null and right_vector_len != null and left_vector_len.? != right_vector_len.?) return false;
+
         const left_shape = valueNonVectorNumericShape(left);
         const right_shape = valueNonVectorNumericShape(right);
         if (left_shape == null and right_shape != null) return false;
@@ -13463,8 +15573,8 @@ pub const Session = struct {
         }
 
         if (valueNumericMode(left) != null and valueNumericMode(right) != null) {
-            const left_len = numericVectorLen(left) orelse return false;
-            const right_len = numericVectorLen(right) orelse return false;
+            const left_len = left_vector_len orelse return false;
+            const right_len = right_vector_len orelse return false;
             if (left_len != right_len) return false;
             for (0..left_len) |idx| {
                 if (try numericFloatAt(left, idx) != try numericFloatAt(right, idx)) return false;
@@ -13486,6 +15596,9 @@ pub const Session = struct {
     }
 
     fn applyConvergeDerived(self: *Session, base: Value, input: Value, collect: bool) KError!Value {
+        const initial = self.shareValue(input);
+        defer self.releaseValue(initial);
+
         var current = self.shareValue(input);
         errdefer self.releaseValue(current);
 
@@ -13499,7 +15612,7 @@ pub const Session = struct {
 
         while (true) {
             const next = try self.applyDerivedBase(base, &[_]Value{current});
-            const converged = try self.valuesExactlyEqual(current, next);
+            const converged = (try self.valuesExactlyEqual(current, next)) or (try self.valuesExactlyEqual(initial, next));
             if (converged) {
                 self.releaseValue(current);
                 if (!collect) return next;
@@ -13604,6 +15717,8 @@ pub const Session = struct {
         if (try self.tryFastBatchedMatmulEachDerived(base, args)) |value| return value;
         if (try self.tryFastUnaryLiftedEachDerived(base, args)) |value| return value;
         if (try self.tryFastBackendMatrixRowFoldEachDerived(base, args)) |value| return value;
+        if (try self.tryFastHostMatrixRowAddScanEach(base, args)) |value| return value;
+        if (try self.tryFastHostMatrixRowMinMaxScanEach(base, args)) |value| return value;
         if (try self.tryFastDenseEachDerived(base, args)) |value| return value;
         var len: ?usize = null;
         var saw_array = false;
@@ -13705,6 +15820,114 @@ pub const Session = struct {
             .wrapManagedBackendArray = Session.wrapManagedBackendArray,
             .numeric_array_max_rank = numeric_array_max_rank,
         }, self, base, args);
+    }
+
+    fn eachScanMinMaxBuiltin(base: Value) ?BuiltinId {
+        if (isDerivedBuiltinClosure(base, .scan, .minimum)) return .minimum;
+        if (isDerivedBuiltinClosure(base, .scan, .maximum)) return .maximum;
+        return null;
+    }
+
+    fn fastHostMatrixRowAddScan(self: *Session, matrix: Value, shape: NumericMatrixShape, view: HostDenseView) KError!?Value {
+        const len = shape.rows * shape.cols;
+        return switch (view) {
+            .int_array => |items| blk: {
+                const out = try self.allocator.alloc(i64, len);
+                defer self.allocator.free(out);
+                try fillRowAddScanInt(out, items, shape.rows, shape.cols);
+                const result = try self.createManagedHostIntArray(out);
+                break :blk try applyNonVectorNumericShapeToValue(self, result, valueNonVectorNumericShape(matrix));
+            },
+            .float_array => |items| blk: {
+                const out = try self.allocator.alloc(f64, len);
+                defer self.allocator.free(out);
+                try fillRowAddScanFloat(out, items, shape.rows, shape.cols);
+                const result = try self.createManagedHostFloatArray(out);
+                break :blk try applyNonVectorNumericShapeToValue(self, result, valueNonVectorNumericShape(matrix));
+            },
+            else => null,
+        };
+    }
+
+    fn tryFastHostMatrixRowAddScanEach(self: *Session, base: Value, args: []const Value) KError!?Value {
+        if (args.len != 1) return null;
+        if (self.dense_backend_override == .mlx) return null;
+        if (!isDerivedBuiltinClosure(base, .scan, .add)) return null;
+        const matrix = args[0];
+        const shape = valueNumericMatrixShape(matrix) orelse return null;
+        if (shape.rows == 0 or shape.cols == 0) return null;
+        if (shape.cols == 1) return self.shareValue(matrix);
+        const view = hostDenseView(self, matrix) catch |err| switch (err) {
+            error.Type => return null,
+            else => return err,
+        };
+        if (self.debugDetailedProbeActive()) self.debug_apply_each_fast_dense_count += 1;
+        return try self.fastHostMatrixRowAddScan(matrix, shape, view);
+    }
+
+    fn fastHostMatrixRowBitMinMaxScan(self: *Session, matrix: Value, shape: NumericMatrixShape, bits: HostBitSlice, op: BuiltinId) KError!Value {
+        const out = try self.allocHostBitArrayUninitialized(.managed, bits.len);
+        const metadata = fillRowBitMinMaxScan(out.words, bits, op, shape.rows, shape.cols);
+        const value = try self.finishManagedHostBitAlloc(out, metadata.flags, metadata.range);
+        return try applyNonVectorNumericShapeToValue(self, value, valueNonVectorNumericShape(matrix));
+    }
+
+    fn fastHostMatrixRowMinMaxScanInt(self: *Session, matrix: Value, shape: NumericMatrixShape, view: HostIntDenseView, op: BuiltinId) KError!Value {
+        const flags = hostIntDenseValueFlags(matrix, view);
+        if (minMaxScanCanReturnInput(op, flags)) return self.shareValue(matrix);
+        const input_kind = hostIntDenseViewKind(view);
+        var plan = try self.planHostIntUnaryOutput(matrix, input_kind, input_kind, shape.rows * shape.cols, true, true);
+        try fillRowMinMaxScanInt(&plan.output, view, op, shape.rows, shape.cols);
+        return try self.finishHostIntOutput(plan, host_dense_flag_normalized);
+    }
+
+    fn fastHostMatrixRowMinMaxScanFloat(self: *Session, matrix: Value, shape: NumericMatrixShape, view: HostFloatDenseView, op: BuiltinId) KError!Value {
+        const flags = hostFloatDenseValueFlags(matrix, view);
+        if (minMaxScanCanReturnInput(op, flags)) return self.shareValue(matrix);
+        const len = shape.rows * shape.cols;
+        if (hostFloatDenseViewStorageKind(view) == .float32) {
+            const plan = try self.planHostFloat32UnaryOutput(matrix, len, true);
+            try fillRowMinMaxScanFloat32(plan.output.items, view, op, shape.rows, shape.cols);
+            return try self.finishHostFloat32Output(plan, 0);
+        }
+        const plan = try self.planHostFloatUnaryOutput(matrix, len, true);
+        try fillRowMinMaxScanFloat(plan.output.items, view, op, shape.rows, shape.cols);
+        return try self.finishHostFloatOutput(plan, 0);
+    }
+
+    fn tryFastHostMatrixRowMinMaxScanEach(self: *Session, base: Value, args: []const Value) KError!?Value {
+        if (args.len != 1) return null;
+        if (self.dense_backend_override == .mlx) return null;
+        const op = eachScanMinMaxBuiltin(base) orelse return null;
+        const matrix = args[0];
+        const shape = valueNumericMatrixShape(matrix) orelse return null;
+        if (shape.rows == 0 or shape.cols == 0) return null;
+        if (shape.cols == 1) return self.shareValue(matrix);
+
+        const view = hostDenseView(self, matrix) catch |err| switch (err) {
+            error.Type => return null,
+            else => return err,
+        };
+        if (self.debugDetailedProbeActive()) self.debug_apply_each_fast_dense_count += 1;
+        return switch (view) {
+            .int_array => |items| blk: {
+                if (hostIntDenseViewBitSlice(items)) |bits| break :blk try self.fastHostMatrixRowBitMinMaxScan(matrix, shape, bits, op);
+                const range = hostIntDenseValueRange(matrix, items);
+                if (range.min >= 0 and range.max <= 1) {
+                    const host = numericHostArrayValue(self, matrix) catch null;
+                    if (host) |array| switch (array.storage) {
+                        .bit => |words| {
+                            const bits = HostBitSlice{ .words = hostDenseLogicalBitWords(array, words), .len = array.logical_len };
+                            break :blk try self.fastHostMatrixRowBitMinMaxScan(matrix, shape, bits, op);
+                        },
+                        else => {},
+                    };
+                }
+                break :blk try self.fastHostMatrixRowMinMaxScanInt(matrix, shape, items, op);
+            },
+            .float_array => |items| try self.fastHostMatrixRowMinMaxScanFloat(matrix, shape, items, op),
+            else => null,
+        };
     }
 
     fn tryFastBackendMatrixRowFoldBuiltin(self: *Session, op: BuiltinId, matrix: Value) KError!?Value {
@@ -13816,6 +16039,13 @@ pub const Session = struct {
         };
     }
 
+    fn hostShapedBitFoldSupportsBuiltin(op: BuiltinId) bool {
+        return switch (op) {
+            .minimum, .mul, .maximum => true,
+            else => false,
+        };
+    }
+
     fn tryFastNumericRazeFold(self: *Session, args: []const Value, collect: bool) KError!?Value {
         if (collect or args.len != 1) return null;
         const value = args[0];
@@ -13909,7 +16139,10 @@ pub const Session = struct {
             .add => try self.tryFastHostAddFoldScan(args, collect),
             .sub => if (!collect) try self.tryFastHostSubFold(args) else null,
             .mul => try self.tryFastHostMulFoldScan(args, collect),
-            .minimum, .maximum => if (!collect) try self.tryFastHostMinMaxFold(base.asBuiltin(), args) else null,
+            .minimum, .maximum => if (collect)
+                try self.tryFastHostMinMaxScan(base.asBuiltin(), args)
+            else
+                try self.tryFastHostMinMaxFold(base.asBuiltin(), args),
             else => null,
         };
     }
@@ -13994,7 +16227,17 @@ pub const Session = struct {
         if (self.dense_backend_override == .mlx) return null;
 
         const vector = args[args.len - 1];
-        if (valueNonVectorNumericShape(vector) != null) return null;
+        if (valueNonVectorNumericShape(vector) != null) {
+            if (collect and args.len == 1) {
+                if (shapedNumericHandle(vector)) |handle| {
+                    if (try self.fastHostFirstAxisAddScan(vector, handle)) |value| {
+                        noteDensePlanDecision(self, .scan, .host, .host, .host_fast_kernel);
+                        return value;
+                    }
+                }
+            }
+            return null;
+        }
         if (vector.tag() == .array and vector.arrayKind() == .numeric_array) {
             const handle = vector.asNumericArray();
             if (numericArrayIsVectorRangeIota(handle)) {
@@ -14268,19 +16511,28 @@ pub const Session = struct {
             .float_array => |items| {
                 const bounds = try hostFloatDenseViewBounds(items);
                 noteDensePlanDecision(self, .reduce, .host, .host, .host_fast_kernel);
+                const result_kind = mergeHostFloatStorageKind(valueFloatStorageKind(vector), if (args.len == 2) scalarFloatStorageKind(args[0]) else null) orelse .float64;
                 if (args.len == 1) {
-                    return try self.floatValue(switch (op) {
+                    const result = switch (op) {
                         .minimum => bounds.min,
                         .maximum => bounds.max,
                         else => unreachable,
-                    });
+                    };
+                    return switch (result_kind) {
+                        .float32 => try self.float32Value(@floatCast(result)),
+                        .float64 => try self.floatValue(result),
+                    };
                 }
                 const seed = scalarNumericValue(args[0]) catch return null;
-                return try self.floatValue(switch (op) {
+                const result = switch (op) {
                     .minimum => @min(seed, bounds.min),
                     .maximum => @max(seed, bounds.max),
                     else => unreachable,
-                });
+                };
+                return switch (result_kind) {
+                    .float32 => try self.float32Value(@floatCast(result)),
+                    .float64 => try self.floatValue(result),
+                };
             },
             else => return null,
         }
@@ -14313,6 +16565,24 @@ pub const Session = struct {
 
         switch (view) {
             .int_array => |items| {
+                if (hostShapedBitFoldSupportsBuiltin(op)) switch (items) {
+                    .dense => |dense| switch (dense) {
+                        .bit => |bits| {
+                            if (args.len == 1) {
+                                noteDensePlanDecision(self, .reduce, .host, .host, .host_fast_kernel);
+                                return try self.fastHostShapedBitFoldUnseeded(handle, bits, op);
+                            }
+                            if (scalarIntLikeValue(args[0])) |seed_int| {
+                                if (seed_int == 0 or seed_int == 1) {
+                                    noteDensePlanDecision(self, .reduce, .host, .host, .host_fast_kernel);
+                                    return try self.fastHostShapedBitFold(handle, bits, op, seed_int != 0);
+                                }
+                            }
+                        },
+                        else => {},
+                    },
+                    else => {},
+                };
                 if (args.len == 2) {
                     if (scalarIntLikeValue(args[0])) |seed_int| {
                         if (supports_int_result) {
@@ -14337,6 +16607,9 @@ pub const Session = struct {
                 if (!supports_float_result) return null;
                 const seed = if (args.len == 2) scalarNumericValue(args[0]) catch return null else null;
                 noteDensePlanDecision(self, .reduce, .host, .host, .host_fast_kernel);
+                if (hostFloatDenseViewStorageKind(items) == .float32) {
+                    return try self.fastHostShapedFloat32Fold(handle, items, op, block_len, outer_len, seed);
+                }
                 return try self.fastHostShapedFloatFold(handle, items, op, block_len, outer_len, seed);
             },
             else => return null,
@@ -14348,8 +16621,19 @@ pub const Session = struct {
         return try applyNonVectorNumericShapeToValue(self, value, numericShapeTailSnapshot(handle));
     }
 
+    fn finishHostReducedBitResult(self: *Session, handle: *const NumericArray, out: HostBitAlloc) KError!Value {
+        const metadata = analyzeBitSlice(.{ .words = out.words, .len = out.len });
+        const value = try self.finishManagedHostBitAlloc(out, metadata.flags, metadata.range);
+        return try applyNonVectorNumericShapeToValue(self, value, numericShapeTailSnapshot(handle));
+    }
+
     fn finishHostReducedFloatResult(self: *Session, handle: *const NumericArray, items: []const f64) KError!Value {
         const value = try self.createManagedHostFloatArray(items);
+        return try applyNonVectorNumericShapeToValue(self, value, numericShapeTailSnapshot(handle));
+    }
+
+    fn finishHostReducedFloat32Result(self: *Session, handle: *const NumericArray, items: []const f32) KError!Value {
+        const value = try self.createManagedHostFloat32Array(items);
         return try applyNonVectorNumericShapeToValue(self, value, numericShapeTailSnapshot(handle));
     }
 
@@ -14387,6 +16671,23 @@ pub const Session = struct {
         }
     }
 
+    fn fillHostShapedFloat32Fold(out: []f32, view: HostFloatDenseView, op: BuiltinId, block_len: usize, outer_len: usize, seed: ?f64) KError!void {
+        const start_row: usize = if (seed) |seed_value| blk: {
+            @memset(out, @floatCast(seed_value));
+            break :blk 0;
+        } else blk: {
+            for (0..block_len) |col_idx| out[col_idx] = @floatCast(try hostFloatDenseViewItem(view, col_idx));
+            break :blk 1;
+        };
+
+        for (start_row..outer_len) |row_idx| {
+            const row_base = row_idx * block_len;
+            for (0..block_len) |col_idx| {
+                out[col_idx] = @floatCast(applyFloatOp(op, out[col_idx], try hostFloatDenseViewItem(view, row_base + col_idx)));
+            }
+        }
+    }
+
     fn fillHostShapedFloatFoldFromInt(out: []f64, view: HostIntDenseView, op: BuiltinId, block_len: usize, outer_len: usize, seed: ?f64) KError!void {
         const start_row: usize = if (seed) |seed_value| blk: {
             @memset(out, seed_value);
@@ -14401,6 +16702,67 @@ pub const Session = struct {
             for (0..block_len) |col_idx| {
                 out[col_idx] = applyFloatOp(op, out[col_idx], @floatFromInt(try hostIntDenseViewItem(view, row_base + col_idx)));
             }
+        }
+    }
+
+    fn bitFoldApplyWord(op: BuiltinId, left: u64, right: u64) u64 {
+        return switch (op) {
+            .minimum, .mul => left & right,
+            .maximum => left | right,
+            else => unreachable,
+        };
+    }
+
+    fn bitFoldSeedWord(op: BuiltinId, seed: bool, mask: u64) u64 {
+        return switch (op) {
+            .minimum, .mul, .maximum => if (seed) mask else 0,
+            else => unreachable,
+        };
+    }
+
+    fn fillHostShapedBitFold(out: []u64, view: HostBitSlice, op: BuiltinId, block_len: usize, outer_len: usize, seed: ?bool) void {
+        if (block_len % host_bit_word_bits == 0) {
+            const row_words = block_len / host_bit_word_bits;
+            if (seed) |seed_value| {
+                const seed_word: u64 = if (seed_value) std.math.maxInt(u64) else 0;
+                @memset(out, seed_word);
+                for (0..outer_len) |row_idx| {
+                    const row = view.words[row_idx * row_words ..][0..row_words];
+                    for (out, row) |*out_word, row_word| {
+                        out_word.* = bitFoldApplyWord(op, out_word.*, row_word);
+                    }
+                }
+            } else {
+                @memcpy(out, view.words[0..row_words]);
+                for (1..outer_len) |row_idx| {
+                    const row = view.words[row_idx * row_words ..][0..row_words];
+                    for (out, row) |*out_word, row_word| {
+                        out_word.* = bitFoldApplyWord(op, out_word.*, row_word);
+                    }
+                }
+            }
+            return;
+        }
+
+        for (out, 0..) |*out_word, word_idx| {
+            const active_len = bitWordActiveLen(block_len, word_idx, out.len);
+            const mask = bitLowMask(active_len);
+            const col_start = word_idx * host_bit_word_bits;
+            var acc: u64 = undefined;
+            const start_row: usize = if (seed) |seed_value| blk: {
+                acc = bitFoldSeedWord(op, seed_value, mask);
+                break :blk 0;
+            } else blk: {
+                acc = bitExtractWindow(view.words, col_start) & mask;
+                break :blk 1;
+            };
+
+            for (start_row..outer_len) |row_idx| {
+                const row_start = row_idx * block_len + col_start;
+                const row_bits = bitExtractWindow(view.words, row_start) & mask;
+                acc = bitFoldApplyWord(op, acc, row_bits);
+            }
+            out_word.* = acc & mask;
         }
     }
 
@@ -14422,11 +16784,34 @@ pub const Session = struct {
         return try self.finishHostReducedIntResult(handle, out);
     }
 
+    fn fastHostShapedBitFoldUnseeded(self: *Session, handle: *const NumericArray, view: HostBitSlice, op: BuiltinId) KError!Value {
+        const block_len = numericShapeInnerBlockLen(handle);
+        const outer_len: usize = @intCast(handle.shape[0]);
+        const out = try self.allocHostBitArrayUninitialized(.managed, block_len);
+        fillHostShapedBitFold(out.words, view, op, block_len, outer_len, null);
+        return try self.finishHostReducedBitResult(handle, out);
+    }
+
+    fn fastHostShapedBitFold(self: *Session, handle: *const NumericArray, view: HostBitSlice, op: BuiltinId, seed: bool) KError!Value {
+        const block_len = numericShapeInnerBlockLen(handle);
+        const outer_len: usize = @intCast(handle.shape[0]);
+        const out = try self.allocHostBitArrayUninitialized(.managed, block_len);
+        fillHostShapedBitFold(out.words, view, op, block_len, outer_len, seed);
+        return try self.finishHostReducedBitResult(handle, out);
+    }
+
     fn fastHostShapedFloatFold(self: *Session, handle: *const NumericArray, view: HostFloatDenseView, op: BuiltinId, block_len: usize, outer_len: usize, seed: ?f64) KError!Value {
         const out = try self.allocator.alloc(f64, block_len);
         defer self.allocator.free(out);
         try fillHostShapedFloatFold(out, view, op, block_len, outer_len, seed);
         return try self.finishHostReducedFloatResult(handle, out);
+    }
+
+    fn fastHostShapedFloat32Fold(self: *Session, handle: *const NumericArray, view: HostFloatDenseView, op: BuiltinId, block_len: usize, outer_len: usize, seed: ?f64) KError!Value {
+        const out = try self.allocator.alloc(f32, block_len);
+        defer self.allocator.free(out);
+        try fillHostShapedFloat32Fold(out, view, op, block_len, outer_len, seed);
+        return try self.finishHostReducedFloat32Result(handle, out);
     }
 
     fn fastHostShapedFloatFoldFromInt(self: *Session, handle: *const NumericArray, view: HostIntDenseView, op: BuiltinId, block_len: usize, outer_len: usize, seed: ?f64) KError!Value {
@@ -14437,12 +16822,12 @@ pub const Session = struct {
     }
 
     fn fastHostAddFoldIntUnseeded(self: *Session, array: *const HostDenseArray, view: HostIntArrayView) KError!Value {
-        const range = hostDenseCachedIntRange(array) orelse hostIntArrayViewEndpointRange(view, array.flags);
+        const range = hostIntAddFoldProofRange(array, view);
         return try self.intValue(try foldAddIntViewMaybeUnchecked(view, range, null));
     }
 
     fn fastHostAddFoldInt(self: *Session, array: *const HostDenseArray, view: HostIntArrayView, seed: i64) KError!Value {
-        const range = hostDenseCachedIntRange(array) orelse hostIntArrayViewEndpointRange(view, array.flags);
+        const range = hostIntAddFoldProofRange(array, view);
         return try self.intValue(try foldAddIntViewMaybeUnchecked(view, range, seed));
     }
 
@@ -14515,6 +16900,154 @@ pub const Session = struct {
         return try self.finishHostFloatOutput(plan, addScanIntFlags(hostIntArrayViewRange(view)));
     }
 
+    fn fastHostFirstAxisAddScan(self: *Session, value: Value, handle: *const NumericArray) KError!?Value {
+        if (handle.rank <= 1) return null;
+        const outer_len: usize = @intCast(handle.shape[0]);
+        const block_len = numericShapeInnerBlockLen(handle);
+        if (outer_len == 0 or block_len == 0) return null;
+        const len = outer_len * block_len;
+        const view = hostDenseView(self, value) catch return null;
+        return switch (view) {
+            .int_array => |items| blk: {
+                const out = try self.allocator.alloc(i64, len);
+                defer self.allocator.free(out);
+                try fillFirstAxisAddScanInt(out, items, block_len, outer_len);
+                const result = try self.createManagedHostIntArray(out);
+                break :blk try applyNonVectorNumericShapeToValue(self, result, numericShapeSnapshotFromHandle(handle));
+            },
+            .float_array => |items| blk: {
+                const out = try self.allocator.alloc(f64, len);
+                defer self.allocator.free(out);
+                try fillFirstAxisAddScanFloat(out, items, block_len, outer_len);
+                const result = try self.createManagedHostFloatArray(out);
+                break :blk try applyNonVectorNumericShapeToValue(self, result, numericShapeSnapshotFromHandle(handle));
+            },
+            else => null,
+        };
+    }
+
+    fn fastHostBitMinMaxScan(self: *Session, op: BuiltinId, bits: HostBitSlice, seed: ?i64) KError!Value {
+        const out = try self.allocHostBitArrayUninitialized(.managed, bits.len);
+        const metadata = switch (op) {
+            .minimum => fillBitPrefixAndScan(out.words, bits, if (seed) |value| value != 0 else true),
+            .maximum => fillBitPrefixOrScan(out.words, bits, if (seed) |value| value != 0 else false),
+            else => unreachable,
+        };
+        return try self.finishManagedHostBitAlloc(out, metadata.flags, metadata.range);
+    }
+
+    fn fastHostFirstAxisBitMinMaxScan(self: *Session, handle: *const NumericArray, bits: HostBitSlice, op: BuiltinId) KError!Value {
+        if (handle.rank <= 1) return error.Type;
+        const outer_len: usize = @intCast(handle.shape[0]);
+        const block_len = numericShapeInnerBlockLen(handle);
+        if (outer_len == 0 or block_len == 0) return error.Type;
+        const out = try self.allocHostBitArrayUninitialized(.managed, bits.len);
+        const metadata = fillFirstAxisBitMinMaxScan(out.words, bits, op, block_len, outer_len);
+        const value = try self.finishManagedHostBitAlloc(out, metadata.flags, metadata.range);
+        return try applyNonVectorNumericShapeToValue(self, value, numericShapeSnapshotFromHandle(handle));
+    }
+
+    fn fastHostFirstAxisBitLikeMinMaxScan(self: *Session, handle: *const NumericArray, view: HostIntDenseView, op: BuiltinId) KError!Value {
+        if (handle.rank <= 1) return error.Type;
+        const outer_len: usize = @intCast(handle.shape[0]);
+        const block_len = numericShapeInnerBlockLen(handle);
+        if (outer_len == 0 or block_len == 0) return error.Type;
+        const out = try self.allocHostBitArrayUninitialized(.managed, hostIntDenseViewLen(view));
+        const metadata = try fillFirstAxisBitLikeMinMaxScan(out.words, view, op, block_len, outer_len);
+        const value = try self.finishManagedHostBitAlloc(out, metadata.flags, metadata.range);
+        return try applyNonVectorNumericShapeToValue(self, value, numericShapeSnapshotFromHandle(handle));
+    }
+
+    fn fastHostMinMaxScanInt(self: *Session, view: HostIntDenseView, op: BuiltinId, seed: ?i64) KError!Value {
+        const len = hostIntDenseViewLen(view);
+        const out = try self.allocator.alloc(i64, len);
+        defer self.allocator.free(out);
+        try fillMinMaxScanInt(out, view, op, seed);
+        return try self.createManagedHostIntArray(out);
+    }
+
+    fn fastHostMinMaxScanFloatFromInt(self: *Session, view: HostIntDenseView, op: BuiltinId, seed: f64) KError!Value {
+        const len = hostIntDenseViewLen(view);
+        const out = try self.allocator.alloc(f64, len);
+        defer self.allocator.free(out);
+        try fillMinMaxScanFloatFromInt(out, view, op, seed);
+        return try self.createManagedHostFloatArray(out);
+    }
+
+    fn fastHostMinMaxScanFloat(self: *Session, view: HostFloatDenseView, op: BuiltinId, seed: ?f64) KError!Value {
+        const len = hostFloatDenseViewLen(view);
+        const out = try self.allocator.alloc(f64, len);
+        defer self.allocator.free(out);
+        try fillMinMaxScanFloat(out, view, op, seed);
+        return try self.createManagedHostFloatArray(out);
+    }
+
+    fn minMaxScanCanReturnInput(op: BuiltinId, flags: u8) bool {
+        const mono = monotonicFlags(flags);
+        return switch (op) {
+            .minimum => (mono & host_dense_flag_dsc) != 0,
+            .maximum => (mono & host_dense_flag_asc) != 0,
+            else => false,
+        };
+    }
+
+    fn minMaxScanNeedsFirstPrefix(op: BuiltinId, flags: u8) bool {
+        const mono = monotonicFlags(flags);
+        return switch (op) {
+            .minimum => (mono & host_dense_flag_asc) != 0,
+            .maximum => (mono & host_dense_flag_dsc) != 0,
+            else => false,
+        };
+    }
+
+    fn repeatFirstAxisFirstCell(self: *Session, source: Value, shape: NumericShapeSnapshot) KError!?Value {
+        if (shape.rank <= 1 or shape.shape[0] <= 0) return null;
+        const rows: usize = @intCast(shape.shape[0]);
+        const row_indices = try newRangeIotaValueWithParams(self, .managed, rows, 0, 0);
+        defer self.releaseValue(row_indices);
+        return try newFirstAxisIndexValue(self, source, row_indices);
+    }
+
+    fn tryFastHostMinMaxScanOrderedInt(self: *Session, op: BuiltinId, vector: Value, view: HostIntDenseView, shape: ?NumericShapeSnapshot) KError!?Value {
+        const flags = hostIntDenseValueFlags(vector, view);
+        const len = hostIntDenseViewLen(view);
+        if (len == 0) return null;
+        if (minMaxScanCanReturnInput(op, flags)) return self.shareValue(vector);
+        if (!minMaxScanNeedsFirstPrefix(op, flags)) return null;
+        if (shape) |snapshot| return try self.repeatFirstAxisFirstCell(vector, snapshot);
+
+        const first = try hostIntDenseViewItem(view, 0);
+        return try newRangeIotaValueWithParams(self, .managed, len, first, 0);
+    }
+
+    fn tryFastHostMinMaxScanOrderedFloat(self: *Session, op: BuiltinId, vector: Value, view: HostFloatDenseView, shape: ?NumericShapeSnapshot) KError!?Value {
+        const flags = hostFloatDenseValueFlags(vector, view);
+        const len = hostFloatDenseViewLen(view);
+        if (len == 0) return null;
+        if (minMaxScanCanReturnInput(op, flags)) return self.shareValue(vector);
+        if (!minMaxScanNeedsFirstPrefix(op, flags)) return null;
+        if (shape) |snapshot| return try self.repeatFirstAxisFirstCell(vector, snapshot);
+
+        const first = try hostFloatDenseViewItem(view, 0);
+        const count = std.math.cast(i64, len) orelse return error.Unsupported;
+        const scalar = switch (valueFloatStorageKind(vector) orelse .float64) {
+            .float32 => try self.float32Value(@floatCast(first)),
+            .float64 => try self.floatValue(first),
+        };
+        return try self.takeScalarValue(count, scalar);
+    }
+
+    fn tryFastHostMinMaxScanConstantBit(self: *Session, vector: Value) KError!?Value {
+        const array = hostDenseIfPresent(vector) orelse return null;
+        switch (array.storage) {
+            .bit => {},
+            else => return null,
+        }
+        const range = hostDenseCachedIntRange(array) orelse return null;
+        if (range.min != range.max) return null;
+        return self.shareValue(vector);
+    }
+
     fn builtinFoldIdentityInt(op: BuiltinId) ?i64 {
         return switch (op) {
             .add => 0,
@@ -14566,18 +17099,131 @@ pub const Session = struct {
         return try self.intValue(fill);
     }
 
+    fn emptyNumericPrototypeFoldResult(self: *Session, op: BuiltinId, seed: ?Value, prototype: Value) KError!Value {
+        const identity = builtinFoldIdentityInt(op) orelse return error.Type;
+        const mode = valueNumericMode(prototype) orelse return error.Type;
+        const flat_len = numericFlatLen(prototype) orelse return try self.emptyNumericFoldResult(op, seed, prototype);
+        const out_shape = valueNonVectorNumericShape(prototype);
+        const want_float = mode == .float or if (seed) |seed_value|
+            scalarIntLikeValue(seed_value) == null
+        else
+            false;
+
+        if (want_float) {
+            const fill = if (seed) |seed_value|
+                try scalarNumericValue(seed_value)
+            else
+                @as(f64, @floatFromInt(identity));
+            const out = try self.allocator.alloc(f64, flat_len);
+            defer self.allocator.free(out);
+            @memset(out, fill);
+            const value = try self.createManagedHostFloatArray(out);
+            return try applyNonVectorNumericShapeToValue(self, value, out_shape);
+        }
+
+        const fill = if (seed) |seed_value|
+            scalarIntLikeValue(seed_value) orelse return error.Type
+        else
+            identity;
+        const out = try self.allocator.alloc(i64, flat_len);
+        defer self.allocator.free(out);
+        @memset(out, fill);
+        const value = try self.createManagedHostIntArray(out);
+        return try applyNonVectorNumericShapeToValue(self, value, out_shape);
+    }
+
     fn tryEmptyBuiltinFoldScanResult(self: *Session, base: Value, args: []const Value, collect: bool, template: Value) KError!?Value {
         if (base.tag() != .builtin) return null;
         const op = base.asBuiltin();
         const identity = builtinFoldIdentityInt(op) orelse return null;
 
         if (collect) return self.shareValue(template);
+        if (args.len == 1 and template.tag() == .array and template.arrayKind() == .host_boxed_array) {
+            const array = template.asHostBoxedArray();
+            if (array.len() == 0) {
+                if (array.prototype) |prototype| {
+                    if (valueNumericMode(prototype) != null) return try self.emptyNumericPrototypeFoldResult(op, null, prototype);
+                } else {
+                    return self.shareValue(template);
+                }
+            }
+        }
 
         if (valueNumericMode(template) != null) {
             return try self.emptyNumericFoldResult(op, if (args.len >= 2) args[0] else null, template);
         }
         if (args.len >= 2) return self.shareValue(args[0]);
         return try self.intValue(identity);
+    }
+
+    fn appendDerivedScanResult(self: *Session, results: *std.ArrayList(Value), value: Value) KError!void {
+        const retained = try self.retainEscapedValue(value);
+        errdefer self.releaseValue(retained);
+        try results.append(self.allocator, retained);
+    }
+
+    fn tryApplyIdentityFoldScan(self: *Session, base: Value, args: []const Value, collect: bool) KError!?Value {
+        if (base.tag() != .builtin or base.asBuiltin() != .identity or args.len != 1) return null;
+        const value = args[0];
+
+        if (stringSourceInfo(value)) |source| {
+            const bytes = source.bytes();
+            if (collect) return self.shareValue(value);
+            if (bytes.len == 0) return try self.managedHostString(" ");
+            return try self.stringIndexScalarValue(source, @intCast(bytes.len - 1));
+        }
+
+        return null;
+    }
+
+    fn tryApplyKeyedDictFoldScan(self: *Session, base: Value, args: []const Value, collect: bool) KError!?Value {
+        const store_value = switch (args.len) {
+            1 => args[0],
+            2 => args[1],
+            else => return null,
+        };
+        if (store_value.tag() != .array or store_value.arrayKind() != .host_keyed_store) return null;
+        const store = store_value.asHostKeyedStore();
+        if (store.layout != .dict) return null;
+
+        const folded = if (args.len == 1)
+            try self.applyFoldDerived(base, &[_]Value{store.values}, collect)
+        else
+            try self.applyFoldDerived(base, &[_]Value{ args[0], store.values }, collect);
+        errdefer self.releaseValue(folded);
+
+        if (!collect) return folded;
+        defer self.releaseValue(folded);
+        return try self.createHostDictValueFromKeySequenceValue(store.path, store.names, folded);
+    }
+
+    fn tryApplyConcatScan(self: *Session, base: Value, args: []const Value, collect: bool) KError!?Value {
+        if (!collect or args.len != 1 or base.tag() != .builtin or base.asBuiltin() != .concat) return null;
+        const vector = args[0];
+        const len = derivedSequenceLen(vector) orelse return null;
+
+        var acc = try self.createManagedHostBoxedArray(&.{});
+        errdefer self.releaseValue(acc);
+
+        var results = std.ArrayList(Value).empty;
+        defer {
+            for (results.items) |value| self.releaseValue(value);
+            results.deinit(self.allocator);
+        }
+        try results.ensureTotalCapacity(self.allocator, len);
+        for (0..len) |idx| {
+            const item = try self.derivedSequenceItemValue(vector, idx);
+            const next = blk: {
+                defer self.releaseValue(item);
+                break :blk try self.concatValues(acc, item);
+            };
+            self.releaseValue(acc);
+            acc = next;
+            try self.appendDerivedScanResult(&results, acc);
+        }
+
+        defer self.releaseValue(acc);
+        return try self.createManagedArrayLikeFromValues(results.items);
     }
 
     fn applyFoldDerived(self: *Session, base: Value, args: []const Value, collect: bool) KError!Value {
@@ -14594,6 +17240,9 @@ pub const Session = struct {
             self.noteHostFoldScanMiss(self.classifyHostFoldScanMiss(base.asBuiltin(), args, collect));
         }
         if (try self.tryApplyControlledFoldDerived(base, args, collect)) |value| return value;
+        if (try self.tryApplyIdentityFoldScan(base, args, collect)) |value| return value;
+        if (try self.tryApplyKeyedDictFoldScan(base, args, collect)) |value| return value;
+        if (try self.tryApplyConcatScan(base, args, collect)) |value| return value;
         if (comptime enable_probe_instrumentation) {
             if (collect) {
                 self.debug_apply_scan_generic_count += 1;
@@ -14633,7 +17282,7 @@ pub const Session = struct {
                 results.deinit(self.allocator);
             }
             try results.ensureTotalCapacity(self.allocator, len);
-            try results.append(self.allocator, self.shareValue(acc));
+            try self.appendDerivedScanResult(&results, acc);
             for (1..len) |idx| {
                 const item = try self.derivedSequenceItemValue(vector, idx);
                 const next = blk: {
@@ -14642,7 +17291,7 @@ pub const Session = struct {
                 };
                 self.releaseValue(acc);
                 acc = next;
-                try results.append(self.allocator, self.shareValue(acc));
+                try self.appendDerivedScanResult(&results, acc);
             }
             defer self.releaseValue(acc);
             return try self.createManagedArrayLikeFromValues(results.items);
@@ -14652,7 +17301,7 @@ pub const Session = struct {
         var sequence_template: ?Value = null;
         for (args[1..]) |arg| {
             const arg_len = derivedSequenceLen(arg) orelse {
-                if (!collect and len == null) continue;
+                if (len == null) continue;
                 return error.Type;
             };
             if (len) |existing| {
@@ -14665,7 +17314,7 @@ pub const Session = struct {
 
         if (len == null) {
             if (!collect) return try self.applyDerivedBase(base, args);
-            return error.Type;
+            return try self.applyDerivedBase(base, args);
         }
         if (len.? == 0) {
             if (sequence_template) |template| {
@@ -14708,7 +17357,7 @@ pub const Session = struct {
             };
             self.releaseValue(acc);
             acc = next;
-            try results.append(self.allocator, self.shareValue(acc));
+            try self.appendDerivedScanResult(&results, acc);
         }
         defer self.releaseValue(acc);
         return try self.createManagedArrayLikeFromValues(results.items);
@@ -14819,13 +17468,13 @@ pub const Session = struct {
                 const src = hostTextBytes(base);
                 var piece_idx: usize = 0;
                 var start: usize = 0;
-                while (std.mem.indexOfScalarPos(u8, src, start, lazy.sep)) |sep_idx| {
+                while (piece_idx < out.len) {
+                    const sep_idx = std.mem.indexOfScalarPos(u8, src, start, lazy.sep) orelse break;
                     out[piece_idx] = std.mem.indexOf(u8, src[start..sep_idx], needle) != null;
                     piece_idx += 1;
                     start = sep_idx + 1;
                 }
-                std.debug.assert(piece_idx < out.len or out.len == 0);
-                if (out.len != 0) out[piece_idx] = std.mem.indexOf(u8, src[start..], needle) != null;
+                if (piece_idx < out.len) out[piece_idx] = std.mem.indexOf(u8, src[start..], needle) != null;
             },
         }
         return try self.createManagedHostBitArray(out);
@@ -14924,7 +17573,13 @@ pub const Session = struct {
     }
 
     fn applyRollingEachPriorDerived(self: *Session, base: Value, seed: Value, vector: Value) KError!Value {
+        if (try self.tryFastBitRollingEachPriorDerived(base, seed, vector)) |result| return result;
+
         const len = derivedSequenceLen(vector) orelse return error.Type;
+        if (comptime enable_probe_instrumentation) {
+            self.debug_apply_each_prior_generic_count += 1;
+            self.debug_apply_each_prior_generic_element_count += len;
+        }
         if (len == 0) return try self.createManagedHostIntArray(&.{});
 
         var results = std.ArrayList(Value).empty;
@@ -14945,6 +17600,59 @@ pub const Session = struct {
         }
         defer self.releaseValue(prior);
         return try self.createManagedArrayLikeFromValues(results.items);
+    }
+
+    fn tryFastBitRollingEachPriorDerived(self: *Session, base: Value, seed: Value, vector: Value) KError!?Value {
+        if (base.tag() != .builtin) return null;
+        const op = base.asBuiltin();
+        switch (op) {
+            .minimum, .mul, .maximum, .equal => {},
+            else => return null,
+        }
+        const len = numericVectorLen(vector) orelse return null;
+        const bits = valueNumericBitSlice(vector) orelse return null;
+        if (bits.len != len) return error.Type;
+        const BitSeedInfo = struct {
+            bit: bool,
+            force_first_false: bool,
+        };
+        const seed_info: BitSeedInfo = blk: {
+            if (scalarIntLikeValue(seed)) |seed_int| {
+                if (seed_int != 0 and seed_int != 1) {
+                    if (op == .equal) break :blk .{ .bit = false, .force_first_false = true };
+                    return null;
+                }
+                break :blk .{ .bit = seed_int == 1, .force_first_false = false };
+            }
+            if (op != .equal) return null;
+            const seed_numeric = scalarNumericValue(seed) catch return null;
+            if (seed_numeric == 0.0) break :blk .{ .bit = false, .force_first_false = false };
+            if (seed_numeric == 1.0) break :blk .{ .bit = true, .force_first_false = false };
+            break :blk .{ .bit = false, .force_first_false = true };
+        };
+
+        if (comptime enable_probe_instrumentation) {
+            self.debug_apply_each_prior_fast_bit_count += 1;
+            self.debug_apply_each_prior_fast_bit_element_count += len;
+        }
+
+        const out = try self.allocHostBitArrayUninitialized(.managed, bits.len);
+        var carry: u64 = @intFromBool(seed_info.bit);
+        for (bits.words, 0..) |_, word_idx| {
+            const word = bitWordMasked(bits.words, bits.len, word_idx);
+            const prior = (word << 1) | carry;
+            var result = switch (op) {
+                .minimum, .mul => word & prior,
+                .maximum => word | prior,
+                .equal => ~(word ^ prior),
+                else => unreachable,
+            };
+            if (word_idx == 0 and seed_info.force_first_false) result &= ~@as(u64, 1);
+            out.words[word_idx] = result;
+            carry = word >> 63;
+        }
+        bitClearUnusedTail(out.words, out.len);
+        return try self.finishManagedHostBitAlloc(out, host_dense_flag_normalized, .{ .min = 0, .max = 1 });
     }
 
     fn applyStencilEachPriorDerived(self: *Session, base: Value, left: Value, vector: Value) KError!Value {
@@ -15005,7 +17713,7 @@ pub const Session = struct {
 
     fn classifyHostFoldScanMiss(self: *Session, op: BuiltinId, args: []const Value, collect: bool) DebugHostFoldScanMiss {
         if (args.len == 0 or args.len > 2) return .unsupported_input;
-        if (collect and op != .add) return .unsupported_builtin;
+        if (collect and op != .add and op != .minimum and op != .maximum) return .unsupported_builtin;
         switch (op) {
             .add, .sub, .mul, .minimum, .maximum => {},
             else => return .unsupported_builtin,
@@ -15118,15 +17826,15 @@ pub const Session = struct {
         if (comptime enable_string_instrumentation) switch (op) {
             .contains => {
                 self.string_perf.contains_calls += 1;
-                self.string_perf.contains_opcode_ns += @intCast(stringPerfNow() - op_start);
+                stringPerfAdd(&self.string_perf.contains_opcode_ns, op_start);
             },
             .split => {
                 self.string_perf.split_calls += 1;
-                self.string_perf.split_opcode_ns += @intCast(stringPerfNow() - op_start);
+                stringPerfAdd(&self.string_perf.split_opcode_ns, op_start);
             },
             .join => {
                 self.string_perf.join_calls += 1;
-                self.string_perf.join_opcode_ns += @intCast(stringPerfNow() - op_start);
+                stringPerfAdd(&self.string_perf.join_opcode_ns, op_start);
             },
             else => {},
         };
@@ -15147,7 +17855,7 @@ pub const Session = struct {
         try self.push(value);
         if (comptime enable_string_instrumentation) {
             self.string_perf.contains_calls += 1;
-            self.string_perf.contains_opcode_ns += @intCast(stringPerfNow() - op_start);
+            stringPerfAdd(&self.string_perf.contains_opcode_ns, op_start);
         }
     }
 
@@ -15166,7 +17874,7 @@ pub const Session = struct {
         try self.push(value);
         if (comptime enable_string_instrumentation) {
             self.string_perf.split_calls += 1;
-            self.string_perf.split_opcode_ns += @intCast(stringPerfNow() - op_start);
+            stringPerfAdd(&self.string_perf.split_opcode_ns, op_start);
         }
     }
 
@@ -15189,7 +17897,7 @@ pub const Session = struct {
         try self.push(value);
         if (comptime enable_string_instrumentation) {
             self.string_perf.join_calls += 1;
-            self.string_perf.join_opcode_ns += @intCast(stringPerfNow() - op_start);
+            stringPerfAdd(&self.string_perf.join_opcode_ns, op_start);
         }
     }
 
@@ -15465,6 +18173,385 @@ pub const Session = struct {
         try self.push(try self.argmaxValue(arg));
     }
 
+    const InsertBounds = struct {
+        start: usize,
+        end: usize,
+    };
+
+    fn insertBoundsFromSelector(selector: Value, len: usize) KError!InsertBounds {
+        if (scalarIntLikeValue(selector)) |raw| {
+            if (raw < 0 or raw > @as(i64, @intCast(len))) return error.Type;
+            const idx: usize = @intCast(raw);
+            return .{ .start = idx, .end = idx };
+        }
+
+        const selector_len = numericVectorLen(selector) orelse return error.Type;
+        if (selector_len != 2) return error.Type;
+        const start_raw = try numericIntAt(selector, 0);
+        const end_raw = try numericIntAt(selector, 1);
+        if (start_raw < 0 or end_raw < start_raw or end_raw > @as(i64, @intCast(len))) return error.Type;
+        return .{ .start = @intCast(start_raw), .end = @intCast(end_raw) };
+    }
+
+    fn insertNumericValueCount(value: Value) KError!usize {
+        if (numericVectorLen(value)) |len| return len;
+        if (scalarNumericFloatValue(value) != null or value.tag() == .float32) return 1;
+        return error.Type;
+    }
+
+    fn insertNumericFloatAt(value: Value, idx: usize) KError!f64 {
+        if (numericVectorLen(value) != null) {
+            return switch (valueNumericMode(value) orelse return error.Type) {
+                .int => @floatFromInt(try numericIntAt(value, idx)),
+                .float => try numericFloatAt(value, idx),
+            };
+        }
+        return switch (value.tag()) {
+            .int => @floatFromInt(value.asInt()),
+            .bool => @floatFromInt(@intFromBool(value.asBool())),
+            .float32 => @floatCast(value.asFloat32()),
+            .float => value.asFloat(),
+            else => error.Type,
+        };
+    }
+
+    fn insertNumericIntAt(value: Value, idx: usize) KError!i64 {
+        if (numericVectorLen(value) != null) return try numericIntAt(value, idx);
+        return scalarIntLikeValue(value) orelse error.Type;
+    }
+
+    fn insertNumericValue(self: *Session, source: Value, selector: Value, replacement: Value) KError!Value {
+        const source_len = numericVectorLen(source) orelse return error.Type;
+        const bounds = try insertBoundsFromSelector(selector, source_len);
+        const replacement_len = try insertNumericValueCount(replacement);
+        const out_len = source_len - (bounds.end - bounds.start) + replacement_len;
+        const source_mode = valueNumericMode(source) orelse return error.Type;
+        const replacement_mode = valueNumericMode(replacement) orelse return error.Type;
+        const out_mode: HostDenseElem = if (source_mode == .float or replacement_mode == .float) .float else .int;
+
+        switch (out_mode) {
+            .int => {
+                const out = try self.allocator.alloc(i64, out_len);
+                defer self.allocator.free(out);
+                var out_idx: usize = 0;
+                for (0..bounds.start) |idx| {
+                    out[out_idx] = try numericIntAt(source, idx);
+                    out_idx += 1;
+                }
+                for (0..replacement_len) |idx| {
+                    out[out_idx] = try insertNumericIntAt(replacement, idx);
+                    out_idx += 1;
+                }
+                for (bounds.end..source_len) |idx| {
+                    out[out_idx] = try numericIntAt(source, idx);
+                    out_idx += 1;
+                }
+                return try self.createManagedHostIntArray(out);
+            },
+            .float => {
+                const out = try self.allocator.alloc(f64, out_len);
+                defer self.allocator.free(out);
+                var out_idx: usize = 0;
+                for (0..bounds.start) |idx| {
+                    out[out_idx] = try insertNumericFloatAt(source, idx);
+                    out_idx += 1;
+                }
+                for (0..replacement_len) |idx| {
+                    out[out_idx] = try insertNumericFloatAt(replacement, idx);
+                    out_idx += 1;
+                }
+                for (bounds.end..source_len) |idx| {
+                    out[out_idx] = try insertNumericFloatAt(source, idx);
+                    out_idx += 1;
+                }
+                return try self.createManagedHostFloatArray(out);
+            },
+        }
+    }
+
+    fn tryFastHostMinMaxScan(self: *Session, op: BuiltinId, args: []const Value) KError!?Value {
+        if (!enable_host_minmax_scan_fast_path) return null;
+        if (args.len == 0 or args.len > 2) return null;
+        if (self.dense_backend_override == .mlx) return null;
+
+        const vector = args[args.len - 1];
+        const shape = valueNonVectorNumericShape(vector);
+        if (args.len == 1) {
+            if (try self.tryFastHostMinMaxScanConstantBit(vector)) |result| {
+                noteDensePlanDecision(self, .scan, .host, .host, .host_fast_kernel);
+                return result;
+            }
+        }
+
+        const view = hostDenseView(self, vector) catch return null;
+        const len = switch (view) {
+            .int_array => |items| hostIntDenseViewLen(items),
+            .float_array => |items| hostFloatDenseViewLen(items),
+            else => return null,
+        };
+        if (args.len == 1 and len == 0) return error.Type;
+        if (len <= 1) return null;
+        if (args.len == 1) {
+            switch (view) {
+                .int_array => |items| {
+                    if (try self.tryFastHostMinMaxScanOrderedInt(op, vector, items, shape)) |result| {
+                        noteDensePlanDecision(self, .scan, .host, .host, .host_fast_kernel);
+                        return result;
+                    }
+                },
+                .float_array => |items| {
+                    if (try self.tryFastHostMinMaxScanOrderedFloat(op, vector, items, shape)) |result| {
+                        noteDensePlanDecision(self, .scan, .host, .host, .host_fast_kernel);
+                        return result;
+                    }
+                },
+                else => {},
+            }
+        }
+        if (shape != null and args.len == 1) {
+            switch (view) {
+                .int_array => |items| {
+                    if (hostIntDenseViewBitSlice(items)) |bits| {
+                        const handle = shapedNumericHandle(vector) orelse return null;
+                        noteDensePlanDecision(self, .scan, .host, .host, .host_fast_kernel);
+                        return try self.fastHostFirstAxisBitMinMaxScan(handle, bits, op);
+                    }
+                    const range = hostIntDenseValueRange(vector, items);
+                    if (range.min >= 0 and range.max <= 1) {
+                        const handle = shapedNumericHandle(vector) orelse return null;
+                        noteDensePlanDecision(self, .scan, .host, .host, .host_fast_kernel);
+                        const host = numericHostArrayValue(self, vector) catch null;
+                        if (host) |array| switch (array.storage) {
+                            .bit => |words| {
+                                const bits = HostBitSlice{ .words = hostDenseLogicalBitWords(array, words), .len = array.logical_len };
+                                return try self.fastHostFirstAxisBitMinMaxScan(handle, bits, op);
+                            },
+                            else => {},
+                        };
+                        return try self.fastHostFirstAxisBitLikeMinMaxScan(handle, items, op);
+                    }
+                },
+                else => {},
+            }
+        }
+        if (shape != null) return null;
+
+        switch (view) {
+            .int_array => |items| {
+                if (hostIntDenseViewBitSlice(items)) |bits| {
+                    if (args.len == 1) {
+                        noteDensePlanDecision(self, .scan, .host, .host, .host_fast_kernel);
+                        return try self.fastHostBitMinMaxScan(op, bits, null);
+                    }
+                    if (scalarIntLikeValue(args[0])) |seed_int| {
+                        if (bitMinMaxScanResultIsBit(op, seed_int)) {
+                            noteDensePlanDecision(self, .scan, .host, .host, .host_fast_kernel);
+                            return try self.fastHostBitMinMaxScan(op, bits, seed_int);
+                        }
+                        noteDensePlanDecision(self, .scan, .host, .host, .host_fast_kernel);
+                        return try self.fastHostMinMaxScanInt(items, op, seed_int);
+                    }
+                    const seed_float = scalarNumericValue(args[0]) catch return null;
+                    noteDensePlanDecision(self, .scan, .host, .host, .host_fast_kernel);
+                    return try self.fastHostMinMaxScanFloatFromInt(items, op, seed_float);
+                }
+
+                if (args.len == 1) {
+                    noteDensePlanDecision(self, .scan, .host, .host, .host_fast_kernel);
+                    return try self.fastHostMinMaxScanInt(items, op, null);
+                }
+                if (scalarIntLikeValue(args[0])) |seed_int| {
+                    noteDensePlanDecision(self, .scan, .host, .host, .host_fast_kernel);
+                    return try self.fastHostMinMaxScanInt(items, op, seed_int);
+                }
+                const seed_float = scalarNumericValue(args[0]) catch return null;
+                noteDensePlanDecision(self, .scan, .host, .host, .host_fast_kernel);
+                return try self.fastHostMinMaxScanFloatFromInt(items, op, seed_float);
+            },
+            .float_array => |items| {
+                if (args.len == 1) {
+                    noteDensePlanDecision(self, .scan, .host, .host, .host_fast_kernel);
+                    return try self.fastHostMinMaxScanFloat(items, op, null);
+                }
+                const seed = scalarNumericValue(args[0]) catch return null;
+                noteDensePlanDecision(self, .scan, .host, .host, .host_fast_kernel);
+                return try self.fastHostMinMaxScanFloat(items, op, seed);
+            },
+            else => return null,
+        }
+    }
+
+    fn insertStringValue(self: *Session, source: Value, selector: Value, replacement: Value) KError!Value {
+        const source_bytes = stringBytes(source) orelse return error.Type;
+        const replacement_bytes = stringBytes(replacement) orelse return error.Type;
+        const bounds = try insertBoundsFromSelector(selector, source_bytes.len);
+        const out_len = source_bytes.len - (bounds.end - bounds.start) + replacement_bytes.len;
+        const out = try self.allocator.alloc(u8, out_len);
+        defer self.allocator.free(out);
+        @memcpy(out[0..bounds.start], source_bytes[0..bounds.start]);
+        @memcpy(out[bounds.start .. bounds.start + replacement_bytes.len], replacement_bytes);
+        @memcpy(out[bounds.start + replacement_bytes.len ..], source_bytes[bounds.end..]);
+        if (out.len == 1) return try self.managedHostCharVector(out);
+        return try self.managedHostString(out);
+    }
+
+    fn insertSymbolReplacementCount(value: Value) KError!usize {
+        if (symbolBytes(value) != null) return 1;
+        if (value.tag() == .array and value.arrayKind() == .host_symbol_list) return value.asHostStringList().len;
+        return error.Type;
+    }
+
+    fn insertSymbolReplacementBytes(value: Value, idx: usize) KError![]const u8 {
+        if (symbolBytes(value)) |bytes| {
+            if (idx != 0) return error.Internal;
+            return bytes;
+        }
+        if (value.tag() == .array and value.arrayKind() == .host_symbol_list) return try hostStringListItemBytes(value.asHostStringList(), idx);
+        return error.Type;
+    }
+
+    fn insertSymbolListValue(self: *Session, source: Value, selector: Value, replacement: Value) KError!Value {
+        if (source.tag() != .array or source.arrayKind() != .host_symbol_list) return error.Type;
+        const source_list = source.asHostStringList();
+        const bounds = try insertBoundsFromSelector(selector, source_list.len);
+        const replacement_len = try insertSymbolReplacementCount(replacement);
+        const out_len = source_list.len - (bounds.end - bounds.start) + replacement_len;
+        const out = try self.allocator.alloc([]const u8, out_len);
+        defer self.allocator.free(out);
+        var out_idx: usize = 0;
+        for (0..bounds.start) |idx| {
+            out[out_idx] = try hostStringListItemBytes(source_list, idx);
+            out_idx += 1;
+        }
+        for (0..replacement_len) |idx| {
+            out[out_idx] = try insertSymbolReplacementBytes(replacement, idx);
+            out_idx += 1;
+        }
+        for (bounds.end..source_list.len) |idx| {
+            out[out_idx] = try hostStringListItemBytes(source_list, idx);
+            out_idx += 1;
+        }
+        return try self.createManagedHostSymbolListFromSlices(out);
+    }
+
+    fn insertBoxedReplacementCount(value: Value) usize {
+        if (value.tag() == .array and value.arrayKind() == .host_boxed_array) return value.asHostBoxedArray().len();
+        return 1;
+    }
+
+    fn insertBoxedReplacementValue(self: *Session, value: Value, idx: usize) KError!Value {
+        if (value.tag() == .array and value.arrayKind() == .host_boxed_array) return try self.hostBoxedArrayIndexScalar(value.asHostBoxedArray(), @intCast(idx));
+        if (idx != 0) return error.Internal;
+        return try self.retainEscapedValue(value);
+    }
+
+    fn insertBoxedValue(self: *Session, source: Value, selector: Value, replacement: Value) KError!Value {
+        if (source.tag() != .array or source.arrayKind() != .host_boxed_array) return error.Type;
+        const source_array = source.asHostBoxedArray();
+        const bounds = try insertBoundsFromSelector(selector, source_array.len());
+        const replacement_len = insertBoxedReplacementCount(replacement);
+        const out_len = source_array.len() - (bounds.end - bounds.start) + replacement_len;
+        const out = try self.allocator.alloc(Value, out_len);
+        defer self.allocator.free(out);
+        var initialized: usize = 0;
+        defer {
+            for (out[0..initialized]) |value| self.releaseValue(value);
+        }
+
+        for (0..bounds.start) |idx| {
+            out[initialized] = try self.hostBoxedArrayIndexScalar(source_array, @intCast(idx));
+            initialized += 1;
+        }
+        for (0..replacement_len) |idx| {
+            out[initialized] = try self.insertBoxedReplacementValue(replacement, idx);
+            initialized += 1;
+        }
+        for (bounds.end..source_array.len()) |idx| {
+            out[initialized] = try self.hostBoxedArrayIndexScalar(source_array, @intCast(idx));
+            initialized += 1;
+        }
+        return try self.createManagedHostBoxedArray(out);
+    }
+
+    fn tableRangeValue(self: *Session, store: *const HostKeyedStore, start: usize, end: usize) KError!Value {
+        if (end < start or end > store.row_count) return error.Type;
+        const row_indices = try self.allocator.alloc(usize, end - start);
+        defer self.allocator.free(row_indices);
+        for (row_indices, start..) |*idx, row| idx.* = row;
+        return try self.tableSelectRows(store, row_indices);
+    }
+
+    fn insertTableValue(self: *Session, source: Value, selector: Value, replacement: Value) KError!Value {
+        if (source.tag() != .array or source.arrayKind() != .host_keyed_store) return error.Type;
+        const source_store = source.asHostKeyedStore();
+        if (source_store.layout != .table) return error.Type;
+        const bounds = try insertBoundsFromSelector(selector, source_store.row_count);
+
+        const replacement_table = blk: {
+            if (replacement.tag() != .array or replacement.arrayKind() != .host_keyed_store) return error.Type;
+            const replacement_store = replacement.asHostKeyedStore();
+            break :blk switch (replacement_store.layout) {
+                .table => try self.retainEscapedValue(replacement),
+                .dict => try self.flipValue(replacement),
+            };
+        };
+        defer self.releaseValue(replacement_table);
+        const replacement_store = replacement_table.asHostKeyedStore();
+        if (replacement_store.layout != .table) return error.Type;
+
+        const prefix = try self.tableRangeValue(source_store, 0, bounds.start);
+        defer self.releaseValue(prefix);
+        const suffix = try self.tableRangeValue(source_store, bounds.end, source_store.row_count);
+        defer self.releaseValue(suffix);
+
+        const left = try self.concatTableValues(prefix.asHostKeyedStore(), replacement_store);
+        defer self.releaseValue(left);
+        return try self.concatTableValues(left.asHostKeyedStore(), suffix.asHostKeyedStore());
+    }
+
+    fn insertValue(self: *Session, source: Value, selector: Value, replacement: Value) KError!Value {
+        if (stringBytes(source) != null) return try self.insertStringValue(source, selector, replacement);
+        if (source.tag() == .array) {
+            return switch (source.arrayKind()) {
+                .host_symbol_list => try self.insertSymbolListValue(source, selector, replacement),
+                .host_boxed_array => try self.insertBoxedValue(source, selector, replacement),
+                .host_keyed_store => try self.insertTableValue(source, selector, replacement),
+                else => if (valueNumericMode(source) != null)
+                    try self.insertNumericValue(source, selector, replacement)
+                else
+                    error.Type,
+            };
+        }
+        return error.Type;
+    }
+
+    fn builtinUsesGenericArityDispatch(op: BuiltinId) bool {
+        return switch (op) {
+            .prng,
+            .grad,
+            .valuegrad,
+            .rope,
+            .ropeflat,
+            .ropecisflat,
+            .rmsnorm,
+            .layernorm,
+            .gelu,
+            .geluapprox,
+            .mlpdense,
+            .conv2d,
+            .convtranspose2d,
+            .upsamplenearest2d,
+            .groupnorm,
+            .softmax,
+            .sdpa,
+            .sam3boxrpb,
+            .sdpamask,
+            .sdpaflat,
+            => false,
+            else => true,
+        };
+    }
+
     fn applyBuiltinCall(self: *Session, op: BuiltinId, args: []const Value) KError!Value {
         var profile_scope = self.beginSamplingProfileScope(.apply_builtin);
         defer profile_scope.end();
@@ -15490,7 +18577,8 @@ pub const Session = struct {
         return switch (args.len) {
             0 => error.Arity,
             1 => self.applyMonad(op, args[0]),
-            2 => self.applyDyad(if (op == .unique) .find else op, args[0], args[1]),
+            2 => self.applyDyad(dyadicBuiltinForGenericCall(op), args[0], args[1]),
+            3 => if (op == .unique or op == .find) self.insertValue(args[0], args[1], args[2]) else error.Arity,
             else => error.Arity,
         };
     }
@@ -15499,6 +18587,17 @@ pub const Session = struct {
         if (args.len == 0) return error.Arity;
         if (args.len == 1) return try self.applyArrayCall1(callee, args[0]);
         return try self.deepIndexValue(callee, args);
+    }
+
+    fn dyadicBuiltinForGenericCall(op: BuiltinId) BuiltinId {
+        return switch (op) {
+            .count => .take,
+            .floor => .drop,
+            .sort => .reshape,
+            .stringify => .cast,
+            .unique => .find,
+            else => op,
+        };
     }
 
     fn applyArrayCall1Scalar(self: *Session, callee: Value, raw_index: i64) KError!Value {
@@ -15522,10 +18621,14 @@ pub const Session = struct {
         return switch (callee.arrayKind()) {
             .host_dense_array, .backend_array => try self.hostDenseIndexScalar(try numericHostArrayValue(self, callee), raw_index),
             .host_boxed_array => try self.hostBoxedArrayIndexScalar(callee.asHostBoxedArray(), raw_index),
-            .host_string_list => try self.hostStringListItemValue(
-                callee.asHostStringList(),
-                @intCast(try normalizeIndex(raw_index, callee.asHostStringList().len)),
-            ),
+            .host_string_list => if (normalizeIndexOrNull(raw_index, callee.asHostStringList().len)) |idx|
+                try self.hostStringListItemValue(callee.asHostStringList(), idx)
+            else
+                try self.managedHostString(&.{}),
+            .host_symbol_list => if (normalizeIndexOrNull(raw_index, callee.asHostStringList().len)) |idx|
+                try self.hostSymbolListItemValue(callee.asHostStringList(), idx)
+            else
+                try self.emptySymbolValue(),
             .host_relation => error.Type,
             .host_keyed_store => blk: {
                 const store = callee.asHostKeyedStore();
@@ -15548,24 +18651,157 @@ pub const Session = struct {
         return try self.managedHostString(&[_]u8{' '});
     }
 
+    fn allocManagedHostStringUninitialized(self: *Session, len: usize) !HostStringAlloc {
+        const buf = try hostTextAllocSlice(self.allocator, len);
+        errdefer self.allocator.free(buf);
+        const text = hostTextFromAlloc(buf);
+        text.* = .{
+            .header = HeapHeader.init(.host_string, .managed),
+            .len = len,
+        };
+        return .{
+            .value = Value.array(text),
+            .bytes = hostTextBytesFromAlloc(buf, len),
+        };
+    }
+
+    fn gatherTypedStringIndexInBounds(comptime SelT: type, out: []u8, bytes: []const u8, selector: []const SelT) void {
+        const src: [*]const u8 = bytes.ptr;
+        var dst: [*]u8 = out.ptr;
+        var idx: usize = 0;
+        while (idx + 8 <= selector.len) : (idx += 8) {
+            dst[0] = src[@as(usize, @intCast(selector[idx + 0]))];
+            dst[1] = src[@as(usize, @intCast(selector[idx + 1]))];
+            dst[2] = src[@as(usize, @intCast(selector[idx + 2]))];
+            dst[3] = src[@as(usize, @intCast(selector[idx + 3]))];
+            dst[4] = src[@as(usize, @intCast(selector[idx + 4]))];
+            dst[5] = src[@as(usize, @intCast(selector[idx + 5]))];
+            dst[6] = src[@as(usize, @intCast(selector[idx + 6]))];
+            dst[7] = src[@as(usize, @intCast(selector[idx + 7]))];
+            dst += 8;
+        }
+        while (idx < selector.len) : (idx += 1) {
+            dst[0] = src[@as(usize, @intCast(selector[idx]))];
+            dst += 1;
+        }
+    }
+
+    fn gatherStringIndexInBounds(out: []u8, bytes: []const u8, selector: HostIntArrayView) void {
+        switch (selector) {
+            .bit => unreachable,
+            .int8 => |items| gatherTypedStringIndexInBounds(i8, out, bytes, items),
+            .int16 => |items| gatherTypedStringIndexInBounds(i16, out, bytes, items),
+            .int32 => |items| gatherTypedStringIndexInBounds(i32, out, bytes, items),
+            .int64 => |items| gatherTypedStringIndexInBounds(i64, out, bytes, items),
+        }
+    }
+
+    fn stringIndexDenseInBoundsValue(self: *Session, source: HostStringSource, selector: HostIntArrayView) KError!Value {
+        const len = hostIntArrayViewLen(selector);
+        const bytes = source.bytes();
+        if (len == 1) {
+            const selected = [_]u8{bytes[@intCast(hostIntViewItem(selector, 0))]};
+            return try self.managedHostCharVector(&selected);
+        }
+        const out = try self.allocManagedHostStringUninitialized(len);
+        gatherStringIndexInBounds(out.bytes, bytes, selector);
+        return out.value;
+    }
+
     fn stringIndexValue(self: *Session, source: HostStringSource, selector: Value) KError!Value {
+        const bytes = source.bytes();
+        if (hostDenseIfPresent(selector)) |array| {
+            if (hostIntArrayView(array)) |dense_view| switch (dense_view) {
+                .bit => {},
+                else => if (denseSelectorCachedRangeFitsSource(array, bytes.len))
+                    return try self.stringIndexDenseInBoundsValue(source, dense_view),
+            };
+        }
+
         const view = valueHostIntStructuralView(selector) orelse return error.Type;
         const len = hostIntDenseViewLen(view);
-        const bytes = source.bytes();
-        const out = try self.allocator.alloc(u8, len);
-        defer self.allocator.free(out);
+        if (len == 1) {
+            const raw_index = try hostIntDenseViewItem(view, 0);
+            const selected = [_]u8{if (raw_index >= 0 and raw_index < @as(i64, @intCast(bytes.len)))
+                bytes[@intCast(raw_index)]
+            else
+                ' '};
+            return try self.managedHostCharVector(&selected);
+        }
+        const out = try self.allocManagedHostStringUninitialized(len);
+        errdefer self.releaseValue(out.value);
         for (0..len) |idx| {
             const raw_index = try hostIntDenseViewItem(view, idx);
-            out[idx] = if (raw_index >= 0 and raw_index < @as(i64, @intCast(bytes.len)))
+            out.bytes[idx] = if (raw_index >= 0 and raw_index < @as(i64, @intCast(bytes.len)))
                 bytes[@intCast(raw_index)]
             else
                 ' ';
         }
-        return try self.managedHostString(out);
+        return out.value;
+    }
+
+    fn stringIndexWhereBitMaskValue(self: *Session, source: HostStringSource, mask: HostBitSlice) KError!Value {
+        const bytes = source.bytes();
+        const len = bitCountTrue(mask);
+        const out = try self.allocManagedHostStringUninitialized(len);
+        errdefer self.releaseValue(out.value);
+
+        if (mask.len <= bytes.len) {
+            if (comptime enable_string_mask_neon) {
+                const written = kiwi_string_mask_compress_neon(out.bytes.ptr, out.bytes.len, bytes.ptr, mask.words.ptr, mask.len);
+                std.debug.assert(written == out.bytes.len);
+            } else {
+                copyStringWhereBitMaskBytesInBounds(out.bytes, bytes, mask);
+            }
+        } else {
+            copyStringWhereBitMaskScalarPadded(out.bytes, bytes, mask);
+        }
+
+        if (len == 1) {
+            const result = try self.managedHostCharVector(out.bytes);
+            self.releaseValue(out.value);
+            return result;
+        }
+        return out.value;
+    }
+
+    fn stringRejectWhereBitMaskValue(self: *Session, source: HostStringSource, mask: HostBitSlice) KError!Value {
+        const bytes = source.bytes();
+        if (mask.len != bytes.len) return error.Type;
+
+        const inverted_words = try self.allocator.alloc(u64, bitWordCount(mask.len));
+        defer self.allocator.free(inverted_words);
+        fillBitNotWords(inverted_words, mask);
+        return try self.stringIndexWhereBitMaskValue(source, .{ .words = inverted_words, .len = mask.len });
+    }
+
+    fn invertedHostBitMaskValue(self: *Session, mask: HostBitSlice) KError!Value {
+        const out = try self.allocHostBitArrayUninitialized(.managed, mask.len);
+        fillBitNotWords(out.words, mask);
+        const metadata = analyzeBitSlice(.{ .words = out.words, .len = out.len });
+        return try self.finishManagedHostBitAlloc(out, metadata.flags, metadata.range);
+    }
+
+    fn applyWhereMaskCall(self: *Session, callee: Value, mask_value: Value) KError!Value {
+        if (valueNumericBitSlice(mask_value)) |bits| {
+            if (callee.tag() == .array) {
+                if (stringSourceInfo(callee)) |source| {
+                    return try self.stringIndexWhereBitMaskValue(source, bits);
+                }
+                if (derivedSequenceLen(callee)) |source_len| {
+                    if (bits.len == source_len) return try self.applyArrayCall1(callee, mask_value);
+                }
+            }
+        }
+
+        const selector = try self.whereValue(mask_value);
+        defer self.releaseValue(selector);
+        return try self.applyValue(callee, &[_]Value{selector});
     }
 
     fn applyArrayCall1(self: *Session, callee: Value, selector: Value) KError!Value {
         if (callee.tag() != .array) return error.Type;
+        if (isAllAxisSelectorValue(selector)) return self.shareValue(callee);
         if (callee.arrayKind() == .host_keyed_store and callee.asHostKeyedStore().layout == .dict) {
             const store = callee.asHostKeyedStore();
             if (derivedSequenceLen(selector) != null) return try self.keyedStoreLookupSequenceValue(store, selector);
@@ -15594,7 +18830,27 @@ pub const Session = struct {
             else
                 error.Type,
             .host_string_list => switch (selector.tag()) {
-                .int, .bool => try self.hostStringListItemValue(callee.asHostStringList(), @intCast(try normalizeIndex(scalarIntLikeValue(selector).?, callee.asHostStringList().len))),
+                .int, .bool => if (normalizeIndexOrNull(scalarIntLikeValue(selector).?, callee.asHostStringList().len)) |idx|
+                    try self.hostStringListItemValue(callee.asHostStringList(), idx)
+                else
+                    try self.managedHostString(&.{}),
+                .array => blk: {
+                    const indices = try self.collectSelectorIndicesForLen(callee.asHostStringList().len, selector);
+                    defer self.allocator.free(indices);
+                    break :blk try self.selectHostStringListBySourceIndices(callee.asHostStringList(), indices);
+                },
+                else => error.Type,
+            },
+            .host_symbol_list => switch (selector.tag()) {
+                .int, .bool => if (normalizeIndexOrNull(scalarIntLikeValue(selector).?, callee.asHostStringList().len)) |idx|
+                    try self.hostSymbolListItemValue(callee.asHostStringList(), idx)
+                else
+                    try self.emptySymbolValue(),
+                .array => blk: {
+                    const indices = try self.collectSelectorIndicesForLen(callee.asHostStringList().len, selector);
+                    defer self.allocator.free(indices);
+                    break :blk try self.selectHostSymbolListBySourceIndices(callee.asHostStringList(), indices);
+                },
                 else => error.Type,
             },
             .host_relation => blk: {
@@ -15620,18 +18876,69 @@ pub const Session = struct {
     }
 
     fn applyValue(self: *Session, callee: Value, args: []const Value) KError!Value {
+        if (try self.tryApplyAllAxisCallableProjection(callee, args)) |projection| return projection;
         return switch (callee.tag()) {
             .builtin => try self.applyBuiltinCall(callee.asBuiltin(), args),
             .closure => blk: {
                 const closure = callee.asClosure();
                 if (try self.applyDerivedClosure(closure, args)) |result| break :blk result;
-                if (codeForPlainClosureArgs(closure, args)) |compact| break :blk try self.runCodeBorrowed(compact, args);
+                if (try self.tryProjectPlainClosureUnderApplication(callee, closure, args)) |projection| break :blk projection;
+                if (codeForRunnablePlainClosureArgs(closure, args)) |compact| break :blk try self.runCodeBorrowed(compact, codeRunArgs(compact, args));
                 if (closure.code.arity != args.len) return error.Arity;
                 break :blk try self.runClosureMode(closure, args, false);
             },
             .array => try self.applyArrayCall(callee, args),
             else => error.Type,
         };
+    }
+
+    fn argsContainAllAxisSelector(args: []const Value) bool {
+        for (args) |arg| {
+            if (isAllAxisSelectorValue(arg)) return true;
+        }
+        return false;
+    }
+
+    fn tryApplyAllAxisCallableProjection(self: *Session, callee: Value, args: []const Value) KError!?Value {
+        switch (callee.tag()) {
+            .builtin, .closure => {},
+            else => return null,
+        }
+        if (!argsContainAllAxisSelector(args)) return null;
+        if (args.len > 63) return error.Unsupported;
+
+        const slot_values = try self.scratch_arena.allocator().alloc(Value, args.len);
+        var hole_mask: u64 = 0;
+        for (args, 0..) |arg, idx| {
+            if (isAllAxisSelectorValue(arg)) {
+                slot_values[idx] = Value.fromBool(false);
+                hole_mask |= @as(u64, 1) << @intCast(idx);
+            } else {
+                slot_values[idx] = arg;
+            }
+        }
+        return try self.allocManagedProjectionClosure(callee, @intCast(args.len), hole_mask, slot_values);
+    }
+
+    fn tryProjectPlainClosureUnderApplication(self: *Session, callee: Value, closure: *const Closure, args: []const Value) KError!?Value {
+        if (!closureIsCompactPlainGlobal(closure)) return null;
+        const code = closure.code;
+        if (args.len >= code.arity) return null;
+        if (codeCanRunWithArgLen(code, args.len)) return null;
+        if (code.arity > 63) return error.Unsupported;
+
+        const slot_count: usize = code.arity;
+        const slot_values = try self.scratch_arena.allocator().alloc(Value, slot_count);
+        var hole_mask: u64 = 0;
+        for (0..slot_count) |idx| {
+            if (idx < args.len) {
+                slot_values[idx] = args[idx];
+            } else {
+                slot_values[idx] = Value.fromBool(false);
+                hole_mask |= @as(u64, 1) << @intCast(idx);
+            }
+        }
+        return try self.allocManagedProjectionClosure(callee, code.arity, hole_mask, slot_values);
     }
 
     const AutogradTargetBackend = enum {
@@ -16324,6 +19631,7 @@ pub const Session = struct {
         return switch (value.tag()) {
             .int => @floatFromInt(value.asInt()),
             .bool => @floatFromInt(@intFromBool(value.asBool())),
+            .float32 => @floatCast(value.asFloat32()),
             .float => value.asFloat(),
             else => null,
         };
@@ -16593,16 +19901,20 @@ pub const Session = struct {
         if (hostDenseShapeHandle(array)) |handle| {
             if (handle.rank > 1) return try numericValueScalarIndexValue(self, Value.array(@constCast(handle)), raw_index) orelse error.Type;
         }
-        const idx = try normalizeIndex(raw_index, array.len());
+        const idx = normalizeIndexOrNull(raw_index, array.len()) orelse return try self.hostDensePrototypeScalarValue(array);
         return switch (array.storage) {
             .bit => |words| Value.fromBool(bitGet(words, idx)),
             .int8, .int16, .int32, .int64 => try self.intValue(hostIntViewItem(hostIntArrayView(array).?, idx)),
+            .float32 => |items| try self.float32Value(items[idx]),
             .float64 => |items| try self.floatValue(items[idx]),
         };
     }
 
     fn hostBoxedArrayIndexScalar(self: *Session, array: *const HostBoxedArray, raw_index: i64) KError!Value {
-        const idx = try normalizeIndex(raw_index, array.len());
+        const idx = normalizeIndexOrNull(raw_index, array.len()) orelse {
+            if (array.len() == 0) return try self.managedHostString(&.{});
+            return try self.prototypeLikeValue(array.items[0]);
+        };
         return self.shareValue(array.items[idx]);
     }
 
@@ -16615,6 +19927,7 @@ pub const Session = struct {
                         if (comptime enable_probe_instrumentation) self.debug_host_index_in_bounds_fast_count += 1;
                         break :blk switch (array.storage) {
                             .bit => try self.gatherManagedHostBitArraySelectionInBounds(.{ .words = array.storage.bit, .len = array.logical_len }, selector_view),
+                            .float32 => |items| try self.gatherManagedHostFloat32ArraySelectionInBounds(items, selector_view),
                             .float64 => |items| try self.gatherManagedHostFloatArraySelectionInBounds(items, selector_view),
                             else => try self.gatherManagedHostIntArraySelectionInBounds(hostIntArrayView(array).?, selector_view),
                         };
@@ -16657,6 +19970,190 @@ pub const Session = struct {
         };
     }
 
+    fn copyDenseItemsByMask(comptime T: type, out: []T, source: []const T, mask: HostBitSlice) void {
+        var out_idx: usize = 0;
+        for (mask.words, 0..) |_, word_idx| {
+            const word_base = word_idx * host_bit_word_bits;
+            const active = bitWordActiveLen(mask.len, word_idx, mask.words.len);
+            const active_mask = bitLowMask(active);
+            var selected = bitWordMasked(mask.words, mask.len, word_idx);
+            if (selected == 0) continue;
+            if (selected == active_mask) {
+                @memcpy(out[out_idx..][0..active], source[word_base..][0..active]);
+                out_idx += active;
+                continue;
+            }
+            while (selected != 0) {
+                const bit_idx: usize = @intCast(@ctz(selected));
+                out[out_idx] = source[word_base + bit_idx];
+                out_idx += 1;
+                selected &= selected - 1;
+            }
+        }
+        std.debug.assert(out_idx == out.len);
+    }
+
+    fn firstSelectedBitIndex(mask: HostBitSlice) ?usize {
+        for (mask.words, 0..) |_, word_idx| {
+            const selected = bitWordMasked(mask.words, mask.len, word_idx);
+            if (selected == 0) continue;
+            return word_idx * host_bit_word_bits + @as(usize, @intCast(@ctz(selected)));
+        }
+        return null;
+    }
+
+    fn lastSelectedBitIndex(mask: HostBitSlice) ?usize {
+        var word_idx = mask.words.len;
+        while (word_idx != 0) {
+            word_idx -= 1;
+            const selected = bitWordMasked(mask.words, mask.len, word_idx);
+            if (selected == 0) continue;
+            const bit_idx: usize = @intCast(63 - @clz(selected));
+            return word_idx * host_bit_word_bits + bit_idx;
+        }
+        return null;
+    }
+
+    fn maskSelectedIntPreservedStats(view: HostIntArrayView, mask: HostBitSlice, selected_len: usize, source_flags: u8) ?DenseIntGatherStats {
+        if (selected_len == 0) {
+            return .{
+                .flags = host_dense_flag_normalized | host_dense_flag_asc | host_dense_flag_dsc,
+                .range = .{ .min = 0, .max = 0 },
+            };
+        }
+        if ((source_flags & host_dense_flag_normalized) == 0) return null;
+        var mono = monotonicFlags(source_flags);
+        if (selected_len <= 1) mono = host_dense_flag_asc | host_dense_flag_dsc;
+        if (mono == 0) return null;
+
+        const first_idx = firstSelectedBitIndex(mask) orelse return null;
+        const last_idx = lastSelectedBitIndex(mask) orelse return null;
+        const first_value = hostIntViewItem(view, first_idx);
+        const last_value = hostIntViewItem(view, last_idx);
+        const range = if ((mono & host_dense_flag_asc) != 0 and (mono & host_dense_flag_dsc) == 0)
+            HostIntRange{ .min = first_value, .max = last_value }
+        else if ((mono & host_dense_flag_dsc) != 0 and (mono & host_dense_flag_asc) == 0)
+            HostIntRange{ .min = last_value, .max = first_value }
+        else
+            HostIntRange{ .min = @min(first_value, last_value), .max = @max(first_value, last_value) };
+        return .{
+            .flags = host_dense_flag_normalized | mono,
+            .range = range,
+        };
+    }
+
+    fn maskSelectedFloatPreservedFlags(mask: HostBitSlice, selected_len: usize, source_flags: u8) ?u8 {
+        _ = mask;
+        if ((source_flags & host_dense_flag_normalized) == 0) return null;
+        var mono = monotonicFlags(source_flags);
+        if (selected_len <= 1) mono = host_dense_flag_asc | host_dense_flag_dsc;
+        if (mono == 0) return null;
+        return host_dense_flag_normalized | mono;
+    }
+
+    fn copyI32ItemsByMaskNeon(out: []i32, source: []const i32, mask: HostBitSlice) bool {
+        if (comptime !enable_host_mask_compress_neon) return false;
+        if (mask.len < host_mask_compress_vector_min_len) return false;
+        if (out.len * 8 < mask.len) return false;
+        const written = kiwi_host_mask_compress_i32_neon(out.ptr, out.len, source.ptr, mask.words.ptr, mask.len);
+        std.debug.assert(written == out.len);
+        return true;
+    }
+
+    fn copyIntItemsByMask(comptime T: type, out: []T, source: []const T, mask: HostBitSlice) DenseIntGatherStats {
+        var asc = true;
+        var dsc = true;
+        var min_value: i64 = 0;
+        var max_value: i64 = 0;
+        var prev: i64 = 0;
+        var out_idx: usize = 0;
+
+        for (mask.words, 0..) |_, word_idx| {
+            const word_base = word_idx * host_bit_word_bits;
+            var selected = bitWordMasked(mask.words, mask.len, word_idx);
+            while (selected != 0) {
+                const bit_idx: usize = @intCast(@ctz(selected));
+                const item = source[word_base + bit_idx];
+                const item_i64: i64 = @intCast(item);
+                out[out_idx] = item;
+                if (out_idx == 0) {
+                    min_value = item_i64;
+                    max_value = item_i64;
+                } else {
+                    min_value = @min(min_value, item_i64);
+                    max_value = @max(max_value, item_i64);
+                    if (prev > item_i64) asc = false;
+                    if (prev < item_i64) dsc = false;
+                }
+                prev = item_i64;
+                out_idx += 1;
+                selected &= selected - 1;
+            }
+        }
+        std.debug.assert(out_idx == out.len);
+
+        return .{
+            .flags = host_dense_flag_normalized | orderFlagsFromMonotonic(asc, dsc),
+            .range = if (out.len == 0)
+                .{ .min = 0, .max = 0 }
+            else
+                .{ .min = min_value, .max = max_value },
+        };
+    }
+
+    fn hostDenseFullMaskCopy(self: *Session, array: *const HostDenseArray) KError!Value {
+        switch (array.storage) {
+            .bit => {
+                const out = try self.allocHostBitArrayUninitialized(.managed, array.logical_len);
+                @memcpy(out.words, array.storage.bit[0..out.words.len]);
+                const value = try self.finishManagedHostBitAlloc(out, array.flags, sourceHostIntRange(hostDenseSourceValue(array), array));
+                return value;
+            },
+            .float64 => |items| {
+                var out = try self.allocManagedHostFloatResult(array.logical_len);
+                @memcpy(out.items, items[0..array.logical_len]);
+                const value = try out.value(self);
+                hostDenseSetFlags(try mutableNumericHostArrayValue(self, value), array.flags);
+                return value;
+            },
+            .float32 => |items| {
+                var out = try self.allocManagedHostFloat32Result(array.logical_len);
+                @memcpy(out.items, items[0..array.logical_len]);
+                const value = try out.value(self);
+                hostDenseSetFlags(try mutableNumericHostArrayValue(self, value), array.flags);
+                return value;
+            },
+            else => {
+                const view = hostIntArrayView(array).?;
+                var out = try self.allocManagedHostIntResult(hostIntArrayViewKind(view), array.logical_len);
+                switch (view) {
+                    .bit => unreachable,
+                    .int8 => |source| switch (out) {
+                        .int8 => |*dest| @memcpy(dest.items, source[0..array.logical_len]),
+                        else => unreachable,
+                    },
+                    .int16 => |source| switch (out) {
+                        .int16 => |*dest| @memcpy(dest.items, source[0..array.logical_len]),
+                        else => unreachable,
+                    },
+                    .int32 => |source| switch (out) {
+                        .int32 => |*dest| @memcpy(dest.items, source[0..array.logical_len]),
+                        else => unreachable,
+                    },
+                    .int64 => |source| switch (out) {
+                        .int64 => |*dest| @memcpy(dest.items, source[0..array.logical_len]),
+                        else => unreachable,
+                    },
+                }
+                const value = try out.value(self);
+                const host = try mutableNumericHostArrayValue(self, value);
+                hostDenseSetFlags(host, array.flags);
+                hostDenseSetCachedIntRange(host, sourceHostIntRange(hostDenseSourceValue(array), array));
+                return value;
+            },
+        }
+    }
+
     fn hostDenseIndexMask(self: *Session, array: *const HostDenseArray, mask: HostBitSlice) KError!Value {
         if (hostDenseNonVectorShape(array)) |shape| {
             if (shape.rank != 2) return error.Unsupported;
@@ -16664,6 +20161,7 @@ pub const Session = struct {
         }
         if (mask.len != array.len()) return error.Type;
         if (comptime enable_probe_instrumentation) self.debug_host_mask_copy_count += 1;
+        if (bitWordsAllTrue(mask)) return try self.hostDenseFullMaskCopy(array);
         switch (array.storage) {
             .bit => {
                 const selected_len = bitCountTrue(mask);
@@ -16672,23 +20170,66 @@ pub const Session = struct {
                 return try self.finishManagedHostBitAlloc(out, stats.flags, stats.range);
             },
             .float64 => |items| {
-                var out = std.ArrayList(f64).empty;
-                defer out.deinit(self.allocator);
-                for (0..mask.len) |idx| {
-                    if (!bitGet(mask.words, idx)) continue;
-                    try out.append(self.allocator, items[idx]);
-                }
-                return try self.createManagedHostFloatArray(out.items);
+                const selected_len = bitCountTrue(mask);
+                var out = try self.allocManagedHostFloatResult(selected_len);
+                copyDenseItemsByMask(f64, out.items, items, mask);
+                const value = try out.value(self);
+                const flags = maskSelectedFloatPreservedFlags(mask, selected_len, array.flags) orelse analyzeFloatSlice(out.items).flags;
+                hostDenseSetFlags(try mutableNumericHostArrayValue(self, value), flags);
+                return value;
+            },
+            .float32 => |items| {
+                const selected_len = bitCountTrue(mask);
+                var out = try self.allocManagedHostFloat32Result(selected_len);
+                copyDenseItemsByMask(f32, out.items, items, mask);
+                const value = try out.value(self);
+                const flags = maskSelectedFloatPreservedFlags(mask, selected_len, array.flags) orelse analyzeFloatSlice32(out.items).flags;
+                hostDenseSetFlags(try mutableNumericHostArrayValue(self, value), flags);
+                return value;
             },
             else => {
-                var out = std.ArrayList(i64).empty;
-                defer out.deinit(self.allocator);
                 const view = hostIntArrayView(array).?;
-                for (0..mask.len) |idx| {
-                    if (!bitGet(mask.words, idx)) continue;
-                    try out.append(self.allocator, hostIntViewItem(view, idx));
-                }
-                return try self.createManagedHostIntArray(out.items);
+                const selected_len = bitCountTrue(mask);
+                var out = try self.allocManagedHostIntResult(hostIntArrayViewKind(view), selected_len);
+                const preserved_stats = maskSelectedIntPreservedStats(view, mask, selected_len, array.flags);
+                const stats = switch (view) {
+                    .bit => unreachable,
+                    .int8 => |source| switch (out) {
+                        .int8 => |*dest| blk: {
+                            copyDenseItemsByMask(i8, dest.items, source, mask);
+                            break :blk preserved_stats orelse denseIntGatherStatsFromAnalysis(analyzeIntSliceTyped(i8, dest.items));
+                        },
+                        else => unreachable,
+                    },
+                    .int16 => |source| switch (out) {
+                        .int16 => |*dest| blk: {
+                            copyDenseItemsByMask(i16, dest.items, source, mask);
+                            break :blk preserved_stats orelse denseIntGatherStatsFromAnalysis(analyzeIntSliceTyped(i16, dest.items));
+                        },
+                        else => unreachable,
+                    },
+                    .int32 => |source| switch (out) {
+                        .int32 => |*dest| blk: {
+                            if (!copyI32ItemsByMaskNeon(dest.items, source, mask)) {
+                                copyDenseItemsByMask(i32, dest.items, source, mask);
+                            }
+                            break :blk preserved_stats orelse denseIntGatherStatsFromAnalysis(analyzeIntSliceTyped(i32, dest.items));
+                        },
+                        else => unreachable,
+                    },
+                    .int64 => |source| switch (out) {
+                        .int64 => |*dest| blk: {
+                            copyDenseItemsByMask(i64, dest.items, source, mask);
+                            break :blk preserved_stats orelse denseIntGatherStatsFromAnalysis(analyzeIntSliceTyped(i64, dest.items));
+                        },
+                        else => unreachable,
+                    },
+                };
+                const value = try out.value(self);
+                const host = try mutableNumericHostArrayValue(self, value);
+                hostDenseSetFlags(host, stats.flags);
+                hostDenseSetCachedIntRange(host, stats.range);
+                return value;
             },
         }
     }
@@ -16708,6 +20249,10 @@ pub const Session = struct {
         flags: u8,
         range: HostIntRange,
     };
+
+    fn denseIntGatherStatsFromAnalysis(analysis: HostIntAnalysis) DenseIntGatherStats {
+        return .{ .flags = analysis.flags, .range = analysis.range };
+    }
 
     fn compressBitSliceByMask(out: *HostBitAlloc, source: HostBitSlice, mask: HostBitSlice) DenseIntGatherStats {
         var asc = true;
@@ -16874,9 +20419,10 @@ pub const Session = struct {
     }
 
     fn gatherTypedFloatDenseSelectionUnchecked(
+        comptime FloatT: type,
         comptime SelT: type,
-        out: []f64,
-        source: []const f64,
+        out: []FloatT,
+        source: []const FloatT,
         selector: []const SelT,
     ) void {
         for (selector, 0..) |raw_idx, out_idx| {
@@ -16884,13 +20430,13 @@ pub const Session = struct {
         }
     }
 
-    fn gatherFloatDenseSelectionUnchecked(out: []f64, source: []const f64, selector: HostIntArrayView) void {
+    fn gatherFloatDenseSelectionUnchecked(comptime FloatT: type, out: []FloatT, source: []const FloatT, selector: HostIntArrayView) void {
         switch (selector) {
             .bit => unreachable,
-            .int8 => |items| gatherTypedFloatDenseSelectionUnchecked(i8, out, source, items),
-            .int16 => |items| gatherTypedFloatDenseSelectionUnchecked(i16, out, source, items),
-            .int32 => |items| gatherTypedFloatDenseSelectionUnchecked(i32, out, source, items),
-            .int64 => |items| gatherTypedFloatDenseSelectionUnchecked(i64, out, source, items),
+            .int8 => |items| gatherTypedFloatDenseSelectionUnchecked(FloatT, i8, out, source, items),
+            .int16 => |items| gatherTypedFloatDenseSelectionUnchecked(FloatT, i16, out, source, items),
+            .int32 => |items| gatherTypedFloatDenseSelectionUnchecked(FloatT, i32, out, source, items),
+            .int64 => |items| gatherTypedFloatDenseSelectionUnchecked(FloatT, i64, out, source, items),
         }
     }
 
@@ -16963,13 +20509,38 @@ pub const Session = struct {
         return value;
     }
 
+    fn gatherManagedHostFloat32ArraySelection(self: *Session, source: []const f32, selector: HostIntArrayView) KError!Value {
+        const len = hostIntArrayViewLen(selector);
+        var out = try self.allocManagedHostFloat32Result(len);
+        for (0..len) |idx| {
+            const source_idx = try normalizeIndex(hostIntViewItem(selector, idx), source.len);
+            out.items[idx] = source[source_idx];
+        }
+
+        const value = try out.value(self);
+        const analysis = analyzeFloatSlice32(out.items);
+        hostDenseSetFlags(try mutableNumericHostArrayValue(self, value), analysis.flags);
+        return value;
+    }
+
     fn gatherManagedHostFloatArraySelectionInBounds(self: *Session, source: []const f64, selector: HostIntArrayView) KError!Value {
         const len = hostIntArrayViewLen(selector);
         var out = try self.allocManagedHostFloatResult(len);
-        gatherFloatDenseSelectionUnchecked(out.items, source, selector);
+        gatherFloatDenseSelectionUnchecked(f64, out.items, source, selector);
 
         const value = try out.value(self);
         const analysis = analyzeFloatSlice(out.items);
+        hostDenseSetFlags(try mutableNumericHostArrayValue(self, value), analysis.flags);
+        return value;
+    }
+
+    fn gatherManagedHostFloat32ArraySelectionInBounds(self: *Session, source: []const f32, selector: HostIntArrayView) KError!Value {
+        const len = hostIntArrayViewLen(selector);
+        var out = try self.allocManagedHostFloat32Result(len);
+        gatherFloatDenseSelectionUnchecked(f32, out.items, source, selector);
+
+        const value = try out.value(self);
+        const analysis = analyzeFloatSlice32(out.items);
         hostDenseSetFlags(try mutableNumericHostArrayValue(self, value), analysis.flags);
         return value;
     }
@@ -17024,6 +20595,20 @@ pub const Session = struct {
 
         const value = try out.value(self);
         const analysis = analyzeFloatSlice(out.items);
+        hostDenseSetFlags(try mutableNumericHostArrayValue(self, value), analysis.flags);
+        return value;
+    }
+
+    fn gatherManagedHostFloat32Selection(self: *Session, source: []const f32, selector: HostIntDenseView) KError!Value {
+        const len = hostIntDenseViewLen(selector);
+        var out = try self.allocManagedHostFloat32Result(len);
+        for (0..len) |idx| {
+            const source_idx = try normalizeIndex(try hostIntDenseViewItem(selector, idx), source.len);
+            out.items[idx] = source[source_idx];
+        }
+
+        const value = try out.value(self);
+        const analysis = analyzeFloatSlice32(out.items);
         hostDenseSetFlags(try mutableNumericHostArrayValue(self, value), analysis.flags);
         return value;
     }
@@ -17146,6 +20731,9 @@ pub const Session = struct {
             .float64 => |items| {
                 return try self.gatherManagedHostFloatArraySelection(items, selector);
             },
+            .float32 => |items| {
+                return try self.gatherManagedHostFloat32ArraySelection(items, selector);
+            },
             else => {
                 const view = hostIntArrayView(array).?;
                 return try self.gatherManagedHostIntArraySelection(view, selector);
@@ -17177,6 +20765,9 @@ pub const Session = struct {
             },
             .float64 => |items| {
                 return try self.gatherManagedHostFloatSelection(items, selector);
+            },
+            .float32 => |items| {
+                return try self.gatherManagedHostFloat32Selection(items, selector);
             },
             else => {
                 const view = hostIntArrayView(array).?;
@@ -17249,6 +20840,74 @@ pub const Session = struct {
         };
     }
 
+    fn typeValue(self: *Session, value: Value) KError!Value {
+        return try self.managedHostSymbol(typeSymbolBytesForValue(value));
+    }
+
+    fn typeSymbolBytesForValue(value: Value) []const u8 {
+        return switch (value.tag()) {
+            .int, .bool => "i",
+            .float32 => "e",
+            .float => "f",
+            .builtin => "v",
+            .closure => closureTypeSymbolBytes(value.asClosure()),
+            .array => switch (value.arrayKind()) {
+                .host_string, .host_string_view => blk: {
+                    const bytes = stringBytes(value) orelse break :blk "C";
+                    break :blk if (bytes.len == 1) "c" else "C";
+                },
+                .host_symbol => "s",
+                .host_string_list => if (value.asHostStringList().display == .split_list) "A" else "C",
+                .host_symbol_list => "S",
+                .host_boxed_array => boxedArrayTypeSymbolBytes(value.asHostBoxedArray().items),
+                .host_keyed_store => if (value.asHostKeyedStore().layout == .table) "M" else "m",
+                .host_relation, .host_table_scalar => "M",
+                .numeric_array, .host_dense_array, .backend_array => switch (valueNumericMode(value) orelse return "A") {
+                    .int => "I",
+                    .float => if (valueFloatStorageKind(value) == .float32) "E" else "F",
+                },
+                else => "A",
+            },
+        };
+    }
+
+    fn boxedArrayTypeSymbolBytes(items: []const Value) []const u8 {
+        if (items.len == 0) return "A";
+        var result: ?[]const u8 = null;
+        for (items) |item| {
+            const item_result: []const u8 = switch (item.tag()) {
+                .int, .bool => "I",
+                .float32 => "E",
+                .float => "F",
+                .array => blk: {
+                    if (stringBytes(item)) |bytes| {
+                        if (bytes.len == 1) break :blk "C";
+                        break :blk "A";
+                    }
+                    if (symbolBytes(item) != null) break :blk "S";
+                    break :blk "A";
+                },
+                else => "A",
+            };
+            if (std.mem.eql(u8, item_result, "A")) return "A";
+            if (result) |current| {
+                if (!std.mem.eql(u8, current, item_result)) return "A";
+            } else {
+                result = item_result;
+            }
+        }
+        return result orelse "A";
+    }
+
+    fn closureTypeSymbolBytes(closure: *const Closure) []const u8 {
+        return switch (closure.kind) {
+            .plain => "o",
+            .projection => "p",
+            .inner_product, .composition => "q",
+            .each, .fold, .scan, .each_right, .each_left, .each_prior, .grad, .valuegrad => "r",
+        };
+    }
+
     fn applyMonad(self: *Session, op: BuiltinId, value: Value) KError!Value {
         return switch (op) {
             .identity => self.shareValue(value),
@@ -17256,7 +20915,9 @@ pub const Session = struct {
             .add => try self.flipValue(value),
             .sub => blk: {
                 if (try self.tryScalarIntBoolMonad(.sub, value)) |result| break :blk result;
+                if (try self.textByteNumericMonadValue(.sub, value)) |result| break :blk result;
                 break :blk switch (value.tag()) {
+                    .float32 => try self.float32Value(-value.asFloat32()),
                     .float => try self.floatValue(-value.asFloat()),
                     .array => try self.applyNumericMonad(.sub, value),
                     else => error.Type,
@@ -17264,16 +20925,24 @@ pub const Session = struct {
             },
             .div => blk: {
                 if (try self.tryScalarIntBoolMonad(.div, value)) |result| break :blk result;
+                if (try self.textByteNumericMonadValue(.div, value)) |result| break :blk result;
                 break :blk switch (value.tag()) {
+                    .float32 => try self.float32Value(@floatCast(std.math.sqrt(@as(f64, @floatCast(value.asFloat32()))))),
                     .float => try self.floatValue(std.math.sqrt(value.asFloat())),
                     .array => try self.applyNumericMonad(.div, value),
                     else => error.Type,
                 };
             },
             .mul => switch (value.tag()) {
-                .int, .bool, .float => self.shareValue(value),
+                .int, .bool, .float, .float32 => self.shareValue(value),
                 .array => switch (value.arrayKind()) {
                     .host_symbol, .host_table_scalar => self.shareValue(value),
+                    .host_keyed_store => blk: {
+                        const store = value.asHostKeyedStore();
+                        if (store.layout != .dict) break :blk try self.applyArrayCall1Scalar(value, 0);
+                        if (keyedStoreNameCount(store) == 0) break :blk try self.managedHostString(&.{});
+                        break :blk try self.keyedStoreValueAt(store, 0);
+                    },
                     else => try self.applyArrayCall1Scalar(value, 0),
                 },
                 else => error.Type,
@@ -17281,6 +20950,7 @@ pub const Session = struct {
             .exp, .log, .sin, .cos, .tanh, .sigmoid => blk: {
                 if (scalarIntLikeValue(value)) |int_value| break :blk try self.floatValue(applyFloatMonadOp(op, @floatFromInt(int_value)));
                 break :blk switch (value.tag()) {
+                    .float32 => try self.float32Value(@floatCast(applyFloatMonadOp(op, @floatCast(value.asFloat32())))),
                     .float => try self.floatValue(applyFloatMonadOp(op, value.asFloat())),
                     .array => try self.applyNumericMonad(op, value),
                     else => error.Type,
@@ -17302,13 +20972,14 @@ pub const Session = struct {
             .drop => error.Arity,
             .null_fill_without => try self.nullValue(value),
             .sort => try self.sortValue(value),
-            .equal => try self.unitMatrixValue(value),
+            .equal => try self.groupOrUnitMatrixValue(value),
             .reshape => error.Arity,
             .stringify => try self.stringifyValue(value),
             .cast => error.Arity,
             .contains => error.Arity,
             .split => error.Arity,
             .join => error.Arity,
+            .type_of => try self.typeValue(value),
             .bytes => try self.bytesValue(value),
             .utf8 => try self.utf8Value(value),
             .char => try self.charValue(value),
@@ -17414,13 +21085,21 @@ pub const Session = struct {
             .scalar_extend = true,
             .source = .{ .scalar_text = value },
         };
-
-        if (value.tag() == .array and value.arrayKind() == .host_string_list) return .{
+        if (stringSourceInfo(value)) |source| return .{
             .kind = .string,
-            .len = value.asHostStringList().len,
+            .len = source.bytes().len,
             .scalar_extend = false,
             .source = .{ .retained = value },
         };
+
+        if (value.tag() == .array and
+            (value.arrayKind() == .host_string_list or value.arrayKind() == .host_symbol_list))
+            return .{
+                .kind = .string,
+                .len = value.asHostStringList().len,
+                .scalar_extend = false,
+                .source = .{ .retained = value },
+            };
 
         if (numericVectorLen(value)) |len| {
             return .{
@@ -17532,6 +21211,7 @@ pub const Session = struct {
             .bytes_len = bytes_len,
             .base = null,
             .storage = .{ .eager = items },
+            .display = .list,
         };
         return Value.array(list);
     }
@@ -17541,7 +21221,16 @@ pub const Session = struct {
         errdefer self.releaseValue(column_name);
 
         const data = switch (spec.source) {
-            .retained => |value| try self.retainEscapedValue(value),
+            .retained => |value| blk: {
+                const retained = try self.retainEscapedValue(value);
+                errdefer self.releaseValue(retained);
+                if (spec.kind != .string) {
+                    if (valueNumericHandle(retained)) |handle| {
+                        _ = try tryEnsureHostRealizationForHandle(self, @constCast(handle)) orelse return error.Type;
+                    }
+                }
+                break :blk retained;
+            },
             .boxed_values => |items| switch (spec.kind) {
                 .boolean => blk: {
                     var out = try self.allocator.alloc(bool, items.len);
@@ -17590,13 +21279,17 @@ pub const Session = struct {
     }
 
     fn keyedStoreColumnLen(value: Value) ?usize {
+        if (stringSourceInfo(value)) |source| return source.bytes().len;
         if (value.tag() == .array and value.arrayKind() == .host_string_list) return value.asHostStringList().len;
+        if (value.tag() == .array and value.arrayKind() == .host_symbol_list) return value.asHostStringList().len;
         return numericVectorLen(value);
     }
 
     fn keyedStoreColumnMatchesKind(value: Value, kind: HostTableColumnKind) bool {
         return switch (kind) {
-            .string => value.tag() == .array and value.arrayKind() == .host_string_list,
+            .string => stringSourceInfo(value) != null or
+                (value.tag() == .array and
+                    (value.arrayKind() == .host_string_list or value.arrayKind() == .host_symbol_list)),
             else => keyedStoreColumnLen(value) != null,
         };
     }
@@ -17705,6 +21398,14 @@ pub const Session = struct {
                     names[out_idx] = try hostStringListItemBytes(store.names.asHostStringList(), source_idx);
                 }
                 break :blk try self.createManagedHostStringListFromSlices(names);
+            },
+            .host_symbol_list => blk: {
+                const names = try self.allocator.alloc([]const u8, source_indices.len);
+                defer self.allocator.free(names);
+                for (source_indices, 0..) |source_idx, out_idx| {
+                    names[out_idx] = try hostStringListItemBytes(store.names.asHostStringList(), source_idx);
+                }
+                break :blk try self.createManagedHostSymbolListFromSlices(names);
             },
             else => blk: {
                 const names = try self.allocator.alloc(Value, source_indices.len);
@@ -17873,14 +21574,8 @@ pub const Session = struct {
         const source_indices = try self.allocator.alloc(usize, count);
         defer self.allocator.free(source_indices);
 
-        if (raw_count >= 0) {
-            for (0..count) |idx| source_indices[idx] = idx % len;
-        } else {
-            const pad = if (count > len) count - len else 0;
-            for (0..pad) |idx| source_indices[idx] = if (len == 0) 0 else len - 1;
-            const start = if (count >= len) 0 else len - count;
-            for (start..len, pad..) |idx, out_idx| source_indices[out_idx] = idx;
-        }
+        const start = takeCyclicStart(raw_count, count, len);
+        for (0..count) |idx| source_indices[idx] = (start + idx) % len;
 
         return try self.projectKeyedStore(store, source_indices);
     }
@@ -17888,16 +21583,44 @@ pub const Session = struct {
     fn keyedDictDropValue(self: *Session, raw_count: i64, store: *const HostKeyedStore) KError!Value {
         std.debug.assert(store.layout == .dict);
         const len = keyedStoreNameCount(store);
-        const drop_count: usize = if (raw_count >= 0)
-            @min(@as(usize, @intCast(raw_count)), len)
-        else
-            len - @min(@as(usize, @intCast(-raw_count)), len);
-        const start: usize = if (raw_count >= 0) drop_count else 0;
-        const end: usize = if (raw_count >= 0) len else drop_count;
+        const bounds = dropSliceBounds(raw_count, len);
 
-        const source_indices = try self.allocator.alloc(usize, end - start);
+        const source_indices = try self.allocator.alloc(usize, bounds.end - bounds.start);
         defer self.allocator.free(source_indices);
-        for (start..end, 0..) |idx, out_idx| source_indices[out_idx] = idx;
+        for (bounds.start..bounds.end, 0..) |idx, out_idx| source_indices[out_idx] = idx;
+        return try self.projectKeyedStore(store, source_indices);
+    }
+
+    fn keyedDictDeleteKeys(self: *Session, store: *const HostKeyedStore, keys: Value) KError!Value {
+        std.debug.assert(store.layout == .dict);
+
+        const key_items = try self.materializeSequenceItems(keys);
+        defer self.releaseArgs(key_items);
+
+        const len = keyedStoreNameCount(store);
+        const remove = try self.allocator.alloc(bool, len);
+        defer self.allocator.free(remove);
+        @memset(remove, false);
+
+        var removed_count: usize = 0;
+        for (key_items) |key| {
+            const idx = (try self.keyedStoreLookupIndexByKey(store, key)) orelse continue;
+            if (!remove[idx]) {
+                remove[idx] = true;
+                removed_count += 1;
+            }
+        }
+
+        if (removed_count == 0) return self.shareValue(Value.array(@constCast(store)));
+
+        const source_indices = try self.allocator.alloc(usize, len - removed_count);
+        defer self.allocator.free(source_indices);
+        var write_idx: usize = 0;
+        for (remove, 0..) |should_remove, idx| {
+            if (should_remove) continue;
+            source_indices[write_idx] = idx;
+            write_idx += 1;
+        }
         return try self.projectKeyedStore(store, source_indices);
     }
 
@@ -17910,14 +21633,58 @@ pub const Session = struct {
         const key_items = try self.materializeSequenceItems(left);
         defer self.releaseArgs(key_items);
 
-        const source_indices = try self.allocator.alloc(usize, key_items.len);
+        const source_indices = try self.allocator.alloc(?usize, key_items.len);
         defer self.allocator.free(source_indices);
-
+        var saw_missing = false;
         for (key_items, 0..) |item, idx| {
-            source_indices[idx] = (try self.keyedStoreLookupIndexByKey(store, item)) orelse return error.Name;
+            source_indices[idx] = try self.keyedStoreLookupIndexByKey(store, item);
+            if (source_indices[idx] == null) saw_missing = true;
         }
 
-        return try self.projectKeyedStore(store, source_indices);
+        if (!saw_missing) {
+            const projected_indices = try self.allocator.alloc(usize, key_items.len);
+            defer self.allocator.free(projected_indices);
+            for (source_indices, projected_indices) |source_idx, *projected_idx| projected_idx.* = source_idx.?;
+            return try self.projectKeyedStore(store, projected_indices);
+        }
+
+        if (store.layout != .dict) return error.Name;
+
+        const values = try self.allocator.alloc(Value, key_items.len);
+        defer self.allocator.free(values);
+        var initialized_values: usize = 0;
+        defer {
+            for (values[0..initialized_values]) |value| self.releaseValue(value);
+        }
+        for (source_indices, values) |source_idx, *value| {
+            value.* = if (source_idx) |idx|
+                try self.keyedStoreValueAt(store, idx)
+            else
+                try self.prototypeLikeValue(store.values);
+            initialized_values += 1;
+        }
+
+        const names = try self.makeArrayFromValues(key_items);
+        errdefer self.releaseValue(names);
+        const lookup = try self.createKeyedStoreLookupFromNamesValueOptions(names, true);
+        const projected_values = if (keyedStoreUsesDenseValueFastPath(store))
+            try self.makeArrayFromValues(values)
+        else
+            try self.createManagedHostBoxedArray(values);
+        errdefer self.releaseValue(projected_values);
+
+        const owned_path = try self.allocator.dupe(u8, store.path);
+        errdefer self.allocator.free(owned_path);
+        return try self.createManagedKeyedStore(
+            owned_path,
+            true,
+            names,
+            projected_values,
+            null,
+            store.layout,
+            0,
+            lookup,
+        );
     }
 
     fn tableFromKeyedStoreMetadata(self: *Session, store: *const HostKeyedStore, values: []const Value, metadata: []const HostKeyedColumnMetadata) KError!Value {
@@ -18000,6 +21767,11 @@ pub const Session = struct {
                 const singleton = try self.createManagedHostFloatArrayFromValues(&items);
                 break :blk try newReshapeViewValue(self, singleton, numericShapeSnapshotMatrix(1, 1));
             },
+            .float32 => blk: {
+                const items = [_]Value{value};
+                const singleton = try self.createManagedHostFloat32ArrayFromValues(&items);
+                break :blk try newReshapeViewValue(self, singleton, numericShapeSnapshotMatrix(1, 1));
+            },
             .array => switch (value.arrayKind()) {
                 .host_boxed_array => blk: {
                     break :blk try self.createManagedHostBoxedArray(&[_]Value{value});
@@ -18020,7 +21792,9 @@ pub const Session = struct {
 
     fn negateValue(self: *Session, value: Value) KError!Value {
         if (try self.tryScalarIntBoolMonad(.sub, value)) |result| return result;
+        if (try self.textByteNumericMonadValue(.sub, value)) |result| return result;
         return switch (value.tag()) {
+            .float32 => try self.float32Value(-value.asFloat32()),
             .float => try self.floatValue(-value.asFloat()),
             .array => try self.applyNumericMonad(.sub, value),
             else => error.Type,
@@ -18029,11 +21803,28 @@ pub const Session = struct {
 
     fn sqrtValue(self: *Session, value: Value) KError!Value {
         if (try self.tryScalarIntBoolMonad(.div, value)) |result| return result;
+        if (try self.textByteNumericMonadValue(.div, value)) |result| return result;
         return switch (value.tag()) {
+            .float32 => try self.float32Value(@floatCast(std.math.sqrt(@as(f64, @floatCast(value.asFloat32()))))),
             .float => try self.floatValue(std.math.sqrt(value.asFloat())),
             .array => try self.applyNumericMonad(.div, value),
             else => error.Type,
         };
+    }
+
+    fn textByteNumericMonadValue(self: *Session, op: BuiltinId, value: Value) KError!?Value {
+        switch (op) {
+            .sub, .div => {},
+            else => return null,
+        }
+
+        const is_text = stringBytes(value) != null or
+            (value.tag() == .array and value.arrayKind() == .host_string_list);
+        if (!is_text) return null;
+
+        const casted = try self.castValueToInt(value);
+        defer self.releaseValue(casted);
+        return try self.applyMonad(op, casted);
     }
 
     fn tableScalarValue(value: Value) ?*const HostTableScalar {
@@ -18065,7 +21856,10 @@ pub const Session = struct {
         return switch (value.raw & Value.tag_mask) {
             Value.int_tag => value.asInt(),
             Value.bool_tag => @intFromBool(value.asBool()),
-            else => if (value.tag() == .float) exactIntFromFloat(value.asFloat()) else null,
+            else => switch (value.tag()) {
+                .float, .float32 => exactIntFromFloat(value.asFloat()),
+                else => null,
+            },
         };
     }
 
@@ -18073,7 +21867,10 @@ pub const Session = struct {
         return switch (value.raw & Value.tag_mask) {
             Value.int_tag => @floatFromInt(value.asInt()),
             Value.bool_tag => @floatFromInt(@intFromBool(value.asBool())),
-            else => if (value.tag() == .float) value.asFloat() else null,
+            else => switch (value.tag()) {
+                .float, .float32 => value.asFloat(),
+                else => null,
+            },
         };
     }
 
@@ -18113,17 +21910,26 @@ pub const Session = struct {
         const left_float = inlineNumericFloatValue(left) orelse return null;
         const right_float = inlineNumericFloatValue(right) orelse return null;
         if (comptime enable_probe_instrumentation) self.debug_inline_scalar_dyad_attempt_count += 1;
+        const result_kind = scalarNumericResultStorageKind(left, right);
+        const float_result = struct {
+            fn value(session: *Session, kind: HostFloatStorageKind, raw: f64) KError!Value {
+                return switch (kind) {
+                    .float32 => try session.float32Value(@floatCast(raw)),
+                    .float64 => try session.floatValue(raw),
+                };
+            }
+        }.value;
         const result: ?Value = switch (op) {
-            .add => try self.floatValue(left_float + right_float),
-            .sub => try self.floatValue(left_float - right_float),
-            .mul => try self.floatValue(left_float * right_float),
-            .div => try self.floatValue(left_float / right_float),
-            .minimum => try self.floatValue(@min(left_float, right_float)),
-            .maximum => try self.floatValue(@max(left_float, right_float)),
+            .add => try float_result(self, result_kind, left_float + right_float),
+            .sub => try float_result(self, result_kind, left_float - right_float),
+            .mul => try float_result(self, result_kind, left_float * right_float),
+            .div => try float_result(self, result_kind, left_float / right_float),
+            .minimum => try float_result(self, result_kind, @min(left_float, right_float)),
+            .maximum => try float_result(self, result_kind, @max(left_float, right_float)),
             .less => Value.fromBool(left_float < right_float),
             .more => Value.fromBool(left_float > right_float),
             .equal => Value.fromBool(left_float == right_float),
-            .pow => try self.floatValue(std.math.pow(f64, left_float, right_float)),
+            .pow => try float_result(self, result_kind, std.math.pow(f64, left_float, right_float)),
             else => null,
         };
         if (comptime enable_probe_instrumentation) {
@@ -18254,7 +22060,7 @@ pub const Session = struct {
             .boolean => Value.fromBool((try numericIntAt(data, @intCast(row))) != 0),
             .int => try self.intValue(try numericIntAt(data, @intCast(row))),
             .float => try self.floatValue(try numericFloatAt(data, @intCast(row))),
-            .string => try self.hostStringListItemValue(data.asHostStringList(), row),
+            .string => try self.hostTextListItemValue(data, row),
             .date,
             .time,
             .time_ns,
@@ -18286,8 +22092,11 @@ pub const Session = struct {
             initialized += 1;
         }
 
-        const result = try self.createHostDictValue("", keys, values);
-        return result;
+        const names = try self.createManagedHostSymbolListFromSlices(keys);
+        defer self.releaseValue(names);
+        const row_values = try self.makeArrayFromValues(values);
+        defer self.releaseValue(row_values);
+        return try self.createHostDictValueFromKeySequenceValue("", names, row_values);
     }
 
     fn tableRowIndicesFromSelector(self: *Session, selector: HostIntDenseView, row_count: usize) KError![]usize {
@@ -18331,7 +22140,7 @@ pub const Session = struct {
         return try self.createManagedHostBitArray(out);
     }
 
-    fn tableSelectStringRows(self: *Session, list: *const HostStringList, row_indices: []const usize) KError!Value {
+    fn tableSelectStringRows(self: *Session, data: Value, row_indices: []const usize) KError!Value {
         const values = try self.allocator.alloc(Value, row_indices.len);
         defer self.allocator.free(values);
         var initialized: usize = 0;
@@ -18340,7 +22149,7 @@ pub const Session = struct {
         }
 
         for (row_indices, 0..) |row, idx| {
-            values[idx] = try self.hostStringListItemValue(list, row);
+            values[idx] = try self.hostTextListItemValue(data, row);
             initialized += 1;
         }
         return try self.createManagedHostTextListFromValues(values);
@@ -18363,7 +22172,7 @@ pub const Session = struct {
                 for (row_indices, 0..) |row, idx| out[idx] = try numericFloatAt(data, @intCast(row));
                 break :blk try self.createManagedHostFloatArray(out);
             },
-            .string => try self.tableSelectStringRows(data.asHostStringList(), row_indices),
+            .string => try self.tableSelectStringRows(data, row_indices),
             .int,
             .date,
             .time,
@@ -18430,31 +22239,20 @@ pub const Session = struct {
         defer row_indices.deinit(self.allocator);
         try row_indices.ensureTotalCapacity(self.allocator, count);
 
-        if (raw_count >= 0) {
-            for (0..count) |idx| try row_indices.append(self.allocator, idx % store.row_count);
-        } else {
-            const pad = if (count > store.row_count) count - store.row_count else 0;
-            for (0..pad) |_| try row_indices.append(self.allocator, 0);
-            const start = if (count >= store.row_count) 0 else store.row_count - count;
-            for (start..store.row_count) |idx| try row_indices.append(self.allocator, idx);
-        }
+        const start = takeCyclicStart(raw_count, count, store.row_count);
+        for (0..count) |idx| try row_indices.append(self.allocator, (start + idx) % store.row_count);
 
         return try self.tableSelectRows(store, row_indices.items);
     }
 
     fn tableDropValue(self: *Session, raw_count: i64, store: *const HostKeyedStore) KError!Value {
         std.debug.assert(store.layout == .table);
-        const drop_count: usize = if (raw_count >= 0)
-            @min(@as(usize, @intCast(raw_count)), store.row_count)
-        else
-            store.row_count - @min(@as(usize, @intCast(-raw_count)), store.row_count);
-        const start: usize = if (raw_count >= 0) drop_count else 0;
-        const end: usize = if (raw_count >= 0) store.row_count else drop_count;
+        const bounds = dropSliceBounds(raw_count, store.row_count);
 
         var row_indices = std.ArrayList(usize).empty;
         defer row_indices.deinit(self.allocator);
-        try row_indices.ensureTotalCapacity(self.allocator, end - start);
-        for (start..end) |idx| try row_indices.append(self.allocator, idx);
+        try row_indices.ensureTotalCapacity(self.allocator, bounds.end - bounds.start);
+        for (bounds.start..bounds.end) |idx| try row_indices.append(self.allocator, idx);
         return try self.tableSelectRows(store, row_indices.items);
     }
 
@@ -18472,20 +22270,20 @@ pub const Session = struct {
         return try self.createManagedHostBitArray(out);
     }
 
-    fn concatTableStringColumns(self: *Session, left: *const HostStringList, right: *const HostStringList) KError!Value {
-        const values = try self.allocator.alloc(Value, left.len + right.len);
+    fn concatTableStringColumns(self: *Session, left: Value, right: Value, left_rows: usize, right_rows: usize) KError!Value {
+        const values = try self.allocator.alloc(Value, left_rows + right_rows);
         defer self.allocator.free(values);
         var initialized: usize = 0;
         defer {
             for (values[0..initialized]) |value| self.releaseValue(value);
         }
 
-        for (0..left.len) |idx| {
-            values[initialized] = try self.hostStringListItemValue(left, idx);
+        for (0..left_rows) |idx| {
+            values[initialized] = try self.hostTextListItemValue(left, idx);
             initialized += 1;
         }
-        for (0..right.len) |idx| {
-            values[initialized] = try self.hostStringListItemValue(right, idx);
+        for (0..right_rows) |idx| {
+            values[initialized] = try self.hostTextListItemValue(right, idx);
             initialized += 1;
         }
         return try self.createManagedHostTextListFromValues(values);
@@ -18507,7 +22305,7 @@ pub const Session = struct {
                 for (0..right_rows) |idx| out[left_rows + idx] = try numericFloatAt(right, @intCast(idx));
                 break :blk try self.createManagedHostFloatArray(out);
             },
-            .string => try self.concatTableStringColumns(left.asHostStringList(), right.asHostStringList()),
+            .string => try self.concatTableStringColumns(left, right, left_rows, right_rows),
             .int,
             .date,
             .time,
@@ -19297,13 +23095,472 @@ pub const Session = struct {
         switch (builder.kind) {
             .boolean => builder.bool_values.deinit(self.allocator),
             .int, .date, .time, .time_ns, .time_tz, .timestamp, .timestamp_s, .timestamp_ms, .timestamp_ns, .timestamp_tz => builder.int_values.deinit(self.allocator),
-            .float => builder.float_values.deinit(self.allocator),
+            .float => {
+                builder.float32_values.deinit(self.allocator);
+                builder.float_values.deinit(self.allocator);
+            },
             .string => {
                 for (builder.string_values.items) |item| self.allocator.free(item);
                 builder.string_values.deinit(self.allocator);
             },
         }
         builder.validity.deinit(self.allocator);
+    }
+
+    fn tableColumnBuilderEnsureValueCapacity(self: *Session, builder: *TableColumnBuilder, additional: usize) KError!void {
+        switch (builder.kind) {
+            .boolean => try builder.bool_values.ensureUnusedCapacity(self.allocator, additional),
+            .int, .date, .time, .time_ns, .time_tz, .timestamp, .timestamp_s, .timestamp_ms, .timestamp_ns, .timestamp_tz => try builder.int_values.ensureUnusedCapacity(self.allocator, additional),
+            .float => switch (builder.source_type) {
+                .float => try builder.float32_values.ensureUnusedCapacity(self.allocator, additional),
+                .double => try builder.float_values.ensureUnusedCapacity(self.allocator, additional),
+                else => return error.Unsupported,
+            },
+            .string => try builder.string_values.ensureUnusedCapacity(self.allocator, additional),
+        }
+    }
+
+    fn tableColumnBuilderEnsureValidityLen(self: *Session, builder: *TableColumnBuilder, target_len: usize) KError!void {
+        if (!builder.saw_null) builder.saw_null = true;
+        if (builder.validity.items.len >= target_len) return;
+        try builder.validity.ensureUnusedCapacity(self.allocator, target_len - builder.validity.items.len);
+        while (builder.validity.items.len < target_len) builder.validity.appendAssumeCapacity(true);
+    }
+
+    fn tableColumnBuilderAppendValidity(
+        self: *Session,
+        builder: *TableColumnBuilder,
+        row_offset: usize,
+        valid: bool,
+    ) KError!void {
+        if (valid and !builder.saw_null) return;
+        const absolute_row = builder.row_count + row_offset;
+        try self.tableColumnBuilderEnsureValidityLen(builder, absolute_row);
+        try builder.validity.append(self.allocator, valid);
+    }
+
+    fn duckDbValidityBit(validity: ?[*]const u64, row: usize) bool {
+        const words = validity orelse return true;
+        const entry_idx = row / 64;
+        const idx_in_entry = row % 64;
+        return (words[entry_idx] & (@as(u64, 1) << @intCast(idx_in_entry))) != 0;
+    }
+
+    fn analyzeIntSliceTyped(comptime T: type, items: []const T) HostIntAnalysis {
+        if (items.len == 0) {
+            return .{
+                .range = .{ .min = 0, .max = 0 },
+                .kind = .int8,
+                .flags = host_dense_flag_normalized | host_dense_flag_asc | host_dense_flag_dsc,
+            };
+        }
+
+        var min_value: i64 = @intCast(items[0]);
+        var max_value: i64 = @intCast(items[0]);
+        var asc = true;
+        var dsc = true;
+        var prev: i64 = @intCast(items[0]);
+        for (items[1..]) |raw_item| {
+            const item: i64 = @intCast(raw_item);
+            min_value = @min(min_value, item);
+            max_value = @max(max_value, item);
+            if (prev > item) asc = false;
+            if (prev < item) dsc = false;
+            prev = item;
+        }
+
+        return .{
+            .range = .{ .min = min_value, .max = max_value },
+            .kind = hostIntStorageKindForRange(min_value, max_value),
+            .flags = host_dense_flag_normalized | orderFlagsFromMonotonic(asc, dsc),
+        };
+    }
+
+    fn directTableColumnStorageArray(storage: *const DirectTableColumnStorage) *HostDenseArray {
+        return switch (storage.*) {
+            .boolean => |out| out.array,
+            .int8 => |out| out.array,
+            .int16 => |out| out.array,
+            .int32 => |out| out.array,
+            .int64 => |out| out.array,
+            .float32 => |out| out.array,
+            .float64 => |out| out.array,
+        };
+    }
+
+    fn recycleDirectTableColumnStorage(self: *Session, storage: DirectTableColumnStorage) void {
+        self.recycleManagedHostArray(directTableColumnStorageArray(&storage));
+    }
+
+    fn initDirectTableColumnBuilder(
+        self: *Session,
+        name: Value,
+        source_type: duckdb_runtime.TypeId,
+        kind: HostTableColumnKind,
+        total_rows: usize,
+    ) KError!?DirectTableColumnBuilder {
+        const storage: DirectTableColumnStorage = switch (source_type) {
+            .boolean => .{ .boolean = try self.allocHostBitArray(.managed, total_rows) },
+            .tinyint => .{ .int8 = try self.allocHostArrayTyped(i8, .int8, .managed, total_rows) },
+            .smallint => .{ .int16 = try self.allocHostArrayTyped(i16, .int16, .managed, total_rows) },
+            .integer => .{ .int32 = try self.allocHostArrayTyped(i32, .int32, .managed, total_rows) },
+            .bigint => .{ .int64 = try self.allocHostArrayTyped(i64, .int64, .managed, total_rows) },
+            .utinyint => .{ .int16 = try self.allocHostArrayTyped(i16, .int16, .managed, total_rows) },
+            .usmallint => .{ .int32 = try self.allocHostArrayTyped(i32, .int32, .managed, total_rows) },
+            .uinteger, .ubigint => .{ .int64 = try self.allocHostArrayTyped(i64, .int64, .managed, total_rows) },
+            .float => .{ .float32 = try self.allocManagedHostFloat32Result(total_rows) },
+            .double => .{ .float64 = try self.allocManagedHostFloatResult(total_rows) },
+            .date => .{ .int32 = try self.allocHostArrayTyped(i32, .int32, .managed, total_rows) },
+            .time,
+            .time_ns,
+            .time_tz,
+            .timestamp,
+            .timestamp_s,
+            .timestamp_ms,
+            .timestamp_ns,
+            .timestamp_tz,
+            => .{ .int64 = try self.allocHostArrayTyped(i64, .int64, .managed, total_rows) },
+            else => return null,
+        };
+        var wrapped = false;
+        errdefer if (!wrapped) self.recycleDirectTableColumnStorage(storage);
+        const data = try wrapOwnedHostArrayValue(self, directTableColumnStorageArray(&storage));
+        wrapped = true;
+        return .{
+            .name = name,
+            .source_type = source_type,
+            .kind = kind,
+            .storage = storage,
+            .data = data,
+            .total_rows = total_rows,
+        };
+    }
+
+    fn deinitDirectTableColumnBuilder(self: *Session, builder: *DirectTableColumnBuilder) void {
+        if (builder.validity) |mask| self.releaseValue(mask);
+        if (builder.data) |data| self.releaseValue(data);
+        builder.validity = null;
+        builder.data = null;
+    }
+
+    fn ensureDirectTableColumnValidity(self: *Session, builder: *DirectTableColumnBuilder) KError!void {
+        if (builder.validity != null) return;
+        const storage = try self.allocHostBitArray(.managed, builder.total_rows);
+        var wrapped = false;
+        errdefer if (!wrapped) self.recycleManagedHostArray(storage.array);
+        bitFill(storage.words, builder.total_rows, true);
+        const value = try wrapOwnedHostArrayValue(self, storage.array);
+        wrapped = true;
+        builder.validity_storage = storage;
+        builder.validity = value;
+    }
+
+    fn markDirectTableColumnInvalid(self: *Session, builder: *DirectTableColumnBuilder, absolute_row: usize) KError!void {
+        try self.ensureDirectTableColumnValidity(builder);
+        bitSet(builder.validity_storage.?.words, absolute_row, false);
+    }
+
+    fn directWriteBitRun(words: []u64, start: usize, bits: u64, len: usize) void {
+        if (len == 0) return;
+        const word_idx = start / host_bit_word_bits;
+        const bit_offset = start % host_bit_word_bits;
+        std.debug.assert(bit_offset + len <= host_bit_word_bits);
+        const mask = bitLowMask(len) << @intCast(bit_offset);
+        const shifted = (bits & bitLowMask(len)) << @intCast(bit_offset);
+        words[word_idx] = (words[word_idx] & ~mask) | (shifted & mask);
+    }
+
+    fn readU64Unaligned(ptr: [*]const u8) u64 {
+        const typed: *align(1) const u64 = @ptrCast(ptr);
+        return typed.*;
+    }
+
+    fn packBool8Bytes(src: [*]const u8) u8 {
+        const bits = readU64Unaligned(src) & 0x0101_0101_0101_0101;
+        return @truncate((bits *% 0x0102_0408_1020_4080) >> 56);
+    }
+
+    fn packBool64Bytes(src: [*]const u8) u64 {
+        var bits: u64 = 0;
+        inline for (0..8) |idx| {
+            bits |= @as(u64, packBool8Bytes(src + idx * 8)) << @intCast(idx * 8);
+        }
+        return bits;
+    }
+
+    fn fillDirectBooleanColumn(
+        self: *Session,
+        builder: *DirectTableColumnBuilder,
+        dst: []u64,
+        src: [*]const bool,
+        validity: ?[*]const u64,
+        start: usize,
+        rows: usize,
+    ) KError!void {
+        var source_row: usize = 0;
+        var absolute_row = start;
+        var remaining = rows;
+        const src_bytes: [*]const u8 = @ptrCast(src);
+
+        while (remaining >= host_bit_word_bits and absolute_row % host_bit_word_bits == 0 and source_row % host_bit_word_bits == 0) {
+            var packed_bits = packBool64Bytes(src_bytes + source_row);
+            if (validity) |validity_words| {
+                const valid_bits = validity_words[source_row / host_bit_word_bits];
+                if (valid_bits != std.math.maxInt(u64)) {
+                    try self.ensureDirectTableColumnValidity(builder);
+                    builder.validity_storage.?.words[absolute_row / host_bit_word_bits] = valid_bits;
+                    packed_bits &= valid_bits;
+                }
+            }
+            dst[absolute_row / host_bit_word_bits] = packed_bits;
+            source_row += host_bit_word_bits;
+            absolute_row += host_bit_word_bits;
+            remaining -= host_bit_word_bits;
+        }
+
+        while (remaining != 0) {
+            const dst_offset = absolute_row % host_bit_word_bits;
+            const validity_offset = source_row % host_bit_word_bits;
+            var take = @min(remaining, host_bit_word_bits - dst_offset);
+            if (validity != null) take = @min(take, host_bit_word_bits - validity_offset);
+
+            var packed_bits: u64 = 0;
+            for (0..take) |idx| {
+                packed_bits |= @as(u64, @intFromBool(src[source_row + idx])) << @intCast(idx);
+            }
+
+            if (validity) |validity_words| {
+                const valid_bits = (validity_words[source_row / host_bit_word_bits] >> @intCast(validity_offset)) & bitLowMask(take);
+                if (valid_bits != bitLowMask(take)) {
+                    try self.ensureDirectTableColumnValidity(builder);
+                    directWriteBitRun(builder.validity_storage.?.words, absolute_row, valid_bits, take);
+                    packed_bits &= valid_bits;
+                }
+            }
+
+            directWriteBitRun(dst, absolute_row, packed_bits, take);
+            source_row += take;
+            absolute_row += take;
+            remaining -= take;
+        }
+    }
+
+    fn directDateValue(item: duckdb_runtime.c.duckdb_date) i32 {
+        return item.days;
+    }
+
+    fn directTemporalValue(comptime T: type, item: T) i64 {
+        return switch (T) {
+            duckdb_runtime.c.duckdb_time => item.micros,
+            duckdb_runtime.c.duckdb_time_ns => item.nanos,
+            duckdb_runtime.c.duckdb_time_tz => @bitCast(item.bits),
+            duckdb_runtime.c.duckdb_timestamp => item.micros,
+            duckdb_runtime.c.duckdb_timestamp_s => item.seconds,
+            duckdb_runtime.c.duckdb_timestamp_ms => item.millis,
+            duckdb_runtime.c.duckdb_timestamp_ns => item.nanos,
+            else => unreachable,
+        };
+    }
+
+    fn fillDirectSignedColumn(
+        self: *Session,
+        builder: *DirectTableColumnBuilder,
+        comptime SrcT: type,
+        comptime DstT: type,
+        dst: []DstT,
+        src: [*]const SrcT,
+        validity: ?[*]const u64,
+        start: usize,
+        rows: usize,
+    ) KError!void {
+        if (validity == null and SrcT == DstT) {
+            @memcpy(dst[start .. start + rows], src[0..rows]);
+            return;
+        }
+        for (0..rows) |row| {
+            const absolute_row = start + row;
+            const valid = duckDbValidityBit(validity, row);
+            const stored: DstT = if (valid) @intCast(src[row]) else 0;
+            if (!valid) {
+                try self.markDirectTableColumnInvalid(builder, absolute_row);
+            }
+            dst[absolute_row] = stored;
+        }
+    }
+
+    fn fillDirectUnsignedColumn(
+        self: *Session,
+        builder: *DirectTableColumnBuilder,
+        comptime SrcT: type,
+        comptime DstT: type,
+        dst: []DstT,
+        src: [*]const SrcT,
+        validity: ?[*]const u64,
+        start: usize,
+        rows: usize,
+    ) KError!void {
+        for (0..rows) |row| {
+            const absolute_row = start + row;
+            const valid = duckDbValidityBit(validity, row);
+            const stored: DstT = if (valid) std.math.cast(DstT, src[row]) orelse return error.Unsupported else 0;
+            if (!valid) {
+                try self.markDirectTableColumnInvalid(builder, absolute_row);
+            }
+            dst[absolute_row] = stored;
+        }
+    }
+
+    fn fillDirectFloatColumn(
+        self: *Session,
+        builder: *DirectTableColumnBuilder,
+        comptime T: type,
+        dst: []T,
+        src: [*]const T,
+        validity: ?[*]const u64,
+        start: usize,
+        rows: usize,
+    ) KError!void {
+        if (validity == null) {
+            @memcpy(dst[start .. start + rows], src[0..rows]);
+            return;
+        }
+        for (0..rows) |row| {
+            const absolute_row = start + row;
+            const valid = duckDbValidityBit(validity, row);
+            const stored: T = if (valid) src[row] else 0;
+            if (!valid) {
+                try self.markDirectTableColumnInvalid(builder, absolute_row);
+            }
+            dst[absolute_row] = stored;
+        }
+    }
+
+    fn fillDirectDateColumn(
+        self: *Session,
+        builder: *DirectTableColumnBuilder,
+        dst: []i32,
+        src: [*]const duckdb_runtime.c.duckdb_date,
+        validity: ?[*]const u64,
+        start: usize,
+        rows: usize,
+    ) KError!void {
+        for (0..rows) |row| {
+            const absolute_row = start + row;
+            const valid = duckDbValidityBit(validity, row);
+            const stored = if (valid) directDateValue(src[row]) else 0;
+            if (!valid) {
+                try self.markDirectTableColumnInvalid(builder, absolute_row);
+            }
+            dst[absolute_row] = stored;
+        }
+    }
+
+    fn fillDirectTemporalColumn(
+        self: *Session,
+        builder: *DirectTableColumnBuilder,
+        comptime SrcT: type,
+        dst: []i64,
+        src: [*]const SrcT,
+        validity: ?[*]const u64,
+        start: usize,
+        rows: usize,
+    ) KError!void {
+        for (0..rows) |row| {
+            const absolute_row = start + row;
+            const valid = duckDbValidityBit(validity, row);
+            const stored = if (valid) directTemporalValue(SrcT, src[row]) else 0;
+            if (!valid) {
+                try self.markDirectTableColumnInvalid(builder, absolute_row);
+            }
+            dst[absolute_row] = stored;
+        }
+    }
+
+    fn appendDirectTableColumnChunk(
+        self: *Session,
+        builder: *DirectTableColumnBuilder,
+        chunk: *const duckdb_runtime.DataChunk,
+        column_idx: usize,
+    ) KError!void {
+        if (comptime !runtime_has_duckdb) return error.Unsupported;
+        const rows = chunk.rowCount();
+        if (builder.row_count + rows > builder.total_rows) return error.Internal;
+        const start = builder.row_count;
+        const validity = chunk.validity(column_idx);
+        const data = chunk.vectorData(column_idx) catch |err| return mapDuckDbError(err);
+
+        switch (builder.source_type) {
+            .boolean => {
+                const src: [*]const bool = @ptrCast(@alignCast(data));
+                try self.fillDirectBooleanColumn(builder, builder.storage.boolean.words, src, validity, start, rows);
+            },
+            .tinyint => try self.fillDirectSignedColumn(builder, i8, i8, builder.storage.int8.items, @ptrCast(@alignCast(data)), validity, start, rows),
+            .smallint => try self.fillDirectSignedColumn(builder, i16, i16, builder.storage.int16.items, @ptrCast(@alignCast(data)), validity, start, rows),
+            .integer => try self.fillDirectSignedColumn(builder, i32, i32, builder.storage.int32.items, @ptrCast(@alignCast(data)), validity, start, rows),
+            .bigint => try self.fillDirectSignedColumn(builder, i64, i64, builder.storage.int64.items, @ptrCast(@alignCast(data)), validity, start, rows),
+            .utinyint => try self.fillDirectUnsignedColumn(builder, u8, i16, builder.storage.int16.items, @ptrCast(@alignCast(data)), validity, start, rows),
+            .usmallint => try self.fillDirectUnsignedColumn(builder, u16, i32, builder.storage.int32.items, @ptrCast(@alignCast(data)), validity, start, rows),
+            .uinteger => try self.fillDirectUnsignedColumn(builder, u32, i64, builder.storage.int64.items, @ptrCast(@alignCast(data)), validity, start, rows),
+            .ubigint => try self.fillDirectUnsignedColumn(builder, u64, i64, builder.storage.int64.items, @ptrCast(@alignCast(data)), validity, start, rows),
+            .float => try self.fillDirectFloatColumn(builder, f32, builder.storage.float32.items, @ptrCast(@alignCast(data)), validity, start, rows),
+            .double => try self.fillDirectFloatColumn(builder, f64, builder.storage.float64.items, @ptrCast(@alignCast(data)), validity, start, rows),
+            .date => try self.fillDirectDateColumn(builder, builder.storage.int32.items, @ptrCast(@alignCast(data)), validity, start, rows),
+            .time => try self.fillDirectTemporalColumn(builder, duckdb_runtime.c.duckdb_time, builder.storage.int64.items, @ptrCast(@alignCast(data)), validity, start, rows),
+            .time_ns => try self.fillDirectTemporalColumn(builder, duckdb_runtime.c.duckdb_time_ns, builder.storage.int64.items, @ptrCast(@alignCast(data)), validity, start, rows),
+            .time_tz => try self.fillDirectTemporalColumn(builder, duckdb_runtime.c.duckdb_time_tz, builder.storage.int64.items, @ptrCast(@alignCast(data)), validity, start, rows),
+            .timestamp, .timestamp_tz => try self.fillDirectTemporalColumn(builder, duckdb_runtime.c.duckdb_timestamp, builder.storage.int64.items, @ptrCast(@alignCast(data)), validity, start, rows),
+            .timestamp_s => try self.fillDirectTemporalColumn(builder, duckdb_runtime.c.duckdb_timestamp_s, builder.storage.int64.items, @ptrCast(@alignCast(data)), validity, start, rows),
+            .timestamp_ms => try self.fillDirectTemporalColumn(builder, duckdb_runtime.c.duckdb_timestamp_ms, builder.storage.int64.items, @ptrCast(@alignCast(data)), validity, start, rows),
+            .timestamp_ns => try self.fillDirectTemporalColumn(builder, duckdb_runtime.c.duckdb_timestamp_ns, builder.storage.int64.items, @ptrCast(@alignCast(data)), validity, start, rows),
+            else => return error.Unsupported,
+        }
+
+        builder.row_count += rows;
+    }
+
+    fn finishDirectTableColumnBuilder(self: *Session, builder: *DirectTableColumnBuilder) KError!HostTableColumn {
+        _ = self;
+        switch (builder.storage) {
+            .boolean => |out| {
+                hostDenseSetFlags(out.array, host_dense_flag_normalized);
+            },
+            .int8 => |out| {
+                hostDenseSetFlags(out.array, host_dense_flag_normalized);
+            },
+            .int16 => |out| {
+                hostDenseSetFlags(out.array, host_dense_flag_normalized);
+            },
+            .int32 => |out| {
+                hostDenseSetFlags(out.array, host_dense_flag_normalized);
+            },
+            .int64 => |out| {
+                hostDenseSetFlags(out.array, host_dense_flag_normalized);
+            },
+            .float32 => |out| {
+                hostDenseSetFlags(out.array, host_dense_flag_normalized);
+            },
+            .float64 => |out| {
+                hostDenseSetFlags(out.array, host_dense_flag_normalized);
+            },
+        }
+
+        if (builder.validity_storage) |mask| {
+            const metadata = analyzeBitSlice(.{ .words = mask.words, .len = mask.len });
+            hostDenseSetFlags(mask.array, metadata.flags);
+            hostDenseSetCachedIntRange(mask.array, metadata.range);
+        }
+
+        if (builder.row_count != builder.total_rows) return error.Internal;
+        const data = builder.data orelse return error.Internal;
+        const validity = builder.validity;
+        builder.data = null;
+        builder.validity = null;
+        return .{
+            .name = builder.name,
+            .data = data,
+            .validity = validity,
+            .kind = builder.kind,
+        };
     }
 
     fn appendTableColumnBuilderRow(
@@ -19315,8 +23572,7 @@ pub const Session = struct {
     ) KError!void {
         if (comptime !runtime_has_duckdb) return error.Unsupported;
         const valid = chunk.rowIsValid(column_idx, row_idx);
-        try builder.validity.append(self.allocator, valid);
-        if (!valid) builder.saw_null = true;
+        try self.tableColumnBuilderAppendValidity(builder, 0, valid);
 
         switch (builder.kind) {
             .boolean => try builder.bool_values.append(
@@ -19340,13 +23596,23 @@ pub const Session = struct {
                 else
                     0,
             ),
-            .float => try builder.float_values.append(
-                self.allocator,
-                if (valid)
-                    chunk.rowFloat(column_idx, row_idx, builder.source_type) catch |err| return mapDuckDbError(err)
-                else
-                    0,
-            ),
+            .float => switch (builder.source_type) {
+                .float => try builder.float32_values.append(
+                    self.allocator,
+                    if (valid)
+                        @floatCast(chunk.rowFloat(column_idx, row_idx, builder.source_type) catch |err| return mapDuckDbError(err))
+                    else
+                        0,
+                ),
+                .double => try builder.float_values.append(
+                    self.allocator,
+                    if (valid)
+                        chunk.rowFloat(column_idx, row_idx, builder.source_type) catch |err| return mapDuckDbError(err)
+                    else
+                        0,
+                ),
+                else => return error.Unsupported,
+            },
             .string => try builder.string_values.append(
                 self.allocator,
                 if (valid)
@@ -19355,13 +23621,144 @@ pub const Session = struct {
                     try self.allocator.dupe(u8, ""),
             ),
         }
+        builder.row_count += 1;
+    }
+
+    fn appendTableColumnBuilderChunk(
+        self: *Session,
+        builder: *TableColumnBuilder,
+        chunk: *const duckdb_runtime.DataChunk,
+        column_idx: usize,
+    ) KError!void {
+        if (comptime !runtime_has_duckdb) return error.Unsupported;
+        const rows = chunk.rowCount();
+        try self.tableColumnBuilderEnsureValueCapacity(builder, rows);
+        if (builder.saw_null) try builder.validity.ensureUnusedCapacity(self.allocator, rows);
+
+        const validity = chunk.validity(column_idx);
+        switch (builder.kind) {
+            .boolean => {
+                const items: [*]const bool = @ptrCast(@alignCast(chunk.vectorData(column_idx) catch |err| return mapDuckDbError(err)));
+                for (0..rows) |row_idx| {
+                    const valid = duckDbValidityBit(validity, row_idx);
+                    try self.tableColumnBuilderAppendValidity(builder, row_idx, valid);
+                    builder.bool_values.appendAssumeCapacity(if (valid) items[row_idx] else false);
+                }
+            },
+            .int => {
+                const data = chunk.vectorData(column_idx) catch |err| return mapDuckDbError(err);
+                switch (builder.source_type) {
+                    .tinyint => {
+                        const items: [*]const i8 = @ptrCast(@alignCast(data));
+                        for (0..rows) |row_idx| {
+                            const valid = duckDbValidityBit(validity, row_idx);
+                            try self.tableColumnBuilderAppendValidity(builder, row_idx, valid);
+                            builder.int_values.appendAssumeCapacity(if (valid) items[row_idx] else 0);
+                        }
+                    },
+                    .smallint => {
+                        const items: [*]const i16 = @ptrCast(@alignCast(data));
+                        for (0..rows) |row_idx| {
+                            const valid = duckDbValidityBit(validity, row_idx);
+                            try self.tableColumnBuilderAppendValidity(builder, row_idx, valid);
+                            builder.int_values.appendAssumeCapacity(if (valid) items[row_idx] else 0);
+                        }
+                    },
+                    .integer => {
+                        const items: [*]const i32 = @ptrCast(@alignCast(data));
+                        for (0..rows) |row_idx| {
+                            const valid = duckDbValidityBit(validity, row_idx);
+                            try self.tableColumnBuilderAppendValidity(builder, row_idx, valid);
+                            builder.int_values.appendAssumeCapacity(if (valid) items[row_idx] else 0);
+                        }
+                    },
+                    .bigint => {
+                        const items: [*]const i64 = @ptrCast(@alignCast(data));
+                        for (0..rows) |row_idx| {
+                            const valid = duckDbValidityBit(validity, row_idx);
+                            try self.tableColumnBuilderAppendValidity(builder, row_idx, valid);
+                            builder.int_values.appendAssumeCapacity(if (valid) items[row_idx] else 0);
+                        }
+                    },
+                    .utinyint => {
+                        const items: [*]const u8 = @ptrCast(@alignCast(data));
+                        for (0..rows) |row_idx| {
+                            const valid = duckDbValidityBit(validity, row_idx);
+                            try self.tableColumnBuilderAppendValidity(builder, row_idx, valid);
+                            builder.int_values.appendAssumeCapacity(if (valid) items[row_idx] else 0);
+                        }
+                    },
+                    .usmallint => {
+                        const items: [*]const u16 = @ptrCast(@alignCast(data));
+                        for (0..rows) |row_idx| {
+                            const valid = duckDbValidityBit(validity, row_idx);
+                            try self.tableColumnBuilderAppendValidity(builder, row_idx, valid);
+                            builder.int_values.appendAssumeCapacity(if (valid) items[row_idx] else 0);
+                        }
+                    },
+                    .uinteger => {
+                        const items: [*]const u32 = @ptrCast(@alignCast(data));
+                        for (0..rows) |row_idx| {
+                            const valid = duckDbValidityBit(validity, row_idx);
+                            try self.tableColumnBuilderAppendValidity(builder, row_idx, valid);
+                            builder.int_values.appendAssumeCapacity(if (valid) items[row_idx] else 0);
+                        }
+                    },
+                    .ubigint => {
+                        const items: [*]const u64 = @ptrCast(@alignCast(data));
+                        for (0..rows) |row_idx| {
+                            const valid = duckDbValidityBit(validity, row_idx);
+                            try self.tableColumnBuilderAppendValidity(builder, row_idx, valid);
+                            builder.int_values.appendAssumeCapacity(if (valid)
+                                std.math.cast(i64, items[row_idx]) orelse return error.Unsupported
+                            else
+                                0);
+                        }
+                    },
+                    else => return error.Unsupported,
+                }
+            },
+            .float => {
+                const data = chunk.vectorData(column_idx) catch |err| return mapDuckDbError(err);
+                switch (builder.source_type) {
+                    .float => {
+                        const items: [*]const f32 = @ptrCast(@alignCast(data));
+                        for (0..rows) |row_idx| {
+                            const valid = duckDbValidityBit(validity, row_idx);
+                            try self.tableColumnBuilderAppendValidity(builder, row_idx, valid);
+                            builder.float32_values.appendAssumeCapacity(if (valid) items[row_idx] else 0);
+                        }
+                    },
+                    .double => {
+                        const items: [*]const f64 = @ptrCast(@alignCast(data));
+                        for (0..rows) |row_idx| {
+                            const valid = duckDbValidityBit(validity, row_idx);
+                            try self.tableColumnBuilderAppendValidity(builder, row_idx, valid);
+                            builder.float_values.appendAssumeCapacity(if (valid) items[row_idx] else 0);
+                        }
+                    },
+                    else => return error.Unsupported,
+                }
+            },
+            .date, .time, .time_ns, .time_tz, .timestamp, .timestamp_s, .timestamp_ms, .timestamp_ns, .timestamp_tz, .string => {
+                for (0..rows) |row_idx| {
+                    try self.appendTableColumnBuilderRow(builder, chunk, column_idx, row_idx);
+                }
+                return;
+            },
+        }
+        builder.row_count += rows;
     }
 
     fn finalizeTableColumnBuilder(self: *Session, builder: *TableColumnBuilder) KError!HostTableColumn {
         const data = switch (builder.kind) {
             .boolean => try self.createManagedHostBitArray(builder.bool_values.items),
             .int, .date, .time, .time_ns, .time_tz, .timestamp, .timestamp_s, .timestamp_ms, .timestamp_ns, .timestamp_tz => try self.createManagedHostIntArray(builder.int_values.items),
-            .float => try self.createManagedHostFloatArray(builder.float_values.items),
+            .float => switch (builder.source_type) {
+                .float => try self.createManagedHostFloat32Array(builder.float32_values.items),
+                .double => try self.createManagedHostFloatArray(builder.float_values.items),
+                else => return error.Unsupported,
+            },
             .string => try self.createManagedHostStringListFromSlices(builder.string_values.items),
         };
         errdefer self.releaseValue(data);
@@ -19380,7 +23777,73 @@ pub const Session = struct {
         };
     }
 
+    fn tryMaterializeQueryResultTableDirect(self: *Session, result: *duckdb_runtime.QueryResult) KError!?Value {
+        const row_count_hint = result.rowCount();
+        if (row_count_hint == 0) return null;
+
+        const column_count = result.columnCount();
+        const builders = try self.allocator.alloc(DirectTableColumnBuilder, column_count);
+        defer self.allocator.free(builders);
+
+        var initialized_builders: usize = 0;
+        errdefer {
+            for (0..initialized_builders) |idx| self.deinitDirectTableColumnBuilder(&builders[idx]);
+        }
+
+        for (0..column_count) |idx| {
+            const name_bytes = result.columnName(idx) catch |err| return mapDuckDbError(err);
+            defer self.allocator.free(name_bytes);
+            const type_id = result.columnTypeId(idx) catch |err| return mapDuckDbError(err);
+            const kind = try tableColumnKindFromDuckDbType(type_id);
+            builders[idx] = (try self.initDirectTableColumnBuilder(
+                try self.frozenHostSymbol(name_bytes),
+                type_id,
+                kind,
+                row_count_hint,
+            )) orelse {
+                for (0..initialized_builders) |builder_idx| self.deinitDirectTableColumnBuilder(&builders[builder_idx]);
+                return null;
+            };
+            initialized_builders += 1;
+        }
+
+        var row_count: usize = 0;
+        while (true) {
+            var chunk = result.fetchChunk() orelse break;
+            defer chunk.deinit();
+
+            row_count += chunk.rowCount();
+            if (row_count > row_count_hint) return error.Internal;
+            for (0..column_count) |column_idx| {
+                try self.appendDirectTableColumnChunk(&builders[column_idx], &chunk, column_idx);
+            }
+        }
+        if (row_count != row_count_hint) return error.Internal;
+
+        const columns = try self.allocator.alloc(HostTableColumn, column_count);
+        var built_columns: usize = 0;
+        errdefer {
+            for (0..built_columns) |idx| {
+                self.releaseValue(columns[idx].name);
+                self.releaseValue(columns[idx].data);
+                if (columns[idx].validity) |mask| self.releaseValue(mask);
+            }
+            self.allocator.free(columns);
+        }
+
+        for (0..column_count) |idx| {
+            columns[idx] = try self.finishDirectTableColumnBuilder(&builders[idx]);
+            built_columns += 1;
+            self.deinitDirectTableColumnBuilder(&builders[idx]);
+        }
+        initialized_builders = 0;
+
+        return try self.createManagedHostTable(row_count, columns);
+    }
+
     fn materializeQueryResultTable(self: *Session, result: *duckdb_runtime.QueryResult) KError!Value {
+        if (try self.tryMaterializeQueryResultTableDirect(result)) |table| return table;
+
         const column_count = result.columnCount();
         const builders = try self.allocator.alloc(TableColumnBuilder, column_count);
         defer self.allocator.free(builders);
@@ -19402,16 +23865,21 @@ pub const Session = struct {
             initialized_builders += 1;
         }
 
+        const row_count_hint = result.rowCount();
+        if (row_count_hint != 0) {
+            for (0..column_count) |idx| {
+                try self.tableColumnBuilderEnsureValueCapacity(&builders[idx], row_count_hint);
+            }
+        }
+
         var row_count: usize = 0;
         while (true) {
             var chunk = result.fetchChunk() orelse break;
             defer chunk.deinit();
 
             row_count += chunk.rowCount();
-            for (0..chunk.rowCount()) |row_idx| {
-                for (0..column_count) |column_idx| {
-                    try self.appendTableColumnBuilderRow(&builders[column_idx], &chunk, column_idx, row_idx);
-                }
+            for (0..column_count) |column_idx| {
+                try self.appendTableColumnBuilderChunk(&builders[column_idx], &chunk, column_idx);
             }
         }
 
@@ -19436,8 +23904,44 @@ pub const Session = struct {
         return try self.createManagedHostTable(row_count, columns);
     }
 
+    fn tryMaterializeQueryResultColumnDirect(self: *Session, result: *duckdb_runtime.QueryResult) KError!?Value {
+        if (result.columnCount() != 1) return error.Internal;
+        const row_count_hint = result.rowCount();
+        if (row_count_hint == 0) return null;
+
+        const name_bytes = result.columnName(0) catch |err| return mapDuckDbError(err);
+        defer self.allocator.free(name_bytes);
+        const type_id = result.columnTypeId(0) catch |err| return mapDuckDbError(err);
+        const kind = try tableColumnKindFromDuckDbType(type_id);
+
+        var builder = (try self.initDirectTableColumnBuilder(
+            try self.frozenHostSymbol(name_bytes),
+            type_id,
+            kind,
+            row_count_hint,
+        )) orelse return null;
+        defer self.deinitDirectTableColumnBuilder(&builder);
+
+        var row_count: usize = 0;
+        while (true) {
+            var chunk = result.fetchChunk() orelse break;
+            defer chunk.deinit();
+
+            row_count += chunk.rowCount();
+            if (row_count > row_count_hint) return error.Internal;
+            try self.appendDirectTableColumnChunk(&builder, &chunk, 0);
+        }
+        if (row_count != row_count_hint) return error.Internal;
+
+        const column = try self.finishDirectTableColumnBuilder(&builder);
+        self.releaseValue(column.name);
+        if (column.validity) |mask| self.releaseValue(mask);
+        return column.data;
+    }
+
     fn materializeQueryResultColumn(self: *Session, result: *duckdb_runtime.QueryResult) KError!Value {
         if (result.columnCount() != 1) return error.Internal;
+        if (try self.tryMaterializeQueryResultColumnDirect(result)) |column| return column;
 
         const name_bytes = result.columnName(0) catch |err| return mapDuckDbError(err);
         defer self.allocator.free(name_bytes);
@@ -19450,13 +23954,14 @@ pub const Session = struct {
         };
         defer self.deinitTableColumnBuilder(&builder);
 
+        const row_count_hint = result.rowCount();
+        if (row_count_hint != 0) try self.tableColumnBuilderEnsureValueCapacity(&builder, row_count_hint);
+
         while (true) {
             var chunk = result.fetchChunk() orelse break;
             defer chunk.deinit();
 
-            for (0..chunk.rowCount()) |row_idx| {
-                try self.appendTableColumnBuilderRow(&builder, &chunk, 0, row_idx);
-            }
+            try self.appendTableColumnBuilderChunk(&builder, &chunk, 0);
         }
 
         const column = try self.finalizeTableColumnBuilder(&builder);
@@ -19465,7 +23970,7 @@ pub const Session = struct {
         return column.data;
     }
 
-    fn relationTakeSql(self: *Session, relation: *const HostRelation, count: usize) KError![]u8 {
+    fn relationTakeSql(self: *Session, relation: *const HostRelation, count: ?usize) KError![]u8 {
         return switch (relation.origin) {
             .file => |file| blk: {
                 const quoted_path = duckdb_runtime.sqlStringLiteral(self.allocator, file.path) catch |err| return mapDuckDbError(err);
@@ -19475,17 +23980,27 @@ pub const Session = struct {
                     .parquet => try std.fmt.allocPrint(self.allocator, "read_parquet({s})", .{quoted_path}),
                 };
                 defer self.allocator.free(source_sql);
-                break :blk try std.fmt.allocPrint(
-                    self.allocator,
-                    "select * from {s} limit {d}",
-                    .{ source_sql, count },
-                );
+                break :blk if (count) |limit|
+                    try std.fmt.allocPrint(
+                        self.allocator,
+                        "select * from {s} limit {d}",
+                        .{ source_sql, limit },
+                    )
+                else
+                    try std.fmt.allocPrint(
+                        self.allocator,
+                        "select * from {s}",
+                        .{source_sql},
+                    );
             },
-            .sql => |sql_info| try std.fmt.allocPrint(
-                self.allocator,
-                "select * from ({s}) as kiwi_relation limit {d}",
-                .{ sql_info.text, count },
-            ),
+            .sql => |sql_info| if (count) |limit|
+                try std.fmt.allocPrint(
+                    self.allocator,
+                    "select * from ({s}) as kiwi_relation limit {d}",
+                    .{ sql_info.text, limit },
+                )
+            else
+                try self.allocator.dupe(u8, sql_info.text),
         };
     }
 
@@ -19517,8 +24032,12 @@ pub const Session = struct {
     }
 
     fn materializeRelationTake(self: *Session, raw_count: i64, relation: *const HostRelation) KError!Value {
-        if (raw_count < 0) return error.Unsupported;
-        const count: usize = @intCast(raw_count);
+        const count: ?usize = if (isKiwiIntNull(raw_count))
+            null
+        else blk: {
+            if (raw_count < 0) return error.Unsupported;
+            break :blk @as(usize, @intCast(raw_count));
+        };
         const sql = try self.relationTakeSql(relation, count);
         defer self.allocator.free(sql);
 
@@ -19580,7 +24099,7 @@ pub const Session = struct {
         else
             Value.fromBool(std.mem.indexOf(u8, haystack, needle) != null);
         if (comptime enable_string_instrumentation) {
-            self.string_perf.contains_helper_ns += @intCast(stringPerfNow() - helper_start);
+            stringPerfAdd(&self.string_perf.contains_helper_ns, helper_start);
         }
         return result;
     }
@@ -19630,24 +24149,260 @@ pub const Session = struct {
         return try self.managedHostString(&bytes);
     }
 
+    fn checkedDecodeStep(base: i64, digit: i64, acc: i64) KError!i64 {
+        const product = std.math.mul(i64, base, acc) catch return error.Unsupported;
+        return std.math.add(i64, product, digit) catch return error.Unsupported;
+    }
+
+    fn checkedAbsRadix(base: i64) KError!i64 {
+        if (base == std.math.minInt(i64)) return error.Unsupported;
+        return if (base < 0) -base else base;
+    }
+
+    fn decodeNumericBaseAt(left: Value, left_scalar: ?i64, row: usize) KError!i64 {
+        return left_scalar orelse try numericIntAt(left, row);
+    }
+
+    fn decodeNumericValues(self: *Session, left: Value, right: Value) KError!Value {
+        if (valueNumericMode(right) != .int) return error.Type;
+        const left_scalar = scalarIntLikeValue(left);
+        const left_len = if (left_scalar == null) numericVectorLen(left) orelse return error.Type else null;
+
+        if (scalarIntLikeValue(right)) |digit| {
+            const rows = left_len orelse 1;
+            var acc: i64 = 0;
+            for (0..rows) |row| {
+                acc = try checkedDecodeStep(try decodeNumericBaseAt(left, left_scalar, row), digit, acc);
+            }
+            return try self.intValue(acc);
+        }
+
+        if (valueNumericMatrixShape(right)) |shape| {
+            if (left_len) |len| {
+                if (len != shape.rows) return error.Type;
+            }
+            const out = try self.allocator.alloc(i64, shape.cols);
+            defer self.allocator.free(out);
+            for (0..shape.cols) |col| {
+                var acc: i64 = 0;
+                for (0..shape.rows) |row| {
+                    const digit = try numericIntAt(right, row * shape.cols + col);
+                    acc = try checkedDecodeStep(try decodeNumericBaseAt(left, left_scalar, row), digit, acc);
+                }
+                out[col] = acc;
+            }
+            return try self.createManagedHostIntArray(out);
+        }
+
+        const right_len = numericVectorLen(right) orelse return error.Type;
+        const rows = if (left_len) |len| blk: {
+            if (len != right_len) return error.Type;
+            break :blk len;
+        } else right_len;
+
+        var acc: i64 = 0;
+        for (0..rows) |row| {
+            const digit = try numericIntAt(right, row);
+            acc = try checkedDecodeStep(try decodeNumericBaseAt(left, left_scalar, row), digit, acc);
+        }
+        return try self.intValue(acc);
+    }
+
+    fn appendPositiveRadixDigits(self: *Session, out: *std.ArrayList(i64), base: i64, value: i64) KError!void {
+        if (base == 1) return;
+        if (base == 0) {
+            if (value == 0) return;
+            try out.append(self.allocator, if (value < 0) -1 else 0);
+            try out.append(self.allocator, value);
+            return;
+        }
+
+        var quotients = std.ArrayList(i64).empty;
+        defer quotients.deinit(self.allocator);
+
+        var current = value;
+        while (true) {
+            try quotients.append(self.allocator, current);
+            if (quotients.items.len > 1024) return error.Unsupported;
+            const next = @divFloor(current, base);
+            if (next == current) break;
+            current = next;
+        }
+
+        var first = true;
+        var idx = quotients.items.len;
+        while (idx > 0) {
+            idx -= 1;
+            var digit = @mod(quotients.items[idx], base);
+            if (first and digit == 0) {
+                first = false;
+                continue;
+            }
+            if (first and value < 0) digit = -digit;
+            first = false;
+            try out.append(self.allocator, digit);
+        }
+    }
+
+    fn appendNegativeRadixDigits(self: *Session, out: *std.ArrayList(i64), base: i64, value: i64) KError!void {
+        if (base == -1) {
+            if (value != 0) try out.append(self.allocator, 0);
+            return;
+        }
+
+        const abs_base = try checkedAbsRadix(base);
+        var reversed = std.ArrayList(i64).empty;
+        defer reversed.deinit(self.allocator);
+
+        var current: i128 = value;
+        const base_i128: i128 = base;
+        const abs_i128: i128 = abs_base;
+        while (current != 0) {
+            if (reversed.items.len > 1024) return error.Unsupported;
+            const digit_i128 = @mod(current, abs_i128);
+            const digit = std.math.cast(i64, digit_i128) orelse return error.Unsupported;
+            try reversed.append(self.allocator, digit);
+            current = @divExact(current - digit_i128, base_i128);
+        }
+
+        var idx = reversed.items.len;
+        while (idx > 0) {
+            idx -= 1;
+            try out.append(self.allocator, reversed.items[idx]);
+        }
+    }
+
+    fn encodeNumericScalarBaseValue(self: *Session, base: i64, value: i64) KError![]i64 {
+        var digits = std.ArrayList(i64).empty;
+        errdefer digits.deinit(self.allocator);
+
+        if (base >= 0) {
+            try self.appendPositiveRadixDigits(&digits, base, value);
+        } else {
+            try self.appendNegativeRadixDigits(&digits, base, value);
+        }
+        return try digits.toOwnedSlice(self.allocator);
+    }
+
+    fn encodeFixedNumericBaseInto(bases: Value, base_len: usize, value: i64, out: []i64, col: usize, cols: usize) KError!void {
+        var current: i128 = value;
+        var rev = base_len;
+        while (rev > 0) {
+            rev -= 1;
+            const base = try numericIntAt(bases, rev);
+            const abs_base = try checkedAbsRadix(base);
+            if (base == 0) {
+                out[rev * cols + col] = std.math.cast(i64, current) orelse return error.Unsupported;
+                continue;
+            }
+            if (abs_base == 1) {
+                out[rev * cols + col] = 0;
+                continue;
+            }
+            const digit_i128 = @mod(current, @as(i128, abs_base));
+            const digit = std.math.cast(i64, digit_i128) orelse return error.Unsupported;
+            out[rev * cols + col] = digit;
+            current = @divExact(current - digit_i128, @as(i128, base));
+        }
+    }
+
+    fn encodeNumericFixedBaseValues(self: *Session, left: Value, base_len: usize, right: Value) KError!Value {
+        if (base_len == 0) return error.Type;
+        if (scalarIntLikeValue(right)) |value| {
+            const out = try self.allocator.alloc(i64, base_len);
+            defer self.allocator.free(out);
+            try encodeFixedNumericBaseInto(left, base_len, value, out, 0, 1);
+            return try self.createManagedHostIntArray(out);
+        }
+
+        const cols = numericVectorLen(right) orelse return error.Type;
+        const out = try self.allocator.alloc(i64, base_len * cols);
+        defer self.allocator.free(out);
+        for (0..cols) |col| {
+            try encodeFixedNumericBaseInto(left, base_len, try numericIntAt(right, col), out, col, cols);
+        }
+        const value = try self.createManagedHostIntArray(out);
+        return try applyNonVectorNumericShapeToValue(self, value, numericShapeSnapshotMatrix(base_len, cols));
+    }
+
+    fn encodeNumericScalarBaseVector(self: *Session, base: i64, right: Value, cols: usize) KError!Value {
+        var flat_digits = std.ArrayList(i64).empty;
+        defer flat_digits.deinit(self.allocator);
+        var starts = std.ArrayList(usize).empty;
+        defer starts.deinit(self.allocator);
+        var lens = std.ArrayList(usize).empty;
+        defer lens.deinit(self.allocator);
+
+        var rows: usize = 0;
+        for (0..cols) |col| {
+            const digits = try self.encodeNumericScalarBaseValue(base, try numericIntAt(right, col));
+            defer self.allocator.free(digits);
+            try starts.append(self.allocator, flat_digits.items.len);
+            try lens.append(self.allocator, digits.len);
+            rows = @max(rows, digits.len);
+            try flat_digits.appendSlice(self.allocator, digits);
+        }
+
+        const out = try self.allocator.alloc(i64, rows * cols);
+        defer self.allocator.free(out);
+        @memset(out, 0);
+
+        const abs_base = try checkedAbsRadix(base);
+        for (0..cols) |col| {
+            const start = starts.items[col];
+            const len = lens.items[col];
+            const digits = flat_digits.items[start .. start + len];
+            if (len == 0) continue;
+
+            if (base > 1 and digits[0] < 0 and len < rows) {
+                out[col] = digits[0];
+                for (1..(rows - len + 1)) |row| out[row * cols + col] = abs_base - 1;
+                for (digits[1..], rows - len + 1..) |digit, row| out[row * cols + col] = digit;
+            } else {
+                const pad = rows - len;
+                for (digits, 0..) |digit, idx| out[(pad + idx) * cols + col] = digit;
+            }
+        }
+
+        const value = try self.createManagedHostIntArray(out);
+        return try applyNonVectorNumericShapeToValue(self, value, numericShapeSnapshotMatrix(rows, cols));
+    }
+
+    fn encodeNumericScalarBaseValues(self: *Session, base: i64, right: Value) KError!Value {
+        if (scalarIntLikeValue(right)) |value| {
+            const digits = try self.encodeNumericScalarBaseValue(base, value);
+            defer self.allocator.free(digits);
+            return try self.createManagedHostIntArray(digits);
+        }
+        const cols = numericVectorLen(right) orelse return error.Type;
+        return try self.encodeNumericScalarBaseVector(base, right, cols);
+    }
+
+    fn encodeNumericValues(self: *Session, left: Value, right: Value) KError!Value {
+        if (valueNumericMode(right) != .int) return error.Type;
+        if (scalarIntLikeValue(left)) |base| return try self.encodeNumericScalarBaseValues(base, right);
+        const base_len = numericVectorLen(left) orelse return error.Type;
+        return try self.encodeNumericFixedBaseValues(left, base_len, right);
+    }
+
     fn splitValues(self: *Session, left: Value, right: Value) KError!Value {
         const helper_start = stringPerfNow();
-        const sep = stringBytes(left) orelse return error.Type;
+        const sep = stringDelimiterBytes(left) orelse return error.Type;
         const src_info = stringSourceInfo(right) orelse return error.Type;
         const src = src_info.bytes();
         if (sep.len == 0) return error.Type;
 
         if (sep.len == 1 and src_info.span.start == 0 and src_info.span.len == src_info.base.len) {
             const search_start = stringPerfNow();
-            const parts = countScalarSplits(src, sep[0]);
+            const stats = countScalarSplits(src, sep[0]);
             if (comptime enable_string_instrumentation) {
-                self.string_perf.split_search_ns += @intCast(stringPerfNow() - search_start);
+                stringPerfAdd(&self.string_perf.split_search_ns, search_start);
             }
             const result_start = stringPerfNow();
-            const result = try self.createManagedHostStringListLazyScalar(src_info.base, sep[0], parts);
+            const result = try self.createManagedHostStringListLazyScalarWithDisplay(src_info.base, sep[0], stats.parts, stats.bytes_len, .split_list);
             if (comptime enable_string_instrumentation) {
-                self.string_perf.split_result_ns += @intCast(stringPerfNow() - result_start);
-                self.string_perf.split_helper_ns += @intCast(stringPerfNow() - helper_start);
+                stringPerfAdd(&self.string_perf.split_result_ns, result_start);
+                stringPerfAdd(&self.string_perf.split_helper_ns, helper_start);
             }
             return result;
         }
@@ -19660,7 +24415,7 @@ pub const Session = struct {
             const search_start = stringPerfNow();
             const maybe_idx = std.mem.indexOfPos(u8, src, start, sep);
             if (comptime enable_string_instrumentation) {
-                self.string_perf.split_search_ns += @intCast(stringPerfNow() - search_start);
+                stringPerfAdd(&self.string_perf.split_search_ns, search_start);
             }
             const idx = maybe_idx orelse break;
             const append_start = stringPerfNow();
@@ -19671,25 +24426,27 @@ pub const Session = struct {
                 },
             });
             if (comptime enable_string_instrumentation) {
-                self.string_perf.split_append_ns += @intCast(stringPerfNow() - append_start);
+                stringPerfAdd(&self.string_perf.split_append_ns, append_start);
             }
             start = idx + sep.len;
         }
-        const tail_append_start = stringPerfNow();
-        try parts.append(self.allocator, .{
-            .view = .{
-                .start = src_info.span.start + start,
-                .len = src.len - start,
-            },
-        });
-        if (comptime enable_string_instrumentation) {
-            self.string_perf.split_append_ns += @intCast(stringPerfNow() - tail_append_start);
+        if (src.len != start or (!isGrowlerLineSeparatorBytes(sep) and parts.items.len != 0)) {
+            const tail_append_start = stringPerfNow();
+            try parts.append(self.allocator, .{
+                .view = .{
+                    .start = src_info.span.start + start,
+                    .len = src.len - start,
+                },
+            });
+            if (comptime enable_string_instrumentation) {
+                stringPerfAdd(&self.string_perf.split_append_ns, tail_append_start);
+            }
         }
         const result_start = stringPerfNow();
-        const result = try self.createManagedHostStringListPieces(src_info.base, parts.items);
+        const result = try self.createManagedHostStringListPiecesWithDisplay(src_info.base, parts.items, .split_list);
         if (comptime enable_string_instrumentation) {
-            self.string_perf.split_result_ns += @intCast(stringPerfNow() - result_start);
-            self.string_perf.split_helper_ns += @intCast(stringPerfNow() - helper_start);
+            stringPerfAdd(&self.string_perf.split_result_ns, result_start);
+            stringPerfAdd(&self.string_perf.split_helper_ns, helper_start);
         }
         return result;
     }
@@ -19724,14 +24481,14 @@ pub const Session = struct {
 
     fn joinValues(self: *Session, left: Value, right: Value) KError!Value {
         const helper_start = stringPerfNow();
-        const sep = stringBytes(left) orelse return error.Type;
+        const sep = stringDelimiterBytes(left) orelse return error.Type;
         if (right.tag() != .array) return error.Type;
 
         switch (right.arrayKind()) {
             .host_string_list => {
                 const result = try self.joinHostStringList(right.asHostStringList(), sep);
                 if (comptime enable_string_instrumentation) {
-                    self.string_perf.join_helper_ns += @intCast(stringPerfNow() - helper_start);
+                    stringPerfAdd(&self.string_perf.join_helper_ns, helper_start);
                 }
                 return result;
             },
@@ -19744,7 +24501,7 @@ pub const Session = struct {
                 }
                 const result = try self.joinBoxedStringValues(boxed, sep, bytes_len);
                 if (comptime enable_string_instrumentation) {
-                    self.string_perf.join_helper_ns += @intCast(stringPerfNow() - helper_start);
+                    stringPerfAdd(&self.string_perf.join_helper_ns, helper_start);
                 }
                 return result;
             },
@@ -19778,10 +24535,9 @@ pub const Session = struct {
 
     fn joinLazyScalarSplit(self: *Session, list: *const HostStringList, split_sep: u8, join_sep: []const u8) KError!Value {
         const base = list.base orelse unreachable;
-        if (join_sep.len == 1 and join_sep[0] == split_sep) return try self.retainEscapedValue(Value.array(base));
-
         const sep_count = list.len -| 1;
         const total_len = std.math.add(usize, list.bytes_len, sep_count * join_sep.len) catch return error.Unsupported;
+        if (join_sep.len == 1 and join_sep[0] == split_sep and total_len == base.len) return try self.retainEscapedValue(Value.array(base));
 
         const result_start = stringPerfNow();
         const buf = try hostTextAllocSlice(self.allocator, total_len);
@@ -19790,102 +24546,28 @@ pub const Session = struct {
         const payload = hostTextBytesFromAlloc(buf, total_len);
 
         const src = hostTextBytes(base);
-        switch (join_sep.len) {
-            0 => {
-                var offset: usize = 0;
-                var start: usize = 0;
-                while (std.mem.indexOfScalarPos(u8, src, start, split_sep)) |idx| {
-                    const piece = src[start..idx];
-                    @memcpy(payload[offset .. offset + piece.len], piece);
-                    offset += piece.len;
-                    start = idx + 1;
-                }
-                const tail = src[start..];
-                @memcpy(payload[offset .. offset + tail.len], tail);
-                offset += tail.len;
-                std.debug.assert(offset == total_len);
-            },
-            1 => {
-                var offset: usize = 0;
-                var start: usize = 0;
-                var first = true;
-                while (std.mem.indexOfScalarPos(u8, src, start, split_sep)) |idx| {
-                    if (!first) {
-                        payload[offset] = join_sep[0];
-                        offset += 1;
-                    }
-                    first = false;
-                    const piece = src[start..idx];
-                    @memcpy(payload[offset .. offset + piece.len], piece);
-                    offset += piece.len;
-                    start = idx + 1;
-                }
-                if (!first) {
-                    payload[offset] = join_sep[0];
-                    offset += 1;
-                }
-                const tail = src[start..];
-                @memcpy(payload[offset .. offset + tail.len], tail);
-                offset += tail.len;
-                std.debug.assert(offset == total_len);
-            },
-            2 => {
-                var offset: usize = 0;
-                var start: usize = 0;
-                var first = true;
-                while (std.mem.indexOfScalarPos(u8, src, start, split_sep)) |idx| {
-                    if (!first) {
-                        payload[offset] = join_sep[0];
-                        payload[offset + 1] = join_sep[1];
-                        offset += 2;
-                    }
-                    first = false;
-                    const piece = src[start..idx];
-                    @memcpy(payload[offset .. offset + piece.len], piece);
-                    offset += piece.len;
-                    start = idx + 1;
-                }
-                if (!first) {
-                    payload[offset] = join_sep[0];
-                    payload[offset + 1] = join_sep[1];
-                    offset += 2;
-                }
-                const tail = src[start..];
-                @memcpy(payload[offset .. offset + tail.len], tail);
-                offset += tail.len;
-                std.debug.assert(offset == total_len);
-            },
-            else => {
-                var offset: usize = 0;
-                var start: usize = 0;
-                var first = true;
-                while (std.mem.indexOfScalarPos(u8, src, start, split_sep)) |idx| {
-                    if (!first) {
-                        @memcpy(payload[offset .. offset + join_sep.len], join_sep);
-                        offset += join_sep.len;
-                    }
-                    first = false;
-                    const piece = src[start..idx];
-                    @memcpy(payload[offset .. offset + piece.len], piece);
-                    offset += piece.len;
-                    start = idx + 1;
-                }
-                if (!first) {
-                    @memcpy(payload[offset .. offset + join_sep.len], join_sep);
-                    offset += join_sep.len;
-                }
-                const tail = src[start..];
-                @memcpy(payload[offset .. offset + tail.len], tail);
-                offset += tail.len;
-                std.debug.assert(offset == total_len);
-            },
+        var offset: usize = 0;
+        var start: usize = 0;
+        var piece_idx: usize = 0;
+        while (piece_idx < list.len) : (piece_idx += 1) {
+            const sep_idx = std.mem.indexOfScalarPos(u8, src, start, split_sep);
+            const end = sep_idx orelse src.len;
+            if (piece_idx != 0) {
+                @memcpy(payload[offset .. offset + join_sep.len], join_sep);
+                offset += join_sep.len;
+            }
+            const piece = src[start..end];
+            @memcpy(payload[offset .. offset + piece.len], piece);
+            offset += piece.len;
+            start = if (sep_idx) |idx| idx + 1 else src.len;
         }
+        std.debug.assert(offset == total_len);
         text.* = .{
             .header = HeapHeader.init(.host_string, .managed),
             .len = total_len,
         };
         if (comptime enable_string_instrumentation) {
-            self.string_perf.join_result_ns += @intCast(stringPerfNow() - result_start);
+            stringPerfAdd(&self.string_perf.join_result_ns, result_start);
         }
         return Value.array(text);
     }
@@ -19971,7 +24653,7 @@ pub const Session = struct {
             .len = total_len,
         };
         if (comptime enable_string_instrumentation) {
-            self.string_perf.join_result_ns += @intCast(stringPerfNow() - result_start);
+            stringPerfAdd(&self.string_perf.join_result_ns, result_start);
         }
         return Value.array(text);
     }
@@ -20048,7 +24730,7 @@ pub const Session = struct {
             .len = total_len,
         };
         if (comptime enable_string_instrumentation) {
-            self.string_perf.join_result_ns += @intCast(stringPerfNow() - result_start);
+            stringPerfAdd(&self.string_perf.join_result_ns, result_start);
         }
         return Value.array(text);
     }
@@ -20116,6 +24798,7 @@ pub const Session = struct {
         return switch (value.tag()) {
             .bool => value.asBool(),
             .int => value.asInt() != 0,
+            .float32 => value.asFloat32() != 0.0,
             .float => value.asFloat() != 0.0,
             else => null,
         };
@@ -20146,7 +24829,7 @@ pub const Session = struct {
             },
             .host_boxed_array => value.asHostBoxedArray().len(),
             .host_symbol => hostTextBytes(value.asHostSymbol()).len,
-            .host_string_list => value.asHostStringList().len,
+            .host_string_list, .host_symbol_list => value.asHostStringList().len,
             .host_keyed_store => blk: {
                 const store = value.asHostKeyedStore();
                 break :blk switch (store.layout) {
@@ -20175,6 +24858,7 @@ pub const Session = struct {
         return switch (value.tag()) {
             .bool => value.asBool(),
             .int => value.asInt() != 0,
+            .float32 => value.asFloat32() != 0.0,
             .float => value.asFloat() != 0.0,
             .builtin, .closure => true,
             .array => (branchTruthArrayLen(value) orelse return null) != 0,
@@ -20821,9 +25505,33 @@ pub const Session = struct {
         return if (stringSourceInfo(value)) |source| source.bytes() else null;
     }
 
+    fn stringDelimiterBytes(value: Value) ?[]const u8 {
+        if (stringBytes(value)) |bytes| return bytes;
+        if (boxedSingletonCharSourceInfo(value)) |source| return source.bytes();
+        return null;
+    }
+
     fn symbolBytes(value: Value) ?[]const u8 {
         if (value.tag() != .array or value.arrayKind() != .host_symbol) return null;
         return hostTextBytes(value.asHostSymbol());
+    }
+
+    fn isAllAxisSelectorValue(value: Value) bool {
+        const bytes = symbolBytes(value) orelse return false;
+        return std.mem.eql(u8, bytes, all_axis_selector_symbol);
+    }
+
+    fn allAxisSelectorValue(self: *Session) KError!Value {
+        return try self.frozenHostSymbol(all_axis_selector_symbol);
+    }
+
+    fn isSelectorPathMarkerValue(value: Value) bool {
+        const bytes = symbolBytes(value) orelse return false;
+        return std.mem.eql(u8, bytes, selector_path_marker_symbol);
+    }
+
+    fn selectorPathMarkerValue(self: *Session) KError!Value {
+        return try self.frozenHostSymbol(selector_path_marker_symbol);
     }
 
     pub fn displayMimeBundleForValue(self: *Session, value: Value) ?DisplayMimeBundle {
@@ -20858,6 +25566,46 @@ pub const Session = struct {
         return left == right;
     }
 
+    fn numericArrayMatchEqual(self: *Session, left: Value, right: Value) KError!?bool {
+        if (left.tag() != .array or right.tag() != .array) return null;
+        const left_mode = valueNumericMode(left) orelse return null;
+        const right_mode = valueNumericMode(right) orelse return null;
+        if (left_mode != right_mode) return false;
+
+        const left_shape = valueNumericBuilderShape(left) orelse return false;
+        const right_shape = valueNumericBuilderShape(right) orelse return false;
+        if (!numericShapeSnapshotEqual(left_shape, right_shape)) return false;
+
+        const len = try numericShapeSnapshotElementCount(left_shape);
+        const right_len = try numericShapeSnapshotElementCount(right_shape);
+        if (len != right_len) return false;
+
+        switch (left_mode) {
+            .int => for (0..len) |idx| {
+                if (try numericIntAt(left, idx) != try numericIntAt(right, idx)) return false;
+            },
+            .float => for (0..len) |idx| {
+                if (!floatMatchEqual(try numericFloatAt(left, idx), try numericFloatAt(right, idx))) return false;
+            },
+        }
+        _ = self;
+        return true;
+    }
+
+    fn derivedSequenceMatchEqual(self: *Session, left: Value, right: Value) KError!?bool {
+        const left_len = derivedSequenceLen(left) orelse return null;
+        const right_len = derivedSequenceLen(right) orelse return null;
+        if (left_len != right_len) return false;
+        for (0..left_len) |idx| {
+            const left_item = try self.derivedSequenceItemValue(left, idx);
+            defer self.releaseValue(left_item);
+            const right_item = try self.derivedSequenceItemValue(right, idx);
+            defer self.releaseValue(right_item);
+            if (!try self.valueMatchEqual(left_item, right_item)) return false;
+        }
+        return true;
+    }
+
     fn valueMatchEqual(self: *Session, left: Value, right: Value) KError!bool {
         if (tableScalarValue(left)) |scalar| {
             if (scalar.is_null) return tableScalarValue(right) != null and valueAsHostTableScalar(right).is_null and scalar.kind == valueAsHostTableScalar(right).kind;
@@ -20868,6 +25616,11 @@ pub const Session = struct {
             return try self.valueMatchEqual(left, scalar.value);
         }
 
+        if (left.tag() == .array and right.tag() == .array) {
+            if (try self.numericArrayMatchEqual(left, right)) |matched| return matched;
+            if (try self.derivedSequenceMatchEqual(left, right)) |matched| return matched;
+        }
+
         if (left.tag() != right.tag()) {
             const lhs = scalarIntLikeValue(left) orelse return false;
             const rhs = scalarIntLikeValue(right) orelse return false;
@@ -20876,6 +25629,7 @@ pub const Session = struct {
 
         return switch (left.tag()) {
             .int => left.asInt() == right.asInt(),
+            .float32 => floatMatchEqual(left.asFloat(), right.asFloat()),
             .float => floatMatchEqual(left.asFloat(), right.asFloat()),
             .bool => left.asBool() == right.asBool(),
             .builtin => left.asBuiltin() == right.asBuiltin(),
@@ -20913,6 +25667,18 @@ pub const Session = struct {
                         const left_item = try self.hostStringListItemValue(left_list, idx);
                         const right_item = try self.hostStringListItemValue(right_list, idx);
                         if (!try self.valueMatchEqual(left_item, right_item)) break :blk false;
+                    }
+                    break :blk true;
+                },
+                .host_symbol_list => blk: {
+                    if (right.arrayKind() != .host_symbol_list) break :blk false;
+                    const left_list = left.asHostStringList();
+                    const right_list = right.asHostStringList();
+                    if (left_list.len != right_list.len) break :blk false;
+                    for (0..left_list.len) |idx| {
+                        const left_item = try hostStringListItemBytes(left_list, idx);
+                        const right_item = try hostStringListItemBytes(right_list, idx);
+                        if (!std.mem.eql(u8, left_item, right_item)) break :blk false;
                     }
                     break :blk true;
                 },
@@ -20963,18 +25729,18 @@ pub const Session = struct {
 
     fn valueStructuralEqual(self: *Session, left: Value, right: Value) KError!bool {
         if (left.tag() != right.tag()) {
-            if ((left.tag() == .int or left.tag() == .bool or left.tag() == .float) and
-                (right.tag() == .int or right.tag() == .bool or right.tag() == .float))
+            if ((left.tag() == .int or left.tag() == .bool or left.tag() == .float or left.tag() == .float32) and
+                (right.tag() == .int or right.tag() == .bool or right.tag() == .float or right.tag() == .float32))
             {
-                if (left.tag() == .float or right.tag() == .float) {
+                if (left.tag() == .float or left.tag() == .float32 or right.tag() == .float or right.tag() == .float32) {
                     const lhs = switch (left.tag()) {
-                        .float => left.asFloat(),
+                        .float, .float32 => left.asFloat(),
                         .int => @as(f64, @floatFromInt(left.asInt())),
                         .bool => @as(f64, @floatFromInt(@intFromBool(left.asBool()))),
                         else => unreachable,
                     };
                     const rhs = switch (right.tag()) {
-                        .float => right.asFloat(),
+                        .float, .float32 => right.asFloat(),
                         .int => @as(f64, @floatFromInt(right.asInt())),
                         .bool => @as(f64, @floatFromInt(@intFromBool(right.asBool()))),
                         else => unreachable,
@@ -20987,6 +25753,7 @@ pub const Session = struct {
         }
         return switch (left.tag()) {
             .int => left.asInt() == right.asInt(),
+            .float32 => left.asFloat() == right.asFloat(),
             .float => left.asFloat() == right.asFloat(),
             .bool => left.asBool() == right.asBool(),
             .builtin => left.asBuiltin() == right.asBuiltin(),
@@ -21005,6 +25772,18 @@ pub const Session = struct {
                 else
                     false,
                 .host_symbol => right.arrayKind() == .host_symbol and std.mem.eql(u8, hostTextBytes(left.asHostSymbol()), hostTextBytes(right.asHostSymbol())),
+                .host_symbol_list => blk: {
+                    if (right.arrayKind() != .host_symbol_list) break :blk false;
+                    const left_list = left.asHostStringList();
+                    const right_list = right.asHostStringList();
+                    if (left_list.len != right_list.len) break :blk false;
+                    for (0..left_list.len) |idx| {
+                        const left_item = try hostStringListItemBytes(left_list, idx);
+                        const right_item = try hostStringListItemBytes(right_list, idx);
+                        if (!std.mem.eql(u8, left_item, right_item)) break :blk false;
+                    }
+                    break :blk true;
+                },
                 .host_boxed_array => blk: {
                     if (right.arrayKind() != .host_boxed_array) break :blk false;
                     const left_items = left.asHostBoxedArray().items;
@@ -21090,6 +25869,14 @@ pub const Session = struct {
 
         switch (value.tag()) {
             .int => try stringify.write(value.asInt()),
+            .float32 => {
+                const raw = value.asFloat32();
+                if (std.math.isFinite(raw)) {
+                    try stringify.write(raw);
+                } else {
+                    try stringify.write(null);
+                }
+            },
             .float => {
                 const raw = value.asFloat();
                 if (std.math.isFinite(raw)) {
@@ -21186,6 +25973,11 @@ pub const Session = struct {
                 defer self.allocator.free(rendered);
                 return try self.managedHostString(rendered);
             },
+            .float32 => {
+                const rendered = try formatFloat32Scalar(self.allocator, value.asFloat32());
+                defer self.allocator.free(rendered);
+                return try self.managedHostString(rendered);
+            },
             .bool => return try self.managedHostString(if (value.asBool()) "1" else "0"),
             .builtin => {
                 const bytes = [_]u8{builtinChar(value.asBuiltin())};
@@ -21272,12 +26064,25 @@ pub const Session = struct {
 
     fn appendProjectionClosureText(self: *Session, out: *std.ArrayList(u8), closure: *const Closure) KError!bool {
         const info = try self.projectionInfoFromClosure(closure) orelse return false;
-        if (info.callee.tag() == .builtin and info.slot_count == 2 and info.hole_mask == 0b10) {
-            const builtin = info.callee.asBuiltin();
-            if (builtin != .identity) {
-                try self.appendProjectionSlotText(out, info.slot_values[0]);
-                try out.append(self.allocator, builtinChar(builtin));
-                return true;
+        if (info.slot_count == 2 and info.hole_mask == 0b10) {
+            switch (info.callee.tag()) {
+                .builtin => {
+                    const builtin = info.callee.asBuiltin();
+                    if (builtin != .identity) {
+                        try self.appendProjectionSlotText(out, info.slot_values[0]);
+                        try out.append(self.allocator, builtinChar(builtin));
+                        return true;
+                    }
+                },
+                .closure => {
+                    const callee_closure = info.callee.asClosure();
+                    if (closureIsInnerProduct(callee_closure) or closureDerivedKind(callee_closure) != null) {
+                        try self.appendProjectionSlotText(out, info.slot_values[0]);
+                        if (!try self.appendCallableText(out, info.callee)) return false;
+                        return true;
+                    }
+                },
+                else => {},
             }
         }
         if (!try self.appendCallableText(out, info.callee)) return false;
@@ -21313,6 +26118,18 @@ pub const Session = struct {
         return null;
     }
 
+    fn createManagedEmptyIntMatrix(self: *Session) KError!Value {
+        const value = try self.createManagedHostIntArray(&.{});
+        errdefer self.releaseValue(value);
+        return try applyNonVectorNumericShapeToValue(self, value, numericShapeSnapshotMatrix(0, 0));
+    }
+
+    fn createManagedEmptyFloatMatrix(self: *Session) KError!Value {
+        const value = try self.createManagedHostFloatArray(&.{});
+        errdefer self.releaseValue(value);
+        return try applyNonVectorNumericShapeToValue(self, value, numericShapeSnapshotMatrix(0, 0));
+    }
+
     fn truncFloatToInt64(value: f64) KError!i64 {
         if (!std.math.isFinite(value)) return error.Type;
         const truncated = @trunc(value);
@@ -21324,17 +26141,35 @@ pub const Session = struct {
 
     fn castValueToInt(self: *Session, value: Value) KError!Value {
         if (stringBytes(value)) |text| {
-            const parsed_int = std.fmt.parseInt(i64, text, 10) catch |parse_int_err| switch (parse_int_err) {
-                error.InvalidCharacter => blk: {
-                    const parsed_float = std.fmt.parseFloat(f64, text) catch return error.Type;
-                    break :blk try truncFloatToInt64(parsed_float);
-                },
-                else => return error.Type,
-            };
-            return try self.intValue(parsed_int);
+            if (text.len == 1) return try self.intValue(castByteToSignedInt(text[0]));
+            var out = std.ArrayList(i64).empty;
+            defer out.deinit(self.allocator);
+            try out.ensureTotalCapacity(self.allocator, text.len);
+            for (text) |byte| try out.append(self.allocator, castByteToSignedInt(byte));
+            return try self.createManagedHostIntArray(out.items);
+        }
+
+        if (value.tag() == .array and value.arrayKind() == .host_string_list) {
+            return try self.castHostStringListToInt(value.asHostStringList());
+        }
+
+        if (boxedArrayItems(value)) |items| {
+            if (items.len == 0) return try self.createManagedEmptyIntMatrix();
+            const out = try self.allocator.alloc(Value, items.len);
+            var initialized: usize = 0;
+            defer {
+                for (out[0..initialized]) |item| self.releaseValue(item);
+                self.allocator.free(out);
+            }
+            for (items, 0..) |item, idx| {
+                out[idx] = try self.castValueToInt(item);
+                initialized += 1;
+            }
+            return try self.makeArrayFromValues(out);
         }
 
         if (scalarIntLikeValue(value)) |int_value| return try self.intValue(int_value);
+        if (value.tag() == .float32) return try self.intValue(try truncFloatToInt64(value.asFloat()));
         if (value.tag() == .float) return try self.intValue(try truncFloatToInt64(value.asFloat()));
 
         const mode = valueNumericMode(value) orelse return error.Type;
@@ -21350,13 +26185,231 @@ pub const Session = struct {
         return try applyNonVectorNumericShapeToValue(self, casted, valueNonVectorNumericShape(value));
     }
 
-    fn castValueToFloat(self: *Session, value: Value) KError!Value {
+    fn parseIntTextOrNull(text: []const u8) i64 {
+        return std.fmt.parseInt(i64, text, 10) catch kiwi_int_null;
+    }
+
+    fn castValueToParsedInt(self: *Session, value: Value) KError!Value {
         if (stringBytes(value)) |text| {
-            const parsed = std.fmt.parseFloat(f64, text) catch return error.Type;
-            return try self.floatValue(parsed);
+            return try self.intValue(parseIntTextOrNull(text));
         }
 
-        if (scalarNumericFloatValue(value)) |float_value| return try self.floatValue(float_value);
+        if (value.tag() == .array and value.arrayKind() == .host_string_list) {
+            const list = value.asHostStringList();
+            var out = std.ArrayList(i64).empty;
+            defer out.deinit(self.allocator);
+            try out.ensureTotalCapacity(self.allocator, list.len);
+            for (0..list.len) |idx| {
+                const text = try hostStringListItemBytes(list, idx);
+                try out.append(self.allocator, parseIntTextOrNull(text));
+            }
+            return try self.createManagedHostIntArray(out.items);
+        }
+
+        const items = boxedArrayItems(value) orelse return error.Type;
+        var out = std.ArrayList(i64).empty;
+        defer out.deinit(self.allocator);
+        try out.ensureTotalCapacity(self.allocator, items.len);
+        for (items) |item| {
+            const text = stringBytes(item) orelse return error.Type;
+            try out.append(self.allocator, parseIntTextOrNull(text));
+        }
+        return try self.createManagedHostIntArray(out.items);
+    }
+
+    fn parseFloatTextOrNull(text: []const u8) f64 {
+        if (text.len == 0 or std.mem.eql(u8, text, "0n")) return kiwiFloatNull();
+        if (std.mem.eql(u8, text, "0w")) return std.math.inf(f64);
+        if (std.mem.eql(u8, text, "-0w")) return -std.math.inf(f64);
+        return std.fmt.parseFloat(f64, text) catch kiwiFloatNull();
+    }
+
+    fn castIntToByte(value: i64) u8 {
+        return @truncate(@as(u64, @bitCast(value)));
+    }
+
+    fn castByteToSignedInt(value: u8) i64 {
+        return signedByteToInt(value);
+    }
+
+    fn castHostStringListToInt(self: *Session, list: *const HostStringList) KError!Value {
+        if (list.len == 0) return try self.createManagedHostIntArray(&.{});
+
+        const first = try hostStringListItemBytes(list, 0);
+        const cols = first.len;
+        const total = std.math.mul(usize, list.len, cols) catch return error.Unsupported;
+
+        var out = std.ArrayList(i64).empty;
+        defer out.deinit(self.allocator);
+        try out.ensureTotalCapacity(self.allocator, total);
+
+        for (0..list.len) |row| {
+            const text = try hostStringListItemBytes(list, row);
+            if (text.len != cols) return error.Type;
+            for (text) |byte| try out.append(self.allocator, castByteToSignedInt(byte));
+        }
+
+        const casted = try self.createManagedHostIntArray(out.items);
+        return try applyNonVectorNumericShapeToValue(self, casted, numericShapeSnapshotMatrix(list.len, cols));
+    }
+
+    fn castHostStringListToFloatBytes(self: *Session, list: *const HostStringList) KError!Value {
+        if (list.len == 0) return try self.createManagedHostFloatArray(&.{});
+
+        const first = try hostStringListItemBytes(list, 0);
+        const cols = first.len;
+        const total = std.math.mul(usize, list.len, cols) catch return error.Unsupported;
+
+        var out = std.ArrayList(f64).empty;
+        defer out.deinit(self.allocator);
+        try out.ensureTotalCapacity(self.allocator, total);
+
+        for (0..list.len) |row| {
+            const text = try hostStringListItemBytes(list, row);
+            if (text.len != cols) return error.Type;
+            for (text) |byte| try out.append(self.allocator, @floatFromInt(castByteToSignedInt(byte)));
+        }
+
+        const casted = try self.createManagedHostFloatArray(out.items);
+        return try applyNonVectorNumericShapeToValue(self, casted, numericShapeSnapshotMatrix(list.len, cols));
+    }
+
+    fn castHostStringListToParsedFloat(self: *Session, list: *const HostStringList) KError!Value {
+        var out = std.ArrayList(f64).empty;
+        defer out.deinit(self.allocator);
+        try out.ensureTotalCapacity(self.allocator, list.len);
+        for (0..list.len) |idx| {
+            const text = try hostStringListItemBytes(list, idx);
+            try out.append(self.allocator, parseFloatTextOrNull(text));
+        }
+        return try self.createManagedHostFloatArray(out.items);
+    }
+
+    fn castNumericMatrixToCharRows(self: *Session, value: Value, shape: NumericShapeSnapshot, mode: HostDenseElem, len: usize) KError!Value {
+        const rows: usize = @intCast(shape.shape[0]);
+        const cols: usize = @intCast(shape.shape[1]);
+        const total = std.math.mul(usize, rows, cols) catch return error.Unsupported;
+        if (total != len) return error.Internal;
+
+        const bytes = try self.allocator.alloc(u8, total);
+        defer self.allocator.free(bytes);
+        switch (mode) {
+            .int => {
+                for (0..len) |idx| bytes[idx] = castIntToByte(try numericIntAt(value, idx));
+            },
+            .float => {
+                for (0..len) |idx| bytes[idx] = castIntToByte(try truncFloatToInt64(try numericFloatAt(value, idx)));
+            },
+        }
+
+        const row_slices = try self.allocator.alloc([]const u8, rows);
+        defer self.allocator.free(row_slices);
+        for (0..rows) |row| {
+            const start = row * cols;
+            row_slices[row] = bytes[start .. start + cols];
+        }
+        return try self.createManagedHostStringRowsFromSlices(row_slices);
+    }
+
+    fn boxedItemsToCharScalarString(self: *Session, items: []const Value) KError!?Value {
+        if (items.len == 0) return null;
+        var out = std.ArrayList(u8).empty;
+        defer out.deinit(self.allocator);
+        try out.ensureTotalCapacity(self.allocator, items.len);
+        for (items) |item| {
+            if (scalarIntLikeValue(item)) |int_value| {
+                try out.append(self.allocator, castIntToByte(int_value));
+            } else if (item.tag() == .float or item.tag() == .float32) {
+                try out.append(self.allocator, castIntToByte(try truncFloatToInt64(item.asFloat())));
+            } else if (stringBytes(item)) |text| {
+                if (text.len != 1) return null;
+                try out.append(self.allocator, text[0]);
+            } else {
+                return null;
+            }
+        }
+        return try self.managedHostString(out.items);
+    }
+
+    fn castValueToChar(self: *Session, value: Value) KError!Value {
+        if (stringBytes(value)) |text| return try self.managedHostString(text);
+
+        if (scalarIntLikeValue(value)) |int_value| {
+            const bytes = [_]u8{castIntToByte(int_value)};
+            return try self.managedHostString(&bytes);
+        }
+        if (value.tag() == .float or value.tag() == .float32) {
+            const bytes = [_]u8{castIntToByte(try truncFloatToInt64(value.asFloat()))};
+            return try self.managedHostString(&bytes);
+        }
+
+        if (boxedArrayItems(value)) |items| {
+            if (items.len == 0) return try self.createManagedHostBoxedArray(&.{});
+            if (try self.boxedItemsToCharScalarString(items)) |scalar_string| return scalar_string;
+
+            const out = try self.allocator.alloc(Value, items.len);
+            var initialized: usize = 0;
+            defer {
+                for (out[0..initialized]) |item| self.releaseValue(item);
+                self.allocator.free(out);
+            }
+            for (items, 0..) |item, idx| {
+                out[idx] = try self.castValueToChar(item);
+                initialized += 1;
+            }
+            return try self.makeArrayFromValues(out);
+        }
+
+        const mode = valueNumericMode(value) orelse return error.Type;
+        const len = numericFlatLen(value) orelse return error.Type;
+        if (valueNonVectorNumericShape(value)) |shape| {
+            if (shape.rank == 2) return try self.castNumericMatrixToCharRows(value, shape, mode, len);
+        }
+
+        var out = std.ArrayList(u8).empty;
+        defer out.deinit(self.allocator);
+        try out.ensureTotalCapacity(self.allocator, len);
+        switch (mode) {
+            .int => for (0..len) |idx| try out.append(self.allocator, castIntToByte(try numericIntAt(value, idx))),
+            .float => for (0..len) |idx| try out.append(self.allocator, castIntToByte(try truncFloatToInt64(try numericFloatAt(value, idx)))),
+        }
+        return try self.managedHostString(out.items);
+    }
+
+    fn castValueToFloat(self: *Session, value: Value) KError!Value {
+        if (stringBytes(value)) |text| {
+            if (text.len == 1) return try self.floatValue(@floatFromInt(castByteToSignedInt(text[0])));
+            var out = std.ArrayList(f64).empty;
+            defer out.deinit(self.allocator);
+            try out.ensureTotalCapacity(self.allocator, text.len);
+            for (text) |byte| try out.append(self.allocator, @floatFromInt(castByteToSignedInt(byte)));
+            return try self.createManagedHostFloatArray(out.items);
+        }
+
+        if (value.tag() == .array and value.arrayKind() == .host_string_list) {
+            return try self.castHostStringListToFloatBytes(value.asHostStringList());
+        }
+
+        if (boxedArrayItems(value)) |items| {
+            if (items.len == 0) return try self.createManagedEmptyFloatMatrix();
+            const out = try self.allocator.alloc(Value, items.len);
+            var initialized: usize = 0;
+            defer {
+                for (out[0..initialized]) |item| self.releaseValue(item);
+                self.allocator.free(out);
+            }
+            for (items, 0..) |item, idx| {
+                out[idx] = try self.castValueToFloat(item);
+                initialized += 1;
+            }
+            return try self.makeArrayFromValues(out);
+        }
+
+        if (scalarIntLikeValue(value)) |int_value| {
+            return try self.floatValue(if (isKiwiIntNull(int_value)) kiwiFloatNull() else @as(f64, @floatFromInt(int_value)));
+        }
+        if (value.tag() == .float32) return try self.floatValue(value.asFloat());
+        if (value.tag() == .float) return try self.floatValue(value.asFloat());
 
         const mode = valueNumericMode(value) orelse return error.Type;
         const len = numericFlatLen(value) orelse return error.Type;
@@ -21364,11 +26417,100 @@ pub const Session = struct {
         defer out.deinit(self.allocator);
         try out.ensureTotalCapacity(self.allocator, len);
         switch (mode) {
-            .int => for (0..len) |idx| try out.append(self.allocator, @floatFromInt(try numericIntAt(value, idx))),
+            .int => for (0..len) |idx| {
+                const int_value = try numericIntAt(value, idx);
+                try out.append(self.allocator, if (isKiwiIntNull(int_value)) kiwiFloatNull() else @as(f64, @floatFromInt(int_value)));
+            },
             .float => for (0..len) |idx| try out.append(self.allocator, try numericFloatAt(value, idx)),
         }
         const casted = try self.createManagedHostFloatArray(out.items);
         return try applyNonVectorNumericShapeToValue(self, casted, valueNonVectorNumericShape(value));
+    }
+
+    fn castValueToFloat32(self: *Session, value: Value) KError!Value {
+        if (scalarIntLikeValue(value)) |int_value| {
+            return try self.float32Value(if (isKiwiIntNull(int_value)) kiwiFloat32Null() else @as(f32, @floatFromInt(int_value)));
+        }
+        if (value.tag() == .float32) return self.shareValue(value);
+        if (value.tag() == .float) return try self.float32Value(@floatCast(value.asFloat()));
+
+        const mode = valueNumericMode(value) orelse return error.Type;
+        const len = numericFlatLen(value) orelse return error.Type;
+        var out = std.ArrayList(f32).empty;
+        defer out.deinit(self.allocator);
+        try out.ensureTotalCapacity(self.allocator, len);
+        switch (mode) {
+            .int => for (0..len) |idx| {
+                const int_value = try numericIntAt(value, idx);
+                try out.append(self.allocator, if (isKiwiIntNull(int_value)) kiwiFloat32Null() else @as(f32, @floatFromInt(int_value)));
+            },
+            .float => for (0..len) |idx| try out.append(self.allocator, @floatCast(try numericFloatAt(value, idx))),
+        }
+        const casted = try self.createManagedHostFloat32Array(out.items);
+        return try applyNonVectorNumericShapeToValue(self, casted, valueNonVectorNumericShape(value));
+    }
+
+    fn castValueToParsedFloat(self: *Session, value: Value) KError!Value {
+        if (stringBytes(value)) |text| {
+            return try self.floatValue(parseFloatTextOrNull(text));
+        }
+
+        if (value.tag() == .array and value.arrayKind() == .host_string_list) {
+            return try self.castHostStringListToParsedFloat(value.asHostStringList());
+        }
+
+        if (boxedArrayItems(value)) |items| {
+            if (items.len == 0) return try self.createManagedHostFloatArray(&.{});
+            const out = try self.allocator.alloc(Value, items.len);
+            var initialized: usize = 0;
+            defer {
+                for (out[0..initialized]) |item| self.releaseValue(item);
+                self.allocator.free(out);
+            }
+            for (items, 0..) |item, idx| {
+                out[idx] = try self.castValueToParsedFloat(item);
+                initialized += 1;
+            }
+            return try self.makeArrayFromValues(out);
+        }
+
+        return try self.castValueToFloat(value);
+    }
+
+    fn castValueToSymbol(self: *Session, value: Value) KError!Value {
+        if (stringBytes(value)) |text| return try self.managedHostSymbol(text);
+        if (symbolBytes(value)) |text| return try self.managedHostSymbol(text);
+
+        if (value.tag() == .array and value.arrayKind() == .host_string_list) {
+            const list = value.asHostStringList();
+            const slices = try self.allocator.alloc([]const u8, list.len);
+            defer self.allocator.free(slices);
+            for (0..list.len) |idx| slices[idx] = try hostStringListItemBytes(list, idx);
+            return try self.createManagedHostSymbolListFromSlices(slices);
+        }
+        if (value.tag() == .array and value.arrayKind() == .host_symbol_list) {
+            const list = value.asHostStringList();
+            const slices = try self.allocator.alloc([]const u8, list.len);
+            defer self.allocator.free(slices);
+            for (0..list.len) |idx| slices[idx] = try hostStringListItemBytes(list, idx);
+            return try self.createManagedHostSymbolListFromSlices(slices);
+        }
+
+        if (boxedArrayItems(value)) |items| {
+            if (items.len == 0) return try self.createManagedHostSymbolListFromSlices(&.{});
+            if (items.len == 1) {
+                if (stringBytes(items[0]) != null or symbolBytes(items[0]) != null) return try self.castValueToSymbol(items[0]);
+            }
+
+            const slices = try self.allocator.alloc([]const u8, items.len);
+            defer self.allocator.free(slices);
+            for (items, 0..) |item, idx| {
+                slices[idx] = stringBytes(item) orelse symbolBytes(item) orelse return error.Type;
+            }
+            return try self.createManagedHostSymbolListFromSlices(slices);
+        }
+
+        return error.Type;
     }
 
     fn castValueToBackendDtype(self: *Session, value: Value, target_dtype: c.mlx_dtype) KError!Value {
@@ -21384,8 +26526,23 @@ pub const Session = struct {
         if (std.mem.eql(u8, kind, "i") or std.mem.eql(u8, kind, "int") or std.mem.eql(u8, kind, "int32")) {
             return try self.castValueToInt(right);
         }
+        if (std.mem.eql(u8, kind, "I")) {
+            return try self.castValueToParsedInt(right);
+        }
+        if (std.mem.eql(u8, kind, "F")) {
+            return try self.castValueToParsedFloat(right);
+        }
+        if (std.mem.eql(u8, kind, "c") or std.mem.eql(u8, kind, "char")) {
+            return try self.castValueToChar(right);
+        }
         if (std.mem.eql(u8, kind, "n") or std.mem.eql(u8, kind, "f") or std.mem.eql(u8, kind, "float")) {
             return try self.castValueToFloat(right);
+        }
+        if (std.mem.eql(u8, kind, "e") or std.mem.eql(u8, kind, "real")) {
+            return try self.castValueToFloat32(right);
+        }
+        if (kind.len == 0 or std.mem.eql(u8, kind, "s") or std.mem.eql(u8, kind, "symbol")) {
+            return try self.castValueToSymbol(right);
         }
         if (castTagBackendDtype(kind)) |target_dtype| {
             return try self.castValueToBackendDtype(right, target_dtype);
@@ -21396,6 +26553,11 @@ pub const Session = struct {
     fn evalStringValue(self: *Session, value: Value) KError!Value {
         if (stringBytes(value)) |text| return try self.evalSourceIsolated(text);
         if (symbolBytes(value)) |name| return self.retainValue(try self.loadGlobalNamedValue(name));
+        if (value.tag() == .array and value.arrayKind() == .host_symbol_list) {
+            const name = (try self.symbolTargetName(value)) orelse return error.Type;
+            defer self.releaseSymbolTargetName(name);
+            return self.retainValue(try self.loadGlobalNamedValue(name.bytes));
+        }
         return error.Type;
     }
 
@@ -21940,6 +27102,7 @@ pub const Session = struct {
     fn randomDyadValue(self: *Session, count_value: i64, right: Value) KError!Value {
         return switch (right.tag()) {
             .int => try self.randomIntValue(count_value, right.asInt()),
+            .float32 => try self.randomScaleFloatValue(count_value, right.asFloat()),
             .float => try self.randomScaleFloatValue(count_value, right.asFloat()),
             .array => if (stringBytes(right)) |text|
                 try self.randomSelectStringValue(count_value, text)
@@ -22135,6 +27298,13 @@ pub const Session = struct {
     }
 
     fn findFirstEqualDenseFloatSlice(items: []const f64, query: f64) ?usize {
+        if (comptime enable_host_find_vectorized) {
+            if (items.len >= host_find_vector_min_len) {
+                const found = kiwi_host_find_f64(items.ptr, items.len, query);
+                return if (found < items.len) found else null;
+            }
+        }
+
         const lane_count = dense_host_simd_bytes / @sizeOf(f64);
         const Vec = @Vector(lane_count, f64);
         const query_vec: Vec = @splat(query);
@@ -22157,6 +27327,22 @@ pub const Session = struct {
     }
 
     fn findFirstEqualDenseIntSlice(comptime T: type, items: []const T, query: T) ?usize {
+        if (comptime enable_host_find_vectorized) {
+            if (items.len >= host_find_vector_min_len) {
+                const found = if (comptime T == i8)
+                    kiwi_host_find_i8(items.ptr, items.len, query)
+                else if (comptime T == i16)
+                    kiwi_host_find_i16(items.ptr, items.len, query)
+                else if (comptime T == i32)
+                    kiwi_host_find_i32(items.ptr, items.len, query)
+                else if (comptime T == i64)
+                    kiwi_host_find_i64(items.ptr, items.len, query)
+                else
+                    @compileError("unsupported dense int find type");
+                return if (found < items.len) found else null;
+            }
+        }
+
         const lane_count = dense_host_simd_bytes / @sizeOf(T);
         const Vec = @Vector(lane_count, T);
         const query_vec: Vec = @splat(query);
@@ -22240,7 +27426,7 @@ pub const Session = struct {
                 if (end > logical_items.len) return null;
                 return findFirstEqualDenseIntSlice(i64, logical_items[view.start..end], query);
             },
-            .float64 => return null,
+            .float32, .float64 => return null,
         }
     }
 
@@ -22599,7 +27785,7 @@ pub const Session = struct {
             .int16 => |items| for (hostDenseLogicalItems(i16, array, items), 0..) |item, idx| denseFindLookupInsert(keys, slots, capacity - 1, intFindHashKey(item), idx),
             .int32 => |items| for (hostDenseLogicalItems(i32, array, items), 0..) |item, idx| denseFindLookupInsert(keys, slots, capacity - 1, intFindHashKey(item), idx),
             .int64 => |items| for (hostDenseLogicalItems(i64, array, items), 0..) |item, idx| denseFindLookupInsert(keys, slots, capacity - 1, intFindHashKey(item), idx),
-            .float64 => return false,
+            .float32, .float64 => return false,
         }
 
         const cache = try self.ensureManagedHostDenseFindCache(array);
@@ -23659,7 +28845,7 @@ pub const Session = struct {
             }
             if (matched) return try self.intValue(@intCast(row_idx));
         }
-        return try self.intValue(@intCast(shape.rows));
+        return try self.intNullValue();
     }
 
     fn tryFastBackendNumericVectorFindValue(self: *Session, left: Value, right: Value) KError!?Value {
@@ -23808,72 +28994,230 @@ pub const Session = struct {
         return left_len <= left_host_limit;
     }
 
+    fn normalizeFindMissResult(self: *Session, result: Value, miss_index: usize, query_len: usize) KError!Value {
+        const miss_i64 = std.math.cast(i64, miss_index) orelse return error.Unsupported;
+        if (query_len == 1) {
+            const item = scalarIntLikeValue(result) orelse blk: {
+                if (valueNumericMode(result) != .int) return error.Type;
+                break :blk try numericIntAt(result, 0);
+            };
+            return if (item == miss_i64) try self.intNullValue() else try self.intValue(item);
+        }
+
+        const items = try self.allocator.alloc(i64, query_len);
+        defer self.allocator.free(items);
+        for (0..query_len) |idx| {
+            const item = try numericIntAt(result, idx);
+            items[idx] = if (item == miss_i64) kiwi_int_null else item;
+        }
+        return try self.createManagedHostIntArray(items);
+    }
+
     fn findNumericVectorValue(self: *Session, left: Value, right: Value) KError!?Value {
         if (valueNumericMode(left) == null or valueNumericMatrixShape(left) != null) return null;
         const left_len = numericFlatLen(left) orelse return null;
         const query_len = numericRowQueryLen(right) orelse return null;
         if (!backendResidentNumericVectorFindPrefersHost(self, left, right, left_len, query_len)) {
-            if (try self.tryFastBackendNumericVectorFindValue(left, right)) |result| return result;
+            if (try self.tryFastBackendNumericVectorFindValue(left, right)) |result| {
+                defer self.releaseValue(result);
+                return try self.normalizeFindMissResult(result, left_len, query_len);
+            }
         }
         if (query_len == 1 and
             numericValueSupportsStructuralFlatItemsWithoutHost(left) and
             numericValueSupportsStructuralFlatItemsWithoutHost(right))
         {
             if (try self.tryFastHostNumericVectorFindScalarIndex(left, right, left_len)) |idx| {
-                return try self.intValue(@intCast(idx));
+                return if (idx == left_len) try self.intNullValue() else try self.intValue(@intCast(idx));
             }
         }
         if (valueNumericHandle(left)) |handle| _ = try tryEnsureHostRealizationForHandle(self, @constCast(handle));
         if (valueNumericHandle(right)) |handle| _ = try tryEnsureHostRealizationForHandle(self, @constCast(handle));
         if (query_len == 1) {
             if (try self.tryFastHostNumericVectorFindScalarIndex(left, right, left_len)) |idx| {
-                return try self.intValue(@intCast(idx));
+                return if (idx == left_len) try self.intNullValue() else try self.intValue(@intCast(idx));
             }
         }
         if (query_len != 1) {
             if (try self.tryFastHostNumericVectorFindMultiValue(left, right, left_len)) |result| {
-                return result;
+                defer self.releaseValue(result);
+                return try self.normalizeFindMissResult(result, left_len, query_len);
             }
             var out = std.ArrayList(i64).empty;
             defer out.deinit(self.allocator);
             try out.ensureTotalCapacity(self.allocator, query_len);
             for (0..query_len) |query_idx| {
-                var found_idx: usize = left_len;
+                var found_idx: i64 = kiwi_int_null;
                 for (0..left_len) |idx| {
                     if (try numericValuesEqualAt(left, idx, right, query_idx)) {
-                        found_idx = idx;
+                        found_idx = @intCast(idx);
                         break;
                     }
                 }
-                try out.append(self.allocator, @intCast(found_idx));
+                try out.append(self.allocator, found_idx);
             }
             return try self.createManagedHostIntArray(out.items);
         }
         for (0..left_len) |idx| {
             if (try numericValuesEqualAt(left, idx, right, 0)) return try self.intValue(@intCast(idx));
         }
-        return try self.intValue(@intCast(left_len));
+        return try self.intNullValue();
+    }
+
+    fn findStringValue(self: *Session, left: Value, right: Value) KError!?Value {
+        const haystack = stringBytes(left) orelse return null;
+        const queries = stringBytes(right) orelse return try self.findMissForQueryValue(right);
+        if (queries.len == 0) return try self.createManagedHostIntArray(&.{});
+        if (queries.len == 1) {
+            return if (std.mem.indexOfScalar(u8, haystack, queries[0])) |idx|
+                try self.intValue(@intCast(idx))
+            else
+                try self.intNullValue();
+        }
+
+        const out = try self.allocator.alloc(i64, queries.len);
+        defer self.allocator.free(out);
+        for (queries, 0..) |query, idx| {
+            out[idx] = if (std.mem.indexOfScalar(u8, haystack, query)) |found|
+                @intCast(found)
+            else
+                kiwi_int_null;
+        }
+        return try self.createManagedHostIntArray(out);
+    }
+
+    fn findQuerySequenceLen(value: Value) ?usize {
+        if (stringSourceInfo(value) != null) return null;
+        return derivedSequenceLen(value);
+    }
+
+    fn findMissForQueryValue(self: *Session, query: Value) KError!Value {
+        const query_len = findQuerySequenceLen(query) orelse return try self.intNullValue();
+        const items = try self.allocator.alloc(i64, query_len);
+        defer self.allocator.free(items);
+        @memset(items, kiwi_int_null);
+        return try self.createManagedHostIntArray(items);
+    }
+
+    fn singleStringBytesValue(self: *Session, value: Value) KError!?[]const u8 {
+        if (stringBytes(value)) |bytes| return bytes;
+        if (value.tag() == .array and value.arrayKind() == .host_string_list) {
+            const list = value.asHostStringList();
+            if (list.len == 1) return try hostStringListItemBytes(list, 0);
+        }
+        if (value.tag() == .array and value.arrayKind() == .host_boxed_array) {
+            const boxed = value.asHostBoxedArray();
+            if (boxed.len() == 1) return try self.singleStringBytesValue(boxed.items[0]);
+        }
+        return null;
+    }
+
+    fn valueStringListBoxedTextEqual(self: *Session, list_value: Value, boxed_value: Value) KError!bool {
+        if (list_value.tag() != .array or list_value.arrayKind() != .host_string_list) return false;
+        if (boxed_value.tag() != .array or boxed_value.arrayKind() != .host_boxed_array) return false;
+
+        const list = list_value.asHostStringList();
+        const boxed = boxed_value.asHostBoxedArray();
+        if (list.len != boxed.len()) return false;
+        for (0..list.len) |idx| {
+            const left = try hostStringListItemBytes(list, idx);
+            const right = (try self.singleStringBytesValue(boxed.items[idx])) orelse return false;
+            if (!std.mem.eql(u8, left, right)) return false;
+        }
+        return true;
+    }
+
+    fn valueFindEqual(self: *Session, left: Value, right: Value) KError!bool {
+        if (try self.valueMatchEqual(left, right)) return true;
+        if (try self.valueStringListBoxedTextEqual(left, right)) return true;
+        if (try self.valueStringListBoxedTextEqual(right, left)) return true;
+        return false;
+    }
+
+    fn findSequenceIndex(self: *Session, left: Value, left_len: usize, query: Value) KError!?usize {
+        for (0..left_len) |idx| {
+            const item = try self.derivedSequenceItemValue(left, idx);
+            defer self.releaseValue(item);
+            if (try self.valueFindEqual(item, query)) return idx;
+        }
+        return null;
+    }
+
+    fn findSequenceValue(self: *Session, left: Value, right: Value) KError!?Value {
+        const left_len = derivedSequenceLen(left) orelse return null;
+        if (try self.findSequenceIndex(left, left_len, right)) |idx| return try self.intValue(@intCast(idx));
+
+        const query_len = findQuerySequenceLen(right) orelse return try self.intNullValue();
+        var out = std.ArrayList(i64).empty;
+        defer out.deinit(self.allocator);
+        try out.ensureTotalCapacity(self.allocator, query_len);
+        for (0..query_len) |query_idx| {
+            const query = try self.derivedSequenceItemValue(right, query_idx);
+            defer self.releaseValue(query);
+            const idx = try self.findSequenceIndex(left, left_len, query);
+            try out.append(self.allocator, if (idx) |found| @intCast(found) else kiwi_int_null);
+        }
+        return try self.createManagedHostIntArray(out.items);
+    }
+
+    fn keyedStoreValueFindIndex(self: *Session, store: *const HostKeyedStore, query: Value) KError!?usize {
+        const len = derivedSequenceLen(store.values) orelse return error.Internal;
+        for (0..len) |idx| {
+            const item = try self.keyedStoreValueAt(store, idx);
+            defer self.releaseValue(item);
+            if (try self.valueFindEqual(item, query)) return idx;
+        }
+        return null;
+    }
+
+    fn keyedStoreFindMissingKeyPrototype(self: *Session, store: *const HostKeyedStore) KError!Value {
+        const len = keyedStoreNameCount(store);
+        if (len == 0) return try self.emptySymbolValue();
+        const first = try self.keyedStoreNameValue(store, 0);
+        defer self.releaseValue(first);
+        return try self.prototypeLikeValue(first);
+    }
+
+    fn findKeyedStoreValue(self: *Session, store: *const HostKeyedStore, query: Value) KError!Value {
+        if (store.layout != .dict) return error.Type;
+        if (try self.keyedStoreValueFindIndex(store, query)) |idx| return try self.keyedStoreNameValue(store, idx);
+        return try self.keyedStoreFindMissingKeyPrototype(store);
+    }
+
+    fn findKeyedStoreValues(self: *Session, store: *const HostKeyedStore, query: Value) KError!?Value {
+        if (store.layout != .dict) return null;
+        const query_len = findQuerySequenceLen(query) orelse return try self.findKeyedStoreValue(store, query);
+
+        const values = try self.allocator.alloc(Value, query_len);
+        defer self.allocator.free(values);
+        var initialized: usize = 0;
+        defer {
+            for (values[0..initialized]) |value| self.releaseValue(value);
+        }
+
+        for (0..query_len) |idx| {
+            const item = try self.derivedSequenceItemValue(query, idx);
+            defer self.releaseValue(item);
+            values[idx] = try self.findKeyedStoreValue(store, item);
+            initialized += 1;
+        }
+        return try self.makeArrayFromValues(values);
     }
 
     fn findValues(self: *Session, left: Value, right: Value) KError!Value {
+        if (try self.findStringValue(left, right)) |result| return result;
         if (valueNumericMatrixShape(left)) |shape| {
             if (try self.findNumericMatrixRowValue(left, right, shape)) |result| return result;
         }
         if (try self.findNumericVectorValue(left, right)) |result| return result;
         if (left.tag() == .array and left.arrayKind() == .host_keyed_store) {
             const store = left.asHostKeyedStore();
-            const key = keyedLookupNameBytes(right) orelse return error.Type;
-            return try self.intValue(@intCast(store.lookup.get(key) orelse keyedStoreNameCount(store)));
+            if (try self.findKeyedStoreValues(store, right)) |result| return result;
+            const key = keyedLookupNameBytes(right) orelse return try self.findMissForQueryValue(right);
+            return if (store.lookup.get(key)) |idx| try self.intValue(@intCast(idx)) else try self.intNullValue();
         }
-        if (boxedArrayItems(left)) |items| {
-            if (symbolBytes(right) != null) {
-                for (items, 0..) |item, idx| {
-                    if (try self.valueStructuralEqual(item, right)) return try self.intValue(@intCast(idx));
-                }
-                return try self.intValue(@intCast(items.len));
-            }
-        }
-        return error.Type;
+        if (try self.findSequenceValue(left, right)) |result| return result;
+        return try self.findMissForQueryValue(right);
     }
 
     fn countValue(self: *Session, value: Value) KError!Value {
@@ -23886,7 +29230,7 @@ pub const Session = struct {
                 break :blk switch (value.arrayKind()) {
                     .host_dense_array => try self.intValue(@intCast(value.asHostDenseArray().len())),
                     .host_boxed_array => try self.intValue(@intCast(value.asHostBoxedArray().len())),
-                    .host_string_list => try self.intValue(@intCast(value.asHostStringList().len)),
+                    .host_string_list, .host_symbol_list => try self.intValue(@intCast(value.asHostStringList().len)),
                     .host_relation => try self.intValue(@intCast(try self.relationRowCount(@constCast(value.asHostRelation())))),
                     .host_keyed_store => blk2: {
                         const store = value.asHostKeyedStore();
@@ -23900,7 +29244,28 @@ pub const Session = struct {
         };
     }
 
+    fn lowerStringValue(self: *Session, value: Value) KError!?Value {
+        const source = stringSourceInfo(value) orelse return null;
+        const bytes = source.bytes();
+        var changed = false;
+        for (bytes) |byte| {
+            if (byte >= 'A' and byte <= 'Z') {
+                changed = true;
+                break;
+            }
+        }
+        if (!changed) return self.shareValue(value);
+
+        const out = try self.allocator.alloc(u8, bytes.len);
+        defer self.allocator.free(out);
+        for (bytes, 0..) |byte, idx| {
+            out[idx] = if (byte >= 'A' and byte <= 'Z') byte + 32 else byte;
+        }
+        return try self.managedHostString(out);
+    }
+
     fn floorValue(self: *Session, value: Value) KError!Value {
+        if (try self.lowerStringValue(value)) |text| return text;
         return switch (value.tag()) {
             .int, .bool => self.shareValue(value),
             .float => blk: {
@@ -24012,24 +29377,69 @@ pub const Session = struct {
         return try self.createManagedHostIntArray(out.items);
     }
 
-    fn whereBitVectorValue(self: *Session, array: *const HostDenseArray) KError!Value {
-        const bits: HostBitSlice = .{ .words = array.storage.bit, .len = array.len() };
-        const count = bitCountTrue(bits);
-        const out = try self.allocator.alloc(i64, count);
-        defer self.allocator.free(out);
-
+    fn fillWhereBitVectorIndices(comptime T: type, out: []T, bits: HostBitSlice) HostIntRange {
         var out_idx: usize = 0;
+        var first_value: i64 = 0;
+        var last_value: i64 = 0;
         for (bits.words, 0..) |_, word_idx| {
             const word_base = word_idx * host_bit_word_bits;
             var selected = bitWordMasked(bits.words, bits.len, word_idx);
             while (selected != 0) {
                 const bit_idx: usize = @intCast(@ctz(selected));
-                out[out_idx] = @intCast(word_base + bit_idx);
+                const index = word_base + bit_idx;
+                out[out_idx] = @intCast(index);
+                const index_i64: i64 = @intCast(index);
+                if (out_idx == 0) first_value = index_i64;
+                last_value = index_i64;
                 out_idx += 1;
                 selected &= selected - 1;
             }
         }
-        return try self.createManagedHostIntArray(out);
+        return if (out.len == 0)
+            .{ .min = 0, .max = 0 }
+        else
+            .{ .min = first_value, .max = last_value };
+    }
+
+    fn whereBitVectorRange(bits: HostBitSlice, count: usize) HostIntRange {
+        if (count == 0) return .{ .min = 0, .max = 0 };
+        return .{
+            .min = @intCast(firstSelectedBitIndex(bits).?),
+            .max = @intCast(lastSelectedBitIndex(bits).?),
+        };
+    }
+
+    fn fillWhereBitVectorIndicesI32Neon(out: []i32, bits: HostBitSlice) bool {
+        if (comptime !enable_host_where_neon) return false;
+        if (bits.len < host_where_vector_min_len) return false;
+        const written = kiwi_host_where_i32_neon(out.ptr, out.len, bits.words.ptr, bits.len);
+        std.debug.assert(written == out.len);
+        return true;
+    }
+
+    fn whereBitVectorValue(self: *Session, array: *const HostDenseArray) KError!Value {
+        const bits: HostBitSlice = .{ .words = array.storage.bit, .len = array.len() };
+        const count = bitCountTrue(bits);
+        const max_index: i64 = if (bits.len == 0) 0 else std.math.cast(i64, bits.len - 1) orelse return error.Unsupported;
+        var out = try self.allocManagedHostIntResult(hostIntStorageKindForRange(0, max_index), count);
+        const range = switch (out) {
+            .bit => unreachable,
+            .int8 => |*result| fillWhereBitVectorIndices(i8, result.items, bits),
+            .int16 => |*result| fillWhereBitVectorIndices(i16, result.items, bits),
+            .int32 => |*result| blk: {
+                if (fillWhereBitVectorIndicesI32Neon(result.items, bits)) break :blk whereBitVectorRange(bits, count);
+                break :blk fillWhereBitVectorIndices(i32, result.items, bits);
+            },
+            .int64 => |*result| fillWhereBitVectorIndices(i64, result.items, bits),
+        };
+        const value = try out.value(self);
+        const host = try mutableNumericHostArrayValue(self, value);
+        hostDenseSetFlags(host, if (count <= 1)
+            host_dense_flag_normalized | host_dense_flag_asc | host_dense_flag_dsc
+        else
+            host_dense_flag_normalized | host_dense_flag_asc);
+        hostDenseSetCachedIntRange(host, range);
+        return value;
     }
 
     fn whereIntVectorValue(self: *Session, array: *const HostDenseArray) KError!Value {
@@ -24067,6 +29477,880 @@ pub const Session = struct {
         return error.Type;
     }
 
+    fn filterRightLen(value: Value) ?usize {
+        return switch (value.tag()) {
+            .int, .bool, .float, .float32, .builtin, .closure => 1,
+            .array => blk: {
+                if (stringSourceInfo(value)) |source| break :blk source.bytes().len;
+                if (value.arrayKind() == .host_symbol or value.arrayKind() == .host_table_scalar) break :blk 1;
+                if (value.arrayKind() == .host_keyed_store) {
+                    const store = value.asHostKeyedStore();
+                    break :blk switch (store.layout) {
+                        .dict => keyedStoreNameCount(store),
+                        .table => store.row_count,
+                    };
+                }
+                if (value.arrayKind() == .host_relation) {
+                    const relation = value.asHostRelation();
+                    break :blk if (relation.cached_row_count_known) relation.cached_row_count else null;
+                }
+                break :blk derivedSequenceLen(value);
+            },
+        };
+    }
+
+    fn sourceIndicesFromScalarFilterCount(self: *Session, count_value: i64, source_len: usize) KError![]usize {
+        if (count_value < 0) return error.Type;
+        const count: usize = @intCast(count_value);
+        const total = std.math.mul(usize, count, source_len) catch return error.Unsupported;
+        const out = try self.allocator.alloc(usize, total);
+        errdefer self.allocator.free(out);
+
+        var write_idx: usize = 0;
+        for (0..source_len) |source_idx| {
+            for (0..count) |_| {
+                out[write_idx] = source_idx;
+                write_idx += 1;
+            }
+        }
+        return out;
+    }
+
+    fn sourceIndicesFromCountFilterView(self: *Session, view: HostIntDenseView, source_len: usize) KError![]usize {
+        if (hostIntDenseViewLen(view) != source_len) return error.Type;
+
+        var total: usize = 0;
+        for (0..source_len) |idx| {
+            const count_i64 = try hostIntDenseViewItem(view, idx);
+            if (count_i64 < 0) return error.Type;
+            const count: usize = @intCast(count_i64);
+            total = std.math.add(usize, total, count) catch return error.Unsupported;
+        }
+
+        const out = try self.allocator.alloc(usize, total);
+        errdefer self.allocator.free(out);
+
+        var write_idx: usize = 0;
+        for (0..source_len) |source_idx| {
+            const count: usize = @intCast(try hostIntDenseViewItem(view, source_idx));
+            for (0..count) |_| {
+                out[write_idx] = source_idx;
+                write_idx += 1;
+            }
+        }
+        return out;
+    }
+
+    fn sourceIndicesFromBitFilterMask(self: *Session, bits: HostBitSlice, source_len: usize) KError![]usize {
+        if (bits.len != source_len) return error.Type;
+        const out = try self.allocator.alloc(usize, bitCountTrue(bits));
+        errdefer self.allocator.free(out);
+
+        var out_idx: usize = 0;
+        for (bits.words, 0..) |_, word_idx| {
+            const word_base = word_idx * host_bit_word_bits;
+            var selected = bitWordMasked(bits.words, bits.len, word_idx);
+            while (selected != 0) {
+                const bit_idx: usize = @intCast(@ctz(selected));
+                out[out_idx] = word_base + bit_idx;
+                out_idx += 1;
+                selected &= selected - 1;
+            }
+        }
+        return out;
+    }
+
+    fn sourceIndicesFromBitRejectMask(self: *Session, bits: HostBitSlice, source_len: usize) KError![]usize {
+        if (bits.len != source_len) return error.Type;
+        const out = try self.allocator.alloc(usize, source_len - bitCountTrue(bits));
+        errdefer self.allocator.free(out);
+
+        var out_idx: usize = 0;
+        for (0..source_len) |idx| {
+            if (bitGet(bits.words, idx)) continue;
+            out[out_idx] = idx;
+            out_idx += 1;
+        }
+        return out;
+    }
+
+    fn sourceIndicesFromScalarRejectCount(self: *Session, count_value: i64, source_len: usize) KError![]usize {
+        if (count_value != 0) return try self.allocator.alloc(usize, 0);
+
+        const out = try self.allocator.alloc(usize, source_len);
+        errdefer self.allocator.free(out);
+        for (out, 0..) |*item, idx| item.* = idx;
+        return out;
+    }
+
+    fn sourceIndicesFromCountRejectView(self: *Session, view: HostIntDenseView, source_len: usize) KError![]usize {
+        if (hostIntDenseViewLen(view) != source_len) return error.Type;
+
+        var total: usize = 0;
+        for (0..source_len) |idx| {
+            const count_i64 = try hostIntDenseViewItem(view, idx);
+            if (count_i64 == 0) total += 1;
+        }
+
+        const out = try self.allocator.alloc(usize, total);
+        errdefer self.allocator.free(out);
+
+        var write_idx: usize = 0;
+        for (0..source_len) |source_idx| {
+            if ((try hostIntDenseViewItem(view, source_idx)) != 0) continue;
+            out[write_idx] = source_idx;
+            write_idx += 1;
+        }
+        return out;
+    }
+
+    fn directHostBitFilterMask(value: Value, source_len: usize) KError!?HostBitSlice {
+        const len = numericVectorLen(value) orelse return null;
+        if (len != source_len) return error.Type;
+        const host = hostDenseIfPresent(value) orelse return null;
+        return switch (host.storage) {
+            .bit => |words| .{ .words = words, .len = host.logical_len },
+            else => null,
+        };
+    }
+
+    fn sourceIndicesFromFilterPredicate(self: *Session, predicate: Value, source_len: usize) KError![]usize {
+        if (scalarIntLikeValue(predicate)) |count_value| {
+            return try self.sourceIndicesFromScalarFilterCount(count_value, source_len);
+        }
+        if (numericVectorLen(predicate) == null) return error.Type;
+        const view = valueHostIntStructuralView(predicate) orelse blk: {
+            if (valueNumericMode(predicate) == null) return error.Type;
+            const host = try numericHostArrayValue(self, predicate);
+            const host_view = hostIntArrayView(host) orelse return error.Type;
+            break :blk HostIntDenseView{ .dense = host_view };
+        };
+        return try self.sourceIndicesFromCountFilterView(view, source_len);
+    }
+
+    fn sourceIndicesFromRejectPredicate(self: *Session, predicate: Value, source_len: usize) KError![]usize {
+        if (scalarIntLikeValue(predicate)) |count_value| {
+            return try self.sourceIndicesFromScalarRejectCount(count_value, source_len);
+        }
+        if (numericVectorLen(predicate) == null) return error.Type;
+        const view = valueHostIntStructuralView(predicate) orelse blk: {
+            if (valueNumericMode(predicate) == null) return error.Type;
+            const host = try numericHostArrayValue(self, predicate);
+            const host_view = hostIntArrayView(host) orelse return error.Type;
+            break :blk HostIntDenseView{ .dense = host_view };
+        };
+        return try self.sourceIndicesFromCountRejectView(view, source_len);
+    }
+
+    fn intSelectorValueFromSourceIndices(self: *Session, indices: []const usize) KError!Value {
+        const values = try self.allocator.alloc(i64, indices.len);
+        defer self.allocator.free(values);
+        for (indices, 0..) |idx, out_idx| {
+            values[out_idx] = std.math.cast(i64, idx) orelse return error.Unsupported;
+        }
+        return try self.createManagedHostIntArray(values);
+    }
+
+    fn selectHostStringListBySourceIndices(self: *Session, list: *const HostStringList, indices: []const usize) KError!Value {
+        const items = try self.allocator.alloc([]const u8, indices.len);
+        defer self.allocator.free(items);
+        for (indices, 0..) |source_idx, out_idx| {
+            if (source_idx >= list.len) return error.Type;
+            items[out_idx] = try hostStringListItemBytes(list, source_idx);
+        }
+        return try self.createManagedHostStringListFromSlices(items);
+    }
+
+    fn selectHostSymbolListBySourceIndices(self: *Session, list: *const HostStringList, indices: []const usize) KError!Value {
+        const items = try self.allocator.alloc([]const u8, indices.len);
+        defer self.allocator.free(items);
+        for (indices, 0..) |source_idx, out_idx| {
+            if (source_idx >= list.len) return error.Type;
+            items[out_idx] = try hostStringListItemBytes(list, source_idx);
+        }
+        return try self.createManagedHostSymbolListFromSlices(items);
+    }
+
+    fn selectHostTextListByBitMask(self: *Session, list: *const HostStringList, bits: HostBitSlice, invert: bool, symbol: bool) KError!Value {
+        if (bits.len != list.len) return error.Type;
+        const true_count = bitCountTrue(bits);
+        const selected_len = if (invert) bits.len - true_count else true_count;
+        const items = try self.allocator.alloc([]const u8, selected_len);
+        defer self.allocator.free(items);
+
+        var out_idx: usize = 0;
+        for (bits.words, 0..) |_, word_idx| {
+            const word_base = word_idx * host_bit_word_bits;
+            const active = bitWordActiveLen(bits.len, word_idx, bits.words.len);
+            const active_mask = bitLowMask(active);
+            var selected = bitWordMasked(bits.words, bits.len, word_idx);
+            if (invert) selected = (~selected) & active_mask;
+            while (selected != 0) {
+                const bit_idx: usize = @intCast(@ctz(selected));
+                const source_idx = word_base + bit_idx;
+                items[out_idx] = try hostStringListItemBytes(list, source_idx);
+                out_idx += 1;
+                selected &= selected - 1;
+            }
+        }
+        std.debug.assert(out_idx == selected_len);
+
+        return if (symbol)
+            try self.createManagedHostSymbolListFromSlices(items)
+        else
+            try self.createManagedHostStringListFromSlices(items);
+    }
+
+    fn selectHostStringListByBitMask(self: *Session, list: *const HostStringList, bits: HostBitSlice, invert: bool) KError!Value {
+        return try self.selectHostTextListByBitMask(list, bits, invert, false);
+    }
+
+    fn selectHostSymbolListByBitMask(self: *Session, list: *const HostStringList, bits: HostBitSlice, invert: bool) KError!Value {
+        return try self.selectHostTextListByBitMask(list, bits, invert, true);
+    }
+
+    fn selectHostBoxedArrayBySourceIndices(self: *Session, array: *const HostBoxedArray, indices: []const usize) KError!Value {
+        if (indices.len == 0) {
+            if (array.len() != 0) return try self.emptySequenceForBoxedItem(.managed, array.items[0]);
+            if (array.prototype) |prototype| return try self.emptySequenceForBoxedItem(.managed, prototype);
+            return try self.createManagedHostBoxedArray(&.{});
+        }
+
+        const items = try self.allocator.alloc(Value, indices.len);
+        defer self.allocator.free(items);
+        for (indices, 0..) |source_idx, out_idx| {
+            if (source_idx >= array.len()) return error.Type;
+            items[out_idx] = array.items[source_idx];
+        }
+        return try self.makeArrayFromValues(items);
+    }
+
+    fn selectRightBySourceIndices(self: *Session, right: Value, indices: []const usize) KError!Value {
+        if (right.tag() == .array) {
+            switch (right.arrayKind()) {
+                .host_keyed_store => {
+                    const store = right.asHostKeyedStore();
+                    return switch (store.layout) {
+                        .dict => try self.projectKeyedStore(store, indices),
+                        .table => try self.tableSelectRows(store, indices),
+                    };
+                },
+                .host_string_list => return try self.selectHostStringListBySourceIndices(right.asHostStringList(), indices),
+                .host_symbol_list => return try self.selectHostSymbolListBySourceIndices(right.asHostStringList(), indices),
+                .host_boxed_array => return try self.selectHostBoxedArrayBySourceIndices(right.asHostBoxedArray(), indices),
+                .host_symbol, .host_table_scalar => {
+                    const count = std.math.cast(i64, indices.len) orelse return error.Unsupported;
+                    const count_value = try self.intValue(count);
+                    defer self.releaseValue(count_value);
+                    return try self.takeValues(count_value, right);
+                },
+                else => {},
+            }
+        } else {
+            const count = std.math.cast(i64, indices.len) orelse return error.Unsupported;
+            const count_value = try self.intValue(count);
+            defer self.releaseValue(count_value);
+            return try self.takeValues(count_value, right);
+        }
+
+        const selector = try self.intSelectorValueFromSourceIndices(indices);
+        defer self.releaseValue(selector);
+        return try self.applyArrayCall1(right, selector);
+    }
+
+    fn filterSelectByHostBitMask(self: *Session, right: Value, predicate: Value, bits: HostBitSlice, source_len: usize) KError!Value {
+        if (right.tag() == .array) {
+            if (stringSourceInfo(right)) |source| return try self.stringIndexWhereBitMaskValue(source, bits);
+            switch (right.arrayKind()) {
+                .host_keyed_store => {
+                    const store = right.asHostKeyedStore();
+                    if (store.layout == .table) return try self.tableSelectRowsBySelector(store, .{ .dense = .{ .bit = bits } });
+                },
+                .host_string_list => return try self.selectHostStringListByBitMask(right.asHostStringList(), bits, false),
+                .host_symbol_list => return try self.selectHostSymbolListByBitMask(right.asHostStringList(), bits, false),
+                .host_dense_array, .numeric_array, .backend_array, .host_boxed_array => return try self.applyArrayCall1(right, predicate),
+                else => {},
+            }
+        }
+        const indices = try self.sourceIndicesFromBitFilterMask(bits, source_len);
+        defer self.allocator.free(indices);
+        return try self.selectRightBySourceIndices(right, indices);
+    }
+
+    fn applyFilterCallable(self: *Session, left: Value, right: Value) KError!Value {
+        if (left.tag() == .closure) {
+            const closure = left.asClosure();
+            if (closure.kind == .plain and closure.code.arity == 0) {
+                return try self.applyValue(left, &.{});
+            }
+        }
+        return try self.applyValue(left, &.{right});
+    }
+
+    fn rejectSelectByHostBitMask(self: *Session, right: Value, bits: HostBitSlice, source_len: usize) KError!Value {
+        if (right.tag() == .array) {
+            if (stringSourceInfo(right)) |source| return try self.stringRejectWhereBitMaskValue(source, bits);
+            switch (right.arrayKind()) {
+                .host_keyed_store => {
+                    const store = right.asHostKeyedStore();
+                    if (store.layout == .table) {
+                        const inverted = try self.invertedHostBitMaskValue(bits);
+                        defer self.releaseValue(inverted);
+                        const inverted_bits = valueNumericBitSlice(inverted) orelse return error.Internal;
+                        return try self.tableSelectRowsBySelector(store, .{ .dense = .{ .bit = inverted_bits } });
+                    }
+                },
+                .host_string_list => return try self.selectHostStringListByBitMask(right.asHostStringList(), bits, true),
+                .host_symbol_list => return try self.selectHostSymbolListByBitMask(right.asHostStringList(), bits, true),
+                .host_dense_array, .numeric_array, .backend_array, .host_boxed_array => {
+                    const inverted = try self.invertedHostBitMaskValue(bits);
+                    defer self.releaseValue(inverted);
+                    return try self.applyArrayCall1(right, inverted);
+                },
+                else => {},
+            }
+        }
+
+        const indices = try self.sourceIndicesFromBitRejectMask(bits, source_len);
+        defer self.allocator.free(indices);
+        return try self.selectRightBySourceIndices(right, indices);
+    }
+
+    fn filterValues(self: *Session, left: Value, right: Value) KError!Value {
+        const source_len = filterRightLen(right) orelse return error.Type;
+        const predicate = try self.applyFilterCallable(left, right);
+        defer self.releaseValue(predicate);
+
+        if (try directHostBitFilterMask(predicate, source_len)) |bits| {
+            return try self.filterSelectByHostBitMask(right, predicate, bits, source_len);
+        }
+        if (valueBackendBoolMaskLen(predicate)) |mask_len| {
+            if (mask_len != source_len) return error.Type;
+            if (right.tag() == .array and valueNumericMode(right) != null) {
+                return try self.applyArrayCall1(right, predicate);
+            }
+        }
+
+        const indices = try self.sourceIndicesFromFilterPredicate(predicate, source_len);
+        defer self.allocator.free(indices);
+        return try self.selectRightBySourceIndices(right, indices);
+    }
+
+    fn rejectValues(self: *Session, left: Value, right: Value) KError!Value {
+        const source_len = filterRightLen(right) orelse return error.Type;
+        const predicate = try self.applyFilterCallable(left, right);
+        defer self.releaseValue(predicate);
+
+        if (try directHostBitFilterMask(predicate, source_len)) |bits| {
+            return try self.rejectSelectByHostBitMask(right, bits, source_len);
+        }
+
+        const indices = try self.sourceIndicesFromRejectPredicate(predicate, source_len);
+        defer self.allocator.free(indices);
+        return try self.selectRightBySourceIndices(right, indices);
+    }
+
+    fn groupOrUnitMatrixValue(self: *Session, value: Value) KError!Value {
+        if (scalarIntLikeValue(value) != null) return try self.unitMatrixValue(value);
+        return try self.groupValue(value);
+    }
+
+    fn createEmptyGroupValues(self: *Session) KError!Value {
+        const empty_indices = try self.createManagedHostIntArray(&.{});
+        defer self.releaseValue(empty_indices);
+        return try self.createManagedHostBoxedArrayWithPrototype(&.{}, empty_indices);
+    }
+
+    fn createGroupIndexValues(self: *Session, counts: []const usize, groups: []const usize) KError!Value {
+        if (counts.len == 0) return try self.createEmptyGroupValues();
+
+        var starts = try self.allocator.alloc(usize, counts.len);
+        defer self.allocator.free(starts);
+        var cursors = try self.allocator.alloc(usize, counts.len);
+        defer self.allocator.free(cursors);
+
+        var total: usize = 0;
+        for (counts, 0..) |count, idx| {
+            starts[idx] = total;
+            cursors[idx] = total;
+            total = std.math.add(usize, total, count) catch return error.Unsupported;
+        }
+        if (total != groups.len) return error.Internal;
+
+        var flat = try self.allocator.alloc(i64, total);
+        defer self.allocator.free(flat);
+        for (groups, 0..) |group_idx, item_idx| {
+            if (group_idx >= counts.len) return error.Internal;
+            flat[cursors[group_idx]] = std.math.cast(i64, item_idx) orelse return error.Unsupported;
+            cursors[group_idx] += 1;
+        }
+
+        var values = try self.allocator.alloc(Value, counts.len);
+        defer self.allocator.free(values);
+        var initialized: usize = 0;
+        defer {
+            for (values[0..initialized]) |value| self.releaseValue(value);
+        }
+
+        for (counts, 0..) |count, group_idx| {
+            const start = starts[group_idx];
+            values[group_idx] = try self.createManagedHostIntArray(flat[start .. start + count]);
+            initialized += 1;
+        }
+        return try self.createManagedHostBoxedArray(values);
+    }
+
+    fn createGroupDictValue(self: *Session, keys_value: Value, counts: []const usize, groups: []const usize) KError!Value {
+        const values_value = try self.createGroupIndexValues(counts, groups);
+        defer self.releaseValue(values_value);
+        if (stringSourceInfo(keys_value) != null) return try self.createHostDictValueFromCharStringKeys("", keys_value, values_value);
+        return try self.createHostDictValueFromKeySequenceValue("", keys_value, values_value);
+    }
+
+    fn createEmptyGroupDictValue(self: *Session, keys_value: Value) KError!Value {
+        const values_value = try self.createEmptyGroupValues();
+        defer self.releaseValue(values_value);
+        if (stringSourceInfo(keys_value) != null) return try self.createHostDictValueFromCharStringKeys("", keys_value, values_value);
+        return try self.createHostDictValueFromKeySequenceValue("", keys_value, values_value);
+    }
+
+    fn floatGroupHashKey(value: f64) u64 {
+        if (std.math.isNan(value)) return 0x7ff8_0000_0000_0000;
+        return @as(u64, @bitCast(value));
+    }
+
+    fn floatGroupEqual(left: f64, right: f64) bool {
+        if (std.math.isNan(left) and std.math.isNan(right)) return true;
+        return @as(u64, @bitCast(left)) == @as(u64, @bitCast(right));
+    }
+
+    fn valueGroupEqual(self: *Session, left: Value, right: Value) KError!bool {
+        if (tableScalarValue(left)) |scalar| {
+            if (scalar.is_null) return tableScalarValue(right) != null and valueAsHostTableScalar(right).is_null and scalar.kind == valueAsHostTableScalar(right).kind;
+            return try self.valueGroupEqual(scalar.value, right);
+        }
+        if (tableScalarValue(right)) |scalar| {
+            if (scalar.is_null) return false;
+            return try self.valueGroupEqual(left, scalar.value);
+        }
+
+        if (left.tag() == .array and right.tag() == .array) {
+            if (try self.numericArrayGroupEqual(left, right)) |matched| return matched;
+            if (try self.derivedSequenceGroupEqual(left, right)) |matched| return matched;
+        }
+
+        if (left.tag() != right.tag()) {
+            const lhs = scalarIntLikeValue(left) orelse return false;
+            const rhs = scalarIntLikeValue(right) orelse return false;
+            return lhs == rhs;
+        }
+
+        return switch (left.tag()) {
+            .int => left.asInt() == right.asInt(),
+            .float32 => floatGroupEqual(left.asFloat(), right.asFloat()),
+            .float => floatGroupEqual(left.asFloat(), right.asFloat()),
+            .bool => left.asBool() == right.asBool(),
+            .builtin => left.asBuiltin() == right.asBuiltin(),
+            .closure => left.asClosure() == right.asClosure(),
+            .array => switch (left.arrayKind()) {
+                .host_table_scalar => blk: {
+                    if (right.arrayKind() != .host_table_scalar) break :blk false;
+                    const lhs = valueAsHostTableScalar(left);
+                    const rhs = valueAsHostTableScalar(right);
+                    if (lhs.kind != rhs.kind or lhs.is_null != rhs.is_null) break :blk false;
+                    if (lhs.is_null) break :blk true;
+                    break :blk try self.valueGroupEqual(lhs.value, rhs.value);
+                },
+                .host_string, .host_string_view => if (stringBytes(right)) |right_text|
+                    std.mem.eql(u8, stringBytes(left).?, right_text)
+                else
+                    false,
+                .host_symbol => right.arrayKind() == .host_symbol and std.mem.eql(u8, hostTextBytes(left.asHostSymbol()), hostTextBytes(right.asHostSymbol())),
+                .host_boxed_array => blk: {
+                    if (right.arrayKind() != .host_boxed_array) break :blk false;
+                    const left_items = left.asHostBoxedArray().items;
+                    const right_items = right.asHostBoxedArray().items;
+                    if (left_items.len != right_items.len) break :blk false;
+                    for (left_items, right_items) |left_item, right_item| {
+                        if (!try self.valueGroupEqual(left_item, right_item)) break :blk false;
+                    }
+                    break :blk true;
+                },
+                .host_string_list => blk: {
+                    if (right.arrayKind() != .host_string_list) break :blk false;
+                    const left_list = left.asHostStringList();
+                    const right_list = right.asHostStringList();
+                    if (left_list.len != right_list.len) break :blk false;
+                    for (0..left_list.len) |idx| {
+                        const left_item = try self.hostStringListItemValue(left_list, idx);
+                        const right_item = try self.hostStringListItemValue(right_list, idx);
+                        defer self.releaseValue(left_item);
+                        defer self.releaseValue(right_item);
+                        if (!try self.valueGroupEqual(left_item, right_item)) break :blk false;
+                    }
+                    break :blk true;
+                },
+                .host_symbol_list => blk: {
+                    if (right.arrayKind() != .host_symbol_list) break :blk false;
+                    const left_list = left.asHostStringList();
+                    const right_list = right.asHostStringList();
+                    if (left_list.len != right_list.len) break :blk false;
+                    for (0..left_list.len) |idx| {
+                        const left_item = try hostStringListItemBytes(left_list, idx);
+                        const right_item = try hostStringListItemBytes(right_list, idx);
+                        if (!std.mem.eql(u8, left_item, right_item)) break :blk false;
+                    }
+                    break :blk true;
+                },
+                .host_dense_array, .backend_array, .numeric_array => blk: {
+                    switch (right.arrayKind()) {
+                        .host_dense_array, .backend_array, .numeric_array => {},
+                        else => break :blk false,
+                    }
+                    const lhs = try numericHostArrayValue(self, left);
+                    const rhs = try numericHostArrayValue(self, right);
+                    if (lhs.len() != rhs.len()) break :blk false;
+                    var lhs_dims_buf: [numeric_array_max_rank]i32 = [_]i32{0} ** numeric_array_max_rank;
+                    var rhs_dims_buf: [numeric_array_max_rank]i32 = [_]i32{0} ** numeric_array_max_rank;
+                    if (!std.mem.eql(i32, hostDenseShapeDims(lhs, &lhs_dims_buf), hostDenseShapeDims(rhs, &rhs_dims_buf))) break :blk false;
+                    for (0..lhs.len()) |idx| {
+                        const left_item = try self.hostDenseIndexScalar(lhs, @intCast(idx));
+                        const right_item = try self.hostDenseIndexScalar(rhs, @intCast(idx));
+                        defer self.releaseValue(left_item);
+                        defer self.releaseValue(right_item);
+                        if (!try self.valueGroupEqual(left_item, right_item)) break :blk false;
+                    }
+                    break :blk true;
+                },
+                .host_keyed_store => blk: {
+                    if (right.arrayKind() != .host_keyed_store) break :blk false;
+                    const lhs = left.asHostKeyedStore();
+                    const rhs = right.asHostKeyedStore();
+                    if (lhs.layout != rhs.layout or lhs.row_count != rhs.row_count) break :blk false;
+                    const count = keyedStoreNameCount(lhs);
+                    if (count != keyedStoreNameCount(rhs)) break :blk false;
+                    for (0..count) |idx| {
+                        const left_name = try self.keyedStoreNameValue(lhs, idx);
+                        const right_name = try self.keyedStoreNameValue(rhs, idx);
+                        defer self.releaseValue(left_name);
+                        defer self.releaseValue(right_name);
+                        if (!try self.valueGroupEqual(left_name, right_name)) break :blk false;
+                        const left_value = try self.keyedStoreValueAt(lhs, idx);
+                        const right_value = try self.keyedStoreValueAt(rhs, idx);
+                        defer self.releaseValue(left_value);
+                        defer self.releaseValue(right_value);
+                        if (!try self.valueGroupEqual(left_value, right_value)) break :blk false;
+                    }
+                    break :blk true;
+                },
+                .host_relation => false,
+                else => false,
+            },
+        };
+    }
+
+    fn numericArrayGroupEqual(self: *Session, left: Value, right: Value) KError!?bool {
+        if (left.tag() != .array or right.tag() != .array) return null;
+        const left_mode = valueNumericMode(left) orelse return null;
+        const right_mode = valueNumericMode(right) orelse return null;
+        if (left_mode != right_mode) return false;
+
+        const left_shape = valueNumericBuilderShape(left) orelse return false;
+        const right_shape = valueNumericBuilderShape(right) orelse return false;
+        if (!numericShapeSnapshotEqual(left_shape, right_shape)) return false;
+
+        const len = try numericShapeSnapshotElementCount(left_shape);
+        const right_len = try numericShapeSnapshotElementCount(right_shape);
+        if (len != right_len) return false;
+
+        switch (left_mode) {
+            .int => for (0..len) |idx| {
+                if (try numericIntAt(left, idx) != try numericIntAt(right, idx)) return false;
+            },
+            .float => for (0..len) |idx| {
+                if (!floatGroupEqual(try numericFloatAt(left, idx), try numericFloatAt(right, idx))) return false;
+            },
+        }
+        _ = self;
+        return true;
+    }
+
+    fn derivedSequenceGroupEqual(self: *Session, left: Value, right: Value) KError!?bool {
+        const left_len = derivedSequenceLen(left) orelse return null;
+        const right_len = derivedSequenceLen(right) orelse return null;
+        if (left_len != right_len) return false;
+        for (0..left_len) |idx| {
+            const left_item = try self.derivedSequenceItemValue(left, idx);
+            defer self.releaseValue(left_item);
+            const right_item = try self.derivedSequenceItemValue(right, idx);
+            defer self.releaseValue(right_item);
+            if (!try self.valueGroupEqual(left_item, right_item)) return false;
+        }
+        return true;
+    }
+
+    fn groupStringValue(self: *Session, value: Value, bytes: []const u8) KError!Value {
+        if (bytes.len == 0) return try self.createEmptyGroupDictValue(value);
+
+        var counts = std.ArrayList(usize).empty;
+        defer counts.deinit(self.allocator);
+        var unique_bytes = std.ArrayList(u8).empty;
+        defer unique_bytes.deinit(self.allocator);
+        try counts.ensureTotalCapacity(self.allocator, @min(bytes.len, 256));
+        try unique_bytes.ensureTotalCapacity(self.allocator, @min(bytes.len, 256));
+
+        var byte_counts = [_]usize{0} ** 256;
+        var byte_groups = [_]usize{0} ** 256;
+        const groups = try self.allocator.alloc(usize, bytes.len);
+        defer self.allocator.free(groups);
+
+        for (bytes, 0..) |byte, idx| {
+            if (byte_counts[byte] == 0) {
+                byte_groups[byte] = unique_bytes.items.len;
+                try unique_bytes.append(self.allocator, byte);
+                try counts.append(self.allocator, 0);
+            }
+            const group_idx = byte_groups[byte];
+            counts.items[group_idx] += 1;
+            groups[idx] = group_idx;
+            byte_counts[byte] += 1;
+        }
+
+        const keys_value = try self.managedHostString(unique_bytes.items);
+        defer self.releaseValue(keys_value);
+        return try self.createGroupDictValue(keys_value, counts.items, groups);
+    }
+
+    fn groupNumericIntVectorValue(self: *Session, value: Value, len: usize) KError!Value {
+        if (len == 0) return try self.createEmptyGroupDictValue(value);
+
+        var lookup = std.AutoHashMap(i64, usize).init(self.allocator);
+        defer lookup.deinit();
+        try lookup.ensureTotalCapacity(std.math.cast(u32, len) orelse return error.Unsupported);
+
+        var keys = std.ArrayList(i64).empty;
+        defer keys.deinit(self.allocator);
+        var counts = std.ArrayList(usize).empty;
+        defer counts.deinit(self.allocator);
+        try keys.ensureTotalCapacity(self.allocator, len);
+        try counts.ensureTotalCapacity(self.allocator, len);
+
+        const groups = try self.allocator.alloc(usize, len);
+        defer self.allocator.free(groups);
+
+        for (0..len) |idx| {
+            const item = try numericIntAt(value, idx);
+            const group_idx = lookup.get(item) orelse blk: {
+                const new_idx = keys.items.len;
+                try lookup.put(item, new_idx);
+                try keys.append(self.allocator, item);
+                try counts.append(self.allocator, 0);
+                break :blk new_idx;
+            };
+            counts.items[group_idx] += 1;
+            groups[idx] = group_idx;
+        }
+
+        const keys_value = try self.createManagedHostIntArray(keys.items);
+        defer self.releaseValue(keys_value);
+        return try self.createGroupDictValue(keys_value, counts.items, groups);
+    }
+
+    fn groupNumericFloatVectorValue(self: *Session, value: Value, len: usize) KError!Value {
+        if (len == 0) return try self.createEmptyGroupDictValue(value);
+
+        var lookup = std.AutoHashMap(u64, usize).init(self.allocator);
+        defer lookup.deinit();
+        try lookup.ensureTotalCapacity(std.math.cast(u32, len) orelse return error.Unsupported);
+
+        var keys = std.ArrayList(f64).empty;
+        defer keys.deinit(self.allocator);
+        var counts = std.ArrayList(usize).empty;
+        defer counts.deinit(self.allocator);
+        try keys.ensureTotalCapacity(self.allocator, len);
+        try counts.ensureTotalCapacity(self.allocator, len);
+
+        const groups = try self.allocator.alloc(usize, len);
+        defer self.allocator.free(groups);
+
+        for (0..len) |idx| {
+            const item = try numericFloatAt(value, idx);
+            const key = floatGroupHashKey(item);
+            const group_idx = lookup.get(key) orelse blk: {
+                const new_idx = keys.items.len;
+                try lookup.put(key, new_idx);
+                try keys.append(self.allocator, item);
+                try counts.append(self.allocator, 0);
+                break :blk new_idx;
+            };
+            counts.items[group_idx] += 1;
+            groups[idx] = group_idx;
+        }
+
+        const keys_value = try self.createManagedHostFloatArray(keys.items);
+        defer self.releaseValue(keys_value);
+        return try self.createGroupDictValue(keys_value, counts.items, groups);
+    }
+
+    fn groupSequenceItemsValue(self: *Session, key_source: Value, items: []const Value) KError!Value {
+        if (items.len == 0) return try self.createEmptyGroupDictValue(key_source);
+
+        var keys = std.ArrayList(Value).empty;
+        defer {
+            for (keys.items) |value| self.releaseValue(value);
+            keys.deinit(self.allocator);
+        }
+        var counts = std.ArrayList(usize).empty;
+        defer counts.deinit(self.allocator);
+        try keys.ensureTotalCapacity(self.allocator, items.len);
+        try counts.ensureTotalCapacity(self.allocator, items.len);
+
+        const groups = try self.allocator.alloc(usize, items.len);
+        defer self.allocator.free(groups);
+
+        for (items, 0..) |item, item_idx| {
+            var group_idx: ?usize = null;
+            for (keys.items, 0..) |candidate, candidate_idx| {
+                if (try self.valueGroupEqual(candidate, item)) {
+                    group_idx = candidate_idx;
+                    break;
+                }
+            }
+            const resolved = group_idx orelse blk: {
+                const new_idx = keys.items.len;
+                try keys.append(self.allocator, try self.retainEscapedValue(item));
+                try counts.append(self.allocator, 0);
+                break :blk new_idx;
+            };
+            counts.items[resolved] += 1;
+            groups[item_idx] = resolved;
+        }
+
+        const keys_value = try self.createKeyArrayFromValues(keys.items);
+        defer self.releaseValue(keys_value);
+        return try self.createGroupDictValue(keys_value, counts.items, groups);
+    }
+
+    fn createGroupedOriginalKeyValues(
+        self: *Session,
+        original_keys: []const Value,
+        counts: []const usize,
+        groups: []const usize,
+    ) KError!Value {
+        if (counts.len == 0) return try self.createEmptyGroupValues();
+
+        var values = try self.allocator.alloc(Value, counts.len);
+        defer self.allocator.free(values);
+        var initialized: usize = 0;
+        defer {
+            for (values[0..initialized]) |value| self.releaseValue(value);
+        }
+
+        for (counts, 0..) |count, group_idx| {
+            var group_keys = try self.allocator.alloc(Value, count);
+            defer self.allocator.free(group_keys);
+            var used: usize = 0;
+            for (groups, 0..) |candidate_group, item_idx| {
+                if (candidate_group == group_idx) {
+                    group_keys[used] = original_keys[item_idx];
+                    used += 1;
+                }
+            }
+            if (used != count) return error.Internal;
+            values[group_idx] = try self.createKeyArrayFromValues(group_keys);
+            initialized += 1;
+        }
+
+        return try self.createManagedHostBoxedArray(values);
+    }
+
+    fn groupDictValue(self: *Session, store: *const HostKeyedStore) KError!Value {
+        const len = keyedStoreNameCount(store);
+        if (len == 0) return try self.createEmptyGroupDictValue(store.values);
+
+        var original_keys = try self.allocator.alloc(Value, len);
+        defer self.allocator.free(original_keys);
+        var values = try self.allocator.alloc(Value, len);
+        defer self.allocator.free(values);
+        var keys_initialized: usize = 0;
+        var values_initialized: usize = 0;
+        defer {
+            for (original_keys[0..keys_initialized]) |value| self.releaseValue(value);
+            for (values[0..values_initialized]) |value| self.releaseValue(value);
+        }
+
+        for (0..len) |idx| {
+            original_keys[idx] = try self.keyedStoreNameValue(store, idx);
+            keys_initialized += 1;
+            values[idx] = try self.keyedStoreValueAt(store, idx);
+            values_initialized += 1;
+        }
+
+        var grouped_keys = std.ArrayList(Value).empty;
+        defer {
+            for (grouped_keys.items) |value| self.releaseValue(value);
+            grouped_keys.deinit(self.allocator);
+        }
+        var counts = std.ArrayList(usize).empty;
+        defer counts.deinit(self.allocator);
+        try grouped_keys.ensureTotalCapacity(self.allocator, len);
+        try counts.ensureTotalCapacity(self.allocator, len);
+
+        const groups = try self.allocator.alloc(usize, len);
+        defer self.allocator.free(groups);
+
+        for (values, 0..) |item, item_idx| {
+            var group_idx: ?usize = null;
+            for (grouped_keys.items, 0..) |candidate, candidate_idx| {
+                if (try self.valueGroupEqual(candidate, item)) {
+                    group_idx = candidate_idx;
+                    break;
+                }
+            }
+            const resolved = group_idx orelse blk: {
+                const new_idx = grouped_keys.items.len;
+                try grouped_keys.append(self.allocator, try self.retainEscapedValue(item));
+                try counts.append(self.allocator, 0);
+                break :blk new_idx;
+            };
+            counts.items[resolved] += 1;
+            groups[item_idx] = resolved;
+        }
+
+        const keys_value = try self.createKeyArrayFromValues(grouped_keys.items);
+        defer self.releaseValue(keys_value);
+        const values_value = try self.createGroupedOriginalKeyValues(original_keys, counts.items, groups);
+        defer self.releaseValue(values_value);
+        if (stringSourceInfo(keys_value) != null) return try self.createHostDictValueFromCharStringKeys("", keys_value, values_value);
+        return try self.createHostDictValueFromKeySequenceValue("", keys_value, values_value);
+    }
+
+    fn groupValue(self: *Session, value: Value) KError!Value {
+        if (stringBytes(value)) |bytes| return try self.groupStringValue(value, bytes);
+
+        if (value.tag() == .array and value.arrayKind() == .host_keyed_store) {
+            const store = value.asHostKeyedStore();
+            if (store.layout == .dict) return try self.groupDictValue(store);
+        }
+
+        if (valueNumericMode(value)) |mode| {
+            if (valueNonVectorNumericShape(value) == null) {
+                const len = numericFlatLen(value) orelse return error.Type;
+                return switch (mode) {
+                    .int => try self.groupNumericIntVectorValue(value, len),
+                    .float => try self.groupNumericFloatVectorValue(value, len),
+                };
+            }
+        }
+
+        const items = try self.materializeTopLevelItems(value);
+        defer {
+            for (items) |item| self.releaseValue(item);
+            self.allocator.free(items);
+        }
+        return try self.groupSequenceItemsValue(value, items);
+    }
+
     fn unitMatrixValue(self: *Session, value: Value) KError!Value {
         const count_i64 = scalarIntLikeValue(value) orelse return error.Type;
         if (count_i64 < 0) return error.Type;
@@ -24094,6 +30378,7 @@ pub const Session = struct {
             const count: usize = @intCast(count_value);
             return try newRangeIotaValue(self, .managed, count);
         }
+        if (try self.namespaceKeysValue(value)) |keys| return keys;
         if (value.tag() == .array and value.arrayKind() == .host_keyed_store) {
             return self.shareValue(value.asHostKeyedStore().names);
         }
@@ -24203,6 +30488,14 @@ pub const Session = struct {
                 hostDenseSetCachedIntRange(host, sourceHostIntRange(value, array));
                 break :blk try wrapOwnedHostArrayValue(self, host);
             },
+            .float32 => |items| blk: {
+                const out = try self.allocHostArrayTyped(f32, .float32, .managed, items.len);
+                reverseTypedSlice(f32, out.items, items);
+                const host = out.array;
+                hostDenseSetFlags(host, reversedDenseFlags(array.flags));
+                hostDenseCopyFloatBounds(host, array);
+                break :blk try wrapOwnedHostArrayValue(self, host);
+            },
             .float64 => |items| blk: {
                 const out = try self.allocHostArrayTyped(f64, .float64, .managed, items.len);
                 reverseTypedSlice(f64, out.items, items);
@@ -24275,6 +30568,20 @@ pub const Session = struct {
     fn notValue(self: *Session, value: Value) KError!Value {
         if (boolLikeValue(value)) |truthy| return Value.fromBool(!truthy);
         if (stringBytes(value)) |bytes| return try self.notStringValue(bytes);
+        if (hostDenseIfPresent(value)) |array| switch (array.storage) {
+            .bit => |words| {
+                const source_bits: HostBitSlice = .{
+                    .words = hostDenseLogicalBitWords(array, words),
+                    .len = array.logical_len,
+                };
+                const plan = try self.planHostIntUnaryOutput(hostDenseSourceValue(array), .bit, .bit, array.logical_len, true, true);
+                fillBitNotWords(plan.output.bit.words, source_bits);
+                const result = try self.finishHostIntOutput(plan, host_dense_flag_normalized | invertMonotonicFlags(array.flags));
+                hostDenseSetCachedIntRange(try mutableNumericHostArrayValue(self, result), .{ .min = 0, .max = 1 });
+                return result;
+            },
+            else => {},
+        };
         if (valueHostIntStructuralView(value)) |view| {
             const len = hostIntDenseViewLen(view);
             const out = try self.allocHostBitArray(.managed, len);
@@ -24335,7 +30642,10 @@ pub const Session = struct {
     fn scalarNullLikeValue(value: Value) bool {
         if (tableScalarValue(value)) |scalar| return scalar.is_null;
         return switch (value.tag()) {
-            .int, .float, .bool, .builtin, .closure => false,
+            .int => isKiwiIntNull(value.asInt()),
+            .float32 => isKiwiFloat32Null(value.asFloat32()),
+            .float => isKiwiFloatNull(value.asFloat()),
+            .bool, .builtin, .closure => false,
             .array => switch (value.arrayKind()) {
                 .host_symbol => hostTextBytes(value.asHostSymbol()).len == 0,
                 else => false,
@@ -24347,6 +30657,7 @@ pub const Session = struct {
         return switch (value.tag()) {
             .array => switch (value.arrayKind()) {
                 .host_symbol, .host_table_scalar => true,
+                .host_string, .host_string_view => (stringBytes(value) orelse "").len == 1,
                 else => false,
             },
             else => true,
@@ -24354,13 +30665,21 @@ pub const Session = struct {
     }
 
     fn numericFalseMaskValue(self: *Session, value: Value) KError!Value {
+        const mode = valueNumericMode(value) orelse return Value.fromBool(false);
         const total = numericFlatLen(value) orelse if (value.tag() == .array)
             (try numericHostArrayValue(self, value)).len()
         else
             return Value.fromBool(false);
         const bits = try self.allocator.alloc(bool, total);
         defer self.allocator.free(bits);
-        @memset(bits, false);
+        switch (mode) {
+            .int => {
+                for (0..total) |idx| bits[idx] = isKiwiIntNull(try numericIntAt(value, idx));
+            },
+            .float => {
+                for (0..total) |idx| bits[idx] = isKiwiFloatNull(try numericFloatAt(value, idx));
+            },
+        }
         const mask = try self.createManagedHostBitArray(bits);
         if (valueNonVectorNumericShape(value)) |shape| return try applyNonVectorNumericShapeToValue(self, mask, shape);
         return mask;
@@ -24372,10 +30691,9 @@ pub const Session = struct {
         if (value.tag() != .array) return Value.fromBool(false);
 
         if (stringBytes(value)) |text| {
-            const bits = try self.allocator.alloc(bool, text.len);
-            defer self.allocator.free(bits);
-            @memset(bits, false);
-            return try self.createManagedHostBitArray(bits);
+            var out = try self.allocHostBitArrayUninitialized(.managed, text.len);
+            const metadata = fillStringByteEqWords(&out, text, " ");
+            return try self.finishManagedHostBitAlloc(out, metadata.flags, metadata.range);
         }
         if (valueNumericMode(value) != null) return try self.numericFalseMaskValue(value);
         if (boxedArrayItems(value)) |items| {
@@ -24389,17 +30707,90 @@ pub const Session = struct {
             .host_string_list => blk: {
                 const bits = try self.allocator.alloc(bool, value.asHostStringList().len);
                 defer self.allocator.free(bits);
-                @memset(bits, false);
+                for (bits, 0..) |*bit, idx| bit.* = (try hostStringListItemBytes(value.asHostStringList(), idx)).len == 0;
                 break :blk try self.createManagedHostBitArray(bits);
             },
-            .host_symbol => Value.fromBool(false),
+            .host_symbol_list => blk: {
+                const bits = try self.allocator.alloc(bool, value.asHostStringList().len);
+                defer self.allocator.free(bits);
+                for (bits, 0..) |*bit, idx| bit.* = (try hostStringListItemBytes(value.asHostStringList(), idx)).len == 0;
+                break :blk try self.createManagedHostBitArray(bits);
+            },
+            .host_symbol => Value.fromBool(hostTextBytes(value.asHostSymbol()).len == 0),
             else => error.Type,
         };
     }
 
+    fn fillNumericNulls(self: *Session, left: Value, right: Value, mode: HostDenseElem) KError!Value {
+        const total = numericFlatLen(right) orelse if (right.tag() == .array)
+            (try numericHostArrayValue(self, right)).len()
+        else
+            return error.Type;
+        const result = switch (mode) {
+            .float => blk: {
+                const fill_value = try scalarNumericValue(left);
+                const items = try self.allocator.alloc(f64, total);
+                defer self.allocator.free(items);
+                for (0..total) |idx| {
+                    const item = try numericFloatAt(right, idx);
+                    items[idx] = if (isKiwiFloatNull(item)) fill_value else item;
+                }
+                break :blk try self.createManagedHostFloatArray(items);
+            },
+            .int => blk: {
+                if (left.tag() == .float) {
+                    const fill_value = left.asFloat();
+                    const items = try self.allocator.alloc(f64, total);
+                    defer self.allocator.free(items);
+                    for (0..total) |idx| {
+                        const item = try numericIntAt(right, idx);
+                        items[idx] = if (isKiwiIntNull(item)) fill_value else @floatFromInt(item);
+                    }
+                    break :blk try self.createManagedHostFloatArray(items);
+                }
+                const fill_value = scalarIntLikeValue(left) orelse return error.Type;
+                const items = try self.allocator.alloc(i64, total);
+                defer self.allocator.free(items);
+                for (0..total) |idx| {
+                    const item = try numericIntAt(right, idx);
+                    items[idx] = if (isKiwiIntNull(item)) fill_value else item;
+                }
+                break :blk try self.createManagedHostIntArray(items);
+            },
+        };
+        if (valueNonVectorNumericShape(right)) |shape| return try applyNonVectorNumericShapeToValue(self, result, shape);
+        return result;
+    }
+
+    fn fillStringNulls(self: *Session, left: Value, right: Value) KError!?Value {
+        const bytes = stringBytes(right) orelse return null;
+        const fill_bytes = stringBytes(left) orelse return null;
+        if (fill_bytes.len != 1) return null;
+        const out = try self.allocator.alloc(u8, bytes.len);
+        defer self.allocator.free(out);
+        for (bytes, out) |byte, *item| item.* = if (byte == ' ') fill_bytes[0] else byte;
+        return try self.managedHostString(out);
+    }
+
+    fn fillSymbolListNulls(self: *Session, left: Value, right: *const HostStringList) KError!?Value {
+        const fill_bytes = symbolBytes(left) orelse return null;
+        const items = try self.allocator.alloc([]const u8, right.len);
+        defer self.allocator.free(items);
+        for (items, 0..) |*item, idx| {
+            const bytes = try hostStringListItemBytes(right, idx);
+            item.* = if (bytes.len == 0) fill_bytes else bytes;
+        }
+        return try self.createManagedHostSymbolListFromSlices(items);
+    }
+
     fn fillValues(self: *Session, left: Value, right: Value) KError!Value {
         if (scalarNullLikeValue(right)) return self.shareValue(left);
+        if (try self.fillStringNulls(left, right)) |result| return result;
+        if (valueNumericMode(right)) |mode| return try self.fillNumericNulls(left, right, mode);
         if (right.tag() != .array) return self.shareValue(right);
+        if (right.arrayKind() == .host_symbol_list) {
+            if (try self.fillSymbolListNulls(left, right.asHostStringList())) |result| return result;
+        }
         if (boxedArrayItems(right)) |items| {
             var out = std.ArrayList(Value).empty;
             defer out.deinit(self.allocator);
@@ -26282,76 +32673,27 @@ pub const Session = struct {
         return result;
     }
 
-    fn concatIntVectorFloatScalar(self: *Session, view: HostIntDenseView, scalar_float: f64, scalar_on_right: bool) KError!Value {
-        const len = hostIntDenseViewLen(view);
-        const total_len = std.math.add(usize, len, 1) catch return error.Unsupported;
-        const out = try self.allocManagedHostFloatResult(total_len);
-        var write_idx: usize = 0;
-        if (!scalar_on_right) {
-            out.items[0] = scalar_float;
-            write_idx = 1;
+    fn concatMixedNumericVectorScalarBoxed(self: *Session, vector: Value, scalar: Value, scalar_on_right: bool) KError!Value {
+        var values = std.ArrayList(Value).empty;
+        var owned_values = std.ArrayList(Value).empty;
+        defer {
+            for (owned_values.items) |value| self.releaseValue(value);
+            owned_values.deinit(self.allocator);
+            values.deinit(self.allocator);
         }
-        for (0..len) |idx| out.items[write_idx + idx] = @floatFromInt(try hostIntDenseViewItem(view, idx));
-        if (scalar_on_right) out.items[len] = scalar_float;
-
-        const analysis = analyzeFloatSlice(out.items);
-        const result = try out.value(self);
-        hostDenseSetFlags(try mutableNumericHostArrayValue(self, result), analysis.flags);
-        return result;
+        if (scalar_on_right) {
+            try self.appendConcatValue(&values, &owned_values, vector);
+            try values.append(self.allocator, scalar);
+        } else {
+            try values.append(self.allocator, scalar);
+            try self.appendConcatValue(&values, &owned_values, vector);
+        }
+        return try self.createManagedHostBoxedArray(values.items);
     }
 
-    fn concatFloatVectorAsIntScalar(self: *Session, vector: Value, view: HostFloatDenseView, scalar_int: i64, range: HostIntRange, scalar_on_right: bool) KError!Value {
+    fn concatFloatVectorScalar(self: *Session, view: HostFloatDenseView, scalar_float: f64, scalar_on_right: bool) KError!Value {
         const len = hostFloatDenseViewLen(view);
         const total_len = std.math.add(usize, len, 1) catch return error.Unsupported;
-        var out = try self.allocManagedHostIntResult(hostIntStorageKindForRange(range.min, range.max), total_len);
-
-        var write_idx: usize = 0;
-        if (!scalar_on_right) {
-            try out.set(0, scalar_int);
-            write_idx = 1;
-        }
-        for (0..len) |idx| try out.set(write_idx + idx, exactIntFromFloat(try hostFloatDenseViewItem(view, idx)).?);
-        if (scalar_on_right) try out.set(len, scalar_int);
-
-        const vector_flags = hostFloatDenseValueFlags(vector, view);
-        var asc = len <= 1 or (vector_flags & host_dense_flag_asc) != 0;
-        var dsc = len <= 1 or (vector_flags & host_dense_flag_dsc) != 0;
-        if (len != 0) {
-            const first = exactIntFromFloat(try hostFloatDenseViewItem(view, 0)).?;
-            const last = exactIntFromFloat(try hostFloatDenseViewItem(view, len - 1)).?;
-            if (scalar_on_right) {
-                asc = asc and last <= scalar_int;
-                dsc = dsc and last >= scalar_int;
-            } else {
-                asc = asc and scalar_int <= first;
-                dsc = dsc and scalar_int >= first;
-            }
-        }
-
-        const result = try out.value(self);
-        const host = try mutableNumericHostArrayValue(self, result);
-        hostDenseSetFlags(host, host_dense_flag_normalized | orderFlagsFromMonotonic(asc, dsc));
-        hostDenseSetCachedIntRange(host, range);
-        return result;
-    }
-
-    fn concatFloatVectorScalar(self: *Session, vector: Value, view: HostFloatDenseView, scalar_float: f64, scalar_exact_int: ?i64, scalar_on_right: bool) KError!Value {
-        const len = hostFloatDenseViewLen(view);
-        const total_len = std.math.add(usize, len, 1) catch return error.Unsupported;
-        if (scalar_exact_int) |scalar_int| {
-            var range = hostIntRangeForValue(scalar_int);
-            var all_int = true;
-            for (0..len) |idx| {
-                const item_int = exactIntFromFloat(try hostFloatDenseViewItem(view, idx)) orelse {
-                    all_int = false;
-                    break;
-                };
-                range.min = @min(range.min, item_int);
-                range.max = @max(range.max, item_int);
-            }
-            if (all_int) return try self.concatFloatVectorAsIntScalar(vector, view, scalar_int, range, scalar_on_right);
-        }
-
         const out = try self.allocManagedHostFloatResult(total_len);
         var write_idx: usize = 0;
         if (!scalar_on_right) {
@@ -26370,17 +32712,21 @@ pub const Session = struct {
     fn concatNumericVectorScalar(self: *Session, vector: Value, scalar: Value, scalar_on_right: bool) KError!?Value {
         if (numericVectorLen(vector) == null or valueNumericMatrixShape(vector) != null) return null;
         const scalar_float = inlineNumericFloatValue(scalar) orelse return null;
-        const scalar_exact_int = inlineExactIntNumericValue(scalar);
         const vector_view = hostDenseView(self, vector) catch |err| switch (err) {
             error.Type => return null,
             else => return err,
         };
         return switch (vector_view) {
-            .int_array => |view| if (scalar_exact_int) |scalar_int|
-                try self.concatIntVectorScalar(vector, view, scalar, scalar_int, scalar_on_right)
-            else
-                try self.concatIntVectorFloatScalar(view, scalar_float, scalar_on_right),
-            .float_array => |view| try self.concatFloatVectorScalar(vector, view, scalar_float, scalar_exact_int, scalar_on_right),
+            .int_array => |view| switch (scalar.tag()) {
+                .int, .bool => try self.concatIntVectorScalar(vector, view, scalar, inlineExactIntNumericValue(scalar).?, scalar_on_right),
+                .float, .float32 => try self.concatMixedNumericVectorScalarBoxed(vector, scalar, scalar_on_right),
+                else => null,
+            },
+            .float_array => |view| switch (scalar.tag()) {
+                .float, .float32 => try self.concatFloatVectorScalar(view, scalar_float, scalar_on_right),
+                .int, .bool => try self.concatMixedNumericVectorScalarBoxed(vector, scalar, scalar_on_right),
+                else => null,
+            },
             else => null,
         };
     }
@@ -26405,9 +32751,14 @@ pub const Session = struct {
         if (try concatNumericMatrixShape(self, left, right)) |shape| {
             if (try concatNumericMatrixValue(self, left, right, shape)) |result| return result;
             var values = std.ArrayList(Value).empty;
-            defer values.deinit(self.allocator);
-            try self.appendConcatValue(&values, left);
-            try self.appendConcatValue(&values, right);
+            var owned_values = std.ArrayList(Value).empty;
+            defer {
+                for (owned_values.items) |value| self.releaseValue(value);
+                owned_values.deinit(self.allocator);
+                values.deinit(self.allocator);
+            }
+            try self.appendConcatValue(&values, &owned_values, left);
+            try self.appendConcatValue(&values, &owned_values, right);
             const result = try self.makeArrayFromValues(values.items);
             return try self.setNumericMatrixShapeOnValue(result, shape.rows, shape.cols);
         }
@@ -26420,16 +32771,43 @@ pub const Session = struct {
             return try newFlatConcatValue(self, left, right);
         }
         var values = std.ArrayList(Value).empty;
-        defer values.deinit(self.allocator);
-        try self.appendConcatValue(&values, left);
-        try self.appendConcatValue(&values, right);
+        var owned_values = std.ArrayList(Value).empty;
+        defer {
+            for (owned_values.items) |value| self.releaseValue(value);
+            owned_values.deinit(self.allocator);
+            values.deinit(self.allocator);
+        }
+        try self.appendConcatValue(&values, &owned_values, left);
+        try self.appendConcatValue(&values, &owned_values, right);
         return try self.makeArrayFromValues(values.items);
     }
 
-    fn appendConcatValue(self: *Session, values: *std.ArrayList(Value), value: Value) KError!void {
+    fn appendConcatValue(self: *Session, values: *std.ArrayList(Value), owned_values: *std.ArrayList(Value), value: Value) KError!void {
+        if (stringBytes(value) != null) {
+            try values.append(self.allocator, value);
+            return;
+        }
+        if (symbolBytes(value) != null) {
+            try values.append(self.allocator, value);
+            return;
+        }
+        if (value.tag() == .array and value.arrayKind() == .host_string_list) {
+            try values.append(self.allocator, value);
+            return;
+        }
+        if (value.tag() == .array and value.arrayKind() == .host_symbol_list) {
+            const list = value.asHostStringList();
+            for (0..list.len) |idx| {
+                const item = try self.hostSymbolListItemValue(list, idx);
+                errdefer self.releaseValue(item);
+                try values.append(self.allocator, item);
+                try owned_values.append(self.allocator, item);
+            }
+            return;
+        }
         if (value.tag() != .array) {
             switch (value.tag()) {
-                .int, .bool, .float => try values.append(self.allocator, value),
+                .int, .bool, .float, .float32 => try values.append(self.allocator, value),
                 else => return error.Type,
             }
             return;
@@ -26455,17 +32833,34 @@ pub const Session = struct {
     }
 
     fn takeValues(self: *Session, left: Value, right: Value) KError!Value {
-        if (try shapeVectorSnapshotValue(left)) |shape| {
-            return try self.reshapeToSnapshotValue(shape, right);
+        switch (left.tag()) {
+            .builtin, .closure => return try self.filterValues(left, right),
+            else => {},
+        }
+        if (isEmptyIntVectorValue(left)) {
+            if (try self.tryProjectKeyedStoreByKeys(left, right)) |projected| return projected;
+            return try self.applyMonad(.mul, right);
+        }
+        if (try reshapeShapeSnapshotValue(left)) |shape| {
+            return try self.reshapeValueWithShape(.managed, shape, right);
         }
         if (try self.tryProjectKeyedStoreByKeys(left, right)) |projected| return projected;
         const raw_count = scalarIntLikeValue(left) orelse return error.Type;
+        if (stringSourceInfo(right)) |source| {
+            return try self.takeHostString(raw_count, source);
+        }
         if (right.tag() == .array and right.arrayKind() == .host_string_list) {
             return try self.takeHostStringList(raw_count, right.asHostStringList());
         }
+        if (right.tag() == .array and right.arrayKind() == .host_symbol_list) {
+            return try self.takeHostSymbolList(raw_count, right.asHostStringList());
+        }
         if (right.tag() != .array) {
-            if (right.tag() != .int and right.tag() != .bool and right.tag() != .float) return error.Type;
-            return try self.takeScalarValue(raw_count, right);
+            return switch (right.tag()) {
+                .int, .bool, .float, .float32 => try self.takeScalarValue(raw_count, right),
+                .builtin, .closure => try self.takeAtomBoxedValue(raw_count, right),
+                else => error.Type,
+            };
         }
         if (right.arrayKind() == .host_keyed_store) {
             const store = right.asHostKeyedStore();
@@ -26478,24 +32873,34 @@ pub const Session = struct {
             return try self.materializeRelationTake(raw_count, right.asHostRelation());
         }
         if (right.arraySubkind() == .host_boxed_array) {
+            if (boxedSingletonCharSourceInfo(right)) |source| {
+                return try self.takeHostString(raw_count, source);
+            }
             return try self.takeHostBoxedArray(raw_count, right.asHostBoxedArray());
+        }
+        if (right.arrayKind() == .host_symbol) {
+            return try self.takeHostSymbol(raw_count, right.asHostSymbol());
+        }
+        if (right.arrayKind() == .host_table_scalar) {
+            return try self.takeAtomBoxedValue(raw_count, right);
         }
         if (valueNumericMatrixView(right)) |matrix| {
             const count: usize = @intCast(@abs(raw_count));
             if (count == 0) return try numericValueMatrixSelectRows(self, right, &.{});
-            if (matrix.shape.rows == 0) return error.Type;
+            if (matrix.shape.rows == 0) {
+                const total = std.math.mul(usize, count, matrix.shape.cols) catch return error.Unsupported;
+                const value = switch (valueNumericMode(right) orelse return error.Type) {
+                    .int => try self.createManagedIntNullArray(total),
+                    .float => try self.createManagedFloatNullArray(total),
+                };
+                return try self.setNumericMatrixShapeOnValue(value, count, matrix.shape.cols);
+            }
 
             var row_indices = std.ArrayList(usize).empty;
             defer row_indices.deinit(self.allocator);
             try row_indices.ensureTotalCapacity(self.allocator, count);
-            if (raw_count >= 0) {
-                for (0..count) |idx| try row_indices.append(self.allocator, idx % matrix.shape.rows);
-            } else {
-                const pad = if (count > matrix.shape.rows) count - matrix.shape.rows else 0;
-                for (0..pad) |_| try row_indices.append(self.allocator, 0);
-                const start = if (count >= matrix.shape.rows) 0 else matrix.shape.rows - count;
-                for (start..matrix.shape.rows) |idx| try row_indices.append(self.allocator, idx);
-            }
+            const start = takeCyclicStart(raw_count, count, matrix.shape.rows);
+            for (0..count) |idx| try row_indices.append(self.allocator, (start + idx) % matrix.shape.rows);
             return try numericValueMatrixSelectRows(self, right, row_indices.items);
         }
         if (shapedNumericHandle(right)) |handle| {
@@ -26503,6 +32908,15 @@ pub const Session = struct {
             const count: usize = @intCast(@abs(raw_count));
             if (count == 0) {
                 if (try numericValueFirstAxisContiguousSliceValue(self, right, .{ .start = 0, .len = 0 })) |result| return result;
+            } else if (rows == 0) {
+                const block_len = numericShapeInnerBlockLen(handle);
+                const total = std.math.mul(usize, count, block_len) catch return error.Unsupported;
+                const value = switch (valueNumericMode(right) orelse return error.Type) {
+                    .int => try self.createManagedIntNullArray(total),
+                    .float => try self.createManagedFloatNullArray(total),
+                };
+                const shape = numericShapeFirstAxisSliceSnapshot(handle, count) orelse return error.Type;
+                return try applyNonVectorNumericShapeToValue(self, value, shape);
             } else if (count <= rows) {
                 const start = if (raw_count >= 0) 0 else rows - count;
                 if (try numericValueFirstAxisContiguousSliceValue(self, right, .{ .start = start, .len = count })) |result| return result;
@@ -26515,7 +32929,7 @@ pub const Session = struct {
             if (numericVectorLen(right)) |len| {
                 const count: usize = @intCast(@abs(raw_count));
                 if (count == 0) return try newFlatSliceValue(self, right, 0, 0);
-                if (len == 0) return error.Type;
+                if (len == 0) return try self.takeEmptyNumericPrototypeValue(raw_count, valueNumericMode(right).?);
                 if (count <= len) {
                     const start = if (raw_count >= 0) 0 else len - count;
                     return try newFlatSliceValue(self, right, start, count);
@@ -26525,18 +32939,559 @@ pub const Session = struct {
         return try self.takeHostArray(raw_count, try numericHostArrayValue(self, right));
     }
 
-    fn shapeVectorSnapshotValue(value: Value) KError!?NumericShapeSnapshot {
+    fn isEmptyIntVectorValue(value: Value) bool {
+        if (valueNumericMode(value) != .int) return false;
+        return (numericVectorLen(value) orelse return false) == 0;
+    }
+
+    fn reshapeShapeSnapshotValue(value: Value) KError!?ReshapeShapeSnapshot {
         const len = numericVectorLen(value) orelse return null;
         if (valueNumericMode(value) != .int) return null;
         if (len == 0) return error.Type;
         if (len > numeric_array_max_rank) return error.Unsupported;
 
-        var dims_buf: [numeric_array_max_rank]i32 = [_]i32{0} ** numeric_array_max_rank;
+        var snapshot = ReshapeShapeSnapshot{};
+        snapshot.rank = @intCast(len);
         for (0..len) |idx| {
             const dim_i64 = try numericIntAt(value, idx);
-            dims_buf[idx] = std.math.cast(i32, dim_i64) orelse return error.Unsupported;
+            if (isKiwiIntNull(dim_i64)) {
+                snapshot.shape[idx] = kiwi_int_null;
+            } else {
+                if (dim_i64 < 0) return error.Type;
+                _ = std.math.cast(i32, dim_i64) orelse return error.Unsupported;
+                snapshot.shape[idx] = dim_i64;
+            }
         }
-        return try numericShapeSnapshotFromDims(dims_buf[0..len]);
+        return snapshot;
+    }
+
+    fn fixedReshapeShapeSnapshot(shape: ReshapeShapeSnapshot) KError!?NumericShapeSnapshot {
+        if (shape.hasNullDim()) return null;
+        var dims_buf: [numeric_array_max_rank]i32 = [_]i32{0} ** numeric_array_max_rank;
+        for (shape.shapeSlice(), 0..) |dim, idx| {
+            dims_buf[idx] = std.math.cast(i32, dim) orelse return error.Unsupported;
+        }
+        return try numericShapeSnapshotFromDims(dims_buf[0..shape.rank]);
+    }
+
+    fn shapeVectorSnapshotValue(value: Value) KError!?NumericShapeSnapshot {
+        const shape = (try reshapeShapeSnapshotValue(value)) orelse return null;
+        return try fixedReshapeShapeSnapshot(shape);
+    }
+
+    fn fixedShapeContainsZero(shape: NumericShapeSnapshot) bool {
+        for (shape.shapeSlice()) |dim| {
+            if (dim == 0) return true;
+        }
+        return false;
+    }
+
+    fn fixedShapeProduct(dims: []const i32) KError!usize {
+        var total: usize = 1;
+        for (dims) |dim| {
+            if (dim < 0) return error.Type;
+            total = std.math.mul(usize, total, @as(usize, @intCast(dim))) catch return error.Unsupported;
+        }
+        return total;
+    }
+
+    fn fixedShapeProductMaxOne(dims: []const i32) KError!usize {
+        var total: usize = 1;
+        for (dims) |dim| {
+            if (dim < 0) return error.Type;
+            total = std.math.mul(usize, total, @as(usize, @intCast(@max(1, dim)))) catch return error.Unsupported;
+        }
+        return total;
+    }
+
+    fn createOwnedHostStringSpaces(self: *Session, owner: HeapOwner, len: usize) KError!Value {
+        const bytes = try self.allocator.alloc(u8, len);
+        defer self.allocator.free(bytes);
+        @memset(bytes, ' ');
+        return try self.createOwnedHostString(owner, bytes);
+    }
+
+    fn createCharPrototypeForFixedShape(self: *Session, owner: HeapOwner, dims: []const i32) KError!Value {
+        if (dims.len == 0) return try self.createOwnedHostStringSpaces(owner, 1);
+        if (dims.len == 1) return try self.createOwnedHostStringSpaces(owner, @intCast(dims[0]));
+
+        const first: usize = @intCast(dims[0]);
+        const prototype = try self.createCharPrototypeForFixedShape(owner, dims[1..]);
+        defer self.releaseValue(prototype);
+        if (first == 0) {
+            return try self.createOwnedHostBoxedArrayWithPrototype(owner, &.{}, prototype);
+        }
+
+        const values = try self.allocator.alloc(Value, first);
+        defer self.allocator.free(values);
+        for (values) |*value| value.* = prototype;
+
+        if (dims.len == 2) {
+            const row = stringBytes(prototype) orelse return error.Internal;
+            const rows = try self.allocator.alloc([]const u8, first);
+            defer self.allocator.free(rows);
+            for (rows) |*item| item.* = row;
+            return try self.createOwnedHostStringRowsFromSlices(owner, rows);
+        }
+        return try self.createOwnedHostBoxedArray(owner, values);
+    }
+
+    fn materializeCharReshapeFlat(self: *Session, source: []const u8, total: usize) KError![]u8 {
+        const flat = try self.allocator.alloc(u8, total);
+        errdefer self.allocator.free(flat);
+        if (source.len == 0) {
+            @memset(flat, ' ');
+        } else {
+            for (flat, 0..) |*byte, idx| byte.* = source[idx % source.len];
+        }
+        return flat;
+    }
+
+    fn buildCharReshapeFromFlat(self: *Session, owner: HeapOwner, dims: []const i32, flat: []const u8, base: usize) KError!Value {
+        if (dims.len == 0) return error.Type;
+        if (dims.len == 1) {
+            const len: usize = @intCast(dims[0]);
+            if (base + len > flat.len) return error.Internal;
+            return try self.createOwnedHostString(owner, flat[base .. base + len]);
+        }
+        if (dims.len == 2) {
+            const rows_len: usize = @intCast(dims[0]);
+            const cols_len: usize = @intCast(dims[1]);
+            const rows = try self.allocator.alloc([]const u8, rows_len);
+            defer self.allocator.free(rows);
+            for (rows, 0..) |*row, idx| {
+                const start = base + idx * cols_len;
+                if (start + cols_len > flat.len) return error.Internal;
+                row.* = flat[start .. start + cols_len];
+            }
+            return try self.createOwnedHostStringRowsFromSlices(owner, rows);
+        }
+
+        const first: usize = @intCast(dims[0]);
+        const block_len = try fixedShapeProduct(dims[1..]);
+        const values = try self.allocator.alloc(Value, first);
+        defer self.allocator.free(values);
+        var initialized: usize = 0;
+        defer {
+            for (values[0..initialized]) |value| self.releaseValue(value);
+        }
+        for (values, 0..) |*value, idx| {
+            value.* = try self.buildCharReshapeFromFlat(owner, dims[1..], flat, base + idx * block_len);
+            initialized += 1;
+        }
+        return try self.createOwnedHostBoxedArray(owner, values);
+    }
+
+    fn reshapeHostStringToFixedShape(self: *Session, owner: HeapOwner, shape: NumericShapeSnapshot, source: []const u8) KError!Value {
+        if (fixedShapeContainsZero(shape)) return try self.createCharPrototypeForFixedShape(owner, shape.shapeSlice());
+        const total = try fixedShapeProduct(shape.shapeSlice());
+        const flat = try self.materializeCharReshapeFlat(source, total);
+        defer self.allocator.free(flat);
+        return try self.buildCharReshapeFromFlat(owner, shape.shapeSlice(), flat, 0);
+    }
+
+    fn symbolSourceLen(value: Value) ?usize {
+        if (symbolBytes(value) != null) return 1;
+        if (value.tag() == .array and value.arrayKind() == .host_symbol_list) return value.asHostStringList().len;
+        return null;
+    }
+
+    fn symbolSourceItemBytes(value: Value, idx: usize) KError![]const u8 {
+        if (symbolBytes(value)) |bytes| {
+            if (idx != 0) return error.Internal;
+            return bytes;
+        }
+        if (value.tag() == .array and value.arrayKind() == .host_symbol_list) {
+            return try hostStringListItemBytes(value.asHostStringList(), idx);
+        }
+        return error.Type;
+    }
+
+    fn cycledSymbolSourceItemBytes(self: *Session, value: Value, source_len: usize, idx: usize) KError![]const u8 {
+        _ = self;
+        if (source_len == 0) return &.{};
+        return try symbolSourceItemBytes(value, idx % source_len);
+    }
+
+    fn createOwnedEmptySymbolList(self: *Session, owner: HeapOwner, len: usize) KError!Value {
+        const items = try self.allocator.alloc([]const u8, len);
+        defer self.allocator.free(items);
+        for (items) |*item| item.* = &.{};
+        return try self.createOwnedHostSymbolListFromSlices(owner, items);
+    }
+
+    fn createSymbolPrototypeForFixedShape(self: *Session, owner: HeapOwner, dims: []const i32) KError!Value {
+        if (dims.len == 0) return try self.createOwnedHostSymbol(owner, &.{});
+        if (dims.len == 1) return try self.createOwnedEmptySymbolList(owner, @intCast(dims[0]));
+
+        const first: usize = @intCast(dims[0]);
+        const prototype = try self.createSymbolPrototypeForFixedShape(owner, dims[1..]);
+        defer self.releaseValue(prototype);
+        if (first == 0) return try self.createOwnedHostBoxedArrayWithPrototype(owner, &.{}, prototype);
+
+        const values = try self.allocator.alloc(Value, first);
+        defer self.allocator.free(values);
+        for (values) |*value| value.* = prototype;
+        return try self.createOwnedHostBoxedArray(owner, values);
+    }
+
+    fn buildSymbolReshapeFromSource(
+        self: *Session,
+        owner: HeapOwner,
+        dims: []const i32,
+        source: Value,
+        source_len: usize,
+        base: usize,
+    ) KError!Value {
+        if (dims.len == 0) return error.Type;
+        if (dims.len == 1) {
+            const len: usize = @intCast(dims[0]);
+            const items = try self.allocator.alloc([]const u8, len);
+            defer self.allocator.free(items);
+            for (items, 0..) |*item, idx| item.* = try self.cycledSymbolSourceItemBytes(source, source_len, base + idx);
+            return try self.createOwnedHostSymbolListFromSlices(owner, items);
+        }
+
+        const first: usize = @intCast(dims[0]);
+        if (first == 0) {
+            const prototype = try self.createSymbolPrototypeForFixedShape(owner, dims[1..]);
+            defer self.releaseValue(prototype);
+            return try self.createOwnedHostBoxedArrayWithPrototype(owner, &.{}, prototype);
+        }
+
+        const block_len = try fixedShapeProductMaxOne(dims[1..]);
+        const values = try self.allocator.alloc(Value, first);
+        defer self.allocator.free(values);
+        var initialized: usize = 0;
+        defer {
+            for (values[0..initialized]) |value| self.releaseValue(value);
+        }
+        for (values, 0..) |*value, idx| {
+            value.* = try self.buildSymbolReshapeFromSource(owner, dims[1..], source, source_len, base + idx * block_len);
+            initialized += 1;
+        }
+        return try self.createOwnedHostBoxedArray(owner, values);
+    }
+
+    fn reshapeSymbolToFixedShape(self: *Session, owner: HeapOwner, shape: NumericShapeSnapshot, right: Value) KError!Value {
+        const source_len = symbolSourceLen(right) orelse return error.Type;
+        return try self.buildSymbolReshapeFromSource(owner, shape.shapeSlice(), right, source_len, 0);
+    }
+
+    fn createOwnedNumericNullLike(self: *Session, owner: HeapOwner, value: Value) KError!Value {
+        const mode = valueNumericMode(value) orelse return error.Type;
+        const len = numericFlatLen(value) orelse if (numericVectorLen(value)) |vector_len| vector_len else return error.Type;
+        const nulls = switch (mode) {
+            .int => try self.createOwnedIntNullArray(owner, len),
+            .float => if (valueFloatStorageKind(value) == .float32)
+                try self.createOwnedFloat32NullArray(owner, len)
+            else
+                try self.createOwnedFloatNullArray(owner, len),
+        };
+        if (valueNonVectorNumericShape(value)) |shape| {
+            return try applyNonVectorNumericShapeToValue(self, nulls, shape);
+        }
+        return nulls;
+    }
+
+    fn deepPrototypeValue(self: *Session, owner: HeapOwner, value: Value) KError!Value {
+        switch (value.tag()) {
+            .int, .bool => return try self.intNullValue(),
+            .float32 => return try self.float32NullValue(),
+            .float => return try self.floatNullValue(),
+            else => {},
+        }
+        if (stringBytes(value)) |bytes| return try self.createOwnedHostStringSpaces(owner, bytes.len);
+        if (symbolBytes(value) != null) return try self.createOwnedHostSymbol(owner, &.{});
+        if (valueNumericMode(value) != null) return try self.createOwnedNumericNullLike(owner, value);
+        if (value.tag() == .array and value.arrayKind() == .host_symbol_list) {
+            return try self.createOwnedEmptySymbolList(owner, value.asHostStringList().len);
+        }
+        if (value.tag() == .array and value.arrayKind() == .host_string_list) {
+            const list = value.asHostStringList();
+            const items = try self.allocator.alloc([]const u8, list.len);
+            defer self.allocator.free(items);
+            for (items, 0..) |*item, idx| {
+                const bytes = try hostStringListItemBytes(list, idx);
+                const spaces = try self.allocator.alloc(u8, bytes.len);
+                defer self.allocator.free(spaces);
+                @memset(spaces, ' ');
+                item.* = spaces;
+            }
+            return try self.createOwnedHostStringListFromSlices(owner, items);
+        }
+        if (value.tag() == .array and value.arrayKind() == .host_boxed_array) {
+            const array = value.asHostBoxedArray();
+            if (array.len() == 0) {
+                if (array.prototype) |prototype| {
+                    const next = try self.deepPrototypeValue(owner, prototype);
+                    defer self.releaseValue(next);
+                    return try self.createOwnedHostBoxedArrayWithPrototype(owner, &.{}, next);
+                }
+                return try self.createOwnedHostBoxedArray(owner, &.{});
+            }
+            const values = try self.allocator.alloc(Value, array.len());
+            defer self.allocator.free(values);
+            var initialized: usize = 0;
+            defer {
+                for (values[0..initialized]) |item| self.releaseValue(item);
+            }
+            for (values, array.items[0..array.len()]) |*out, item| {
+                out.* = try self.deepPrototypeValue(owner, item);
+                initialized += 1;
+            }
+            return try self.createOwnedHostBoxedArray(owner, values);
+        }
+        return error.Type;
+    }
+
+    fn emptySequenceForBoxedItem(self: *Session, owner: HeapOwner, value: Value) KError!Value {
+        switch (value.tag()) {
+            .int, .bool => return try self.createOwnedHostIntArray(owner, &.{}),
+            .float => return try self.createOwnedHostFloatArray(owner, &.{}),
+            else => {},
+        }
+        if (stringBytes(value) != null) return try self.createOwnedHostString(owner, &.{});
+        if (symbolBytes(value) != null) return try self.createOwnedHostSymbolListFromSlices(owner, &.{});
+        if (valueNumericMode(value) != null) {
+            const prototype = try self.createOwnedNumericNullLike(owner, value);
+            defer self.releaseValue(prototype);
+            return try self.createOwnedHostBoxedArrayWithPrototype(owner, &.{}, prototype);
+        }
+        if (value.tag() == .array and value.arrayKind() == .host_symbol_list) return try self.createOwnedHostSymbolListFromSlices(owner, &.{});
+        if (value.tag() == .array and value.arrayKind() == .host_string_list) {
+            const prototype = try self.deepPrototypeValue(owner, value);
+            defer self.releaseValue(prototype);
+            return try self.createOwnedHostBoxedArrayWithPrototype(owner, &.{}, prototype);
+        }
+        if (value.tag() == .array and value.arrayKind() == .host_boxed_array) {
+            const prototype = try self.deepPrototypeValue(owner, value);
+            defer self.releaseValue(prototype);
+            return try self.createOwnedHostBoxedArrayWithPrototype(owner, &.{}, prototype);
+        }
+        return error.Type;
+    }
+
+    fn emptyReshapeSequenceForItem(self: *Session, owner: HeapOwner, value: Value) KError!Value {
+        switch (value.tag()) {
+            .int, .bool => return try self.createOwnedHostIntArray(owner, &.{}),
+            .float => return try self.createOwnedHostFloatArray(owner, &.{}),
+            else => {},
+        }
+        if (stringBytes(value)) |bytes| {
+            const prototype = try self.createOwnedHostStringSpaces(owner, bytes.len);
+            defer self.releaseValue(prototype);
+            return try self.createOwnedHostBoxedArrayWithPrototype(owner, &.{}, prototype);
+        }
+        if (symbolBytes(value) != null) return try self.createOwnedHostSymbolListFromSlices(owner, &.{});
+        if (valueNumericMode(value) != null) {
+            const prototype = try self.createOwnedNumericNullLike(owner, value);
+            defer self.releaseValue(prototype);
+            return try self.createOwnedHostBoxedArrayWithPrototype(owner, &.{}, prototype);
+        }
+        if (value.tag() == .array and value.arrayKind() == .host_symbol_list) {
+            const prototype = try self.deepPrototypeValue(owner, value);
+            defer self.releaseValue(prototype);
+            return try self.createOwnedHostBoxedArrayWithPrototype(owner, &.{}, prototype);
+        }
+        if (value.tag() == .array and value.arrayKind() == .host_string_list) {
+            const prototype = try self.deepPrototypeValue(owner, value);
+            defer self.releaseValue(prototype);
+            return try self.createOwnedHostBoxedArrayWithPrototype(owner, &.{}, prototype);
+        }
+        if (value.tag() == .array and value.arrayKind() == .host_boxed_array) {
+            const prototype = try self.deepPrototypeValue(owner, value);
+            defer self.releaseValue(prototype);
+            return try self.createOwnedHostBoxedArrayWithPrototype(owner, &.{}, prototype);
+        }
+        return error.Type;
+    }
+
+    fn reshapeItemSequenceSourceLen(value: Value) ?usize {
+        if (value.tag() != .array) return null;
+        if (hasBackendRealization(value)) return null;
+        if (shapedNumericHandle(value)) |handle| return @intCast(handle.shape[0]);
+        return switch (value.arrayKind()) {
+            .host_string_list => value.asHostStringList().len,
+            .host_boxed_array => value.asHostBoxedArray().len(),
+            else => null,
+        };
+    }
+
+    fn numericFirstAxisPrototypeItemValue(self: *Session, value: Value) KError!Value {
+        const handle = shapedNumericHandle(value) orelse return error.Type;
+        const mode = valueNumericMode(value) orelse return error.Type;
+        const block_len = numericShapeInnerBlockLen(handle);
+        const prototype = switch (mode) {
+            .int => try self.createManagedIntNullArray(block_len),
+            .float => try self.createManagedFloatNullArray(block_len),
+        };
+        return try applyNonVectorNumericShapeToValue(self, prototype, numericShapeTailSnapshot(handle));
+    }
+
+    fn reshapeItemSequencePrototypeItemValue(self: *Session, value: Value) KError!Value {
+        if (shapedNumericHandle(value) != null) return try self.numericFirstAxisPrototypeItemValue(value);
+        if (value.tag() == .array and value.arrayKind() == .host_string_list) return try self.managedHostString(&.{});
+        if (value.tag() == .array and value.arrayKind() == .host_boxed_array) {
+            const array = value.asHostBoxedArray();
+            if (array.prototype) |prototype| return try self.retainEscapedValue(prototype);
+            return try self.managedHostString(&.{});
+        }
+        return error.Type;
+    }
+
+    fn materializeItemSequenceReshapeFlat(self: *Session, dims: []const i32, right: Value, source_len: usize) KError![]Value {
+        const total = try fixedShapeProductMaxOne(dims);
+        const flat = try self.allocator.alloc(Value, total);
+        errdefer self.allocator.free(flat);
+
+        const fallback = if (source_len == 0) try self.reshapeItemSequencePrototypeItemValue(right) else Value.int(0) catch unreachable;
+        defer if (source_len == 0) self.releaseValue(fallback);
+
+        var initialized: usize = 0;
+        errdefer {
+            for (flat[0..initialized]) |item| self.releaseValue(item);
+        }
+        for (flat, 0..) |*item, idx| {
+            item.* = if (source_len == 0)
+                try self.retainEscapedValue(fallback)
+            else
+                try self.derivedSequenceItemValue(right, idx % source_len);
+            initialized += 1;
+        }
+        return flat;
+    }
+
+    fn materializeBoxedReshapeFlat(self: *Session, dims: []const i32, right: *const HostBoxedArray) KError![]Value {
+        const total = try fixedShapeProductMaxOne(dims);
+        const flat = try self.allocator.alloc(Value, total);
+        errdefer self.allocator.free(flat);
+
+        const needs_empty_fallback = right.len() == 0 and right.prototype == null;
+        const fallback = if (needs_empty_fallback) try self.managedHostString(&.{}) else Value.int(0) catch unreachable;
+        defer if (needs_empty_fallback) self.releaseValue(fallback);
+
+        var initialized: usize = 0;
+        errdefer {
+            for (flat[0..initialized]) |item| self.releaseValue(item);
+        }
+        for (flat, 0..) |*item, idx| {
+            const source = if (right.len() != 0)
+                right.items[idx % right.len()]
+            else if (right.prototype) |prototype|
+                prototype
+            else
+                fallback;
+            item.* = try self.retainEscapedValue(source);
+            initialized += 1;
+        }
+        return flat;
+    }
+
+    fn buildBoxedPrototypeForShape(self: *Session, owner: HeapOwner, dims: []const i32, flat: []const Value, base: usize) KError!Value {
+        if (dims.len == 0) return try self.deepPrototypeValue(owner, flat[base]);
+        if (dims.len == 1) {
+            const len: usize = @intCast(dims[0]);
+            if (len == 0) return try self.emptyReshapeSequenceForItem(owner, flat[base]);
+            const values = try self.allocator.alloc(Value, len);
+            defer self.allocator.free(values);
+            var initialized: usize = 0;
+            defer {
+                for (values[0..initialized]) |item| self.releaseValue(item);
+            }
+            for (values, 0..) |*value, idx| {
+                value.* = try self.deepPrototypeValue(owner, flat[base + idx]);
+                initialized += 1;
+            }
+            return try self.createOwnedHostBoxedArray(owner, values);
+        }
+
+        const first: usize = @intCast(dims[0]);
+        if (first == 0) {
+            const prototype = try self.buildBoxedPrototypeForShape(owner, dims[1..], flat, base);
+            defer self.releaseValue(prototype);
+            return try self.createOwnedHostBoxedArrayWithPrototype(owner, &.{}, prototype);
+        }
+
+        const block_len = try fixedShapeProductMaxOne(dims[1..]);
+        const values = try self.allocator.alloc(Value, first);
+        defer self.allocator.free(values);
+        var initialized: usize = 0;
+        defer {
+            for (values[0..initialized]) |item| self.releaseValue(item);
+        }
+        for (values, 0..) |*value, idx| {
+            value.* = try self.buildBoxedPrototypeForShape(owner, dims[1..], flat, base + idx * block_len);
+            initialized += 1;
+        }
+        return try self.createOwnedHostBoxedArray(owner, values);
+    }
+
+    fn buildBoxedReshapeFromFlat(self: *Session, owner: HeapOwner, dims: []const i32, flat: []const Value, base: usize) KError!Value {
+        if (dims.len == 0) return error.Type;
+        if (dims.len == 1) {
+            const len: usize = @intCast(dims[0]);
+            if (len == 0) return try self.emptyReshapeSequenceForItem(owner, flat[base]);
+            if (base + len > flat.len) return error.Internal;
+            return try self.createOwnedHostBoxedArray(owner, flat[base .. base + len]);
+        }
+
+        const first: usize = @intCast(dims[0]);
+        if (first == 0) {
+            const prototype = try self.buildBoxedPrototypeForShape(owner, dims[1..], flat, base);
+            defer self.releaseValue(prototype);
+            return try self.createOwnedHostBoxedArrayWithPrototype(owner, &.{}, prototype);
+        }
+
+        const block_len = try fixedShapeProductMaxOne(dims[1..]);
+        const values = try self.allocator.alloc(Value, first);
+        defer self.allocator.free(values);
+        var initialized: usize = 0;
+        defer {
+            for (values[0..initialized]) |item| self.releaseValue(item);
+        }
+        for (values, 0..) |*value, idx| {
+            value.* = try self.buildBoxedReshapeFromFlat(owner, dims[1..], flat, base + idx * block_len);
+            initialized += 1;
+        }
+        return try self.createOwnedHostBoxedArray(owner, values);
+    }
+
+    fn reshapeBoxedToFixedShape(self: *Session, owner: HeapOwner, shape: NumericShapeSnapshot, array: *const HostBoxedArray) KError!Value {
+        const flat = try self.materializeBoxedReshapeFlat(shape.shapeSlice(), array);
+        defer {
+            for (flat) |item| self.releaseValue(item);
+            self.allocator.free(flat);
+        }
+        return try self.buildBoxedReshapeFromFlat(owner, shape.shapeSlice(), flat, 0);
+    }
+
+    fn reshapeItemSequenceToFixedShape(self: *Session, owner: HeapOwner, shape: NumericShapeSnapshot, right: Value) KError!?Value {
+        const source_len = reshapeItemSequenceSourceLen(right) orelse return null;
+        const flat = try self.materializeItemSequenceReshapeFlat(shape.shapeSlice(), right, source_len);
+        defer {
+            for (flat) |item| self.releaseValue(item);
+            self.allocator.free(flat);
+        }
+        return try self.buildBoxedReshapeFromFlat(owner, shape.shapeSlice(), flat, 0);
+    }
+
+    fn reshapeValueWithShape(self: *Session, owner: HeapOwner, shape: ReshapeShapeSnapshot, right: Value) KError!Value {
+        if (try fixedReshapeShapeSnapshot(shape)) |fixed_shape| {
+            if (stringSourceInfo(right)) |source| {
+                return try self.reshapeHostStringToFixedShape(owner, fixed_shape, source.bytes());
+            }
+            if (symbolSourceLen(right) != null) return try self.reshapeSymbolToFixedShape(owner, fixed_shape, right);
+            if (try self.reshapeItemSequenceToFixedShape(owner, fixed_shape, right)) |result| return result;
+            if (right.tag() == .array and right.arrayKind() == .host_boxed_array) {
+                return try self.reshapeBoxedToFixedShape(owner, fixed_shape, right.asHostBoxedArray());
+            }
+            return if (owner == .managed)
+                try self.reshapeToSnapshotValue(fixed_shape, right)
+            else
+                try self.reshapeConstantToSnapshotValue(owner, fixed_shape, right);
+        }
+        return try self.reshapeNullShapeValue(owner, shape, right);
     }
 
     fn reshapeToSnapshotValue(self: *Session, shape: NumericShapeSnapshot, right: Value) KError!Value {
@@ -26554,7 +33509,10 @@ pub const Session = struct {
 
         if (valueRangeIotaHandle(right)) |handle| {
             const source_total = numericArrayRangeLen(handle);
-            if (source_total == 0 and total != 0) return error.Type;
+            if (source_total == 0 and total != 0) {
+                const reshaped = try self.createManagedIntNullArray(total);
+                return try applyNonVectorNumericShapeToValue(self, reshaped, shape);
+            }
             if (source_total == total) {
                 return try newRangeIotaValueWithShape(
                     self,
@@ -26572,7 +33530,13 @@ pub const Session = struct {
                 (try numericHostArrayValue(self, right)).len()
             else
                 return error.Type;
-            if (source_total == 0 and total != 0) return error.Type;
+            if (source_total == 0 and total != 0) {
+                const reshaped = switch (mode) {
+                    .int => try self.createManagedIntNullArray(total),
+                    .float => try self.createManagedFloatNullArray(total),
+                };
+                return try applyNonVectorNumericShapeToValue(self, reshaped, shape);
+            }
             if (source_total == total) {
                 return try newReshapeViewValue(self, right, shape);
             }
@@ -26641,7 +33605,13 @@ pub const Session = struct {
                 (try numericHostArrayValue(self, right)).len()
             else
                 return error.Type;
-            if (source_total == 0 and total != 0) return error.Type;
+            if (source_total == 0 and total != 0) {
+                const reshaped = switch (mode) {
+                    .int => try self.createOwnedIntNullArray(owner, total),
+                    .float => try self.createOwnedFloatNullArray(owner, total),
+                };
+                return try applyNonVectorNumericShapeToValue(self, reshaped, shape);
+            }
             if (source_total == total) {
                 return try applyNonVectorNumericShapeToValue(self, right, shape);
             }
@@ -26670,8 +33640,501 @@ pub const Session = struct {
         return error.Type;
     }
 
+    fn createOwnedNumericVectorSlice(self: *Session, owner: HeapOwner, value: Value, start: usize, len: usize) KError!Value {
+        const mode = valueNumericMode(value) orelse return error.Type;
+        const source_len = numericVectorLen(value) orelse return error.Type;
+        if (start > source_len or start + len > source_len) return error.Internal;
+        return switch (mode) {
+            .int => blk: {
+                const data = try self.allocator.alloc(i64, len);
+                defer self.allocator.free(data);
+                for (data, 0..) |*item, idx| item.* = try numericIntAt(value, @intCast(start + idx));
+                break :blk try self.createOwnedHostIntArray(owner, data);
+            },
+            .float => blk: {
+                const data = try self.allocator.alloc(f64, len);
+                defer self.allocator.free(data);
+                for (data, 0..) |*item, idx| item.* = try numericFloatAt(value, @intCast(start + idx));
+                break :blk try self.createOwnedHostFloatArray(owner, data);
+            },
+        };
+    }
+
+    fn emptyChunkPrototypeForValue(self: *Session, owner: HeapOwner, value: Value) KError!?Value {
+        if (stringSourceInfo(value) != null) return try self.createOwnedHostString(owner, &.{});
+        if (valueNumericMode(value) != null and numericVectorLen(value) != null) {
+            return try self.createOwnedNumericVectorSlice(owner, value, 0, 0);
+        }
+        return null;
+    }
+
+    fn chunkHostStringBySize(self: *Session, owner: HeapOwner, source: []const u8, chunk_size: usize) KError!Value {
+        const count = if (chunk_size == 0 or source.len == 0) 0 else (source.len + chunk_size - 1) / chunk_size;
+        if (count == 0) {
+            const prototype = try self.createOwnedHostString(owner, &.{});
+            defer self.releaseValue(prototype);
+            return try self.createOwnedHostBoxedArrayWithPrototype(owner, &.{}, prototype);
+        }
+
+        const rows = try self.allocator.alloc([]const u8, count);
+        defer self.allocator.free(rows);
+        for (rows, 0..) |*row, idx| {
+            const start = idx * chunk_size;
+            const end = @min(source.len, start + chunk_size);
+            row.* = source[start..end];
+        }
+        return try self.createOwnedHostStringRowsFromSlices(owner, rows);
+    }
+
+    fn splitHostStringIntoGroups(self: *Session, owner: HeapOwner, source: []const u8, groups: usize) KError!Value {
+        if (groups == 0) {
+            const prototype = try self.createOwnedHostString(owner, &.{});
+            defer self.releaseValue(prototype);
+            return try self.createOwnedHostBoxedArrayWithPrototype(owner, &.{}, prototype);
+        }
+
+        const rows = try self.allocator.alloc([]const u8, groups);
+        defer self.allocator.free(rows);
+        for (rows, 0..) |*row, idx| {
+            const start = idx * source.len / groups;
+            const end = (idx + 1) * source.len / groups;
+            row.* = source[start..end];
+        }
+        return try self.createOwnedHostStringRowsFromSlices(owner, rows);
+    }
+
+    fn createSymbolChunkValue(self: *Session, owner: HeapOwner, source: Value, source_len: usize, start: usize, len: usize) KError!Value {
+        const items = try self.allocator.alloc([]const u8, len);
+        defer self.allocator.free(items);
+        for (items, 0..) |*item, idx| item.* = try symbolSourceItemBytes(source, start + idx);
+        if (source_len == 0 and len != 0) return error.Internal;
+        return try self.createOwnedHostSymbolListFromSlices(owner, items);
+    }
+
+    fn chunkSymbolBySize(self: *Session, owner: HeapOwner, source: Value, chunk_size: usize) KError!Value {
+        const source_len = symbolSourceLen(source) orelse return error.Type;
+        const count = if (chunk_size == 0 or source_len == 0) 0 else (source_len + chunk_size - 1) / chunk_size;
+        if (count == 0) {
+            const prototype = try self.createOwnedHostSymbolListFromSlices(owner, &.{});
+            defer self.releaseValue(prototype);
+            return try self.createOwnedHostBoxedArrayWithPrototype(owner, &.{}, prototype);
+        }
+
+        const values = try self.allocator.alloc(Value, count);
+        defer self.allocator.free(values);
+        var initialized: usize = 0;
+        defer {
+            for (values[0..initialized]) |item| self.releaseValue(item);
+        }
+        for (values, 0..) |*item, idx| {
+            const start = idx * chunk_size;
+            const end = @min(source_len, start + chunk_size);
+            item.* = try self.createSymbolChunkValue(owner, source, source_len, start, end - start);
+            initialized += 1;
+        }
+        return try self.createOwnedHostBoxedArray(owner, values);
+    }
+
+    fn splitSymbolIntoGroups(self: *Session, owner: HeapOwner, source: Value, groups: usize) KError!Value {
+        const source_len = symbolSourceLen(source) orelse return error.Type;
+        if (groups == 0) {
+            const prototype = try self.createOwnedHostSymbolListFromSlices(owner, &.{});
+            defer self.releaseValue(prototype);
+            return try self.createOwnedHostBoxedArrayWithPrototype(owner, &.{}, prototype);
+        }
+
+        const values = try self.allocator.alloc(Value, groups);
+        defer self.allocator.free(values);
+        var initialized: usize = 0;
+        defer {
+            for (values[0..initialized]) |item| self.releaseValue(item);
+        }
+        for (values, 0..) |*item, idx| {
+            const start = idx * source_len / groups;
+            const end = (idx + 1) * source_len / groups;
+            item.* = try self.createSymbolChunkValue(owner, source, source_len, start, end - start);
+            initialized += 1;
+        }
+        return try self.createOwnedHostBoxedArray(owner, values);
+    }
+
+    fn createBoxedChunkValue(self: *Session, owner: HeapOwner, array: *const HostBoxedArray, start: usize, len: usize) KError!Value {
+        if (start > array.len() or start + len > array.len()) return error.Internal;
+        return try self.createOwnedHostBoxedArray(owner, array.items[start .. start + len]);
+    }
+
+    fn chunkBoxedBySize(self: *Session, owner: HeapOwner, array: *const HostBoxedArray, chunk_size: usize) KError!Value {
+        const source_len = array.len();
+        const count = if (chunk_size == 0 or source_len == 0) 0 else (source_len + chunk_size - 1) / chunk_size;
+        if (count == 0) {
+            const prototype = if (array.prototype) |prototype| try self.emptySequenceForBoxedItem(owner, prototype) else try self.createOwnedHostBoxedArray(owner, &.{});
+            defer self.releaseValue(prototype);
+            return try self.createOwnedHostBoxedArrayWithPrototype(owner, &.{}, prototype);
+        }
+
+        const values = try self.allocator.alloc(Value, count);
+        defer self.allocator.free(values);
+        var initialized: usize = 0;
+        defer {
+            for (values[0..initialized]) |item| self.releaseValue(item);
+        }
+        for (values, 0..) |*item, idx| {
+            const start = idx * chunk_size;
+            const end = @min(source_len, start + chunk_size);
+            item.* = try self.createBoxedChunkValue(owner, array, start, end - start);
+            initialized += 1;
+        }
+        return try self.createOwnedHostBoxedArray(owner, values);
+    }
+
+    fn splitBoxedIntoGroups(self: *Session, owner: HeapOwner, array: *const HostBoxedArray, groups: usize) KError!Value {
+        const source_len = array.len();
+        if (groups == 0) {
+            const prototype = if (array.prototype) |prototype| try self.emptySequenceForBoxedItem(owner, prototype) else try self.createOwnedHostBoxedArray(owner, &.{});
+            defer self.releaseValue(prototype);
+            return try self.createOwnedHostBoxedArrayWithPrototype(owner, &.{}, prototype);
+        }
+
+        const values = try self.allocator.alloc(Value, groups);
+        defer self.allocator.free(values);
+        var initialized: usize = 0;
+        defer {
+            for (values[0..initialized]) |item| self.releaseValue(item);
+        }
+        for (values, 0..) |*item, idx| {
+            const start = idx * source_len / groups;
+            const end = (idx + 1) * source_len / groups;
+            item.* = try self.createBoxedChunkValue(owner, array, start, end - start);
+            initialized += 1;
+        }
+        return try self.createOwnedHostBoxedArray(owner, values);
+    }
+
+    fn chunkNumericVectorBySize(self: *Session, owner: HeapOwner, value: Value, chunk_size: usize) KError!Value {
+        const source_len = numericVectorLen(value) orelse return error.Type;
+        const count = if (chunk_size == 0 or source_len == 0) 0 else (source_len + chunk_size - 1) / chunk_size;
+        const prototype = try self.createOwnedNumericVectorSlice(owner, value, 0, 0);
+        defer self.releaseValue(prototype);
+        if (count == 0) return try self.createOwnedHostBoxedArrayWithPrototype(owner, &.{}, prototype);
+
+        const values = try self.allocator.alloc(Value, count);
+        defer self.allocator.free(values);
+        var initialized: usize = 0;
+        defer {
+            for (values[0..initialized]) |item| self.releaseValue(item);
+        }
+        for (values, 0..) |*item, idx| {
+            const start = idx * chunk_size;
+            const end = @min(source_len, start + chunk_size);
+            item.* = try self.createOwnedNumericVectorSlice(owner, value, start, end - start);
+            initialized += 1;
+        }
+        return try self.createOwnedHostBoxedArray(owner, values);
+    }
+
+    fn splitNumericVectorIntoGroups(self: *Session, owner: HeapOwner, value: Value, groups: usize) KError!Value {
+        const source_len = numericVectorLen(value) orelse return error.Type;
+        const prototype = try self.createOwnedNumericVectorSlice(owner, value, 0, 0);
+        defer self.releaseValue(prototype);
+        if (groups == 0) return try self.createOwnedHostBoxedArrayWithPrototype(owner, &.{}, prototype);
+
+        const values = try self.allocator.alloc(Value, groups);
+        defer self.allocator.free(values);
+        var initialized: usize = 0;
+        defer {
+            for (values[0..initialized]) |item| self.releaseValue(item);
+        }
+        for (values, 0..) |*item, idx| {
+            const start = idx * source_len / groups;
+            const end = (idx + 1) * source_len / groups;
+            item.* = try self.createOwnedNumericVectorSlice(owner, value, start, end - start);
+            initialized += 1;
+        }
+        return try self.createOwnedHostBoxedArray(owner, values);
+    }
+
+    fn reshapeNullShapeValue(self: *Session, owner: HeapOwner, shape: ReshapeShapeSnapshot, right: Value) KError!Value {
+        const dims = shape.shapeSlice();
+        if (dims.len == 1 and isKiwiIntNull(dims[0])) return try self.ownedValueForOwner(owner, right);
+        if (dims.len != 2) return error.Type;
+
+        const first_null = isKiwiIntNull(dims[0]);
+        const second_null = isKiwiIntNull(dims[1]);
+        if (first_null == second_null) return error.Type;
+
+        if (first_null) {
+            const chunk_size: usize = @intCast(dims[1]);
+            if (stringSourceInfo(right)) |source| return try self.chunkHostStringBySize(owner, source.bytes(), chunk_size);
+            if (symbolSourceLen(right) != null) return try self.chunkSymbolBySize(owner, right, chunk_size);
+            if (right.tag() == .array and right.arrayKind() == .host_boxed_array) return try self.chunkBoxedBySize(owner, right.asHostBoxedArray(), chunk_size);
+            if (valueNumericMode(right) != null and numericVectorLen(right) != null) return try self.chunkNumericVectorBySize(owner, right, chunk_size);
+            return error.Type;
+        }
+
+        const groups: usize = @intCast(dims[0]);
+        if (stringSourceInfo(right)) |source| return try self.splitHostStringIntoGroups(owner, source.bytes(), groups);
+        if (symbolSourceLen(right) != null) return try self.splitSymbolIntoGroups(owner, right, groups);
+        if (right.tag() == .array and right.arrayKind() == .host_boxed_array) return try self.splitBoxedIntoGroups(owner, right.asHostBoxedArray(), groups);
+        if (valueNumericMode(right) != null and numericVectorLen(right) != null) return try self.splitNumericVectorIntoGroups(owner, right, groups);
+        return error.Type;
+    }
+
+    fn intNullValue(self: *Session) KError!Value {
+        return try self.intValue(kiwi_int_null);
+    }
+
+    fn floatNullValue(self: *Session) KError!Value {
+        return try self.floatValue(kiwiFloatNull());
+    }
+
+    fn float32NullValue(self: *Session) KError!Value {
+        return try self.float32Value(kiwiFloat32Null());
+    }
+
+    fn numericPrototypeScalarValue(self: *Session, mode: HostDenseElem) KError!Value {
+        return switch (mode) {
+            .int => try self.intNullValue(),
+            .float => try self.floatNullValue(),
+        };
+    }
+
+    fn createManagedIntNullArray(self: *Session, count: usize) KError!Value {
+        const items = try self.allocator.alloc(i64, count);
+        defer self.allocator.free(items);
+        @memset(items, kiwi_int_null);
+        return try self.createManagedHostIntArray(items);
+    }
+
+    fn createManagedFloatNullArray(self: *Session, count: usize) KError!Value {
+        const items = try self.allocator.alloc(f64, count);
+        defer self.allocator.free(items);
+        @memset(items, kiwiFloatNull());
+        return try self.createManagedHostFloatArray(items);
+    }
+
+    fn createManagedFloat32NullArray(self: *Session, count: usize) KError!Value {
+        const items = try self.allocator.alloc(f32, count);
+        defer self.allocator.free(items);
+        @memset(items, kiwiFloat32Null());
+        return try self.createManagedHostFloat32Array(items);
+    }
+
+    fn createOwnedIntNullArray(self: *Session, owner: HeapOwner, count: usize) KError!Value {
+        const items = try self.allocator.alloc(i64, count);
+        defer self.allocator.free(items);
+        @memset(items, kiwi_int_null);
+        return try self.createOwnedHostIntArray(owner, items);
+    }
+
+    fn createOwnedFloatNullArray(self: *Session, owner: HeapOwner, count: usize) KError!Value {
+        const items = try self.allocator.alloc(f64, count);
+        defer self.allocator.free(items);
+        @memset(items, kiwiFloatNull());
+        return try self.createOwnedHostFloatArray(owner, items);
+    }
+
+    fn createOwnedFloat32NullArray(self: *Session, owner: HeapOwner, count: usize) KError!Value {
+        const items = try self.allocator.alloc(f32, count);
+        defer self.allocator.free(items);
+        @memset(items, kiwiFloat32Null());
+        return try self.createOwnedHostFloat32Array(owner, items);
+    }
+
+    fn takeEmptyNumericPrototypeValue(self: *Session, raw_count: i64, mode: HostDenseElem) KError!Value {
+        const count: usize = @intCast(@abs(raw_count));
+        return switch (mode) {
+            .int => try self.createManagedIntNullArray(count),
+            .float => try self.createManagedFloatNullArray(count),
+        };
+    }
+
+    fn takeEmptyHostArrayPrototypeValue(self: *Session, raw_count: i64, array: *const HostDenseArray) KError!Value {
+        const count: usize = @intCast(@abs(raw_count));
+        return switch (array.storage) {
+            .float32 => try self.createManagedFloat32NullArray(count),
+            .float64 => try self.createManagedFloatNullArray(count),
+            else => try self.createManagedIntNullArray(count),
+        };
+    }
+
+    fn hostDensePrototypeScalarValue(self: *Session, array: *const HostDenseArray) KError!Value {
+        return switch (array.storage) {
+            .float32 => try self.float32Value(kiwiFloat32Null()),
+            .float64 => try self.floatNullValue(),
+            else => try self.intNullValue(),
+        };
+    }
+
+    fn emptySymbolValue(self: *Session) KError!Value {
+        return try self.managedHostSymbol(&.{});
+    }
+
+    fn keyedDictPrototypeLikeValue(self: *Session, store: *const HostKeyedStore) KError!Value {
+        std.debug.assert(store.layout == .dict);
+        const len = keyedStoreNameCount(store);
+        const values = try self.allocator.alloc(Value, len);
+        defer self.allocator.free(values);
+        var initialized: usize = 0;
+        defer {
+            for (values[0..initialized]) |item| self.releaseValue(item);
+        }
+
+        for (0..len) |idx| {
+            const item = try self.keyedStoreValueAt(store, idx);
+            defer self.releaseValue(item);
+            values[idx] = if (try self.prototypeValueForTake(item)) |prototype|
+                prototype
+            else
+                try self.prototypeLikeValue(item);
+            initialized += 1;
+        }
+
+        const names = try self.retainEscapedValue(store.names);
+        errdefer self.releaseValue(names);
+        const value_array = try self.makeArrayFromValues(values);
+        errdefer self.releaseValue(value_array);
+        const lookup = try self.createKeyedStoreLookupFromNamesValue(names);
+
+        const owned_path = try self.allocator.dupe(u8, store.path);
+        errdefer self.allocator.free(owned_path);
+        return try self.createManagedKeyedStore(owned_path, true, names, value_array, null, .dict, 0, lookup);
+    }
+
+    fn prototypeLikeValue(self: *Session, value: Value) KError!Value {
+        if (tableScalarValue(value)) |scalar| return try self.tableNullScalarValue(scalar.kind);
+        if (stringBytes(value) != null) return try self.managedHostString(&.{});
+        if (symbolBytes(value) != null) return try self.emptySymbolValue();
+        if (valueNumericMode(value)) |mode| return try self.numericPrototypeScalarValue(mode);
+        return switch (value.tag()) {
+            .int, .bool => try self.intNullValue(),
+            .float32 => try self.float32Value(kiwiFloat32Null()),
+            .float => try self.floatNullValue(),
+            .array => switch (value.arrayKind()) {
+                .host_string_list => try self.managedHostString(&.{}),
+                .host_symbol_list => try self.emptySymbolValue(),
+                .host_boxed_array => blk: {
+                    const items = value.asHostBoxedArray().items;
+                    if (items.len == 0) break :blk try self.managedHostString(&.{});
+                    break :blk try self.prototypeLikeValue(items[0]);
+                },
+                .host_keyed_store => blk: {
+                    const store = value.asHostKeyedStore();
+                    if (store.layout != .dict) break :blk error.Type;
+                    break :blk try self.keyedDictPrototypeLikeValue(store);
+                },
+                else => error.Type,
+            },
+            else => error.Type,
+        };
+    }
+
+    fn takeCyclicStart(raw_count: i64, count: usize, source_len: usize) usize {
+        std.debug.assert(source_len != 0);
+        if (raw_count >= 0) return 0;
+        const rem = count % source_len;
+        return if (rem == 0) 0 else source_len - rem;
+    }
+
+    fn takeAtomBoxedValue(self: *Session, raw_count: i64, value: Value) KError!Value {
+        const count: usize = @intCast(@abs(raw_count));
+        if (count == 0) return try self.createManagedHostBoxedArray(&.{});
+
+        const items = try self.allocator.alloc(Value, count);
+        defer self.allocator.free(items);
+        for (items) |*item| item.* = value;
+        return try self.createManagedHostBoxedArray(items);
+    }
+
+    fn takeEmptyBoxedPrototypeValue(self: *Session, raw_count: i64) KError!Value {
+        const count: usize = @intCast(@abs(raw_count));
+        if (count == 0) return try self.createManagedHostBoxedArray(&.{});
+
+        const empty = try self.managedHostString(&.{});
+        defer self.releaseValue(empty);
+        const items = try self.allocator.alloc(Value, count);
+        defer self.allocator.free(items);
+        for (items) |*item| item.* = empty;
+        return try self.createManagedHostBoxedArray(items);
+    }
+
+    fn prototypeValueForTake(self: *Session, value: Value) KError!?Value {
+        if (stringBytes(value)) |bytes| {
+            const spaces = try self.allocator.alloc(u8, bytes.len);
+            defer self.allocator.free(spaces);
+            @memset(spaces, ' ');
+            return try self.managedHostString(spaces);
+        }
+        if (valueNumericMode(value)) |mode| {
+            if (numericVectorLen(value)) |len| {
+                return switch (mode) {
+                    .int => try self.createManagedIntNullArray(len),
+                    .float => try self.createManagedFloatNullArray(len),
+                };
+            }
+        }
+        if (value.tag() == .array and value.arrayKind() == .host_string_list) {
+            const list = value.asHostStringList();
+            const bytes = if (list.len == 0) &.{} else try hostStringListItemBytes(list, 0);
+            const spaces = try self.allocator.alloc(u8, bytes.len);
+            defer self.allocator.free(spaces);
+            @memset(spaces, ' ');
+            return try self.managedHostString(spaces);
+        }
+        if (value.tag() == .array and value.arrayKind() == .host_boxed_array) {
+            const array = value.asHostBoxedArray();
+            if (array.len() != 0) {
+                const item_prototype = (try self.prototypeValueForTake(array.items[0])) orelse return null;
+                defer self.releaseValue(item_prototype);
+                return try self.createManagedHostBoxedArray(&.{item_prototype});
+            }
+            if (array.prototype) |prototype| {
+                const item_prototype = (try self.prototypeValueForTake(prototype)) orelse return null;
+                defer self.releaseValue(item_prototype);
+                return try self.createManagedHostBoxedArrayWithPrototype(&.{}, item_prototype);
+            }
+        }
+        if (value.tag() == .array and value.arrayKind() == .host_keyed_store) {
+            const store = value.asHostKeyedStore();
+            if (store.layout == .dict) return try self.keyedDictPrototypeLikeValue(store);
+        }
+        return null;
+    }
+
+    fn takeHostString(self: *Session, raw_count: i64, source: HostStringSource) KError!Value {
+        const count: usize = @intCast(@abs(raw_count));
+        if (count == 0) return try self.managedHostString(&.{});
+
+        const bytes = source.bytes();
+        const out = try self.allocator.alloc(u8, count);
+        defer self.allocator.free(out);
+
+        if (bytes.len == 0) {
+            @memset(out, ' ');
+        } else {
+            const start = takeCyclicStart(raw_count, count, bytes.len);
+            for (out, 0..) |*byte, idx| byte.* = bytes[(start + idx) % bytes.len];
+        }
+        return try self.managedHostCharVector(out);
+    }
+
+    fn takeHostSymbol(self: *Session, raw_count: i64, symbol: *const HostText) KError!Value {
+        const count: usize = @intCast(@abs(raw_count));
+        const items = try self.allocator.alloc([]const u8, count);
+        defer self.allocator.free(items);
+        const bytes = hostTextBytes(symbol);
+        for (items) |*item| item.* = bytes;
+        return try self.createManagedHostSymbolListFromSlices(items);
+    }
+
     fn takeScalarValue(self: *Session, raw_count: i64, value: Value) KError!Value {
-        if (raw_count == 0) return try self.createManagedHostIntArray(&.{});
+        if (raw_count == 0) {
+            return switch (value.tag()) {
+                .float32 => try self.createManagedHostFloat32Array(&.{}),
+                .float => try self.createManagedHostFloatArray(&.{}),
+                .int, .bool => try self.createManagedHostIntArray(&.{}),
+                else => error.Type,
+            };
+        }
         const count: usize = @intCast(@abs(raw_count));
         switch (value.tag()) {
             .bool => {
@@ -26682,6 +34145,13 @@ pub const Session = struct {
                     host_dense_flag_normalized | host_dense_flag_asc | host_dense_flag_dsc,
                     hostIntRangeForValue(@intFromBool(value.asBool())),
                 );
+            },
+            .float32 => {
+                var out = std.ArrayList(f32).empty;
+                defer out.deinit(self.allocator);
+                try out.ensureTotalCapacity(self.allocator, count);
+                for (0..count) |_| try out.append(self.allocator, value.asFloat32());
+                return try self.createManagedHostFloat32Array(out.items);
             },
             .float => {
                 var out = std.ArrayList(f64).empty;
@@ -26712,19 +34182,20 @@ pub const Session = struct {
                 };
                 return try self.setNumericMatrixShapeOnValue(value, 0, shape.cols);
             }
-            if (shape.rows == 0) return error.Type;
+            if (shape.rows == 0) {
+                const total = std.math.mul(usize, count, shape.cols) catch return error.Unsupported;
+                const value = switch (array.storage) {
+                    .float64 => try self.createManagedFloatNullArray(total),
+                    else => try self.createManagedIntNullArray(total),
+                };
+                return try self.setNumericMatrixShapeOnValue(value, count, shape.cols);
+            }
 
             var row_indices = std.ArrayList(usize).empty;
             defer row_indices.deinit(self.allocator);
             try row_indices.ensureTotalCapacity(self.allocator, count);
-            if (raw_count >= 0) {
-                for (0..count) |idx| try row_indices.append(self.allocator, idx % shape.rows);
-            } else {
-                const pad = if (count > shape.rows) count - shape.rows else 0;
-                for (0..pad) |_| try row_indices.append(self.allocator, 0);
-                const start = if (count >= shape.rows) 0 else shape.rows - count;
-                for (start..shape.rows) |idx| try row_indices.append(self.allocator, idx);
-            }
+            const start = takeCyclicStart(raw_count, count, shape.rows);
+            for (0..count) |idx| try row_indices.append(self.allocator, (start + idx) % shape.rows);
             return try self.createManagedHostNumericMatrixRows(array, row_indices.items, shape.cols);
         }
         const count: usize = @intCast(@abs(raw_count));
@@ -26735,7 +34206,7 @@ pub const Session = struct {
                 else => try self.createManagedHostIntArray(&.{}),
             };
         }
-        if (array.len() == 0) return error.Type;
+        if (array.len() == 0) return try self.takeEmptyHostArrayPrototypeValue(raw_count, array);
         if (raw_count >= 0) {
             return switch (array.storage) {
                 .bit => blk: {
@@ -26774,21 +34245,21 @@ pub const Session = struct {
             .bit => blk: {
                 const source = HostBitSlice{ .words = array.storage.bit, .len = array.logical_len };
                 const out = try self.allocHostBitArray(.managed, count);
-                const pad = if (count > array.len()) count - array.len() else 0;
-                bitFillRange(out.words, 0, pad, bitGet(array.storage.bit, 0));
-                const start = if (count >= array.len()) 0 else array.len() - count;
-                bitCopyRange(out.words, pad, source, start, array.len() - start);
-                break :blk try self.finishManagedHostBitAlloc(out, array.flags, sourceHostIntRange(hostDenseSourceValue(array), array));
+                const start = takeCyclicStart(raw_count, count, source.len);
+                for (0..count) |idx| bitSet(out.words, idx, bitGet(source.words, (start + idx) % source.len));
+                break :blk try self.finishManagedHostBitAlloc(
+                    out,
+                    if (count <= array.len()) array.flags else host_dense_flag_normalized,
+                    sourceHostIntRange(hostDenseSourceValue(array), array),
+                );
             },
             .float64 => |items| blk: {
                 const logical_items = hostDenseLogicalItems(f64, array, items);
                 var out = std.ArrayList(f64).empty;
                 defer out.deinit(self.allocator);
                 try out.ensureTotalCapacity(self.allocator, count);
-                const pad = if (count > logical_items.len) count - logical_items.len else 0;
-                for (0..pad) |_| try out.append(self.allocator, logical_items[0]);
-                const start = if (count >= logical_items.len) 0 else logical_items.len - count;
-                for (logical_items[start..]) |item| try out.append(self.allocator, item);
+                const start = takeCyclicStart(raw_count, count, logical_items.len);
+                for (0..count) |idx| try out.append(self.allocator, logical_items[(start + idx) % logical_items.len]);
                 break :blk try self.createManagedHostFloatArray(out.items);
             },
             else => blk: {
@@ -26796,11 +34267,9 @@ pub const Session = struct {
                 var out = std.ArrayList(i64).empty;
                 defer out.deinit(self.allocator);
                 try out.ensureTotalCapacity(self.allocator, count);
-                const pad = if (count > hostIntArrayViewLen(view)) count - hostIntArrayViewLen(view) else 0;
-                const first = hostIntViewItem(view, 0);
-                for (0..pad) |_| try out.append(self.allocator, first);
-                const start = if (count >= hostIntArrayViewLen(view)) 0 else hostIntArrayViewLen(view) - count;
-                for (start..hostIntArrayViewLen(view)) |idx| try out.append(self.allocator, hostIntViewItem(view, idx));
+                const view_len = hostIntArrayViewLen(view);
+                const start = takeCyclicStart(raw_count, count, view_len);
+                for (0..count) |idx| try out.append(self.allocator, hostIntViewItem(view, (start + idx) % view_len));
                 break :blk try self.createManagedHostIntArray(out.items);
             },
         };
@@ -26808,29 +34277,49 @@ pub const Session = struct {
 
     fn takeHostBoxedArray(self: *Session, raw_count: i64, array: *const HostBoxedArray) KError!Value {
         const count: usize = @intCast(@abs(raw_count));
-        if (count == 0) return try self.createManagedHostBoxedArray(&.{});
-        if (array.len() == 0) return error.Type;
+        if (count == 0) {
+            const prototype = if (array.len() != 0)
+                try self.prototypeValueForTake(array.items[0])
+            else if (array.prototype) |item|
+                try self.prototypeValueForTake(item)
+            else
+                null;
+            defer if (prototype) |item| self.releaseValue(item);
+            return try self.createManagedHostBoxedArrayWithPrototype(&.{}, prototype);
+        }
+        if (array.len() == 0) return try self.takeEmptyBoxedPrototypeValue(raw_count);
 
         var out = std.ArrayList(Value).empty;
         defer out.deinit(self.allocator);
         try out.ensureTotalCapacity(self.allocator, count);
 
-        if (raw_count >= 0) {
-            for (0..count) |idx| try out.append(self.allocator, array.items[idx % array.len()]);
-        } else {
-            const pad = if (count > array.len()) count - array.len() else 0;
-            const first = array.items[0];
-            for (0..pad) |_| try out.append(self.allocator, first);
-            const start = if (count >= array.len()) 0 else array.len() - count;
-            for (start..array.len()) |idx| try out.append(self.allocator, array.items[idx]);
-        }
+        const start = takeCyclicStart(raw_count, count, array.len());
+        for (0..count) |idx| try out.append(self.allocator, array.items[(start + idx) % array.len()]);
         return try self.createManagedHostBoxedArray(out.items);
     }
 
     fn takeHostStringList(self: *Session, raw_count: i64, list: *const HostStringList) KError!Value {
         const count: usize = @intCast(@abs(raw_count));
-        if (count == 0) return try self.createManagedHostTextListFromValues(&.{});
-        if (list.len == 0) return error.Type;
+        if (count == 0) {
+            const prototype = if (list.len == 0) blk: {
+                const empty = try self.managedHostString(&.{});
+                break :blk empty;
+            } else blk: {
+                const first = try hostStringListItemBytes(list, 0);
+                const spaces = try self.allocator.alloc(u8, first.len);
+                defer self.allocator.free(spaces);
+                @memset(spaces, ' ');
+                break :blk try self.managedHostString(spaces);
+            };
+            defer self.releaseValue(prototype);
+            return try self.createManagedHostBoxedArrayWithPrototype(&.{}, prototype);
+        }
+        if (list.len == 0) {
+            const items = try self.allocator.alloc([]const u8, count);
+            defer self.allocator.free(items);
+            for (items) |*item| item.* = &.{};
+            return try self.createManagedHostStringListFromSlices(items);
+        }
 
         var out = std.ArrayList(Value).empty;
         defer out.deinit(self.allocator);
@@ -26839,23 +34328,145 @@ pub const Session = struct {
         }
         try out.ensureTotalCapacity(self.allocator, count);
 
-        if (raw_count >= 0) {
-            for (0..count) |idx| try out.append(self.allocator, try self.hostStringListItemValue(list, idx % list.len));
-        } else {
-            const pad = if (count > list.len) count - list.len else 0;
-            const first = try self.hostStringListItemValue(list, 0);
-            defer self.releaseValue(first);
-            for (0..pad) |_| try out.append(self.allocator, try self.retainEscapedValue(first));
-            const start = if (count >= list.len) 0 else list.len - count;
-            for (start..list.len) |idx| try out.append(self.allocator, try self.hostStringListItemValue(list, idx));
-        }
+        const start = takeCyclicStart(raw_count, count, list.len);
+        for (0..count) |idx| try out.append(self.allocator, try self.hostStringListItemValue(list, (start + idx) % list.len));
         return try self.createManagedHostTextListFromValues(out.items);
     }
 
+    fn takeHostSymbolList(self: *Session, raw_count: i64, list: *const HostStringList) KError!Value {
+        const count: usize = @intCast(@abs(raw_count));
+        if (count == 0) return try self.createManagedHostSymbolListFromSlices(&.{});
+
+        const items = try self.allocator.alloc([]const u8, count);
+        defer self.allocator.free(items);
+        if (list.len == 0) {
+            for (items) |*item| item.* = &.{};
+        } else {
+            const start = takeCyclicStart(raw_count, count, list.len);
+            for (items, 0..) |*item, idx| item.* = try hostStringListItemBytes(list, (start + idx) % list.len);
+        }
+        return try self.createManagedHostSymbolListFromSlices(items);
+    }
+
+    fn undSequenceLen(value: Value) ?usize {
+        if (stringSourceInfo(value)) |source| return source.bytes().len;
+        if (value.tag() == .array and value.arrayKind() == .host_keyed_store) {
+            const store = value.asHostKeyedStore();
+            return switch (store.layout) {
+                .dict => null,
+                .table => store.row_count,
+            };
+        }
+        return derivedSequenceLen(value);
+    }
+
+    fn sourceIndicesFromRange(self: *Session, start: usize, end: usize) KError![]usize {
+        if (end < start) return error.Type;
+        const out = try self.allocator.alloc(usize, end - start);
+        errdefer self.allocator.free(out);
+        for (out, start..) |*item, idx| item.* = idx;
+        return out;
+    }
+
+    fn sourceIndicesExcludingIndex(self: *Session, len: usize, remove_idx: usize) KError![]usize {
+        if (remove_idx >= len) return error.Internal;
+        const out = try self.allocator.alloc(usize, len - 1);
+        errdefer self.allocator.free(out);
+        var write_idx: usize = 0;
+        for (0..len) |idx| {
+            if (idx == remove_idx) continue;
+            out[write_idx] = idx;
+            write_idx += 1;
+        }
+        return out;
+    }
+
+    fn selectSequenceRange(self: *Session, value: Value, start: usize, end: usize) KError!Value {
+        if (start == end and value.tag() == .array and value.arrayKind() == .host_boxed_array) {
+            const array = value.asHostBoxedArray();
+            if (array.len() != 0) return try self.emptySequenceForBoxedItem(.managed, array.items[@min(start, array.len() - 1)]);
+            if (array.prototype) |prototype| return try self.emptySequenceForBoxedItem(.managed, prototype);
+        }
+        const indices = try self.sourceIndicesFromRange(start, end);
+        defer self.allocator.free(indices);
+        return try self.selectRightBySourceIndices(value, indices);
+    }
+
+    fn removeSequenceIndex(self: *Session, left: Value, raw_index: i64) KError!Value {
+        if (raw_index < 0) return self.shareValue(left);
+        const len = undSequenceLen(left) orelse return error.Type;
+        const remove_idx = std.math.cast(usize, raw_index) orelse return self.shareValue(left);
+        if (remove_idx >= len) return self.shareValue(left);
+
+        const indices = try self.sourceIndicesExcludingIndex(len, remove_idx);
+        defer self.allocator.free(indices);
+        return try self.selectRightBySourceIndices(left, indices);
+    }
+
+    fn cutValues(self: *Session, left: Value, right: Value) KError!Value {
+        const view = valueHostIntStructuralView(left) orelse return error.Type;
+        const cut_count = hostIntDenseViewLen(view);
+        const source_len = undSequenceLen(right) orelse return error.Type;
+
+        if (cut_count == 0) {
+            const prototype = try self.selectSequenceRange(right, 0, 0);
+            defer self.releaseValue(prototype);
+            return try self.createManagedHostBoxedArrayWithPrototype(&.{}, prototype);
+        }
+
+        const cuts = try self.allocator.alloc(usize, cut_count);
+        defer self.allocator.free(cuts);
+        var previous: usize = 0;
+        for (cuts, 0..) |*cut, idx| {
+            const raw_cut = try hostIntDenseViewItem(view, idx);
+            if (raw_cut < 0) return error.Type;
+            const cut_idx = std.math.cast(usize, raw_cut) orelse return error.Unsupported;
+            if (cut_idx > source_len or (idx != 0 and cut_idx < previous)) return error.Type;
+            cut.* = cut_idx;
+            previous = cut_idx;
+        }
+
+        const values = try self.allocator.alloc(Value, cut_count);
+        defer self.allocator.free(values);
+        var initialized: usize = 0;
+        defer {
+            for (values[0..initialized]) |value| self.releaseValue(value);
+        }
+        for (cuts, 0..) |start, idx| {
+            const end = if (idx + 1 < cut_count) cuts[idx + 1] else source_len;
+            values[idx] = try self.selectSequenceRange(right, start, end);
+            initialized += 1;
+        }
+        return try self.makeArrayFromValues(values);
+    }
+
     fn dropValues(self: *Session, left: Value, right: Value) KError!Value {
+        switch (left.tag()) {
+            .builtin, .closure => return try self.rejectValues(left, right),
+            else => {},
+        }
+        if (left.tag() == .array and left.arrayKind() == .host_keyed_store and left.asHostKeyedStore().layout == .dict) {
+            return try self.keyedDictDeleteKeys(left.asHostKeyedStore(), right);
+        }
+        if (scalarIntLikeValue(right)) |raw_index| {
+            if (undSequenceLen(left) != null) return try self.removeSequenceIndex(left, raw_index);
+        }
+        if (scalarIntLikeValue(left) == null and valueHostIntStructuralView(left) != null and undSequenceLen(right) != null) {
+            return try self.cutValues(left, right);
+        }
+
         const raw_count = scalarIntLikeValue(left) orelse return error.Type;
+        if (stringSourceInfo(right)) |source| {
+            return try self.dropHostString(raw_count, source);
+        }
         if (right.tag() == .array and right.arrayKind() == .host_string_list) {
             return try self.dropHostStringList(raw_count, right.asHostStringList());
+        }
+        if (right.tag() == .array and right.arrayKind() == .host_symbol_list) {
+            return try self.dropHostSymbolList(raw_count, right.asHostStringList());
+        }
+        if (boxedSingletonCharSourceInfo(right)) |source| {
+            return try self.dropHostString(raw_count, source);
         }
         if (right.tag() == .array and right.arrayKind() == .host_keyed_store) {
             const store = right.asHostKeyedStore();
@@ -26868,76 +34479,51 @@ pub const Session = struct {
             return try self.dropHostBoxedArray(raw_count, right.asHostBoxedArray());
         }
         if (valueNumericMatrixView(right)) |matrix| {
-            const drop_count: usize = if (raw_count >= 0)
-                @min(@as(usize, @intCast(raw_count)), matrix.shape.rows)
-            else
-                matrix.shape.rows - @min(@as(usize, @intCast(-raw_count)), matrix.shape.rows);
-            const start: usize = if (raw_count >= 0) drop_count else 0;
-            const end: usize = if (raw_count >= 0) matrix.shape.rows else drop_count;
+            const bounds = dropSliceBounds(raw_count, matrix.shape.rows);
             var row_indices = std.ArrayList(usize).empty;
             defer row_indices.deinit(self.allocator);
-            try row_indices.ensureTotalCapacity(self.allocator, end - start);
-            for (start..end) |idx| try row_indices.append(self.allocator, idx);
+            try row_indices.ensureTotalCapacity(self.allocator, bounds.end - bounds.start);
+            for (bounds.start..bounds.end) |idx| try row_indices.append(self.allocator, idx);
             return try numericValueMatrixSelectRows(self, right, row_indices.items);
         }
         if (shapedNumericHandle(right)) |handle| {
             const rows: usize = @intCast(handle.shape[0]);
-            const drop_count: usize = if (raw_count >= 0)
-                @min(@as(usize, @intCast(raw_count)), rows)
-            else
-                rows - @min(@as(usize, @intCast(-raw_count)), rows);
-            const start: usize = if (raw_count >= 0) drop_count else 0;
-            const end: usize = if (raw_count >= 0) rows else drop_count;
-            if (try numericValueFirstAxisContiguousSliceValue(self, right, .{ .start = start, .len = end - start })) |result| return result;
+            const bounds = dropSliceBounds(raw_count, rows);
+            if (try numericValueFirstAxisContiguousSliceValue(self, right, .{ .start = bounds.start, .len = bounds.end - bounds.start })) |result| return result;
         }
         if (NumericStructuralView.init(right)) |structural| {
             if (try numericStructuralDropValue(self, structural, raw_count)) |result| return result;
         }
         if (valueNumericMode(right) != null) {
             if (numericVectorLen(right)) |len| {
-                const drop_count: usize = if (raw_count >= 0)
-                    @min(@as(usize, @intCast(raw_count)), len)
-                else
-                    len - @min(@as(usize, @intCast(-raw_count)), len);
-                const start: usize = if (raw_count >= 0) drop_count else 0;
-                const end: usize = if (raw_count >= 0) len else drop_count;
-                return try newFlatSliceValue(self, right, start, end - start);
+                const bounds = dropSliceBounds(raw_count, len);
+                return try newFlatSliceValue(self, right, bounds.start, bounds.end - bounds.start);
             }
         }
         const array = try numericHostArrayValue(self, right);
         if (hostNumericMatrixShape(array)) |shape| {
-            const drop_count: usize = if (raw_count >= 0)
-                @min(@as(usize, @intCast(raw_count)), shape.rows)
-            else
-                shape.rows - @min(@as(usize, @intCast(-raw_count)), shape.rows);
-            const start: usize = if (raw_count >= 0) drop_count else 0;
-            const end: usize = if (raw_count >= 0) shape.rows else drop_count;
+            const bounds = dropSliceBounds(raw_count, shape.rows);
             var row_indices = std.ArrayList(usize).empty;
             defer row_indices.deinit(self.allocator);
-            try row_indices.ensureTotalCapacity(self.allocator, end - start);
-            for (start..end) |idx| try row_indices.append(self.allocator, idx);
+            try row_indices.ensureTotalCapacity(self.allocator, bounds.end - bounds.start);
+            for (bounds.start..bounds.end) |idx| try row_indices.append(self.allocator, idx);
             return try self.createManagedHostNumericMatrixRows(array, row_indices.items, shape.cols);
         }
         const len = array.len();
-        const drop_count: usize = if (raw_count >= 0)
-            @min(@as(usize, @intCast(raw_count)), len)
-        else
-            len - @min(@as(usize, @intCast(-raw_count)), len);
-        const start: usize = if (raw_count >= 0) drop_count else 0;
-        const end: usize = if (raw_count >= 0) len else drop_count;
+        const bounds = dropSliceBounds(raw_count, len);
         return switch (array.storage) {
             .bit => blk: {
-                const out = try self.allocHostBitArray(.managed, end - start);
-                bitCopyRange(out.words, 0, .{ .words = array.storage.bit, .len = array.logical_len }, start, end - start);
+                const out = try self.allocHostBitArray(.managed, bounds.end - bounds.start);
+                bitCopyRange(out.words, 0, .{ .words = array.storage.bit, .len = array.logical_len }, bounds.start, bounds.end - bounds.start);
                 break :blk try self.finishManagedHostBitAlloc(out, array.flags, sourceHostIntRange(hostDenseSourceValue(array), array));
             },
-            .float64 => |items| try self.createManagedHostFloatArray(hostDenseLogicalItems(f64, array, items)[start..end]),
+            .float64 => |items| try self.createManagedHostFloatArray(hostDenseLogicalItems(f64, array, items)[bounds.start..bounds.end]),
             else => blk: {
                 const view = hostIntArrayView(array).?;
                 var out = std.ArrayList(i64).empty;
                 defer out.deinit(self.allocator);
-                try out.ensureTotalCapacity(self.allocator, end - start);
-                for (start..end) |idx| try out.append(self.allocator, hostIntViewItem(view, idx));
+                try out.ensureTotalCapacity(self.allocator, bounds.end - bounds.start);
+                for (bounds.start..bounds.end) |idx| try out.append(self.allocator, hostIntViewItem(view, idx));
                 break :blk try self.createManagedHostIntArray(out.items);
             },
         };
@@ -26945,35 +34531,50 @@ pub const Session = struct {
 
     fn dropHostBoxedArray(self: *Session, raw_count: i64, array: *const HostBoxedArray) KError!Value {
         const len = array.len();
-        const drop_count: usize = if (raw_count >= 0)
-            @min(@as(usize, @intCast(raw_count)), len)
-        else
-            len - @min(@as(usize, @intCast(-raw_count)), len);
-        const start: usize = if (raw_count >= 0) drop_count else 0;
-        const end: usize = if (raw_count >= 0) len else drop_count;
-        const items = array.items[start..end];
+        const bounds = dropSliceBounds(raw_count, len);
+        const items = array.items[bounds.start..bounds.end];
+        if (items.len == 0) {
+            if (array.len() != 0) return try self.emptySequenceForBoxedItem(.managed, array.items[0]);
+            if (array.prototype) |prototype| return try self.emptySequenceForBoxedItem(.managed, prototype);
+        }
         if (items.len != 0 and boxedItemsCanNumericNormalize(items)) {
             return try self.makeArrayFromValues(items);
         }
         return try self.createManagedHostBoxedArray(items);
     }
 
+    fn dropHostString(self: *Session, raw_count: i64, source: HostStringSource) KError!Value {
+        const bounds = dropSliceBounds(raw_count, source.bytes().len);
+        const len = bounds.end - bounds.start;
+        if (source.is_vector and len == 1) {
+            return try self.managedHostCharVector(source.bytes()[bounds.start..bounds.end]);
+        }
+        return try self.managedHostStringViewWithReason(source.base, .{
+            .start = source.span.start + bounds.start,
+            .len = len,
+        }, .generic);
+    }
+
     fn dropHostStringList(self: *Session, raw_count: i64, list: *const HostStringList) KError!Value {
-        const drop_count: usize = if (raw_count >= 0)
-            @min(@as(usize, @intCast(raw_count)), list.len)
-        else
-            list.len - @min(@as(usize, @intCast(-raw_count)), list.len);
-        const start: usize = if (raw_count >= 0) drop_count else 0;
-        const end: usize = if (raw_count >= 0) list.len else drop_count;
+        const bounds = dropSliceBounds(raw_count, list.len);
 
         var out = std.ArrayList(Value).empty;
         defer out.deinit(self.allocator);
         defer {
             for (out.items) |item| self.releaseValue(item);
         }
-        try out.ensureTotalCapacity(self.allocator, end - start);
-        for (start..end) |idx| try out.append(self.allocator, try self.hostStringListItemValue(list, idx));
+        try out.ensureTotalCapacity(self.allocator, bounds.end - bounds.start);
+        for (bounds.start..bounds.end) |idx| try out.append(self.allocator, try self.hostStringListItemValue(list, idx));
         return try self.createManagedHostTextListFromValues(out.items);
+    }
+
+    fn dropHostSymbolList(self: *Session, raw_count: i64, list: *const HostStringList) KError!Value {
+        const bounds = dropSliceBounds(raw_count, list.len);
+
+        const items = try self.allocator.alloc([]const u8, bounds.end - bounds.start);
+        defer self.allocator.free(items);
+        for (items, bounds.start..) |*item, idx| item.* = try hostStringListItemBytes(list, idx);
+        return try self.createManagedHostSymbolListFromSlices(items);
     }
 
     fn reshapeValues(self: *Session, left: Value, right: Value) KError!Value {
@@ -27048,6 +34649,7 @@ pub const Session = struct {
         if (try self.promoteRenderableNumericDyadOperands(left, right)) |operands| {
             return try self.equalValues(operands.left, operands.right);
         }
+        if (try self.equalStringByteValues(left, right)) |result| return result;
         const left_table_scalar = tableScalarValue(left) != null;
         const right_table_scalar = tableScalarValue(right) != null;
         if ((left.tag() != .array and right.tag() != .array) or left_table_scalar or right_table_scalar) {
@@ -27118,27 +34720,364 @@ pub const Session = struct {
         return null;
     }
 
+    fn hostCompareOpCode(op: BuiltinId) ?i32 {
+        return switch (op) {
+            .equal => host_compare_op_equal,
+            .less => host_compare_op_less,
+            .more => host_compare_op_more,
+            else => null,
+        };
+    }
+
+    fn finishFastHostCompareResult(self: *Session, out: HostBitAlloc, shape: ?NumericShapeSnapshot) KError!Value {
+        var summary: HostCompareSummary = undefined;
+        kiwi_host_compare_last_summary(&summary);
+        const metadata = hostCompareSummaryMetadata(summary);
+        const result = try self.finishManagedHostBitAlloc(out, metadata.flags, metadata.range);
+        return try applyNonVectorNumericShapeToValue(self, result, shape);
+    }
+
+    fn finishConstantHostCompareResult(self: *Session, len: usize, value: bool, shape: ?NumericShapeSnapshot) KError!Value {
+        const out = try self.allocHostBitArrayUninitialized(.managed, len);
+        bitFill(out.words, out.len, value);
+        const metadata = (BitSequenceStats{
+            .saw_zero = !value,
+            .saw_one = value,
+        }).metadata();
+        const result = try self.finishManagedHostBitAlloc(out, metadata.flags, metadata.range);
+        return try applyNonVectorNumericShapeToValue(self, result, shape);
+    }
+
+    fn rangeIotaCompareConstantTruth(op: BuiltinId, left: *const NumericArray, right: *const NumericArray, len: usize) KError!?bool {
+        if (len == 0) return false;
+        const left_range = numericArrayRangeIota(left);
+        const right_range = numericArrayRangeIota(right);
+        const diff_start = @as(i128, left_range.start) - @as(i128, right_range.start);
+        const diff_step = @as(i128, left_range.step) - @as(i128, right_range.step);
+        const span = std.math.mul(i128, diff_step, @as(i128, @intCast(len - 1))) catch return error.Unsupported;
+        const diff_last = std.math.add(i128, diff_start, span) catch return error.Unsupported;
+        const diff_min = @min(diff_start, diff_last);
+        const diff_max = @max(diff_start, diff_last);
+        return switch (op) {
+            .less => if (diff_max < 0) true else if (diff_min >= 0) false else null,
+            .more => if (diff_min > 0) true else if (diff_max <= 0) false else null,
+            .equal => if (diff_start == 0 and diff_step == 0) true else if (diff_min > 0 or diff_max < 0) false else null,
+            else => null,
+        };
+    }
+
+    fn tryFastHostRangeCompare(self: *Session, op: BuiltinId, left: Value, right: Value, shape: ?NumericShapeSnapshot) KError!?Value {
+        const left_range = valueRangeIotaHandle(left) orelse return null;
+        const right_range = valueRangeIotaHandle(right) orelse return null;
+        const len = try arrayResultLen(left, right);
+        if (numericArrayRangeLen(left_range) != len or numericArrayRangeLen(right_range) != len) return error.Type;
+        const value = (try rangeIotaCompareConstantTruth(op, left_range, right_range, len)) orelse return null;
+        return try self.finishConstantHostCompareResult(len, value, shape);
+    }
+
+    const HostCompareIntDensePtr = struct {
+        ptr: *const anyopaque,
+        width: i32,
+        len: usize,
+    };
+
+    const HostCompareIntFloatPrepared = struct {
+        len: usize,
+        shape: ?NumericShapeSnapshot,
+        op_code: i32,
+        int_ptr: HostCompareIntDensePtr,
+        float_items: []const f64,
+        int_left: bool,
+    };
+
+    fn hostCompareIntDensePtr(view: HostIntArrayView) ?HostCompareIntDensePtr {
+        return switch (view) {
+            .int8 => |items| .{ .ptr = @ptrCast(items.ptr), .width = 1, .len = items.len },
+            .int16 => |items| .{ .ptr = @ptrCast(items.ptr), .width = 2, .len = items.len },
+            .int32 => |items| .{ .ptr = @ptrCast(items.ptr), .width = 4, .len = items.len },
+            .int64 => |items| .{ .ptr = @ptrCast(items.ptr), .width = 8, .len = items.len },
+            .bit => null,
+        };
+    }
+
+    fn prepareFastHostCompareIntFloat(self: *Session, op: BuiltinId, left: Value, right: Value) KError!?HostCompareIntFloatPrepared {
+        const op_code = hostCompareOpCode(op) orelse return null;
+        const shape = try nonVectorNumericShapeForDyad(left, right);
+        const len = try arrayResultLen(left, right);
+        if (len < host_compare_vector_min_len) return null;
+        if (rowwiseMatrixVectorDyad(left, right) != null) return null;
+
+        const left_view = hostDenseView(self, left) catch |err| switch (err) {
+            error.Type => return null,
+            else => return err,
+        };
+        const right_view = hostDenseView(self, right) catch |err| switch (err) {
+            error.Type => return null,
+            else => return err,
+        };
+
+        switch (left_view) {
+            .int_array => |left_items| switch (right_view) {
+                .float_array => |right_items| {
+                    if (left_items != .dense or right_items != .dense) return null;
+                    const int_ptr = hostCompareIntDensePtr(left_items.dense) orelse return null;
+                    if (int_ptr.len != right_items.dense.len or int_ptr.len != len) return error.Type;
+                    return .{
+                        .len = len,
+                        .shape = shape,
+                        .op_code = op_code,
+                        .int_ptr = int_ptr,
+                        .float_items = right_items.dense,
+                        .int_left = true,
+                    };
+                },
+                else => {},
+            },
+            .float_array => |left_items| switch (right_view) {
+                .int_array => |right_items| {
+                    if (left_items != .dense or right_items != .dense) return null;
+                    const int_ptr = hostCompareIntDensePtr(right_items.dense) orelse return null;
+                    if (int_ptr.len != left_items.dense.len or int_ptr.len != len) return error.Type;
+                    return .{
+                        .len = len,
+                        .shape = shape,
+                        .op_code = op_code,
+                        .int_ptr = int_ptr,
+                        .float_items = left_items.dense,
+                        .int_left = false,
+                    };
+                },
+                else => {},
+            },
+            else => {},
+        }
+        return null;
+    }
+
+    fn fillFastHostCompareIntArrays(out: *HostBitAlloc, op_code: i32, left: HostIntArrayView, right: HostIntArrayView) bool {
+        if (hostIntArrayViewLen(left) != hostIntArrayViewLen(right)) return false;
+        switch (left) {
+            .int8 => |left_items| switch (right) {
+                .int8 => |right_items| {
+                    kiwi_host_compare_i8_array(out.words.ptr, left_items.ptr, right_items.ptr, left_items.len, op_code);
+                    return true;
+                },
+                else => {},
+            },
+            .int16 => |left_items| switch (right) {
+                .int16 => |right_items| {
+                    kiwi_host_compare_i16_array(out.words.ptr, left_items.ptr, right_items.ptr, left_items.len, op_code);
+                    return true;
+                },
+                else => {},
+            },
+            .int32 => |left_items| switch (right) {
+                .int32 => |right_items| {
+                    kiwi_host_compare_i32_array(out.words.ptr, left_items.ptr, right_items.ptr, left_items.len, op_code);
+                    return true;
+                },
+                else => {},
+            },
+            .int64 => |left_items| switch (right) {
+                .int64 => |right_items| {
+                    kiwi_host_compare_i64_array(out.words.ptr, left_items.ptr, right_items.ptr, left_items.len, op_code);
+                    return true;
+                },
+                else => {},
+            },
+            .bit => return false,
+        }
+        const left_ptr = hostCompareIntDensePtr(left) orelse return false;
+        const right_ptr = hostCompareIntDensePtr(right) orelse return false;
+        if (left_ptr.len != right_ptr.len) return false;
+        kiwi_host_compare_int_mixed_array(out.words.ptr, left_ptr.ptr, left_ptr.width, right_ptr.ptr, right_ptr.width, left_ptr.len, op_code);
+        return true;
+    }
+
+    fn fillFastHostCompareIntFloatArray(out: *HostBitAlloc, op_code: i32, int_items: HostIntArrayView, float_items: []const f64, int_left: bool) bool {
+        const int_ptr = hostCompareIntDensePtr(int_items) orelse return false;
+        if (int_ptr.len != float_items.len) return false;
+        kiwi_host_compare_int_f64_array(out.words.ptr, int_ptr.ptr, int_ptr.width, float_items.ptr, int_ptr.len, if (int_left) 1 else 0, op_code);
+        return true;
+    }
+
+    fn canFastHostCompareIntArrays(left: HostIntArrayView, right: HostIntArrayView) bool {
+        if (hostIntArrayViewLen(left) != hostIntArrayViewLen(right)) return false;
+        return hostCompareIntDensePtr(left) != null and hostCompareIntDensePtr(right) != null;
+    }
+
+    fn canFastHostCompareIntScalar(items: HostIntArrayView, scalar: i64) bool {
+        return switch (items) {
+            .int8 => std.math.cast(i8, scalar) != null,
+            .int16 => std.math.cast(i16, scalar) != null,
+            .int32 => std.math.cast(i32, scalar) != null,
+            .int64 => true,
+            .bit => false,
+        };
+    }
+
+    fn fillFastHostCompareIntScalar(out: *HostBitAlloc, op_code: i32, items: HostIntArrayView, scalar: i64, scalar_left: bool) bool {
+        const scalar_left_int: i32 = if (scalar_left) 1 else 0;
+        switch (items) {
+            .int8 => |view| {
+                const typed_scalar = std.math.cast(i8, scalar) orelse return false;
+                kiwi_host_compare_i8_scalar(out.words.ptr, view.ptr, view.len, typed_scalar, scalar_left_int, op_code);
+                return true;
+            },
+            .int16 => |view| {
+                const typed_scalar = std.math.cast(i16, scalar) orelse return false;
+                kiwi_host_compare_i16_scalar(out.words.ptr, view.ptr, view.len, typed_scalar, scalar_left_int, op_code);
+                return true;
+            },
+            .int32 => |view| {
+                const typed_scalar = std.math.cast(i32, scalar) orelse return false;
+                kiwi_host_compare_i32_scalar(out.words.ptr, view.ptr, view.len, typed_scalar, scalar_left_int, op_code);
+                return true;
+            },
+            .int64 => |view| {
+                kiwi_host_compare_i64_scalar(out.words.ptr, view.ptr, view.len, scalar, scalar_left_int, op_code);
+                return true;
+            },
+            .bit => return false,
+        }
+    }
+
+    fn tryFastHostDenseCompare(self: *Session, op: BuiltinId, left: Value, right: Value, shape: ?NumericShapeSnapshot) KError!?Value {
+        if (comptime !enable_host_compare_vectorized) return null;
+        const op_code = hostCompareOpCode(op) orelse return null;
+        const len = try arrayResultLen(left, right);
+        if (len < host_compare_vector_min_len) return null;
+        if (rowwiseMatrixVectorDyad(left, right) != null) return null;
+
+        const left_view = hostDenseView(self, left) catch |err| switch (err) {
+            error.Type => return null,
+            else => return err,
+        };
+        const right_view = hostDenseView(self, right) catch |err| switch (err) {
+            error.Type => return null,
+            else => return err,
+        };
+
+        switch (left_view) {
+            .int_array => |left_items| switch (right_view) {
+                .int_array => |right_items| {
+                    if (left_items != .dense or right_items != .dense) return null;
+                    if (!canFastHostCompareIntArrays(left_items.dense, right_items.dense)) return null;
+                    var out = try self.allocHostBitArrayUninitialized(.managed, len);
+                    if (!fillFastHostCompareIntArrays(&out, op_code, left_items.dense, right_items.dense)) return null;
+                    return try self.finishFastHostCompareResult(out, shape);
+                },
+                .scalar_int => |scalar| {
+                    if (left_items != .dense) return null;
+                    if (!canFastHostCompareIntScalar(left_items.dense, scalar)) return null;
+                    var out = try self.allocHostBitArrayUninitialized(.managed, len);
+                    if (!fillFastHostCompareIntScalar(&out, op_code, left_items.dense, scalar, false)) return null;
+                    return try self.finishFastHostCompareResult(out, shape);
+                },
+                .float_array => |right_items| {
+                    if (left_items != .dense or right_items != .dense) return null;
+                    var out = try self.allocHostBitArrayUninitialized(.managed, len);
+                    if (!fillFastHostCompareIntFloatArray(&out, op_code, left_items.dense, right_items.dense, true)) return null;
+                    return try self.finishFastHostCompareResult(out, shape);
+                },
+                else => {},
+            },
+            .scalar_int => |scalar| switch (right_view) {
+                .int_array => |right_items| {
+                    if (right_items != .dense) return null;
+                    if (!canFastHostCompareIntScalar(right_items.dense, scalar)) return null;
+                    var out = try self.allocHostBitArrayUninitialized(.managed, len);
+                    if (!fillFastHostCompareIntScalar(&out, op_code, right_items.dense, scalar, true)) return null;
+                    return try self.finishFastHostCompareResult(out, shape);
+                },
+                .float_array => |right_items| {
+                    if (right_items != .dense) return null;
+                    const out = try self.allocHostBitArrayUninitialized(.managed, len);
+                    kiwi_host_compare_f64_scalar(out.words.ptr, right_items.dense.ptr, right_items.dense.len, @floatFromInt(scalar), 1, op_code);
+                    return try self.finishFastHostCompareResult(out, shape);
+                },
+                else => {},
+            },
+            .float_array => |left_items| switch (right_view) {
+                .float_array => |right_items| {
+                    if (left_items != .dense or right_items != .dense) return null;
+                    if (left_items.dense.len != right_items.dense.len) return error.Type;
+                    const out = try self.allocHostBitArrayUninitialized(.managed, len);
+                    kiwi_host_compare_f64_array(out.words.ptr, left_items.dense.ptr, right_items.dense.ptr, left_items.dense.len, op_code);
+                    return try self.finishFastHostCompareResult(out, shape);
+                },
+                .scalar_float => |scalar| {
+                    if (left_items != .dense) return null;
+                    const out = try self.allocHostBitArrayUninitialized(.managed, len);
+                    kiwi_host_compare_f64_scalar(out.words.ptr, left_items.dense.ptr, left_items.dense.len, scalar, 0, op_code);
+                    return try self.finishFastHostCompareResult(out, shape);
+                },
+                .scalar_int => |scalar| {
+                    if (left_items != .dense) return null;
+                    const out = try self.allocHostBitArrayUninitialized(.managed, len);
+                    kiwi_host_compare_f64_scalar(out.words.ptr, left_items.dense.ptr, left_items.dense.len, @floatFromInt(scalar), 0, op_code);
+                    return try self.finishFastHostCompareResult(out, shape);
+                },
+                .int_array => |right_items| {
+                    if (left_items != .dense or right_items != .dense) return null;
+                    var out = try self.allocHostBitArrayUninitialized(.managed, len);
+                    if (!fillFastHostCompareIntFloatArray(&out, op_code, right_items.dense, left_items.dense, false)) return null;
+                    return try self.finishFastHostCompareResult(out, shape);
+                },
+            },
+            .scalar_float => |scalar| switch (right_view) {
+                .float_array => |right_items| {
+                    if (right_items != .dense) return null;
+                    const out = try self.allocHostBitArrayUninitialized(.managed, len);
+                    kiwi_host_compare_f64_scalar(out.words.ptr, right_items.dense.ptr, right_items.dense.len, scalar, 1, op_code);
+                    return try self.finishFastHostCompareResult(out, shape);
+                },
+                else => {},
+            },
+        }
+        return null;
+    }
+
     fn compareNumericArrayValues(self: *Session, op: BuiltinId, left: Value, right: Value) KError!Value {
         if (planCompareMaskBackend(self, op, left, right) == .mlx) return try self.applyBackendArrayDyad(op, left, right);
         const shape = try nonVectorNumericShapeForDyad(left, right);
         if (try self.tryFastHostBitCompare(op, left, right, shape)) |result| return result;
+        if (try self.tryFastHostRangeCompare(op, left, right, shape)) |result| return result;
+        if (try self.tryFastHostDenseCompare(op, left, right, shape)) |result| return result;
         const len = try arrayResultLen(left, right);
         const rowwise = rowwiseMatrixVectorDyad(left, right);
         const out = try self.allocHostBitArray(.managed, len);
         var stats = BitSequenceStats{};
+        const integer_compare = valueNumericMode(left) == .int and valueNumericMode(right) == .int;
         for (0..len) |idx| {
-            const lhs = if (left.tag() == .array)
-                try numericFloatAt(left, if (rowwise) |info| info.operandIndex(true, idx) else idx)
-            else
-                scalarNumericFloatValue(left).?;
-            const rhs = if (right.tag() == .array)
-                try numericFloatAt(right, if (rowwise) |info| info.operandIndex(false, idx) else idx)
-            else
-                scalarNumericFloatValue(right).?;
-            const bit = switch (op) {
-                .less => lhs < rhs,
-                .more => lhs > rhs,
-                else => return error.Internal,
+            const bit = if (integer_compare) blk: {
+                const lhs = if (left.tag() == .array)
+                    try numericIntAt(left, if (rowwise) |info| info.operandIndex(true, idx) else idx)
+                else
+                    scalarIntLikeValue(left).?;
+                const rhs = if (right.tag() == .array)
+                    try numericIntAt(right, if (rowwise) |info| info.operandIndex(false, idx) else idx)
+                else
+                    scalarIntLikeValue(right).?;
+                break :blk switch (op) {
+                    .less => lhs < rhs,
+                    .more => lhs > rhs,
+                    else => return error.Internal,
+                };
+            } else blk: {
+                const lhs = if (left.tag() == .array)
+                    try numericFloatAt(left, if (rowwise) |info| info.operandIndex(true, idx) else idx)
+                else
+                    scalarNumericFloatValue(left).?;
+                const rhs = if (right.tag() == .array)
+                    try numericFloatAt(right, if (rowwise) |info| info.operandIndex(false, idx) else idx)
+                else
+                    scalarNumericFloatValue(right).?;
+                break :blk switch (op) {
+                    .less => lhs < rhs,
+                    .more => lhs > rhs,
+                    else => return error.Internal,
+                };
             };
             bitSet(out.words, idx, bit);
             stats.note(bit);
@@ -27329,6 +35268,117 @@ pub const Session = struct {
         return try self.transposeHostDenseValueSwapAxes(value, handle, axis1, axis2);
     }
 
+    fn transposeHostStringList(self: *Session, list: *const HostStringList) KError!Value {
+        if (list.len == 0) return try self.createManagedHostBoxedArray(&.{});
+        const first = try hostStringListItemBytes(list, 0);
+        const cols = first.len;
+        for (1..list.len) |idx| {
+            if ((try hostStringListItemBytes(list, idx)).len != cols) return error.Type;
+        }
+
+        if (cols == 0) {
+            const prototype = try self.createOwnedHostStringSpaces(.managed, list.len);
+            defer self.releaseValue(prototype);
+            return try self.createManagedHostBoxedArrayWithPrototype(&.{}, prototype);
+        }
+
+        const payload_len = std.math.mul(usize, cols, list.len) catch return error.Unsupported;
+        const payload = try self.allocator.alloc(u8, payload_len);
+        defer self.allocator.free(payload);
+        const rows = try self.allocator.alloc([]const u8, cols);
+        defer self.allocator.free(rows);
+
+        for (0..cols) |col_idx| {
+            const start = col_idx * list.len;
+            for (0..list.len) |row_idx| {
+                const row = try hostStringListItemBytes(list, row_idx);
+                payload[start + row_idx] = row[col_idx];
+            }
+            rows[col_idx] = payload[start .. start + list.len];
+        }
+        return try self.createManagedHostStringRowsFromSlices(rows);
+    }
+
+    fn boxedTransposeRowLen(value: Value) ?usize {
+        if (stringSourceInfo(value)) |source| return source.bytes().len;
+        return derivedSequenceLen(value);
+    }
+
+    fn boxedTransposeCellValue(self: *Session, row: Value, col: usize) KError!Value {
+        if (stringSourceInfo(row)) |source| return try self.stringIndexScalarValue(source, @intCast(col));
+        return try self.derivedSequenceItemValue(row, col);
+    }
+
+    fn transposeHostBoxedColumnValue(self: *Session, items: []const Value) KError!Value {
+        var all_unit_strings = true;
+        for (items) |item| {
+            const bytes = stringBytes(item) orelse {
+                all_unit_strings = false;
+                break;
+            };
+            if (bytes.len != 1) {
+                all_unit_strings = false;
+                break;
+            }
+        }
+
+        if (all_unit_strings) {
+            const out = try self.allocator.alloc(u8, items.len);
+            defer self.allocator.free(out);
+            for (items, 0..) |item, idx| out[idx] = stringBytes(item).?[0];
+            const text = try self.managedHostString(out);
+            defer self.releaseValue(text);
+            return try self.createManagedHostBoxedArray(&.{text});
+        }
+
+        return try self.makeArrayFromValues(items);
+    }
+
+    fn isBoxedTextVector(value: Value) bool {
+        if (value.tag() != .array or value.arrayKind() != .host_boxed_array) return false;
+        const array = value.asHostBoxedArray();
+        return array.len() == 1 and stringBytes(array.items[0]) != null;
+    }
+
+    fn transposeHostBoxedArray(self: *Session, array: *const HostBoxedArray) KError!Value {
+        const rows = array.len();
+        if (rows == 0) return error.Type;
+        const cols = boxedTransposeRowLen(array.items[0]) orelse return error.Type;
+        if (cols == 0) return error.Type;
+        for (array.items[1..]) |row| {
+            if ((boxedTransposeRowLen(row) orelse return error.Type) != cols) return error.Type;
+        }
+
+        const columns = try self.allocator.alloc(Value, cols);
+        defer self.allocator.free(columns);
+        var initialized_columns: usize = 0;
+        defer {
+            for (columns[0..initialized_columns]) |value| self.releaseValue(value);
+        }
+
+        for (0..cols) |col| {
+            const items = try self.allocator.alloc(Value, rows);
+            defer self.allocator.free(items);
+            var initialized_items: usize = 0;
+            defer {
+                for (items[0..initialized_items]) |value| self.releaseValue(value);
+            }
+
+            for (array.items) |row| {
+                items[initialized_items] = try self.boxedTransposeCellValue(row, col);
+                initialized_items += 1;
+            }
+
+            columns[initialized_columns] = try self.transposeHostBoxedColumnValue(items);
+            initialized_columns += 1;
+        }
+
+        if (rows > 1 and columns.len == 1 and isBoxedTextVector(columns[0])) {
+            return try self.retainEscapedValue(columns[0]);
+        }
+        return try self.createManagedHostBoxedArray(columns);
+    }
+
     fn transposeValue(self: *Session, value: Value) KError!Value {
         if (valueNumericHandle(value)) |handle| {
             if (handle.rank > 2 and valueNumericMode(value) != null) {
@@ -27370,6 +35420,12 @@ pub const Session = struct {
                 },
             }
         }
+        if (value.tag() == .array and value.arrayKind() == .host_string_list) {
+            return try self.transposeHostStringList(value.asHostStringList());
+        }
+        if (value.tag() == .array and value.arrayKind() == .host_boxed_array) {
+            return try self.transposeHostBoxedArray(value.asHostBoxedArray());
+        }
         return error.Type;
     }
 
@@ -27384,10 +35440,13 @@ pub const Session = struct {
             return try self.applyNumericDyad(.minimum, left, right);
         }
         if (shouldUseGenericArrayDyad(left, right)) return try self.applyGenericArrayDyad(.minimum, left, right);
-        if (left.tag() == .float or right.tag() == .float) {
+        if (left.tag() == .float or left.tag() == .float32 or right.tag() == .float or right.tag() == .float32) {
             const lhs = scalarNumericFloatValue(left) orelse return error.Type;
             const rhs = scalarNumericFloatValue(right) orelse return error.Type;
-            return try self.floatValue(@min(lhs, rhs));
+            return switch (scalarNumericResultStorageKind(left, right)) {
+                .float32 => try self.float32Value(@floatCast(@min(lhs, rhs))),
+                .float64 => try self.floatValue(@min(lhs, rhs)),
+            };
         }
         const lhs = scalarIntLikeValue(left) orelse return error.Type;
         const rhs = scalarIntLikeValue(right) orelse return error.Type;
@@ -27405,10 +35464,13 @@ pub const Session = struct {
             return try self.applyNumericDyad(.maximum, left, right);
         }
         if (shouldUseGenericArrayDyad(left, right)) return try self.applyGenericArrayDyad(.maximum, left, right);
-        if (left.tag() == .float or right.tag() == .float) {
+        if (left.tag() == .float or left.tag() == .float32 or right.tag() == .float or right.tag() == .float32) {
             const lhs = scalarNumericFloatValue(left) orelse return error.Type;
             const rhs = scalarNumericFloatValue(right) orelse return error.Type;
-            return try self.floatValue(@max(lhs, rhs));
+            return switch (scalarNumericResultStorageKind(left, right)) {
+                .float32 => try self.float32Value(@floatCast(@max(lhs, rhs))),
+                .float64 => try self.floatValue(@max(lhs, rhs)),
+            };
         }
         const lhs = scalarIntLikeValue(left) orelse return error.Type;
         const rhs = scalarIntLikeValue(right) orelse return error.Type;
@@ -27441,25 +35503,60 @@ pub const Session = struct {
         return try self.compareScalars(.more, left, right);
     }
 
+    fn stringByteDyadLen(left_len: usize, right_len: usize) KError!usize {
+        if (left_len == right_len) return left_len;
+        if (left_len == 1) return right_len;
+        if (right_len == 1) return left_len;
+        return error.Type;
+    }
+
+    fn equalStringByteValues(self: *Session, left: Value, right: Value) KError!?Value {
+        const left_bytes = stringBytes(left) orelse return null;
+        const right_bytes = stringBytes(right) orelse return null;
+        if (left_bytes.len == 1 and right_bytes.len == 1) {
+            return Value.fromBool(left_bytes[0] == right_bytes[0]);
+        }
+
+        const len = try stringByteDyadLen(left_bytes.len, right_bytes.len);
+        var out = try self.allocHostBitArrayUninitialized(.managed, len);
+        const metadata = fillStringByteEqWords(&out, left_bytes, right_bytes);
+        return try self.finishManagedHostBitAlloc(out, metadata.flags, metadata.range);
+    }
+
     fn equalArrayValues(self: *Session, left: Value, right: Value) KError!Value {
         if (valueNumericMode(left) != null and valueNumericMode(right) != null) {
             if (planCompareMaskBackend(self, .equal, left, right) == .mlx) return try self.applyBackendArrayDyad(.equal, left, right);
             const shape = try nonVectorNumericShapeForDyad(left, right);
             if (try self.tryFastHostBitCompare(.equal, left, right, shape)) |result| return result;
+            if (try self.tryFastHostRangeCompare(.equal, left, right, shape)) |result| return result;
+            if (try self.tryFastHostDenseCompare(.equal, left, right, shape)) |result| return result;
             const len = try arrayResultLen(left, right);
             const rowwise = rowwiseMatrixVectorDyad(left, right);
             const out = try self.allocHostBitArray(.managed, len);
             var stats = BitSequenceStats{};
+            const integer_compare = valueNumericMode(left) == .int and valueNumericMode(right) == .int;
             for (0..len) |idx| {
-                const lhs = if (left.tag() == .array)
-                    try numericFloatAt(left, if (rowwise) |info| info.operandIndex(true, idx) else idx)
-                else
-                    scalarNumericFloatValue(left).?;
-                const rhs = if (right.tag() == .array)
-                    try numericFloatAt(right, if (rowwise) |info| info.operandIndex(false, idx) else idx)
-                else
-                    scalarNumericFloatValue(right).?;
-                const bit = lhs == rhs;
+                const bit = if (integer_compare) blk: {
+                    const lhs = if (left.tag() == .array)
+                        try numericIntAt(left, if (rowwise) |info| info.operandIndex(true, idx) else idx)
+                    else
+                        scalarIntLikeValue(left).?;
+                    const rhs = if (right.tag() == .array)
+                        try numericIntAt(right, if (rowwise) |info| info.operandIndex(false, idx) else idx)
+                    else
+                        scalarIntLikeValue(right).?;
+                    break :blk lhs == rhs;
+                } else blk: {
+                    const lhs = if (left.tag() == .array)
+                        try numericFloatAt(left, if (rowwise) |info| info.operandIndex(true, idx) else idx)
+                    else
+                        scalarNumericFloatValue(left).?;
+                    const rhs = if (right.tag() == .array)
+                        try numericFloatAt(right, if (rowwise) |info| info.operandIndex(false, idx) else idx)
+                    else
+                        scalarNumericFloatValue(right).?;
+                    break :blk lhs == rhs;
+                };
                 bitSet(out.words, idx, bit);
                 stats.note(bit);
             }
@@ -27501,15 +35598,24 @@ pub const Session = struct {
         if (hasArrayOperand(left, right) and canApplyNumericDyad(left, right)) return try self.applyNumericDyad(.add, left, right);
         return switch (left.tag()) {
             .int => switch (right.tag()) {
+                .float32 => try self.float32Value(@as(f32, @floatFromInt(left.asInt())) + right.asFloat32()),
                 .float => try self.floatValue(@as(f64, @floatFromInt(left.asInt())) + right.asFloat()),
                 else => error.Type,
             },
             .bool => switch (right.tag()) {
+                .float32 => try self.float32Value(@as(f32, @floatFromInt(@intFromBool(left.asBool()))) + right.asFloat32()),
                 .float => try self.floatValue(@as(f64, @floatFromInt(@intFromBool(left.asBool()))) + right.asFloat()),
+                else => error.Type,
+            },
+            .float32 => switch (right.tag()) {
+                .int, .bool => try self.float32Value(left.asFloat32() + @as(f32, @floatFromInt(scalarIntLikeValue(right).?))),
+                .float32 => try self.float32Value(left.asFloat32() + right.asFloat32()),
+                .float => try self.floatValue(left.asFloat() + right.asFloat()),
                 else => error.Type,
             },
             .float => switch (right.tag()) {
                 .int, .bool => try self.floatValue(left.asFloat() + @as(f64, @floatFromInt(scalarIntLikeValue(right).?))),
+                .float32 => try self.floatValue(left.asFloat() + right.asFloat()),
                 .float => try self.floatValue(left.asFloat() + right.asFloat()),
                 else => error.Type,
             },
@@ -27527,15 +35633,24 @@ pub const Session = struct {
         if (hasArrayOperand(left, right) and canApplyNumericDyad(left, right)) return try self.applyNumericDyad(.sub, left, right);
         return switch (left.tag()) {
             .int => switch (right.tag()) {
+                .float32 => try self.float32Value(@as(f32, @floatFromInt(left.asInt())) - right.asFloat32()),
                 .float => try self.floatValue(@as(f64, @floatFromInt(left.asInt())) - right.asFloat()),
                 else => error.Type,
             },
             .bool => switch (right.tag()) {
+                .float32 => try self.float32Value(@as(f32, @floatFromInt(@intFromBool(left.asBool()))) - right.asFloat32()),
                 .float => try self.floatValue(@as(f64, @floatFromInt(@intFromBool(left.asBool()))) - right.asFloat()),
+                else => error.Type,
+            },
+            .float32 => switch (right.tag()) {
+                .int, .bool => try self.float32Value(left.asFloat32() - @as(f32, @floatFromInt(scalarIntLikeValue(right).?))),
+                .float32 => try self.float32Value(left.asFloat32() - right.asFloat32()),
+                .float => try self.floatValue(left.asFloat() - right.asFloat()),
                 else => error.Type,
             },
             .float => switch (right.tag()) {
                 .int, .bool => try self.floatValue(left.asFloat() - @as(f64, @floatFromInt(scalarIntLikeValue(right).?))),
+                .float32 => try self.floatValue(left.asFloat() - right.asFloat()),
                 .float => try self.floatValue(left.asFloat() - right.asFloat()),
                 else => error.Type,
             },
@@ -27553,15 +35668,24 @@ pub const Session = struct {
         if (hasArrayOperand(left, right) and canApplyNumericDyad(left, right)) return try self.applyNumericDyad(.mul, left, right);
         return switch (left.tag()) {
             .int => switch (right.tag()) {
+                .float32 => try self.float32Value(@as(f32, @floatFromInt(left.asInt())) * right.asFloat32()),
                 .float => try self.floatValue(@as(f64, @floatFromInt(left.asInt())) * right.asFloat()),
                 else => error.Type,
             },
             .bool => switch (right.tag()) {
+                .float32 => try self.float32Value(@as(f32, @floatFromInt(@intFromBool(left.asBool()))) * right.asFloat32()),
                 .float => try self.floatValue(@as(f64, @floatFromInt(@intFromBool(left.asBool()))) * right.asFloat()),
+                else => error.Type,
+            },
+            .float32 => switch (right.tag()) {
+                .int, .bool => try self.float32Value(left.asFloat32() * @as(f32, @floatFromInt(scalarIntLikeValue(right).?))),
+                .float32 => try self.float32Value(left.asFloat32() * right.asFloat32()),
+                .float => try self.floatValue(left.asFloat() * right.asFloat()),
                 else => error.Type,
             },
             .float => switch (right.tag()) {
                 .int, .bool => try self.floatValue(left.asFloat() * @as(f64, @floatFromInt(scalarIntLikeValue(right).?))),
+                .float32 => try self.floatValue(left.asFloat() * right.asFloat()),
                 .float => try self.floatValue(left.asFloat() * right.asFloat()),
                 else => error.Type,
             },
@@ -27580,16 +35704,21 @@ pub const Session = struct {
         const left_float = switch (left.tag()) {
             .int => @as(f64, @floatFromInt(left.asInt())),
             .bool => @as(f64, @floatFromInt(@intFromBool(left.asBool()))),
+            .float32 => @as(f64, @floatCast(left.asFloat32())),
             .float => left.asFloat(),
             else => return error.Type,
         };
         const right_float = switch (right.tag()) {
             .int => @as(f64, @floatFromInt(right.asInt())),
             .bool => @as(f64, @floatFromInt(@intFromBool(right.asBool()))),
+            .float32 => @as(f64, @floatCast(right.asFloat32())),
             .float => right.asFloat(),
             else => return error.Type,
         };
-        return try self.floatValue(left_float / right_float);
+        return switch (scalarNumericResultStorageKind(left, right)) {
+            .float32 => try self.float32Value(@floatCast(left_float / right_float)),
+            .float64 => try self.floatValue(left_float / right_float),
+        };
     }
 
     fn powValues(self: *Session, left: Value, right: Value) KError!Value {
@@ -27606,7 +35735,10 @@ pub const Session = struct {
         }
         const left_float = scalarNumericFloatValue(left) orelse return error.Type;
         const right_float = scalarNumericFloatValue(right) orelse return error.Type;
-        return try self.floatValue(std.math.pow(f64, left_float, right_float));
+        return switch (scalarNumericResultStorageKind(left, right)) {
+            .float32 => try self.float32Value(@floatCast(std.math.pow(f64, left_float, right_float))),
+            .float64 => try self.floatValue(std.math.pow(f64, left_float, right_float)),
+        };
     }
 
     const MatmulShape = struct {
@@ -27687,6 +35819,15 @@ pub const Session = struct {
         return value;
     }
 
+    fn finishHostMatmulFloat32Result(self: *Session, shape: MatmulShape, out: HostFloat32Result) KError!Value {
+        if (shape.result_rank == 0) return try self.float32Value(out.items[0]);
+        const value = try out.value(self);
+        const analysis = analyzeFloatSlice32(out.items);
+        hostDenseSetFlags(try mutableNumericHostArrayValue(self, value), analysis.flags);
+        if (shape.result_rank == 2) return try newReshapeViewValue(self, value, numericShapeSnapshotMatrix(shape.result_rows, shape.result_cols));
+        return value;
+    }
+
     fn finishHostMatmulIntResult(self: *Session, shape: MatmulShape, items: []const i64) KError!Value {
         if (shape.result_rank == 0) return try self.intValue(items[0]);
         const value = try self.createManagedHostIntArray(items);
@@ -27695,6 +35836,26 @@ pub const Session = struct {
     }
 
     fn transposeDenseFloatMatrixBlocked(out: []f64, input: []const f64, rows: usize, cols: usize) void {
+        const tile: usize = 32;
+        var row0: usize = 0;
+        while (row0 < rows) : (row0 += tile) {
+            const row_end = @min(row0 + tile, rows);
+            var col0: usize = 0;
+            while (col0 < cols) : (col0 += tile) {
+                const col_end = @min(col0 + tile, cols);
+                var row_idx = row0;
+                while (row_idx < row_end) : (row_idx += 1) {
+                    const input_row = input[row_idx * cols ..][0..cols];
+                    var col_idx = col0;
+                    while (col_idx < col_end) : (col_idx += 1) {
+                        out[col_idx * rows + row_idx] = input_row[col_idx];
+                    }
+                }
+            }
+        }
+    }
+
+    fn transposeDenseFloat32MatrixBlocked(out: []f32, input: []const f32, rows: usize, cols: usize) void {
         const tile: usize = 32;
         var row0: usize = 0;
         while (row0 < rows) : (row0 += tile) {
@@ -27730,10 +35891,131 @@ pub const Session = struct {
         return acc;
     }
 
+    fn denseFloat32Dot(lhs: []const f32, rhs: []const f32) f32 {
+        const lane_count = 8;
+        const Vec = @Vector(lane_count, f32);
+        var acc_vec: Vec = @splat(0.0);
+        var idx: usize = 0;
+        const vector_limit = lhs.len - (lhs.len % lane_count);
+        while (idx < vector_limit) : (idx += lane_count) {
+            const lhs_vec: Vec = lhs[idx..][0..lane_count].*;
+            const rhs_vec: Vec = rhs[idx..][0..lane_count].*;
+            acc_vec += lhs_vec * rhs_vec;
+        }
+        var acc = @reduce(.Add, acc_vec);
+        while (idx < lhs.len) : (idx += 1) acc += lhs[idx] * rhs[idx];
+        return acc;
+    }
+
+    fn denseFloat32Float64Dot(lhs: []const f32, rhs: []const f64) f64 {
+        const lane_count = 4;
+        const VecF32 = @Vector(lane_count, f32);
+        const VecF64 = @Vector(lane_count, f64);
+        var acc_vec: VecF64 = @splat(0.0);
+        var idx: usize = 0;
+        const vector_limit = lhs.len - (lhs.len % lane_count);
+        while (idx < vector_limit) : (idx += lane_count) {
+            const lhs_vec32: VecF32 = lhs[idx..][0..lane_count].*;
+            const lhs_vec64: VecF64 = @floatCast(lhs_vec32);
+            const rhs_vec: VecF64 = rhs[idx..][0..lane_count].*;
+            acc_vec += lhs_vec64 * rhs_vec;
+        }
+        var acc = @reduce(.Add, acc_vec);
+        while (idx < lhs.len) : (idx += 1) acc += @as(f64, @floatCast(lhs[idx])) * rhs[idx];
+        return acc;
+    }
+
+    fn denseFloat64Float32Dot(lhs: []const f64, rhs: []const f32) f64 {
+        const lane_count = 4;
+        const VecF32 = @Vector(lane_count, f32);
+        const VecF64 = @Vector(lane_count, f64);
+        var acc_vec: VecF64 = @splat(0.0);
+        var idx: usize = 0;
+        const vector_limit = lhs.len - (lhs.len % lane_count);
+        while (idx < vector_limit) : (idx += lane_count) {
+            const lhs_vec: VecF64 = lhs[idx..][0..lane_count].*;
+            const rhs_vec32: VecF32 = rhs[idx..][0..lane_count].*;
+            const rhs_vec64: VecF64 = @floatCast(rhs_vec32);
+            acc_vec += lhs_vec * rhs_vec64;
+        }
+        var acc = @reduce(.Add, acc_vec);
+        while (idx < lhs.len) : (idx += 1) acc += lhs[idx] * @as(f64, @floatCast(rhs[idx]));
+        return acc;
+    }
+
+    fn hostFloatDenseViewContiguousFloat32(view: HostFloatDenseView) ?[]const f32 {
+        if (view != .flat_slice) return null;
+        const slice = view.flat_slice;
+        if (slice.start != 0) return null;
+        const array = slice.source_host orelse return null;
+        if (slice.len != array.logical_len) return null;
+        return switch (array.storage) {
+            .float32 => |items| hostDenseLogicalItems(f32, array, items),
+            else => null,
+        };
+    }
+
+    fn hostFloatDenseViewContiguousFloat64(view: HostFloatDenseView) ?[]const f64 {
+        return switch (view) {
+            .dense => |items| items,
+            else => null,
+        };
+    }
+
+    fn hostBlasMatmulShapeSupported(shape: MatmulShape) bool {
+        if (comptime !enable_host_accelerate_blas) return false;
+        if (shape.result_rank != 2) return false;
+        if (shape.left_rows == 0 or shape.result_cols == 0 or shape.left_cols == 0) return false;
+        if (shape.left_rows > host_accelerate_blas_max_dim) return false;
+        if (shape.result_cols > host_accelerate_blas_max_dim) return false;
+        if (shape.left_cols > host_accelerate_blas_max_dim) return false;
+        return true;
+    }
+
+    fn hostBlasDotLenSupported(len: usize) bool {
+        if (comptime !enable_host_accelerate_blas) return false;
+        if (len < host_accelerate_dot_min_len) return false;
+        return len <= host_accelerate_blas_max_dim;
+    }
+
+    fn tryHostBlasDotFloatDense(self: *Session, left_items: []const f64, right_items: []const f64, len: usize) KError!?Value {
+        if (!hostBlasDotLenSupported(len)) return null;
+        var out: f64 = 0.0;
+        if (kiwi_host_blas_ddot(&out, left_items.ptr, right_items.ptr, len) == 0) return null;
+        return try self.floatValue(out);
+    }
+
+    fn tryHostBlasDotFloat32Dense(self: *Session, left_items: []const f32, right_items: []const f32, len: usize) KError!?Value {
+        if (!hostBlasDotLenSupported(len)) return null;
+        var out: f32 = 0.0;
+        if (kiwi_host_blas_sdot(&out, left_items.ptr, right_items.ptr, len) == 0) return null;
+        return try self.float32Value(out);
+    }
+
+    fn tryHostBlasMatmulFloatDense(self: *Session, left_items: []const f64, right_items: []const f64, shape: MatmulShape) KError!?Value {
+        if (!hostBlasMatmulShapeSupported(shape)) return null;
+        const out = try self.allocManagedHostFloatResult(shape.result_len);
+        if (kiwi_host_blas_dgemm_rowmajor(out.items.ptr, left_items.ptr, right_items.ptr, shape.left_rows, shape.result_cols, shape.left_cols) == 0) {
+            return error.Unsupported;
+        }
+        return try self.finishHostMatmulFloatResult(shape, out);
+    }
+
+    fn tryHostBlasMatmulFloat32Dense(self: *Session, left_items: []const f32, right_items: []const f32, shape: MatmulShape) KError!?Value {
+        if (!hostBlasMatmulShapeSupported(shape)) return null;
+        const out = try self.allocManagedHostFloat32Result(shape.result_len);
+        if (kiwi_host_blas_sgemm_rowmajor(out.items.ptr, left_items.ptr, right_items.ptr, shape.left_rows, shape.result_cols, shape.left_cols) == 0) {
+            return error.Unsupported;
+        }
+        return try self.finishHostMatmulFloat32Result(shape, out);
+    }
+
     fn applyHostMatmulFloatDense(self: *Session, left_items: []const f64, right_items: []const f64, shape: MatmulShape) KError!Value {
         if (shape.result_rank == 0) {
+            if (try self.tryHostBlasDotFloatDense(left_items, right_items, shape.left_cols)) |value| return value;
             return try self.floatValue(denseFloatDot(left_items[0..shape.left_cols], right_items[0..shape.left_cols]));
         }
+        if (try self.tryHostBlasMatmulFloatDense(left_items, right_items, shape)) |value| return value;
 
         const right_t = try self.allocator.alloc(f64, right_items.len);
         defer self.allocator.free(right_t);
@@ -27751,13 +36033,94 @@ pub const Session = struct {
         return try self.finishHostMatmulFloatResult(shape, out);
     }
 
+    fn applyHostMatmulFloat32Dense(self: *Session, left_items: []const f32, right_items: []const f32, shape: MatmulShape) KError!Value {
+        if (shape.result_rank == 0) {
+            if (try self.tryHostBlasDotFloat32Dense(left_items, right_items, shape.left_cols)) |value| return value;
+            return try self.float32Value(denseFloat32Dot(left_items[0..shape.left_cols], right_items[0..shape.left_cols]));
+        }
+        if (try self.tryHostBlasMatmulFloat32Dense(left_items, right_items, shape)) |value| return value;
+
+        const right_t = try self.allocator.alloc(f32, right_items.len);
+        defer self.allocator.free(right_t);
+        transposeDenseFloat32MatrixBlocked(right_t, right_items, shape.right_rows, shape.right_cols);
+
+        const out = try self.allocManagedHostFloat32Result(shape.result_len);
+        for (0..shape.result_rows) |row_idx| {
+            const out_row = out.items[row_idx * shape.result_cols ..][0..shape.result_cols];
+            const left_row = left_items[row_idx * shape.left_cols ..][0..shape.left_cols];
+            for (0..shape.result_cols) |col_idx| {
+                const right_col = right_t[col_idx * shape.left_cols ..][0..shape.left_cols];
+                out_row[col_idx] = denseFloat32Dot(left_row, right_col);
+            }
+        }
+        return try self.finishHostMatmulFloat32Result(shape, out);
+    }
+
+    fn applyHostMatmulFloat32Float64Dense(self: *Session, left_items: []const f32, right_items: []const f64, shape: MatmulShape) KError!Value {
+        if (shape.result_rank == 0) {
+            return try self.floatValue(denseFloat32Float64Dot(left_items[0..shape.left_cols], right_items[0..shape.left_cols]));
+        }
+
+        const right_t = try self.allocator.alloc(f64, right_items.len);
+        defer self.allocator.free(right_t);
+        transposeDenseFloatMatrixBlocked(right_t, right_items, shape.right_rows, shape.right_cols);
+
+        const out = try self.allocManagedHostFloatResult(shape.result_len);
+        for (0..shape.result_rows) |row_idx| {
+            const out_row = out.items[row_idx * shape.result_cols ..][0..shape.result_cols];
+            const left_row = left_items[row_idx * shape.left_cols ..][0..shape.left_cols];
+            for (0..shape.result_cols) |col_idx| {
+                const right_col = right_t[col_idx * shape.left_cols ..][0..shape.left_cols];
+                out_row[col_idx] = denseFloat32Float64Dot(left_row, right_col);
+            }
+        }
+        return try self.finishHostMatmulFloatResult(shape, out);
+    }
+
+    fn applyHostMatmulFloat64Float32Dense(self: *Session, left_items: []const f64, right_items: []const f32, shape: MatmulShape) KError!Value {
+        if (shape.result_rank == 0) {
+            return try self.floatValue(denseFloat64Float32Dot(left_items[0..shape.left_cols], right_items[0..shape.left_cols]));
+        }
+
+        const right_t = try self.allocator.alloc(f32, right_items.len);
+        defer self.allocator.free(right_t);
+        transposeDenseFloat32MatrixBlocked(right_t, right_items, shape.right_rows, shape.right_cols);
+
+        const out = try self.allocManagedHostFloatResult(shape.result_len);
+        for (0..shape.result_rows) |row_idx| {
+            const out_row = out.items[row_idx * shape.result_cols ..][0..shape.result_cols];
+            const left_row = left_items[row_idx * shape.left_cols ..][0..shape.left_cols];
+            for (0..shape.result_cols) |col_idx| {
+                const right_col = right_t[col_idx * shape.left_cols ..][0..shape.left_cols];
+                out_row[col_idx] = denseFloat64Float32Dot(left_row, right_col);
+            }
+        }
+        return try self.finishHostMatmulFloatResult(shape, out);
+    }
+
     fn applyHostMatmulGeneric(self: *Session, left: Value, right: Value, shape: MatmulShape) KError!Value {
         const left_view = try hostDenseView(self, left);
         const right_view = try hostDenseView(self, right);
 
         if (shape.result_mode == .float) {
-            if (left_view == .float_array and left_view.float_array == .dense and right_view == .float_array and right_view.float_array == .dense) {
-                return try self.applyHostMatmulFloatDense(left_view.float_array.dense, right_view.float_array.dense, shape);
+            if (left_view == .float_array and right_view == .float_array) {
+                const left_f32 = hostFloatDenseViewContiguousFloat32(left_view.float_array);
+                const right_f32 = hostFloatDenseViewContiguousFloat32(right_view.float_array);
+                const left_f64 = hostFloatDenseViewContiguousFloat64(left_view.float_array);
+                const right_f64 = hostFloatDenseViewContiguousFloat64(right_view.float_array);
+
+                if (left_f32 != null and right_f32 != null) {
+                    return try self.applyHostMatmulFloat32Dense(left_f32.?, right_f32.?, shape);
+                }
+                if (left_f64 != null and right_f64 != null) {
+                    return try self.applyHostMatmulFloatDense(left_f64.?, right_f64.?, shape);
+                }
+                if (left_f32 != null and right_f64 != null) {
+                    return try self.applyHostMatmulFloat32Float64Dense(left_f32.?, right_f64.?, shape);
+                }
+                if (left_f64 != null and right_f32 != null) {
+                    return try self.applyHostMatmulFloat64Float32Dense(left_f64.?, right_f32.?, shape);
+                }
             }
 
             if (shape.result_rank == 0) {
@@ -27817,6 +36180,12 @@ pub const Session = struct {
         return null;
     }
 
+    fn promoteTextNumericDyadOperand(self: *Session, value: Value, other: Value) KError!?Value {
+        if (stringBytes(value) == null) return null;
+        if (valueNumericMode(other) == null) return null;
+        return try self.castValueToInt(value);
+    }
+
     const NumericDyadOperands = struct {
         left: Value,
         right: Value,
@@ -27838,6 +36207,14 @@ pub const Session = struct {
                 promoted_right = value;
                 changed = true;
             }
+        }
+        if (try self.promoteTextNumericDyadOperand(promoted_left, promoted_right)) |value| {
+            promoted_left = value;
+            changed = true;
+        }
+        if (try self.promoteTextNumericDyadOperand(promoted_right, promoted_left)) |value| {
+            promoted_right = value;
+            changed = true;
         }
         if (!changed) return null;
         return .{ .left = promoted_left, .right = promoted_right };
@@ -28053,16 +36430,31 @@ pub const Session = struct {
             .float_array => |items| switch (op) {
                 .add, .mul => self.shareValue(source_value),
                 .sub => blk: {
+                    if (hostFloatDenseViewStorageKind(items) == .float32) {
+                        const plan = try self.planHostFloat32UnaryOutput(source_value, hostFloatDenseViewLen(items), false);
+                        fillFloat32NegDenseView(plan.output.items, items);
+                        break :blk try self.finishHostFloat32Output(plan, 0);
+                    }
                     const plan = try self.planHostFloatUnaryOutput(source_value, hostFloatDenseViewLen(items), false);
                     fillFloatNegDenseView(plan.output.items, items);
                     break :blk try self.finishHostFloatOutput(plan, 0);
                 },
                 .div => blk: {
+                    if (hostFloatDenseViewStorageKind(items) == .float32) {
+                        const plan = try self.planHostFloat32UnaryOutput(source_value, hostFloatDenseViewLen(items), false);
+                        fillFloat32UnaryDenseView(plan.output.items, op, items);
+                        break :blk try self.finishHostFloat32Output(plan, 0);
+                    }
                     const plan = try self.planHostFloatUnaryOutput(source_value, hostFloatDenseViewLen(items), false);
                     fillFloatUnaryDenseView(plan.output.items, op, items);
                     break :blk try self.finishHostFloatOutput(plan, 0);
                 },
                 .exp, .log, .sin, .cos, .tanh, .sigmoid => blk: {
+                    if (hostFloatDenseViewStorageKind(items) == .float32) {
+                        const plan = try self.planHostFloat32UnaryOutput(source_value, hostFloatDenseViewLen(items), false);
+                        fillFloat32UnaryDenseView(plan.output.items, op, items);
+                        break :blk try self.finishHostFloat32Output(plan, 0);
+                    }
                     const plan = try self.planHostFloatUnaryOutput(source_value, hostFloatDenseViewLen(items), false);
                     fillFloatUnaryDenseView(plan.output.items, op, items);
                     break :blk try self.finishHostFloatOutput(plan, 0);
@@ -28091,12 +36483,53 @@ pub const Session = struct {
         return valueNumericMode(left) != null and valueNumericMode(right) != null;
     }
 
+    fn genericDyadDefaultEmptyPrototype(self: *Session) KError!Value {
+        return try self.createManagedHostIntArray(&.{});
+    }
+
+    fn genericDyadEmptyPrototypeOperand(self: *Session, value: Value, array: ?*const HostBoxedArray) KError!Value {
+        if (array) |items| {
+            std.debug.assert(items.len() == 0);
+            if (items.prototype) |prototype| return try self.retainEscapedValue(prototype);
+            return try self.genericDyadDefaultEmptyPrototype();
+        }
+        return try self.retainEscapedValue(value);
+    }
+
+    fn applyGenericArrayDyadToPrototypes(self: *Session, op: BuiltinId, left: Value, right: Value, left_boxed: ?*const HostBoxedArray, right_boxed: ?*const HostBoxedArray) KError!?Value {
+        if ((left_boxed == null or left_boxed.?.len() != 0) and (right_boxed == null or right_boxed.?.len() != 0)) return null;
+
+        const lhs = try self.genericDyadEmptyPrototypeOperand(left, if (left_boxed != null and left_boxed.?.len() == 0) left_boxed else null);
+        defer self.releaseValue(lhs);
+        const rhs = try self.genericDyadEmptyPrototypeOperand(right, if (right_boxed != null and right_boxed.?.len() == 0) right_boxed else null);
+        defer self.releaseValue(rhs);
+
+        const prototype = switch (op) {
+            .add => try self.addValues(lhs, rhs),
+            .sub => try self.subValues(lhs, rhs),
+            .mul => try self.mulValues(lhs, rhs),
+            .div => try self.divValues(lhs, rhs),
+            .pow => try self.powValues(lhs, rhs),
+            .minimum => try self.minimumValues(lhs, rhs),
+            .maximum => try self.maximumValues(lhs, rhs),
+            .less => try self.lessValues(lhs, rhs),
+            .more => try self.moreValues(lhs, rhs),
+            .equal => try self.equalValues(lhs, rhs),
+            else => return error.Unsupported,
+        };
+        defer self.releaseValue(prototype);
+        return try self.createManagedHostBoxedArrayWithPrototype(&.{}, prototype);
+    }
+
     fn applyGenericArrayDyad(self: *Session, op: BuiltinId, left: Value, right: Value) KError!Value {
         const len = try arrayResultLen(left, right);
         const left_dense = if (left.tag() == .array and valueNumericMode(left) != null) try numericHostArrayValue(self, left) else null;
         const right_dense = if (right.tag() == .array and valueNumericMode(right) != null) try numericHostArrayValue(self, right) else null;
         const left_boxed = if (left.tag() == .array and left.arraySubkind() == .host_boxed_array) left.asHostBoxedArray() else null;
         const right_boxed = if (right.tag() == .array and right.arraySubkind() == .host_boxed_array) right.asHostBoxedArray() else null;
+        if (len == 0) {
+            if (try self.applyGenericArrayDyadToPrototypes(op, left, right, left_boxed, right_boxed)) |result| return result;
+        }
         var out = std.ArrayList(Value).empty;
         defer {
             for (out.items) |value| self.releaseValue(value);
@@ -28174,6 +36607,12 @@ pub const Session = struct {
                     for (items, 0..) |item, idx| plan.output.items[idx] = -item;
                     break :blk try self.finishHostFloatOutput(plan, 0);
                 },
+                .float32 => |items| blk: {
+                    const logical_items = hostDenseLogicalItems(f32, array, items);
+                    var plan = try self.planHostFloat32UnaryOutput(hostDenseSourceValue(array), logical_items.len, true);
+                    for (logical_items, 0..) |item, idx| plan.output.items[idx] = -item;
+                    break :blk try self.finishHostFloat32Output(plan, 0);
+                },
             },
             .mul => self.shareValue(hostDenseSourceValue(array)),
             .div, .exp, .log, .sin, .cos, .tanh, .sigmoid => switch (array.storage) {
@@ -28206,6 +36645,12 @@ pub const Session = struct {
                     const plan = try self.planHostFloatUnaryOutput(hostDenseSourceValue(array), items.len, true);
                     fillFloatUnaryArray(f64, plan.output.items, op, items);
                     break :blk try self.finishHostFloatOutput(plan, 0);
+                },
+                .float32 => |items| blk: {
+                    const logical_items = hostDenseLogicalItems(f32, array, items);
+                    const plan = try self.planHostFloat32UnaryOutput(hostDenseSourceValue(array), logical_items.len, true);
+                    for (logical_items, 0..) |item, idx| plan.output.items[idx] = @floatCast(applyFloatMonadOp(op, @as(f64, item)));
+                    break :blk try self.finishHostFloat32Output(plan, 0);
                 },
             },
             else => error.Type,
@@ -28268,6 +36713,28 @@ pub const Session = struct {
         var profile_scope = self.beginSamplingProfileScope(.dense_host);
         defer profile_scope.end();
 
+        const left_view = try hostDenseView(self, left);
+        const right_view = try hostDenseView(self, right);
+        if (hostFloatDyadResultStorageKindForValues(left, right, left_view, right_view) == .float32) {
+            const out = try self.allocManagedHostFloat32Result(len);
+            for (0..len) |idx| {
+                const lhs = try numericFloatAt(left, rowwise.operandIndex(true, idx));
+                const rhs = try numericFloatAt(right, rowwise.operandIndex(false, idx));
+                out.items[idx] = @floatCast(switch (op) {
+                    .add => lhs + rhs,
+                    .sub => lhs - rhs,
+                    .mul => lhs * rhs,
+                    .div => lhs / rhs,
+                    .pow => std.math.pow(f64, lhs, rhs),
+                    .minimum => @min(lhs, rhs),
+                    .maximum => @max(lhs, rhs),
+                    else => return error.Type,
+                });
+            }
+            const result = try out.value(self);
+            return try applyNonVectorNumericShapeToValue(self, result, numericShapeSnapshotMatrix(rowwise.rows, rowwise.cols));
+        }
+
         var out = std.ArrayList(f64).empty;
         defer out.deinit(self.allocator);
         try out.ensureTotalCapacity(self.allocator, len);
@@ -28289,6 +36756,32 @@ pub const Session = struct {
         return try applyNonVectorNumericShapeToValue(self, result, numericShapeSnapshotMatrix(rowwise.rows, rowwise.cols));
     }
 
+    fn tryRangeIotaScalarIntDyad(self: *Session, op: BuiltinId, view: HostIntDenseView, scalar: i64, scalar_left: bool) KError!?Value {
+        const range_view = switch (view) {
+            .range_iota => |items| items,
+            else => return null,
+        };
+        const range = numericArrayRangeIota(range_view.handle);
+        const len = numericArrayRangeLen(range_view.handle);
+        const shape = numericShapeSnapshotFromHandle(range_view.handle);
+        const RangeParams = struct { start: i64, step: i64 };
+        const params: RangeParams = switch (op) {
+            .add => .{
+                .start = try checkedIntOp(.add, range.start, scalar),
+                .step = range.step,
+            },
+            .sub => if (scalar_left) .{
+                .start = try checkedIntOp(.sub, scalar, range.start),
+                .step = try checkedIntOp(.sub, 0, range.step),
+            } else .{
+                .start = try checkedIntOp(.sub, range.start, scalar),
+                .step = range.step,
+            },
+            else => return null,
+        };
+        return try newRangeIotaValueWithShape(self, .managed, len, params.start, params.step, shape);
+    }
+
     fn applyHostArrayDyadInt(self: *Session, op: BuiltinId, left_value: Value, right_value: Value, left: HostDenseView, right: HostDenseView, len: usize) KError!Value {
         var profile_scope = self.beginSamplingProfileScope(.dense_host);
         defer profile_scope.end();
@@ -28299,6 +36792,7 @@ pub const Session = struct {
                     break :blk try self.intValue(result);
                 },
                 .int_array => |items| blk: {
+                    if (try self.tryRangeIotaScalarIntDyad(op, items, li, true)) |result| break :blk result;
                     const left_kind = hostIntStorageKindForValue(li);
                     const right_kind = hostIntDenseViewKind(items);
                     const left_range = hostIntRangeForValue(li);
@@ -28336,6 +36830,7 @@ pub const Session = struct {
             },
             .int_array => |items| switch (right) {
                 .scalar_int => |ri| blk: {
+                    if (try self.tryRangeIotaScalarIntDyad(op, items, ri, false)) |result| break :blk result;
                     const left_kind = hostIntDenseViewKind(items);
                     const right_kind = hostIntStorageKindForValue(ri);
                     const left_range = hostIntDenseValueRange(left_value, items);
@@ -28413,6 +36908,17 @@ pub const Session = struct {
     fn applyHostArrayDyadFloat(self: *Session, op: BuiltinId, left_value: Value, right_value: Value, left: HostDenseView, right: HostDenseView, len: usize) KError!Value {
         var profile_scope = self.beginSamplingProfileScope(.dense_host);
         defer profile_scope.end();
+        if (hostFloatDyadResultStorageKindForValues(left_value, right_value, left, right) == .float32) {
+            const plan = try self.planHostFloat32DyadOutput(left_value, right_value, len, true);
+            for (0..len) |idx| {
+                plan.output.items[idx] = @floatCast(applyFloatOp(
+                    op,
+                    try hostDenseViewFloatItem(left, idx),
+                    try hostDenseViewFloatItem(right, idx),
+                ));
+            }
+            return try self.finishHostFloat32Output(plan, 0);
+        }
         return switch (left) {
             .scalar_int => |li| switch (right) {
                 .scalar_int => |ri| blk: {
@@ -28599,8 +37105,12 @@ pub const Session = struct {
 
     fn materializeBackendArray(self: *Session, value: Value) KError!mlx.Array {
         return switch (value.tag()) {
-            .int => mlx.Array.fromInt(@intCast(value.asInt())),
-            .float => mlx.Array.fromFloat(@floatCast(value.asFloat())),
+            .int => blk: {
+                const item = std.math.cast(i32, value.asInt()) orelse return error.Unsupported;
+                break :blk mlx.Array.fromInt(item);
+            },
+            .float32 => mlx.Array.fromFloat(value.asFloat32()),
+            .float => mlx.Array.fromFloat64(value.asFloat()),
             .bool => mlx.Array.fromInt(@intFromBool(value.asBool())),
             .array => blk: {
                 if (valueNumericHandle(value)) |handle| break :blk try self.materializeBackendArrayFromHandle(@constCast(handle));
@@ -28640,7 +37150,7 @@ pub const Session = struct {
 
     fn classifyGlobalValue(value: Value) GlobalValueClass {
         return switch (value.tag()) {
-            .int, .float, .bool => .scalar,
+            .int, .float, .float32, .bool => .scalar,
             .builtin => .builtin,
             .closure => .closure,
             .array => blk: {
@@ -28743,6 +37253,75 @@ pub const Session = struct {
         _ = try tryEnsureHostRealization(self, value) orelse return error.Unsupported;
     }
 
+    pub const DebugHostCompareIntFloatStage = enum {
+        views,
+        scratch_kernel,
+        managed_finish,
+        full_fast,
+        array_compare,
+    };
+
+    pub fn debugRunHostCompareIntFloatStage(
+        self: *Session,
+        stage: DebugHostCompareIntFloatStage,
+        left: Value,
+        right: Value,
+        scratch_words: []u64,
+    ) KError!void {
+        switch (stage) {
+            .views => {
+                const prepared = (try self.prepareFastHostCompareIntFloat(.less, left, right)) orelse return error.Unsupported;
+                std.mem.doNotOptimizeAway(prepared.len);
+                std.mem.doNotOptimizeAway(prepared.int_ptr.width);
+                std.mem.doNotOptimizeAway(prepared.int_left);
+            },
+            .scratch_kernel => {
+                const prepared = (try self.prepareFastHostCompareIntFloat(.less, left, right)) orelse return error.Unsupported;
+                if (scratch_words.len < bitWordCount(prepared.len)) return error.Type;
+                kiwi_host_compare_int_f64_array(
+                    scratch_words.ptr,
+                    prepared.int_ptr.ptr,
+                    prepared.int_ptr.width,
+                    prepared.float_items.ptr,
+                    prepared.len,
+                    if (prepared.int_left) 1 else 0,
+                    prepared.op_code,
+                );
+                var summary: HostCompareSummary = undefined;
+                kiwi_host_compare_last_summary(&summary);
+                std.mem.doNotOptimizeAway(summary);
+                std.mem.doNotOptimizeAway(scratch_words[0]);
+            },
+            .managed_finish => {
+                const prepared = (try self.prepareFastHostCompareIntFloat(.less, left, right)) orelse return error.Unsupported;
+                const out = try self.allocHostBitArrayUninitialized(.managed, prepared.len);
+                kiwi_host_compare_int_f64_array(
+                    out.words.ptr,
+                    prepared.int_ptr.ptr,
+                    prepared.int_ptr.width,
+                    prepared.float_items.ptr,
+                    prepared.len,
+                    if (prepared.int_left) 1 else 0,
+                    prepared.op_code,
+                );
+                const value = try self.finishFastHostCompareResult(out, prepared.shape);
+                defer self.discardValue(value);
+                try self.forceValue(value);
+            },
+            .full_fast => {
+                const shape = try nonVectorNumericShapeForDyad(left, right);
+                const value = (try self.tryFastHostDenseCompare(.less, left, right, shape)) orelse return error.Unsupported;
+                defer self.discardValue(value);
+                try self.forceValue(value);
+            },
+            .array_compare => {
+                const value = try self.compareNumericArrayValues(.less, left, right);
+                defer self.discardValue(value);
+                try self.forceValue(value);
+            },
+        }
+    }
+
     fn loadGlobalSlot(self: *Session, slot: u16) KError!Value {
         return (try self.loadGlobalCell(slot)).value;
     }
@@ -28841,8 +37420,21 @@ pub const Session = struct {
         return value;
     }
 
+    fn createOwnedHostFloat32Array(self: *Session, owner: HeapOwner, items: []const f32) !Value {
+        const analysis = analyzeFloatSlice32(items);
+        const out = try self.allocOwnedHostFloat32Result(owner, items.len);
+        @memcpy(out.items, items);
+        const value = try out.value(self);
+        hostDenseSetFlags(try mutableNumericHostArrayValue(self, value), analysis.flags);
+        return value;
+    }
+
     fn createManagedHostFloatArray(self: *Session, items: []const f64) !Value {
         return try self.createOwnedHostFloatArray(.managed, items);
+    }
+
+    fn createManagedHostFloat32Array(self: *Session, items: []const f32) !Value {
+        return try self.createOwnedHostFloat32Array(.managed, items);
     }
 
     fn createOwnedHostIntArrayFromValues(self: *Session, owner: HeapOwner, values: []const Value) !Value {
@@ -28920,70 +37512,66 @@ pub const Session = struct {
         var prev = switch (values[0].tag()) {
             .int => @as(f64, @floatFromInt(values[0].asInt())),
             .bool => @as(f64, @floatFromInt(@intFromBool(values[0].asBool()))),
+            .float32 => @as(f64, @floatCast(values[0].asFloat32())),
             .float => values[0].asFloat(),
             else => unreachable,
         };
-        var all_int = true;
-        var min_value: i64 = 0;
-        var max_value: i64 = 0;
+        const out = try self.allocOwnedHostFloatResult(owner, values.len);
         for (values, 0..) |value, idx| {
             const float_value = switch (value.tag()) {
                 .int => @as(f64, @floatFromInt(value.asInt())),
                 .bool => @as(f64, @floatFromInt(@intFromBool(value.asBool()))),
+                .float32 => @as(f64, @floatCast(value.asFloat32())),
                 .float => value.asFloat(),
                 else => unreachable,
             };
+            out.items[idx] = float_value;
             if (idx != 0) {
                 if (prev > float_value) asc = false;
                 if (prev < float_value) dsc = false;
                 prev = float_value;
             }
-            if (all_int) {
-                const int_value = switch (value.tag()) {
-                    .int => value.asInt(),
-                    .bool => @intFromBool(value.asBool()),
-                    .float => exactIntFromFloat(value.asFloat()) orelse {
-                        all_int = false;
-                        continue;
-                    },
-                    else => unreachable,
-                };
-                if (idx == 0) {
-                    min_value = int_value;
-                    max_value = int_value;
-                } else {
-                    min_value = @min(min_value, int_value);
-                    max_value = @max(max_value, int_value);
-                }
-            }
         }
 
-        if (all_int) {
-            var out = try self.allocOwnedHostIntResult(owner, hostIntStorageKindForRange(min_value, max_value), values.len);
-            for (values, 0..) |value, idx| {
-                try out.set(idx, switch (value.tag()) {
-                    .int => value.asInt(),
-                    .bool => @intFromBool(value.asBool()),
-                    .float => exactIntFromFloat(value.asFloat()).?,
-                    else => unreachable,
-                });
-            }
-            const result = try out.value(self);
-            const result_host = try mutableNumericHostArrayValue(self, result);
-            hostDenseSetFlags(result_host, host_dense_flag_normalized | orderFlagsFromMonotonic(asc, dsc));
-            hostDenseSetCachedIntRange(result_host, .{ .min = min_value, .max = max_value });
-            return result;
+        const result = try out.value(self);
+        hostDenseSetFlags(try mutableNumericHostArrayValue(self, result), host_dense_flag_normalized | orderFlagsFromMonotonic(asc, dsc));
+        return result;
+    }
+
+    fn createOwnedHostFloat32ArrayFromValues(self: *Session, owner: HeapOwner, values: []const Value) !Value {
+        if (values.len == 0) {
+            const out = try self.allocOwnedHostFloat32Result(owner, 0);
+            const value = try out.value(self);
+            hostDenseSetFlags(try mutableNumericHostArrayValue(self, value), host_dense_flag_normalized | host_dense_flag_asc | host_dense_flag_dsc);
+            return value;
         }
 
-        const out = try self.allocOwnedHostFloatResult(owner, values.len);
+        var asc = true;
+        var dsc = true;
+        var prev = switch (values[0].tag()) {
+            .int => @as(f32, @floatFromInt(values[0].asInt())),
+            .bool => @as(f32, @floatFromInt(@intFromBool(values[0].asBool()))),
+            .float32 => values[0].asFloat32(),
+            .float => @as(f32, @floatCast(values[0].asFloat())),
+            else => unreachable,
+        };
+        const out = try self.allocOwnedHostFloat32Result(owner, values.len);
         for (values, 0..) |value, idx| {
-            out.items[idx] = switch (value.tag()) {
-                .int => @as(f64, @floatFromInt(value.asInt())),
-                .bool => @as(f64, @floatFromInt(@intFromBool(value.asBool()))),
-                .float => value.asFloat(),
+            const float_value = switch (value.tag()) {
+                .int => @as(f32, @floatFromInt(value.asInt())),
+                .bool => @as(f32, @floatFromInt(@intFromBool(value.asBool()))),
+                .float32 => value.asFloat32(),
+                .float => @as(f32, @floatCast(value.asFloat())),
                 else => unreachable,
             };
+            out.items[idx] = float_value;
+            if (idx != 0) {
+                if (prev > float_value) asc = false;
+                if (prev < float_value) dsc = false;
+                prev = float_value;
+            }
         }
+
         const result = try out.value(self);
         hostDenseSetFlags(try mutableNumericHostArrayValue(self, result), host_dense_flag_normalized | orderFlagsFromMonotonic(asc, dsc));
         return result;
@@ -28993,7 +37581,19 @@ pub const Session = struct {
         return try self.createOwnedHostFloatArrayFromValues(.managed, values);
     }
 
-    fn createOwnedHostBoxedArray(self: *Session, owner: HeapOwner, values: []const Value) !Value {
+    fn createManagedHostFloat32ArrayFromValues(self: *Session, values: []const Value) !Value {
+        return try self.createOwnedHostFloat32ArrayFromValues(.managed, values);
+    }
+
+    fn ownedValueForOwner(self: *Session, owner: HeapOwner, value: Value) !Value {
+        return switch (owner) {
+            .managed => try self.retainEscapedValue(value),
+            .frozen => try self.freezeConstantValue(value),
+            .scratch => value,
+        };
+    }
+
+    fn createOwnedHostBoxedArrayWithPrototype(self: *Session, owner: HeapOwner, values: []const Value, prototype: ?Value) !Value {
         const allocator = switch (owner) {
             .managed => self.allocator,
             .scratch => self.scratch_arena.allocator(),
@@ -29007,22 +37607,28 @@ pub const Session = struct {
         const items = try allocator.alloc(Value, values.len);
         errdefer allocator.free(items);
         for (values, 0..) |value, idx| {
-            items[idx] = switch (owner) {
-                .managed => try self.retainEscapedValue(value),
-                .frozen => try self.freezeConstantValue(value),
-                .scratch => value,
-            };
+            items[idx] = try self.ownedValueForOwner(owner, value);
         }
+        const stored_prototype = if (prototype) |item| try self.ownedValueForOwner(owner, item) else null;
         array.* = .{
             .header = HeapHeader.init(.host_boxed_array, owner),
             .logical_len = values.len,
             .items = items,
+            .prototype = stored_prototype,
         };
         return Value.array(array);
     }
 
+    fn createOwnedHostBoxedArray(self: *Session, owner: HeapOwner, values: []const Value) !Value {
+        return try self.createOwnedHostBoxedArrayWithPrototype(owner, values, null);
+    }
+
     fn createManagedHostBoxedArray(self: *Session, values: []const Value) !Value {
         return try self.createOwnedHostBoxedArray(.managed, values);
+    }
+
+    fn createManagedHostBoxedArrayWithPrototype(self: *Session, values: []const Value, prototype: ?Value) !Value {
+        return try self.createOwnedHostBoxedArrayWithPrototype(.managed, values, prototype);
     }
 
     fn createManagedHostTableScalar(self: *Session, kind: HostTableColumnKind, value: Value, is_null: bool) !Value {
@@ -29146,7 +37752,16 @@ pub const Session = struct {
         return try self.createOwnedHostStringList(.managed, values);
     }
 
-    fn createOwnedHostStringListFromSlices(self: *Session, owner: HeapOwner, items: []const []const u8) !Value {
+    fn createOwnedHostTextListFromSlicesKind(
+        self: *Session,
+        owner: HeapOwner,
+        list_kind: HeapKind,
+        text_kind: HeapKind,
+        display: HostStringListDisplay,
+        items: []const []const u8,
+    ) !Value {
+        std.debug.assert(list_kind == .host_string_list or list_kind == .host_symbol_list);
+        std.debug.assert(text_kind == .host_string or text_kind == .host_symbol);
         const allocator = switch (owner) {
             .managed => self.allocator,
             .scratch => self.scratch_arena.allocator(),
@@ -29178,22 +37793,35 @@ pub const Session = struct {
             }
             std.debug.assert(offset == bytes_len);
             text.* = .{
-                .header = HeapHeader.init(.host_string, owner),
+                .header = HeapHeader.init(text_kind, owner),
                 .len = bytes_len,
             };
             break :blk text;
         };
         list.* = .{
-            .header = HeapHeader.init(.host_string_list, owner),
+            .header = HeapHeader.init(list_kind, owner),
             .len = items.len,
             .bytes_len = bytes_len,
             .base = base,
             .storage = .{ .eager = pieces },
+            .display = display,
         };
         return Value.array(list);
     }
 
-    fn createManagedHostStringListPieces(self: *Session, base: ?*HostText, pieces: []const HostStringPiece) !Value {
+    fn createOwnedHostStringListFromSlices(self: *Session, owner: HeapOwner, items: []const []const u8) !Value {
+        return try self.createOwnedHostTextListFromSlicesKind(owner, .host_string_list, .host_string, .list, items);
+    }
+
+    fn createOwnedHostStringRowsFromSlices(self: *Session, owner: HeapOwner, items: []const []const u8) !Value {
+        return try self.createOwnedHostTextListFromSlicesKind(owner, .host_string_list, .host_string, .char_rows, items);
+    }
+
+    fn createOwnedHostSymbolListFromSlices(self: *Session, owner: HeapOwner, items: []const []const u8) !Value {
+        return try self.createOwnedHostTextListFromSlicesKind(owner, .host_symbol_list, .host_symbol, .list, items);
+    }
+
+    fn createManagedHostStringListPiecesWithDisplay(self: *Session, base: ?*HostText, pieces: []const HostStringPiece, display: HostStringListDisplay) !Value {
         const buf = try hostStringListAllocSlice(self.allocator, pieces.len);
         errdefer self.allocator.free(buf);
         const list = hostStringListFromAlloc(buf);
@@ -29219,11 +37847,16 @@ pub const Session = struct {
             .bytes_len = bytes_len,
             .base = base,
             .storage = .{ .eager = items },
+            .display = display,
         };
         return Value.array(list);
     }
 
-    fn createManagedHostStringListLazyScalar(self: *Session, base: *HostText, sep: u8, count: usize) !Value {
+    fn createManagedHostStringListPieces(self: *Session, base: ?*HostText, pieces: []const HostStringPiece) !Value {
+        return try self.createManagedHostStringListPiecesWithDisplay(base, pieces, .list);
+    }
+
+    fn createManagedHostStringListLazyScalarWithDisplay(self: *Session, base: *HostText, sep: u8, count: usize, bytes_len: usize, display: HostStringListDisplay) !Value {
         const list = try self.allocator.create(HostStringList);
         errdefer self.allocator.destroy(list);
         _ = self.retainValue(Value.array(base));
@@ -29231,15 +37864,28 @@ pub const Session = struct {
         list.* = .{
             .header = HeapHeader.init(.host_string_list, .managed),
             .len = count,
-            .bytes_len = base.len -| (count -| 1),
+            .bytes_len = bytes_len,
             .base = base,
             .storage = .{ .split_scalar = .{ .sep = sep } },
+            .display = display,
         };
         return Value.array(list);
     }
 
+    fn createManagedHostStringListLazyScalar(self: *Session, base: *HostText, sep: u8, count: usize, bytes_len: usize) !Value {
+        return try self.createManagedHostStringListLazyScalarWithDisplay(base, sep, count, bytes_len, .list);
+    }
+
     fn createManagedHostStringListFromSlices(self: *Session, items: []const []const u8) !Value {
         return try self.createOwnedHostStringListFromSlices(.managed, items);
+    }
+
+    fn createManagedHostStringRowsFromSlices(self: *Session, items: []const []const u8) !Value {
+        return try self.createOwnedHostStringRowsFromSlices(.managed, items);
+    }
+
+    fn createManagedHostSymbolListFromSlices(self: *Session, items: []const []const u8) !Value {
+        return try self.createOwnedHostSymbolListFromSlices(.managed, items);
     }
 
     fn retainHostStringPiece(self: *Session, piece: HostStringPiece) void {
@@ -29315,6 +37961,15 @@ const HostFloatResult = struct {
     }
 };
 
+const HostFloat32Result = struct {
+    array: *HostDenseArray,
+    items: []f32,
+
+    fn value(self: HostFloat32Result, session: *Session) !Value {
+        return try wrapOwnedHostArrayValue(session, self.array);
+    }
+};
+
 const DictTableColumnSource = union(enum) {
     scalar_bool: bool,
     scalar_int: i64,
@@ -29363,6 +38018,17 @@ const HostFloatOutputPlan = struct {
     shape: ?NumericShapeSnapshot = null,
 };
 
+const HostFloat32OutputPlan = struct {
+    output: HostFloat32Result,
+    reused: bool,
+    shape: ?NumericShapeSnapshot = null,
+};
+
+const HostFloatStorageKind = enum {
+    float32,
+    float64,
+};
+
 const HostArrayNormalizationPlan = union(enum) {
     int: struct {
         view: HostIntArrayView,
@@ -29373,9 +38039,8 @@ const HostArrayNormalizationPlan = union(enum) {
         items: []const f64,
         flags: u8,
     },
-    float_to_int: struct {
-        items: []const f64,
-        kind: HostIntStorageKind,
+    float32: struct {
+        items: []const f32,
         flags: u8,
     },
 };
@@ -29450,10 +38115,6 @@ fn copyHostIntViewToResult(out: *HostIntResult, view: HostIntArrayView) KError!v
     }
 }
 
-fn copyExactFloatSliceToIntResult(out: *HostIntResult, items: []const f64) KError!void {
-    for (items, 0..) |item, idx| try out.set(idx, exactIntFromFloat(item).?);
-}
-
 fn hostIntArrayView(array: *const HostDenseArray) ?HostIntArrayView {
     return switch (array.storage) {
         .bit => |words| .{ .bit = .{ .words = hostDenseLogicalBitWords(array, words), .len = array.logical_len } },
@@ -29461,7 +38122,7 @@ fn hostIntArrayView(array: *const HostDenseArray) ?HostIntArrayView {
         .int16 => |items| .{ .int16 = hostDenseLogicalItems(i16, array, items) },
         .int32 => |items| .{ .int32 = hostDenseLogicalItems(i32, array, items) },
         .int64 => |items| .{ .int64 = hostDenseLogicalItems(i64, array, items) },
-        .float64 => null,
+        .float32, .float64 => null,
     };
 }
 
@@ -29551,6 +38212,20 @@ fn hostIntArrayViewEndpointRange(view: HostIntArrayView, flags: u8) ?HostIntRang
     if ((mono & host_dense_flag_asc) != 0) return .{ .min = first, .max = last };
     if ((mono & host_dense_flag_dsc) != 0) return .{ .min = last, .max = first };
     return null;
+}
+
+fn hostIntArrayViewStorageRange(view: HostIntArrayView) ?HostIntRange {
+    return switch (view) {
+        .bit => .{ .min = 0, .max = 1 },
+        .int8 => .{ .min = std.math.minInt(i8), .max = std.math.maxInt(i8) },
+        .int16 => .{ .min = std.math.minInt(i16), .max = std.math.maxInt(i16) },
+        .int32 => .{ .min = std.math.minInt(i32), .max = std.math.maxInt(i32) },
+        .int64 => null,
+    };
+}
+
+fn hostIntAddFoldProofRange(array: *const HostDenseArray, view: HostIntArrayView) ?HostIntRange {
+    return hostDenseCachedIntRange(array) orelse hostIntArrayViewEndpointRange(view, array.flags) orelse hostIntArrayViewStorageRange(view);
 }
 
 fn hostIntViewItem(view: HostIntArrayView, idx: usize) i64 {
@@ -30435,6 +39110,14 @@ fn normalizeIndex(raw_index: i64, len: usize) KError!usize {
     return @intCast(index);
 }
 
+fn normalizeIndexOrNull(raw_index: i64, len: usize) ?usize {
+    if (len == 0) return null;
+    var index = raw_index;
+    if (index < 0) index += @as(i64, @intCast(len));
+    if (index < 0 or index >= @as(i64, @intCast(len))) return null;
+    return @intCast(index);
+}
+
 fn hostStorageCopyIntSlice(array: *const HostDenseArray) []const i64 {
     return switch (array.storage) {
         .int64 => |items| hostDenseLogicalItems(i64, array, items),
@@ -31106,6 +39789,7 @@ fn destroyManagedHostArrayNoPool(allocator: std.mem.Allocator, array: *HostDense
         .int16 => |items| allocator.free(items),
         .int32 => |items| allocator.free(items),
         .int64 => |items| allocator.free(items),
+        .float32 => |items| allocator.free(items),
         .float64 => |items| allocator.free(items),
     }
     allocator.destroy(array);
@@ -31113,6 +39797,7 @@ fn destroyManagedHostArrayNoPool(allocator: std.mem.Allocator, array: *HostDense
 
 fn destroyManagedHostBoxedArrayNoPool(allocator: std.mem.Allocator, array: *HostBoxedArray) void {
     for (array.items) |item| releaseHeapValue(allocator, item);
+    if (array.prototype) |prototype| releaseHeapValue(allocator, prototype);
     allocator.free(array.items);
     allocator.destroy(array);
 }
@@ -31258,7 +39943,7 @@ fn retainHeapValue(value: Value) void {
                     const scalar = @constCast(valueAsHostTableScalar(value));
                     if (scalar.header.owner == .managed) scalar.header.ref_count += 1;
                 },
-                .host_string_list => {
+                .host_string_list, .host_symbol_list => {
                     const list = @constCast(value.asHostStringList());
                     if (list.header.owner == .managed) list.header.ref_count += 1;
                 },
@@ -31377,7 +40062,7 @@ fn releaseHeapValue(allocator: std.mem.Allocator, value: Value) void {
                         allocator.destroy(scalar);
                     }
                 },
-                .host_string_list => {
+                .host_string_list, .host_symbol_list => {
                     const list = @constCast(value.asHostStringList());
                     if (list.header.owner != .managed) return;
                     std.debug.assert(list.header.ref_count != 0);
@@ -31515,17 +40200,44 @@ fn newRangeIotaValueWithShape(
     return try applyNonVectorNumericShapeToValue(self, value, shape);
 }
 
+const CollapsedFlatSliceSource = struct {
+    source: Value,
+    start: usize,
+};
+
+fn collapseFlatSliceSource(source: Value, start: usize) KError!CollapsedFlatSliceSource {
+    var resolved_source = source;
+    var resolved_start = start;
+
+    while (true) {
+        const handle = valueNumericHandle(resolved_source) orelse break;
+        if (!numericArrayIsFlatSlice(handle)) break;
+        if (numericHostAttachment(handle) != null or numericHasBackendAttachment(handle)) break;
+
+        const base_source = numericArrayFlatSliceSource(handle) orelse return error.Type;
+        const base_start = numericArrayFlatSliceStart(handle) orelse return error.Type;
+        resolved_start = std.math.add(usize, base_start, resolved_start) catch return error.Unsupported;
+        resolved_source = base_source;
+    }
+
+    return .{ .source = resolved_source, .start = resolved_start };
+}
+
 fn newFlatSliceValue(self: *Session, source: Value, start: usize, len: usize) KError!Value {
     const source_len = numericFlatLen(source) orelse return error.Type;
-    if (start > source_len or start + len > source_len) return error.Type;
+    if (start > source_len or len > source_len - start) return error.Type;
 
-    const retained_source = try self.retainEscapedValue(source);
+    const collapsed = try collapseFlatSliceSource(source, start);
+    const resolved_source_len = numericFlatLen(collapsed.source) orelse return error.Type;
+    if (collapsed.start > resolved_source_len or len > resolved_source_len - collapsed.start) return error.Type;
+
+    const retained_source = try self.retainEscapedValue(collapsed.source);
     errdefer self.releaseValue(retained_source);
 
-    const source_handle = valueNumericHandle(source);
+    const source_handle = valueNumericHandle(collapsed.source);
     const preferred: NumericArrayPreferred = if (source_handle) |handle|
         handle.preferred
-    else if (source.tag() == .array and source.arrayKind() == .backend_array)
+    else if (collapsed.source.tag() == .array and collapsed.source.arrayKind() == .backend_array)
         .mlx
     else
         .host;
@@ -31534,7 +40246,7 @@ fn newFlatSliceValue(self: *Session, source: Value, start: usize, len: usize) KE
     handle.* = .{
         .header = HeapHeader.init(.numeric_array, .managed),
         .preferred = preferred,
-        .structural = .{ .flat_slice = .{ .source = retained_source, .start = start } },
+        .structural = .{ .flat_slice = .{ .source = retained_source, .start = collapsed.start } },
         .rank = 1,
         .shape = [_]i32{ @intCast(len), 0, 0, 0 },
         .host = null,
@@ -31963,6 +40675,23 @@ fn supportsBackendMonad(op: BuiltinId) bool {
     };
 }
 
+fn backendSupportsFloatStorageKindOnDevice(self: *Session, value: Value) bool {
+    if (self.device_preference != .gpu) return true;
+    return valueFloatStorageKind(value) != .float64;
+}
+
+fn backendSupportsNumericDyadDtypes(self: *Session, left: Value, right: Value) bool {
+    return backendSupportsFloatStorageKindOnDevice(self, left) and
+        backendSupportsFloatStorageKindOnDevice(self, right);
+}
+
+fn backendSupportsMatmulDtypes(self: *Session, left: Value, right: Value) bool {
+    if (!backendSupportsNumericDyadDtypes(self, left, right)) return false;
+    const left_mode = valueNumericMode(left) orelse return false;
+    const right_mode = valueNumericMode(right) orelse return false;
+    return left_mode == .float or right_mode == .float;
+}
+
 fn createBackendArrayFromHostArray(self: *Session, array: *const HostDenseArray) KError!mlx.Array {
     var dims_buf: [numeric_array_max_rank]i32 = [_]i32{0} ** numeric_array_max_rank;
     const dims = hostDenseShapeDims(array, &dims_buf);
@@ -31988,23 +40717,18 @@ fn createBackendArrayFromHostArray(self: *Session, array: *const HostDenseArray)
             break :blk mlx.Array.fromIntSlice(converted, dims);
         },
         .int32 => |items| blk: {
-            break :blk mlx.Array.fromIntSlice(hostDenseLogicalItems(i32, array, items), dims);
+            break :blk mlx.Array.fromIntSliceChecked(hostDenseLogicalItems(i32, array, items), dims) catch |err| return mapMlxError(err);
         },
         .int64 => |items| blk: {
-            const logical_items = hostDenseLogicalItems(i64, array, items);
-            const converted = try self.allocator.alloc(i32, logical_items.len);
-            defer self.allocator.free(converted);
-            for (logical_items, 0..) |item, idx| {
-                converted[idx] = std.math.cast(i32, item) orelse return error.Unsupported;
-            }
-            break :blk mlx.Array.fromIntSlice(converted, dims);
+            break :blk mlx.Array.fromInt64SliceChecked(hostDenseLogicalItems(i64, array, items), dims) catch |err| return mapMlxError(err);
+        },
+        .float32 => |items| blk: {
+            break :blk mlx.Array.fromFloatSliceChecked(hostDenseLogicalItems(f32, array, items), dims) catch |err| return mapMlxError(err);
         },
         .float64 => |items| blk: {
-            const logical_items = hostDenseLogicalItems(f64, array, items);
-            const converted = try self.allocator.alloc(f32, logical_items.len);
-            defer self.allocator.free(converted);
-            for (logical_items, 0..) |item, idx| converted[idx] = @floatCast(item);
-            break :blk mlx.Array.fromFloatSlice(converted, dims);
+            const ctx = try self.backendContext();
+            if (ctx.resolved == .gpu) return error.Unsupported;
+            break :blk mlx.Array.fromFloat64SliceChecked(hostDenseLogicalItems(f64, array, items), dims) catch |err| return mapMlxError(err);
         },
     };
 }
@@ -32079,6 +40803,15 @@ fn createHostArrayFromTransposeView(self: *Session, owner: HeapOwner, handle: *c
 
     if (source_host) |array| {
         switch (array.storage) {
+            .float32 => |items| {
+                if (items.len == total_len) {
+                    const out = try self.allocOwnedHostFloat32Result(owner, total_len);
+                    transposeBlockedTyped(f32, out.items, items, rows, cols);
+                    const analysis = analyzeFloatSlice32(out.items);
+                    hostDenseSetFlags(out.array, analysis.flags);
+                    return out.array;
+                }
+            },
             .float64 => |items| {
                 if (items.len == total_len) {
                     const out = try self.allocOwnedHostFloatResult(owner, total_len);
@@ -32266,6 +40999,13 @@ fn createHostArrayFromFlatSlice(self: *Session, owner: HeapOwner, handle: *const
             if (collapsed) |view| switch (view) {
                 .flat_slice => |items| {
                     if (items.source_host) |array| switch (array.storage) {
+                        .float32 => |values| {
+                            const out = try self.allocHostArrayTyped(f32, .float32, owner, len);
+                            @memcpy(out.items, values[items.start .. items.start + len]);
+                            const analysis = analyzeFloatSlice32(out.items);
+                            hostDenseSetFlags(out.array, analysis.flags);
+                            break :blk out.array;
+                        },
                         .float64 => |values| {
                             const out = try self.allocHostArrayTyped(f64, .float64, owner, len);
                             @memcpy(out.items, values[items.start .. items.start + len]);
@@ -32282,6 +41022,16 @@ fn createHostArrayFromFlatSlice(self: *Session, owner: HeapOwner, handle: *const
                     break :blk out.array;
                 },
                 .flat_stride => |items| {
+                    if (items.source_host) |array| switch (array.storage) {
+                        .float32 => {
+                            const out = try self.allocHostArrayTyped(f32, .float32, owner, len);
+                            for (0..len) |idx| out.items[idx] = @floatCast(try hostFlatStrideFloatItem(items, idx));
+                            const analysis = analyzeFloatSlice32(out.items);
+                            hostDenseSetFlags(out.array, analysis.flags);
+                            break :blk out.array;
+                        },
+                        else => {},
+                    };
                     const out = try self.allocHostArrayTyped(f64, .float64, owner, len);
                     for (0..len) |idx| out.items[idx] = try hostFlatStrideFloatItem(items, idx);
                     const analysis = analyzeFloatSlice(out.items);
@@ -32290,6 +41040,13 @@ fn createHostArrayFromFlatSlice(self: *Session, owner: HeapOwner, handle: *const
                 },
             };
             if (hostDenseIfPresent(source)) |array| switch (array.storage) {
+                .float32 => |items| {
+                    const out = try self.allocHostArrayTyped(f32, .float32, owner, len);
+                    @memcpy(out.items, items[start .. start + len]);
+                    const analysis = analyzeFloatSlice32(out.items);
+                    hostDenseSetFlags(out.array, analysis.flags);
+                    break :blk out.array;
+                },
                 .float64 => |items| {
                     const out = try self.allocHostArrayTyped(f64, .float64, owner, len);
                     @memcpy(out.items, items[start .. start + len]);
@@ -32459,6 +41216,47 @@ fn createHostArrayFromFlatValues(self: *Session, owner: HeapOwner, segments: []c
         return host;
     }
 
+    var all_float32 = true;
+    for (segments) |segment| {
+        if (valueNumericFloat32Slice(segment) == null) {
+            all_float32 = false;
+            break;
+        }
+    }
+    if (all_float32) {
+        const out = try self.allocOwnedHostFloat32Result(owner, total_len);
+        var out_idx: usize = 0;
+        for (segments) |segment| {
+            const items = valueNumericFloat32Slice(segment) orelse return error.Type;
+            @memcpy(out.items[out_idx .. out_idx + items.len], items);
+            out_idx += items.len;
+        }
+        const analysis = analyzeFloatSlice32(out.items);
+        hostDenseSetFlags(out.array, analysis.flags);
+        return out.array;
+    }
+
+    var saw_float32 = false;
+    var saw_float64 = false;
+    for (segments) |segment| switch (valueFloatStorageKind(segment) orelse continue) {
+        .float32 => saw_float32 = true,
+        .float64 => saw_float64 = true,
+    };
+    if (saw_float32 and !saw_float64) {
+        const out = try self.allocOwnedHostFloat32Result(owner, total_len);
+        var out_idx: usize = 0;
+        for (segments) |segment| {
+            const len = numericVectorLen(segment) orelse return error.Type;
+            for (0..len) |idx| {
+                out.items[out_idx] = @floatCast(try numericFloatAt(segment, idx));
+                out_idx += 1;
+            }
+        }
+        const analysis = analyzeFloatSlice32(out.items);
+        hostDenseSetFlags(out.array, analysis.flags);
+        return out.array;
+    }
+
     const out = try self.allocOwnedHostFloatResult(owner, total_len);
     var out_idx: usize = 0;
     for (segments) |segment| {
@@ -32475,6 +41273,11 @@ fn createHostArrayFromFlatValues(self: *Session, owner: HeapOwner, segments: []c
 
 fn createBackendArrayFromFlatValues(self: *Session, segments: []const Value) KError!mlx.Array {
     if (segments.len == 0) return error.Type;
+    if (flatValuesPreferSingleHostUpload(segments)) {
+        const host = try createHostArrayFromFlatValues(self, .scratch, segments);
+        return try createBackendArrayFromHostArray(self, host);
+    }
+
     var arrays = try self.allocator.alloc(mlx.Array, segments.len);
     defer self.allocator.free(arrays);
     defer for (arrays[0..segments.len]) |*item| item.deinit();
@@ -32483,6 +41286,16 @@ fn createBackendArrayFromFlatValues(self: *Session, segments: []const Value) KEr
         arrays[idx] = try self.materializeBackendArray(segment);
     }
     return try mlxConcatAxis0((try self.backendContext()).*, arrays[0..segments.len]);
+}
+
+fn flatValuesPreferSingleHostUpload(segments: []const Value) bool {
+    if (segments.len < 8) return false;
+    for (segments) |segment| {
+        if (hasBackendRealization(segment)) return false;
+        if (valueNumericMode(segment) == null) return false;
+        if (!sourceSupportsCheapHostDense(segment)) return false;
+    }
+    return true;
 }
 
 fn createHostArrayFromFlatConcat(self: *Session, owner: HeapOwner, handle: *const NumericArray) KError!*HostDenseArray {
@@ -32553,6 +41366,13 @@ fn createHostArrayFromFirstAxisSlice(self: *Session, owner: HeapOwner, handle: *
             hostDenseSetCachedIntRange(out.array, metadata.range);
             return out.array;
         },
+        .float32 => |items| {
+            const out = try self.allocHostArrayTyped(f32, .float32, owner, total_len);
+            @memcpy(out.items, items[start .. start + total_len]);
+            const host = out.array;
+            host.flags = source_array.flags;
+            return host;
+        },
         .float64 => |items| {
             const out = try self.allocHostArrayTyped(f64, .float64, owner, total_len);
             @memcpy(out.items, items[start .. start + total_len]);
@@ -32574,21 +41394,40 @@ fn createHostArrayFromFirstAxisSlice(self: *Session, owner: HeapOwner, handle: *
     };
 
     switch (hostDenseNumericMode(source_array)) {
-        .float => {
-            const out = try self.allocHostArrayTyped(f64, .float64, owner, total_len);
-            var out_idx: usize = 0;
-            for (0..row_count) |row| {
-                const source_row_i64 = @as(i64, @intCast(slice.start)) + @as(i64, @intCast(row)) * @as(i64, slice.step);
-                if (source_row_i64 < 0) return error.Type;
-                const base_idx = @as(usize, @intCast(source_row_i64)) * row_width;
-                for (0..row_width) |col| {
-                    out.items[out_idx] = try hostDenseFloatAt(source_array, base_idx + col);
-                    out_idx += 1;
+        .float => switch (source_array.storage) {
+            .float32 => {
+                const out = try self.allocHostArrayTyped(f32, .float32, owner, total_len);
+                var out_idx: usize = 0;
+                for (0..row_count) |row| {
+                    const source_row_i64 = @as(i64, @intCast(slice.start)) + @as(i64, @intCast(row)) * @as(i64, slice.step);
+                    if (source_row_i64 < 0) return error.Type;
+                    const base_idx = @as(usize, @intCast(source_row_i64)) * row_width;
+                    for (0..row_width) |col| {
+                        out.items[out_idx] = @floatCast(try hostDenseFloatAt(source_array, base_idx + col));
+                        out_idx += 1;
+                    }
                 }
-            }
-            const analysis = analyzeFloatSlice(out.items);
-            hostDenseSetFlags(out.array, analysis.flags);
-            return out.array;
+                const analysis = analyzeFloatSlice32(out.items);
+                hostDenseSetFlags(out.array, analysis.flags);
+                return out.array;
+            },
+            .float64 => {
+                const out = try self.allocHostArrayTyped(f64, .float64, owner, total_len);
+                var out_idx: usize = 0;
+                for (0..row_count) |row| {
+                    const source_row_i64 = @as(i64, @intCast(slice.start)) + @as(i64, @intCast(row)) * @as(i64, slice.step);
+                    if (source_row_i64 < 0) return error.Type;
+                    const base_idx = @as(usize, @intCast(source_row_i64)) * row_width;
+                    for (0..row_width) |col| {
+                        out.items[out_idx] = try hostDenseFloatAt(source_array, base_idx + col);
+                        out_idx += 1;
+                    }
+                }
+                const analysis = analyzeFloatSlice(out.items);
+                hostDenseSetFlags(out.array, analysis.flags);
+                return out.array;
+            },
+            else => return error.Type,
         },
         .int => {
             if (std.meta.activeTag(source_array.storage) == .bit) {
@@ -32686,6 +41525,26 @@ fn createHostArrayFromFirstAxisIndex(self: *Session, owner: HeapOwner, handle: *
 
     return switch (valueNumericMode(index.source) orelse return error.Type) {
         .float => blk: {
+            const source_array_maybe = try ensureNumericHostAttachmentForDenseView(self, index.source);
+            if (source_array_maybe) |source_array| switch (source_array.storage) {
+                .float32 => {
+                    const out = try self.allocHostArrayTyped(f32, .float32, owner, total_len);
+                    var out_idx: usize = 0;
+                    for (0..row_count) |row| {
+                        const source_row_i64 = try numericIntAt(index.row_indices, row);
+                        if (source_row_i64 < 0) return error.Type;
+                        const base_idx = @as(usize, @intCast(source_row_i64)) * row_width;
+                        for (0..row_width) |col| {
+                            out.items[out_idx] = @floatCast(try hostDenseFloatAt(source_array, base_idx + col));
+                            out_idx += 1;
+                        }
+                    }
+                    const analysis = analyzeFloatSlice32(out.items);
+                    hostDenseSetFlags(out.array, analysis.flags);
+                    break :blk out.array;
+                },
+                else => {},
+            };
             const out = try self.allocHostArrayTyped(f64, .float64, owner, total_len);
             var out_idx: usize = 0;
             for (0..row_count) |row| {
@@ -32817,6 +41676,27 @@ fn createHostArrayFromFirstAxisConcat(self: *Session, owner: HeapOwner, handle: 
         return host;
     }
 
+    var saw_float32 = false;
+    var saw_float64 = false;
+    for (segments.items) |segment| switch (valueFloatStorageKind(segment.value) orelse continue) {
+        .float32 => saw_float32 = true,
+        .float64 => saw_float64 = true,
+    };
+    if (saw_float32 and !saw_float64) {
+        const out = try self.allocOwnedHostFloat32Result(owner, total_len);
+        var out_idx: usize = 0;
+        for (segments.items) |segment| {
+            const len = numericFlatLen(segment.value) orelse return error.Type;
+            for (0..len) |idx| {
+                out.items[out_idx] = @floatCast(try numericFloatAt(segment.value, idx));
+                out_idx += 1;
+            }
+        }
+        const analysis = analyzeFloatSlice32(out.items);
+        hostDenseSetFlags(out.array, analysis.flags);
+        return out.array;
+    }
+
     const out = try self.allocOwnedHostFloatResult(owner, total_len);
     var out_idx: usize = 0;
     for (segments.items) |segment| {
@@ -32889,6 +41769,14 @@ fn createHostArrayFromReshapeView(self: *Session, owner: HeapOwner, handle: *con
 
     return switch (hostDenseNumericMode(source_array)) {
         .float => switch (source_array.storage) {
+            .float32 => |items| blk: {
+                if (items.len != total_len) return error.Type;
+                const out = try self.allocHostArrayTyped(f32, .float32, owner, total_len);
+                @memcpy(out.items, items);
+                const analysis = analyzeFloatSlice32(out.items);
+                hostDenseSetFlags(out.array, analysis.flags);
+                break :blk out.array;
+            },
             .float64 => |items| blk: {
                 if (items.len != total_len) return error.Type;
                 const out = try self.allocHostArrayTyped(f64, .float64, owner, total_len);
@@ -32902,6 +41790,15 @@ fn createHostArrayFromReshapeView(self: *Session, owner: HeapOwner, handle: *con
         .int => blk: {
             const view = hostIntArrayView(source_array) orelse return error.Type;
             if (hostIntArrayViewLen(view) != total_len) return error.Type;
+            if (view == .bit) {
+                const source_bits = view.bit;
+                const out = try self.allocHostBitArrayUninitialized(owner, total_len);
+                @memcpy(out.words, source_bits.words[0..out.words.len]);
+                bitClearUnusedTail(out.words, out.len);
+                hostDenseSetFlags(out.array, source_array.flags);
+                hostDenseSetCachedIntRange(out.array, hostDenseCachedIntRange(source_array) orelse .{ .min = 0, .max = 1 });
+                break :blk out.array;
+            }
             var values = try self.allocator.alloc(i64, total_len);
             defer self.allocator.free(values);
             for (0..total_len) |idx| values[idx] = hostIntViewItem(view, idx);
@@ -32939,8 +41836,10 @@ fn createHostDenseArrayFromBackendArray(self: *Session, owner: HeapOwner, array:
             .backendArrayElementCount = backendArrayElementCount,
             .analyzeIntSlice = analyzeIntSlice,
             .analyzeFloatSlice = analyzeFloatSlice,
+            .analyzeFloatSlice32 = analyzeFloatSlice32,
             .allocOwnedHostIntResult = Session.allocOwnedHostIntResult,
             .allocOwnedHostFloatResult = Session.allocOwnedHostFloatResult,
+            .allocOwnedHostFloat32Result = Session.allocOwnedHostFloat32Result,
             .hostIntResultSet = hostIntResultSet,
             .hostIntResultArrayPtr = hostIntResultArrayPtr,
             .bitClearUnusedTail = bitClearUnusedTail,
@@ -33251,7 +42150,7 @@ fn planDenseNumericDyadBackend(self: *Session, op: BuiltinId, left: Value, right
                 has_backend_residency and
                 left_facts.supports_cheap_host_dense and right_facts.supports_cheap_host_dense),
         .prefer_backend_pipeline = transposePipelinePrefersBackend(self, left) or transposePipelinePrefersBackend(self, right),
-        .supports_backend = supportsBackendDyad(op),
+        .supports_backend = supportsBackendDyad(op) and backendSupportsNumericDyadDtypes(self, left, right),
     });
 }
 
@@ -33333,6 +42232,7 @@ fn planMatmulBackend(self: *Session, left: Value, right: Value) DenseExecBackend
         .matrix_cols = if (shape) |info| info.result_cols else 0,
         .has_backend_residency = has_backend_residency,
         .prefer_host_kernel = if (shape) |info| matmulPrefersHostKernel(left, right, info.result_rank) else false,
+        .supports_backend = backendSupportsMatmulDtypes(self, left, right),
     });
 }
 
@@ -33434,7 +42334,7 @@ fn handleMode(handle: *const NumericArray) ?HostDenseElem {
 fn valueNumericMode(value: Value) ?HostDenseElem {
     return switch (value.tag()) {
         .int, .bool => .int,
-        .float => .float,
+        .float, .float32 => .float,
         .array => if (valueNumericHandle(value)) |handle|
             handleMode(handle)
         else switch (value.arrayKind()) {
@@ -33486,7 +42386,7 @@ fn arrayResultLen(left: Value, right: Value) KError!usize {
             .host_boxed_array => left.asHostBoxedArray().len(),
             else => return error.Type,
         },
-        .int, .float, .bool => null,
+        .int, .float, .float32, .bool => null,
         else => return error.Type,
     };
     const right_len = switch (right.tag()) {
@@ -33495,7 +42395,7 @@ fn arrayResultLen(left: Value, right: Value) KError!usize {
             .host_boxed_array => right.asHostBoxedArray().len(),
             else => return error.Type,
         },
-        .int, .float, .bool => null,
+        .int, .float, .float32, .bool => null,
         else => return error.Type,
     };
 
@@ -33637,6 +42537,12 @@ fn hostDenseViewForHostArray(array: *const HostDenseArray) KError!HostDenseView 
         .int16 => |items| .{ .int_array = .{ .dense = .{ .int16 = hostDenseLogicalItems(i16, array, items) } } },
         .int32 => |items| .{ .int_array = .{ .dense = .{ .int32 = hostDenseLogicalItems(i32, array, items) } } },
         .int64 => |items| .{ .int_array = .{ .dense = .{ .int64 = hostDenseLogicalItems(i64, array, items) } } },
+        .float32 => .{ .float_array = .{ .flat_slice = .{
+            .source_value = hostDenseSourceValue(array),
+            .source_host = array,
+            .start = 0,
+            .len = array.logical_len,
+        } } },
         .float64 => |items| .{ .float_array = .{ .dense = hostDenseLogicalItems(f64, array, items) } },
     };
 }
@@ -33863,6 +42769,7 @@ fn hostDenseView(self: *Session, value: Value) KError!HostDenseView {
     return switch (value.tag()) {
         .int => .{ .scalar_int = value.asInt() },
         .bool => .{ .scalar_int = @intFromBool(value.asBool()) },
+        .float32 => .{ .scalar_float = @floatCast(value.asFloat32()) },
         .float => .{ .scalar_float = value.asFloat() },
         .array => blk: {
             if (valueNumericHandle(value)) |handle| break :blk try hostDenseViewForNumericHandle(self, value, handle);
@@ -33874,6 +42781,122 @@ fn hostDenseView(self: *Session, value: Value) KError!HostDenseView {
         },
         else => error.Type,
     };
+}
+
+fn hostArrayFloatStorageKind(array: *const HostDenseArray) ?HostFloatStorageKind {
+    return switch (array.storage) {
+        .float32 => .float32,
+        .float64 => .float64,
+        else => null,
+    };
+}
+
+fn mergeHostFloatStorageKind(current: ?HostFloatStorageKind, next: ?HostFloatStorageKind) ?HostFloatStorageKind {
+    const next_kind = next orelse return current;
+    const current_kind = current orelse return next_kind;
+    return if (current_kind == .float64 or next_kind == .float64) .float64 else .float32;
+}
+
+fn valueFloatStorageKind(value: Value) ?HostFloatStorageKind {
+    switch (value.tag()) {
+        .float32 => return .float32,
+        .float => return .float64,
+        else => {},
+    }
+    if (hostDenseIfPresent(value)) |array| return hostArrayFloatStorageKind(array);
+    const handle = valueNumericHandle(value) orelse return null;
+    if (valueNumericMode(value) != .float) return null;
+
+    if (numericArrayFlatSliceSource(handle)) |source| return valueFloatStorageKind(source);
+    if (numericArrayReshapeSource(handle)) |source| return valueFloatStorageKind(source);
+    if (numericArrayTransposeSource(handle)) |source| return valueFloatStorageKind(source);
+    if (numericArrayFirstAxisSliceSource(handle)) |source| return valueFloatStorageKind(source);
+    if (numericArrayFirstAxisIndexSource(handle)) |source| return valueFloatStorageKind(source);
+
+    if (numericArrayFlatConcatLeft(handle)) |left| {
+        const right = numericArrayFlatConcatRight(handle) orelse return valueFloatStorageKind(left);
+        return mergeHostFloatStorageKind(valueFloatStorageKind(left), valueFloatStorageKind(right));
+    }
+    if (numericArrayFirstAxisConcatLeft(handle)) |left| {
+        const right = numericArrayFirstAxisConcatRight(handle) orelse return valueFloatStorageKind(left);
+        return mergeHostFloatStorageKind(valueFloatStorageKind(left), valueFloatStorageKind(right));
+    }
+    if (numericArrayFlatSegmentsValues(handle)) |segments| {
+        var kind: ?HostFloatStorageKind = null;
+        for (segments) |segment| kind = mergeHostFloatStorageKind(kind, valueFloatStorageKind(segment));
+        return kind;
+    }
+
+    if (numericBackendAttachment(handle)) |backend| {
+        return switch (backend.array.dtype()) {
+            c.MLX_FLOAT64 => .float64,
+            c.MLX_FLOAT16, c.MLX_FLOAT32, c.MLX_BFLOAT16 => .float32,
+            else => null,
+        };
+    }
+    return null;
+}
+
+fn hostFlatFloatStorageKind(view: HostFlatSliceView) ?HostFloatStorageKind {
+    if (view.source_host) |array| return hostArrayFloatStorageKind(array);
+    return valueFloatStorageKind(view.source_value);
+}
+
+fn hostFlatStrideFloatStorageKind(view: HostFlatStrideView) ?HostFloatStorageKind {
+    if (view.source_host) |array| return hostArrayFloatStorageKind(array);
+    return valueFloatStorageKind(view.source_value);
+}
+
+fn hostFirstAxisFloatStorageKind(source_value: Value, source_host: ?*const HostDenseArray) ?HostFloatStorageKind {
+    if (source_host) |array| return hostArrayFloatStorageKind(array);
+    return valueFloatStorageKind(source_value);
+}
+
+fn hostConcatFloatStorageKind(view: HostFirstAxisConcatView) ?HostFloatStorageKind {
+    const left = if (view.left_host) |array| hostArrayFloatStorageKind(array) else valueFloatStorageKind(view.left_value);
+    const right = if (view.right_host) |array| hostArrayFloatStorageKind(array) else valueFloatStorageKind(view.right_value);
+    return mergeHostFloatStorageKind(left, right);
+}
+
+fn hostFloatDenseViewStorageKind(view: HostFloatDenseView) ?HostFloatStorageKind {
+    return switch (view) {
+        .dense => .float64,
+        .flat_slice => |items| hostFlatFloatStorageKind(items),
+        .flat_stride => |items| hostFlatStrideFloatStorageKind(items),
+        .flat_concat => |items| hostConcatFloatStorageKind(items),
+        .flat_segments => |items| blk: {
+            var kind: ?HostFloatStorageKind = null;
+            for (items.values) |value| kind = mergeHostFloatStorageKind(kind, valueFloatStorageKind(value));
+            break :blk kind;
+        },
+        .first_axis_slice => |items| hostFirstAxisFloatStorageKind(items.source_value, items.source_host),
+        .first_axis_index => |items| hostFirstAxisFloatStorageKind(items.source_value, items.source_host),
+        .first_axis_concat => |items| hostConcatFloatStorageKind(items),
+        .transpose => |items| hostFirstAxisFloatStorageKind(items.source_value, items.source_host),
+    };
+}
+
+fn hostDenseViewFloatStorageKind(view: HostDenseView) ?HostFloatStorageKind {
+    return switch (view) {
+        .float_array => |items| hostFloatDenseViewStorageKind(items),
+        else => null,
+    };
+}
+
+fn hostFloatDyadResultStorageKind(left: HostDenseView, right: HostDenseView) HostFloatStorageKind {
+    const left_kind = hostDenseViewFloatStorageKind(left);
+    const right_kind = hostDenseViewFloatStorageKind(right);
+    if (left_kind == .float64 or right_kind == .float64) return .float64;
+    if (left_kind == .float32 or right_kind == .float32) return .float32;
+    return .float64;
+}
+
+fn hostFloatDyadResultStorageKindForValues(left_value: Value, right_value: Value, left: HostDenseView, right: HostDenseView) HostFloatStorageKind {
+    const left_kind = mergeHostFloatStorageKind(valueFloatStorageKind(left_value), hostDenseViewFloatStorageKind(left));
+    const right_kind = mergeHostFloatStorageKind(valueFloatStorageKind(right_value), hostDenseViewFloatStorageKind(right));
+    if (left_kind == .float64 or right_kind == .float64) return .float64;
+    if (left_kind == .float32 or right_kind == .float32) return .float32;
+    return .float64;
 }
 
 fn hostDenseIntKind(view: HostDenseView) ?HostIntStorageKind {
@@ -33934,6 +42957,7 @@ fn hostDenseIntAt(array: *const HostDenseArray, idx: usize) KError!i64 {
             if (idx >= array.logical_len) return error.Internal;
             break :blk items[idx];
         },
+        .float32 => error.Type,
         .float64 => error.Type,
     };
 }
@@ -33959,6 +42983,10 @@ fn hostDenseFloatAt(array: *const HostDenseArray, idx: usize) KError!f64 {
         .int64 => |items| blk: {
             if (idx >= array.logical_len) return error.Internal;
             break :blk @as(f64, @floatFromInt(items[idx]));
+        },
+        .float32 => |items| blk: {
+            if (idx >= array.logical_len) return error.Internal;
+            break :blk items[idx];
         },
         .float64 => |items| blk: {
             if (idx >= array.logical_len) return error.Internal;
@@ -34059,6 +43087,7 @@ fn numericFloatAt(value: Value, idx: usize) KError!f64 {
     return switch (value.tag()) {
         .int => @as(f64, @floatFromInt(value.asInt())),
         .bool => @as(f64, @floatFromInt(@intFromBool(value.asBool()))),
+        .float32 => @as(f64, @floatCast(value.asFloat32())),
         .float => value.asFloat(),
         .array => switch (value.arrayKind()) {
             .host_dense_array => hostDenseFloatAt(value.asHostDenseArray(), idx),
@@ -34255,18 +43284,9 @@ fn addScanFloatFlags(items: []const f64) u8 {
 
 fn foldAddIntBitSlice(items: HostBitSlice, seed: ?i64) KError!i64 {
     // Packed bool folds can count whole words instead of scalarizing each element.
-    var total = seed orelse 0;
-    var saw_value = seed != null;
-    for (items.words, 0..) |_, word_idx| {
-        const masked = bitWordMasked(items.words, items.len, word_idx);
-        const count: i64 = @intCast(@popCount(masked));
-        if (!saw_value) {
-            total = count;
-            saw_value = true;
-        } else {
-            try checkedAddAcc(&total, count);
-        }
-    }
+    const count: i64 = @intCast(bitCountTrue(items));
+    var total = seed orelse return count;
+    try checkedAddAcc(&total, count);
     return total;
 }
 
@@ -34277,7 +43297,30 @@ fn foldAddIntSlice(comptime T: type, items: []const T, seed: ?i64) KError!i64 {
     return total;
 }
 
-fn foldAddIntSliceUnchecked(comptime T: type, items: []const T, seed: ?i64) i64 {
+fn hostSumIntSliceUnchecked(comptime T: type, items: []const T) i64 {
+    if (comptime enable_host_int_sum_vectorized) {
+        if (items.len >= host_int_sum_vector_min_len) {
+            const dispatch = kiwi_host_int_sum_dispatch();
+            return switch (T) {
+                i8 => dispatch.sum_i8(items.ptr, items.len),
+                i16 => dispatch.sum_i16(items.ptr, items.len),
+                i32 => dispatch.sum_i32(items.ptr, items.len),
+                i64 => dispatch.sum_i64(items.ptr, items.len),
+                else => unreachable,
+            };
+        }
+    }
+
+    var total: i64 = 0;
+    for (items) |item| total += @intCast(item);
+    return total;
+}
+
+fn foldAddIntSliceUnchecked(comptime T: type, items: []const T, seed: ?i64, vector_item_sum_safe: bool) i64 {
+    if (vector_item_sum_safe) {
+        return (seed orelse 0) + hostSumIntSliceUnchecked(T, items);
+    }
+
     var total = seed orelse @as(i64, items[0]);
     const start_idx: usize = if (seed == null) 1 else 0;
     for (items[start_idx..]) |item| total += @intCast(item);
@@ -34285,18 +43328,7 @@ fn foldAddIntSliceUnchecked(comptime T: type, items: []const T, seed: ?i64) i64 
 }
 
 fn foldAddIntBitSliceUnchecked(items: HostBitSlice, seed: ?i64) i64 {
-    var total = seed orelse 0;
-    var saw_value = seed != null;
-    for (items.words, 0..) |_, word_idx| {
-        const count: i64 = @intCast(@popCount(bitWordMasked(items.words, items.len, word_idx)));
-        if (!saw_value) {
-            total = count;
-            saw_value = true;
-        } else {
-            total += count;
-        }
-    }
-    return total;
+    return (seed orelse 0) + @as(i64, @intCast(bitCountTrue(items)));
 }
 
 fn foldAddRangeFitsI64(item_range: HostIntRange, len: usize, seed: ?i64) bool {
@@ -34317,19 +43349,22 @@ fn foldAddIntView(view: HostIntArrayView, seed: ?i64) KError!i64 {
     };
 }
 
-fn foldAddIntViewUnchecked(view: HostIntArrayView, seed: ?i64) i64 {
+fn foldAddIntViewUnchecked(view: HostIntArrayView, seed: ?i64, vector_item_sum_safe: bool) i64 {
     return switch (view) {
         .bit => |items| foldAddIntBitSliceUnchecked(items, seed),
-        .int8 => |items| foldAddIntSliceUnchecked(i8, items, seed),
-        .int16 => |items| foldAddIntSliceUnchecked(i16, items, seed),
-        .int32 => |items| foldAddIntSliceUnchecked(i32, items, seed),
-        .int64 => |items| foldAddIntSliceUnchecked(i64, items, seed),
+        .int8 => |items| foldAddIntSliceUnchecked(i8, items, seed, vector_item_sum_safe),
+        .int16 => |items| foldAddIntSliceUnchecked(i16, items, seed, vector_item_sum_safe),
+        .int32 => |items| foldAddIntSliceUnchecked(i32, items, seed, vector_item_sum_safe),
+        .int64 => |items| foldAddIntSliceUnchecked(i64, items, seed, vector_item_sum_safe),
     };
 }
 
 fn foldAddIntViewMaybeUnchecked(view: HostIntArrayView, known_range: ?HostIntRange, seed: ?i64) KError!i64 {
     if (known_range) |item_range| {
-        if (foldAddRangeFitsI64(item_range, hostIntArrayViewLen(view), seed)) return foldAddIntViewUnchecked(view, seed);
+        const len = hostIntArrayViewLen(view);
+        if (foldAddRangeFitsI64(item_range, len, seed)) {
+            return foldAddIntViewUnchecked(view, seed, foldAddRangeFitsI64(item_range, len, null));
+        }
     }
     return try foldAddIntView(view, seed);
 }
@@ -34345,7 +43380,7 @@ fn foldAddFloatIntView(view: HostIntArrayView, seed: f64) f64 {
     var total = seed;
     switch (view) {
         .bit => |items| {
-            for (items.words, 0..) |_, word_idx| total += @floatFromInt(@popCount(bitWordMasked(items.words, items.len, word_idx)));
+            total += @floatFromInt(bitCountTrue(items));
         },
         .int8 => |items| for (items) |item| {
             total += @floatFromInt(item);
@@ -34415,6 +43450,319 @@ fn analyzeAddScanIntView(view: HostIntArrayView, seed: ?i64) KError!HostAddScanI
         .kind = hostIntStorageKindForRange(min_value, max_value),
         .flags = addScanIntFlags(hostIntArrayViewRange(view)),
     };
+}
+
+fn hostIntDenseViewBitSlice(view: HostIntDenseView) ?HostBitSlice {
+    return switch (view) {
+        .dense => |items| switch (items) {
+            .bit => |bits| bits,
+            else => null,
+        },
+        else => null,
+    };
+}
+
+fn bitMinMaxScanResultIsBit(op: BuiltinId, seed: i64) bool {
+    return switch (op) {
+        .minimum => seed >= 0,
+        .maximum => seed <= 1,
+        else => false,
+    };
+}
+
+fn minMaxScanIntOp(op: BuiltinId, left: i64, right: i64) i64 {
+    return switch (op) {
+        .minimum => @min(left, right),
+        .maximum => @max(left, right),
+        else => unreachable,
+    };
+}
+
+fn minMaxScanFloatOp(op: BuiltinId, left: f64, right: f64) f64 {
+    return switch (op) {
+        .minimum => @min(left, right),
+        .maximum => @max(left, right),
+        else => unreachable,
+    };
+}
+
+fn fillMinMaxScanInt(out: []i64, view: HostIntDenseView, op: BuiltinId, seed: ?i64) KError!void {
+    std.debug.assert(out.len == hostIntDenseViewLen(view));
+    std.debug.assert(out.len > 0);
+
+    var acc: i64 = undefined;
+    const start_idx: usize = if (seed) |seed_value| blk: {
+        acc = seed_value;
+        break :blk 0;
+    } else blk: {
+        acc = try hostIntDenseViewItem(view, 0);
+        out[0] = acc;
+        break :blk 1;
+    };
+
+    for (start_idx..out.len) |idx| {
+        acc = minMaxScanIntOp(op, acc, try hostIntDenseViewItem(view, idx));
+        out[idx] = acc;
+    }
+}
+
+fn fillMinMaxScanFloatFromInt(out: []f64, view: HostIntDenseView, op: BuiltinId, seed: f64) KError!void {
+    std.debug.assert(out.len == hostIntDenseViewLen(view));
+    var acc = seed;
+    for (0..out.len) |idx| {
+        acc = minMaxScanFloatOp(op, acc, @floatFromInt(try hostIntDenseViewItem(view, idx)));
+        out[idx] = acc;
+    }
+}
+
+fn fillMinMaxScanFloat(out: []f64, view: HostFloatDenseView, op: BuiltinId, seed: ?f64) KError!void {
+    std.debug.assert(out.len == hostFloatDenseViewLen(view));
+    std.debug.assert(out.len > 0);
+
+    var acc: f64 = undefined;
+    const start_idx: usize = if (seed) |seed_value| blk: {
+        acc = seed_value;
+        break :blk 0;
+    } else blk: {
+        acc = try hostFloatDenseViewItem(view, 0);
+        out[0] = acc;
+        break :blk 1;
+    };
+
+    for (start_idx..out.len) |idx| {
+        acc = minMaxScanFloatOp(op, acc, try hostFloatDenseViewItem(view, idx));
+        out[idx] = acc;
+    }
+}
+
+fn minMaxScanInitialBit(op: BuiltinId) bool {
+    return switch (op) {
+        .minimum => true,
+        .maximum => false,
+        else => unreachable,
+    };
+}
+
+fn minMaxScanBitOp(op: BuiltinId, left: bool, right: bool) bool {
+    return switch (op) {
+        .minimum => left and right,
+        .maximum => left or right,
+        else => unreachable,
+    };
+}
+
+fn fillFirstAxisBitMinMaxScan(out: []u64, bits: HostBitSlice, op: BuiltinId, block_len: usize, outer_len: usize) BitDenseMetadata {
+    std.debug.assert(bits.len == block_len * outer_len);
+    bitFill(out, bits.len, false);
+    var stats = BitSequenceStats{};
+    for (0..block_len) |inner_idx| {
+        var acc = minMaxScanInitialBit(op);
+        for (0..outer_len) |outer_idx| {
+            const idx = outer_idx * block_len + inner_idx;
+            acc = minMaxScanBitOp(op, acc, bitGet(bits.words, idx));
+            bitSet(out, idx, acc);
+            stats.note(acc);
+        }
+    }
+    return stats.metadata();
+}
+
+fn fillFirstAxisBitLikeMinMaxScan(out: []u64, view: HostIntDenseView, op: BuiltinId, block_len: usize, outer_len: usize) KError!BitDenseMetadata {
+    std.debug.assert(hostIntDenseViewLen(view) == block_len * outer_len);
+    bitFill(out, hostIntDenseViewLen(view), false);
+    var stats = BitSequenceStats{};
+    for (0..block_len) |inner_idx| {
+        var acc = minMaxScanInitialBit(op);
+        for (0..outer_len) |outer_idx| {
+            const idx = outer_idx * block_len + inner_idx;
+            acc = minMaxScanBitOp(op, acc, try hostIntDenseViewItem(view, idx) != 0);
+            bitSet(out, idx, acc);
+            stats.note(acc);
+        }
+    }
+    return stats.metadata();
+}
+
+fn fillRowBitMinMaxScan(out: []u64, bits: HostBitSlice, op: BuiltinId, rows: usize, cols: usize) BitDenseMetadata {
+    std.debug.assert(bits.len == rows * cols);
+    bitFill(out, bits.len, false);
+    var stats = BitSequenceStats{};
+    for (0..rows) |row_idx| {
+        var acc = minMaxScanInitialBit(op);
+        const row_base = row_idx * cols;
+        for (0..cols) |col_idx| {
+            const idx = row_base + col_idx;
+            acc = minMaxScanBitOp(op, acc, bitGet(bits.words, idx));
+            bitSet(out, idx, acc);
+            stats.note(acc);
+        }
+    }
+    return stats.metadata();
+}
+
+fn fillRowMinMaxScanInt(out: *HostIntResult, view: HostIntDenseView, op: BuiltinId, rows: usize, cols: usize) KError!void {
+    std.debug.assert(hostIntDenseViewLen(view) == rows * cols);
+    for (0..rows) |row_idx| {
+        const row_base = row_idx * cols;
+        var acc = try hostIntDenseViewItem(view, row_base);
+        try out.set(row_base, acc);
+        for (1..cols) |col_idx| {
+            const idx = row_base + col_idx;
+            acc = minMaxScanIntOp(op, acc, try hostIntDenseViewItem(view, idx));
+            try out.set(idx, acc);
+        }
+    }
+}
+
+fn fillRowMinMaxScanFloat(out: []f64, view: HostFloatDenseView, op: BuiltinId, rows: usize, cols: usize) KError!void {
+    std.debug.assert(hostFloatDenseViewLen(view) == rows * cols);
+    for (0..rows) |row_idx| {
+        const row_base = row_idx * cols;
+        var acc = try hostFloatDenseViewItem(view, row_base);
+        out[row_base] = acc;
+        for (1..cols) |col_idx| {
+            const idx = row_base + col_idx;
+            acc = minMaxScanFloatOp(op, acc, try hostFloatDenseViewItem(view, idx));
+            out[idx] = acc;
+        }
+    }
+}
+
+fn fillRowMinMaxScanFloat32(out: []f32, view: HostFloatDenseView, op: BuiltinId, rows: usize, cols: usize) KError!void {
+    std.debug.assert(hostFloatDenseViewLen(view) == rows * cols);
+    for (0..rows) |row_idx| {
+        const row_base = row_idx * cols;
+        var acc = try hostFloatDenseViewItem(view, row_base);
+        out[row_base] = @floatCast(acc);
+        for (1..cols) |col_idx| {
+            const idx = row_base + col_idx;
+            acc = minMaxScanFloatOp(op, acc, try hostFloatDenseViewItem(view, idx));
+            out[idx] = @floatCast(acc);
+        }
+    }
+}
+
+fn fillFirstAxisAddScanInt(out: []i64, view: HostIntDenseView, block_len: usize, outer_len: usize) KError!void {
+    std.debug.assert(out.len == hostIntDenseViewLen(view));
+    std.debug.assert(out.len == block_len * outer_len);
+    for (0..block_len) |inner_idx| {
+        var acc: i64 = 0;
+        for (0..outer_len) |outer_idx| {
+            const idx = outer_idx * block_len + inner_idx;
+            try checkedAddAcc(&acc, try hostIntDenseViewItem(view, idx));
+            out[idx] = acc;
+        }
+    }
+}
+
+fn fillRowAddScanInt(out: []i64, view: HostIntDenseView, rows: usize, cols: usize) KError!void {
+    std.debug.assert(out.len == hostIntDenseViewLen(view));
+    std.debug.assert(out.len == rows * cols);
+    for (0..rows) |row_idx| {
+        const row_base = row_idx * cols;
+        var acc: i64 = 0;
+        for (0..cols) |col_idx| {
+            const idx = row_base + col_idx;
+            try checkedAddAcc(&acc, try hostIntDenseViewItem(view, idx));
+            out[idx] = acc;
+        }
+    }
+}
+
+fn fillFirstAxisAddScanFloat(out: []f64, view: HostFloatDenseView, block_len: usize, outer_len: usize) KError!void {
+    std.debug.assert(out.len == hostFloatDenseViewLen(view));
+    std.debug.assert(out.len == block_len * outer_len);
+    for (0..block_len) |inner_idx| {
+        var acc: f64 = 0;
+        for (0..outer_len) |outer_idx| {
+            const idx = outer_idx * block_len + inner_idx;
+            acc += try hostFloatDenseViewItem(view, idx);
+            out[idx] = acc;
+        }
+    }
+}
+
+fn fillRowAddScanFloat(out: []f64, view: HostFloatDenseView, rows: usize, cols: usize) KError!void {
+    std.debug.assert(out.len == hostFloatDenseViewLen(view));
+    std.debug.assert(out.len == rows * cols);
+    for (0..rows) |row_idx| {
+        const row_base = row_idx * cols;
+        var acc: f64 = 0;
+        for (0..cols) |col_idx| {
+            const idx = row_base + col_idx;
+            acc += try hostFloatDenseViewItem(view, idx);
+            out[idx] = acc;
+        }
+    }
+}
+
+fn bitScanWordMetadata(word: u64, active_mask: u64, saw_zero: *bool, saw_one: *bool) void {
+    if ((word & active_mask) != 0) saw_one.* = true;
+    if ((word & active_mask) != active_mask) saw_zero.* = true;
+}
+
+fn finishBitScanMetadata(op: BuiltinId, saw_zero: bool, saw_one: bool) BitDenseMetadata {
+    const constant = !saw_zero or !saw_one;
+    const asc = constant or op == .maximum;
+    const dsc = constant or op == .minimum;
+    return .{
+        .flags = host_dense_flag_normalized | orderFlagsFromMonotonic(asc, dsc),
+        .range = .{
+            .min = if (saw_zero) 0 else if (saw_one) 1 else 0,
+            .max = if (saw_one) 1 else 0,
+        },
+    };
+}
+
+fn fillBitPrefixOrScan(out: []u64, items: HostBitSlice, initial: bool) BitDenseMetadata {
+    std.debug.assert(out.len == items.words.len);
+    var carry = initial;
+    var saw_zero = false;
+    var saw_one = false;
+
+    for (out, 0..) |*out_word, word_idx| {
+        const active = bitWordActiveLen(items.len, word_idx, items.words.len);
+        const active_mask = bitLowMask(active);
+        const result = if (carry) blk: {
+            break :blk active_mask;
+        } else blk: {
+            const word = bitWordMasked(items.words, items.len, word_idx);
+            if (word == 0) break :blk @as(u64, 0);
+            const first_one = word & (0 -% word);
+            carry = true;
+            break :blk (~(first_one -% 1)) & active_mask;
+        };
+        out_word.* = result;
+        bitScanWordMetadata(result, active_mask, &saw_zero, &saw_one);
+    }
+
+    return finishBitScanMetadata(.maximum, saw_zero, saw_one);
+}
+
+fn fillBitPrefixAndScan(out: []u64, items: HostBitSlice, initial: bool) BitDenseMetadata {
+    std.debug.assert(out.len == items.words.len);
+    var carry = initial;
+    var saw_zero = false;
+    var saw_one = false;
+
+    for (out, 0..) |*out_word, word_idx| {
+        const active = bitWordActiveLen(items.len, word_idx, items.words.len);
+        const active_mask = bitLowMask(active);
+        const result = if (!carry) blk: {
+            break :blk @as(u64, 0);
+        } else blk: {
+            const word = bitWordMasked(items.words, items.len, word_idx);
+            const zeroes = (~word) & active_mask;
+            if (zeroes == 0) break :blk active_mask;
+            const first_zero = zeroes & (0 -% zeroes);
+            carry = false;
+            break :blk (first_zero -% 1) & active_mask;
+        };
+        out_word.* = result;
+        bitScanWordMetadata(result, active_mask, &saw_zero, &saw_one);
+    }
+
+    return finishBitScanMetadata(.minimum, saw_zero, saw_one);
 }
 
 fn fillAddScanBitTo(comptime OutT: type, out: []OutT, items: HostBitSlice, seed: ?i64) void {
@@ -34604,6 +43952,7 @@ fn toDenseFloat(value: anytype) f64 {
 const dense_host_simd_bytes = 32;
 const enable_dense_float_simd = true;
 const enable_packed_bit_simd = true;
+const enable_string_byte_simd = true;
 const enable_mixed_bit_float_simd = true;
 const enable_dense_int_simd = true;
 
@@ -34616,7 +43965,7 @@ fn denseFloatSimdSupported(op: BuiltinId) bool {
 
 fn denseIntSimdSupported(op: BuiltinId) bool {
     return switch (op) {
-        .add, .sub, .minimum, .maximum => true,
+        .add, .sub, .minimum, .maximum, .mul => true,
         else => false,
     };
 }
@@ -34642,6 +43991,71 @@ fn denseIntBinaryVec(comptime op: BuiltinId, lhs: anytype, rhs: @TypeOf(lhs)) @T
         .mul => lhs * rhs,
         else => unreachable,
     };
+}
+
+fn hostDenseDyadOpCode(comptime op: BuiltinId) i32 {
+    return switch (op) {
+        .add => host_dyad_op_add,
+        .sub => host_dyad_op_sub,
+        .minimum => host_dyad_op_min,
+        .maximum => host_dyad_op_max,
+        .mul => host_dyad_op_mul,
+        .div => host_dyad_op_div,
+        else => unreachable,
+    };
+}
+
+fn hostDenseDyadIntWidth(comptime T: type) i32 {
+    return switch (@sizeOf(T)) {
+        1 => 1,
+        2 => 2,
+        4 => 4,
+        8 => 8,
+        else => @compileError("unsupported dense host integer width"),
+    };
+}
+
+fn tryHostDenseDyadFloatArray(comptime op: BuiltinId, out: []f64, left_items: []const f64, right_items: []const f64) bool {
+    if (comptime !enable_host_dense_dyad_vectorized) return false;
+    if (comptime op == .add or op == .minimum or op == .mul) return false;
+    if (left_items.len < host_dense_dyad_vector_min_len) return false;
+    return kiwi_host_dyad_f64_array(out.ptr, left_items.ptr, right_items.ptr, left_items.len, hostDenseDyadOpCode(op)) != 0;
+}
+
+fn tryHostDenseDyadFloatScalar(comptime op: BuiltinId, out: []f64, scalar: f64, items: []const f64, scalar_left: bool) bool {
+    if (comptime !enable_host_dense_dyad_vectorized) return false;
+    if (comptime op == .add or op == .minimum or op == .mul) return false;
+    if (items.len < host_dense_dyad_vector_min_len) return false;
+    return kiwi_host_dyad_f64_scalar(out.ptr, scalar, items.ptr, items.len, if (scalar_left) 1 else 0, hostDenseDyadOpCode(op)) != 0;
+}
+
+fn tryHostDenseDyadIntArray(comptime T: type, comptime op: BuiltinId, out: []T, left_items: []const T, right_items: []const T) bool {
+    if (comptime !enable_host_dense_dyad_vectorized) return false;
+    if (comptime @sizeOf(T) == 8) return false;
+    if (left_items.len < host_dense_dyad_vector_min_len) return false;
+    return kiwi_host_dyad_int_array(
+        @ptrCast(out.ptr),
+        @ptrCast(left_items.ptr),
+        @ptrCast(right_items.ptr),
+        left_items.len,
+        hostDenseDyadIntWidth(T),
+        hostDenseDyadOpCode(op),
+    ) != 0;
+}
+
+fn tryHostDenseDyadIntScalar(comptime T: type, comptime op: BuiltinId, out: []T, scalar: T, items: []const T, scalar_left: bool) bool {
+    if (comptime !enable_host_dense_dyad_vectorized) return false;
+    if (comptime @sizeOf(T) == 8) return false;
+    if (items.len < host_dense_dyad_vector_min_len) return false;
+    return kiwi_host_dyad_int_scalar(
+        @ptrCast(out.ptr),
+        @as(i64, @intCast(scalar)),
+        @ptrCast(items.ptr),
+        items.len,
+        hostDenseDyadIntWidth(T),
+        if (scalar_left) 1 else 0,
+        hostDenseDyadOpCode(op),
+    ) != 0;
 }
 
 fn denseBitWordSimdSupported(op: BuiltinId) bool {
@@ -34697,6 +44111,13 @@ fn fillBitWordsBinary(out: []u64, op: BuiltinId, left_words: []const u64, right_
 }
 
 fn fillIntDenseArrayArraySameTypeSimd(comptime T: type, comptime op: BuiltinId, out: []T, left_items: []const T, right_items: []const T) void {
+    if (comptime op == .mul and @sizeOf(T) == 8) {
+        for (left_items, 0..) |left_item, idx| {
+            out[idx] = applyIntOpUncheckedTyped(T, op, left_item, right_items[idx]);
+        }
+        return;
+    }
+    if (tryHostDenseDyadIntArray(T, op, out, left_items, right_items)) return;
     const lane_count = dense_host_simd_bytes / @sizeOf(T);
     const Vec = @Vector(lane_count, T);
     var idx: usize = 0;
@@ -34712,6 +44133,16 @@ fn fillIntDenseArrayArraySameTypeSimd(comptime T: type, comptime op: BuiltinId, 
 }
 
 fn fillIntDenseScalarArraySameTypeSimd(comptime T: type, comptime op: BuiltinId, out: []T, scalar: T, items: []const T, scalar_left: bool) void {
+    if (comptime op == .mul and @sizeOf(T) == 8) {
+        for (items, 0..) |item, idx| {
+            out[idx] = if (scalar_left)
+                applyIntOpUncheckedTyped(T, op, scalar, item)
+            else
+                applyIntOpUncheckedTyped(T, op, item, scalar);
+        }
+        return;
+    }
+    if (tryHostDenseDyadIntScalar(T, op, out, scalar, items, scalar_left)) return;
     const lane_count = dense_host_simd_bytes / @sizeOf(T);
     const Vec = @Vector(lane_count, T);
     const scalar_vec: Vec = @splat(scalar);
@@ -34755,6 +44186,7 @@ fn fillIntDenseScalarArraySameType(comptime T: type, out: []T, op: BuiltinId, sc
 }
 
 fn fillFloatDenseArrayArraySimd(comptime op: BuiltinId, out: []f64, left_items: []const f64, right_items: []const f64) void {
+    if (tryHostDenseDyadFloatArray(op, out, left_items, right_items)) return;
     const lane_count = dense_host_simd_bytes / @sizeOf(f64);
     const Vec = @Vector(lane_count, f64);
     var idx: usize = 0;
@@ -34770,6 +44202,7 @@ fn fillFloatDenseArrayArraySimd(comptime op: BuiltinId, out: []f64, left_items: 
 }
 
 fn fillFloatDenseScalarArraySimd(comptime op: BuiltinId, out: []f64, scalar: f64, items: []const f64, scalar_left: bool) void {
+    if (tryHostDenseDyadFloatScalar(op, out, scalar, items, scalar_left)) return;
     const lane_count = dense_host_simd_bytes / @sizeOf(f64);
     const Vec = @Vector(lane_count, f64);
     const scalar_vec: Vec = @splat(scalar);
@@ -35501,6 +44934,18 @@ fn fillFloatUnaryDenseView(out: []f64, op: BuiltinId, items: HostFloatDenseView)
     }
 }
 
+fn fillFloat32NegDenseView(out: []f32, items: HostFloatDenseView) void {
+    for (0..hostFloatDenseViewLen(items)) |idx| {
+        out[idx] = @floatCast(-(hostFloatDenseViewItem(items, idx) catch unreachable));
+    }
+}
+
+fn fillFloat32UnaryDenseView(out: []f32, op: BuiltinId, items: HostFloatDenseView) void {
+    for (0..hostFloatDenseViewLen(items)) |idx| {
+        out[idx] = @floatCast(applyFloatMonadOp(op, hostFloatDenseViewItem(items, idx) catch unreachable));
+    }
+}
+
 fn fillFloatScalarBitArray(out: []f64, op: BuiltinId, scalar: f64, items: HostBitSlice, scalar_left: bool) void {
     if (enable_mixed_bit_float_simd and denseFloatSimdSupported(op)) {
         return switch (op) {
@@ -35836,6 +45281,7 @@ fn builtinChar(id: BuiltinId) u8 {
         .equal => '=',
         .stringify, .cast => '$',
         .contains, .split, .join, .unique, .find => '?',
+        .type_of => '@',
         .bytes => 'b',
         .utf8 => '8',
         .char => 'c',
@@ -35871,27 +45317,67 @@ fn builtinChar(id: BuiltinId) u8 {
 }
 
 fn formatFloat(allocator: std.mem.Allocator, value: f64) KError![]u8 {
-    const nearest = @round(value);
-    const snapped = if (@abs(value - nearest) < 1e-6)
-        nearest
-    else
-        @round(value * 1_000_000.0) / 1_000_000.0;
+    if (isKiwiFloatNull(value)) return allocator.dupe(u8, "0n");
+    if (std.math.isPositiveInf(value)) return allocator.dupe(u8, "0w");
+    if (std.math.isNegativeInf(value)) return allocator.dupe(u8, "-0w");
+
+    const abs_value = @abs(value);
     var buf: [64]u8 = undefined;
-    const raw = std.fmt.bufPrint(&buf, "{d:.6}", .{snapped}) catch unreachable;
-    var end = raw.len;
-    while (end > 0 and raw[end - 1] == '0') end -= 1;
-    if (end > 0 and raw[end - 1] == '.') end -= 1;
-    if (end == 0) return allocator.dupe(u8, "0");
-    return allocator.dupe(u8, raw[0..end]);
+    if (abs_value != 0.0 and (abs_value < 0.001 or abs_value >= 1.0e16)) {
+        const raw = std.fmt.bufPrint(&buf, "{e}", .{value}) catch unreachable;
+        return allocator.dupe(u8, raw);
+    }
+
+    const raw = std.fmt.bufPrint(&buf, "{d}", .{value}) catch unreachable;
+    if (std.mem.indexOfScalar(u8, raw, '.') != null) return allocator.dupe(u8, raw);
+
+    var out = try allocator.alloc(u8, raw.len + 2);
+    @memcpy(out[0..raw.len], raw);
+    out[raw.len] = '.';
+    out[raw.len + 1] = '0';
+    return out;
+}
+
+fn formatFloat32Scalar(allocator: std.mem.Allocator, value: f32) KError![]u8 {
+    if (isKiwiFloat32Null(value)) return allocator.dupe(u8, "0ne");
+    if (std.math.isPositiveInf(value)) return allocator.dupe(u8, "0we");
+    if (std.math.isNegativeInf(value)) return allocator.dupe(u8, "-0we");
+    const base = try formatFloat(allocator, @floatCast(value));
+    defer allocator.free(base);
+    var out = try allocator.alloc(u8, base.len + 1);
+    @memcpy(out[0..base.len], base);
+    out[base.len] = 'e';
+    return out;
 }
 
 fn scalarNumericValue(value: Value) KError!f64 {
     return switch (value.tag()) {
         .int => @floatFromInt(value.asInt()),
         .bool => @floatFromInt(@intFromBool(value.asBool())),
+        .float32 => @floatCast(value.asFloat32()),
         .float => value.asFloat(),
         else => error.Type,
     };
+}
+
+fn scalarFloatStorageKind(value: Value) ?HostFloatStorageKind {
+    return switch (value.tag()) {
+        .float32 => .float32,
+        .float => .float64,
+        else => null,
+    };
+}
+
+fn scalarNumericResultStorageKind(left: Value, right: Value) HostFloatStorageKind {
+    const left_kind = scalarFloatStorageKind(left);
+    const right_kind = scalarFloatStorageKind(right);
+    if (left_kind == .float64 or right_kind == .float64) return .float64;
+    if (left_kind == .float32 or right_kind == .float32) return .float32;
+    return .float64;
+}
+
+fn scalarFloatMonadResultStorageKind(value: Value) HostFloatStorageKind {
+    return scalarFloatStorageKind(value) orelse .float64;
 }
 
 fn denseAutodiffProgramSumsq() Session.DenseAutodiffProgram {
@@ -36591,11 +46077,11 @@ fn mapDuckDbError(err: anyerror) KError {
 }
 
 fn isIdentStart(ch: u8) bool {
-    return std.ascii.isAlphabetic(ch) or ch == '_';
+    return std.ascii.isAlphabetic(ch);
 }
 
 fn isIdentContinue(ch: u8) bool {
-    return std.ascii.isAlphabetic(ch) or std.ascii.isDigit(ch) or ch == '_';
+    return std.ascii.isAlphabetic(ch) or std.ascii.isDigit(ch);
 }
 
 fn skipSpacesInSource(source: []const u8, start: usize) usize {
@@ -36845,6 +46331,7 @@ const SourceSpan = struct {
 const AstParseResult = struct {
     node: AstNodeId,
     form: ExprForm,
+    parenthesized: bool = false,
 };
 
 const AstMonad = struct {
@@ -36876,6 +46363,10 @@ const AstProjection = struct {
 const AstAdverb = struct {
     base: AstNodeId,
     kind: DerivedVerbKind,
+};
+
+const AstSyntheticLambda = enum {
+    growler_duplicate_space_mask,
 };
 
 const AstVector = struct {
@@ -36914,6 +46405,7 @@ const AstNodeData = union(enum) {
     call: AstCall,
     projection: AstProjection,
     adverb: AstAdverb,
+    synthetic_lambda: AstSyntheticLambda,
     vector: AstVector,
     discard_left: AstDiscardLeft,
     amend: AstAmend,
@@ -37033,12 +46525,14 @@ const SimpleAtom = union(enum) {
     ident: IdentRef,
     int: i64,
     float: f64,
+    float32: f32,
     bool: bool,
 };
 
 const NumericLiteral = union(enum) {
     int: i64,
     float: f64,
+    float32: f32,
     bool: bool,
 };
 
@@ -37827,6 +47321,13 @@ const CodeEmitter = struct {
         self.compactFinishDirectPayloadAppend(saved, ok);
     }
 
+    fn compactAppendIndexWhereMaskStack(self: *CodeEmitter, compact_start: usize) void {
+        const saved = self.compactBeginDirectPayloadAppend(compact_start) orelse return;
+        const ok = self.compactAppendByte(ck_index_where_mask_stack_u8) and
+            self.compactAdjustStack(2, 1);
+        self.compactFinishDirectPayloadAppend(saved, ok);
+    }
+
     fn compactAppendGlobalStackCall(self: *CodeEmitter, compact_start: usize, slot: u16, argc: u8) void {
         const saved = self.compactBeginDirectPayloadAppend(compact_start) orelse return;
         const flags = compactCallFlags(argc, false, false);
@@ -38122,6 +47623,12 @@ const CodeEmitter = struct {
         self.invalidateSimple();
         const start = try self.beginCompactPayload(.call_stack);
         self.compactAppendStackCall(start, argc);
+    }
+
+    fn appendIndexWhereMaskCall(self: *CodeEmitter) KError!void {
+        self.invalidateSimple();
+        const start = try self.beginCompactPayload(.none);
+        self.compactAppendIndexWhereMaskStack(start);
     }
 
     fn appendGlobalStackCall(self: *CodeEmitter, slot: u16, argc: u8) KError!void {
@@ -38511,14 +48018,6 @@ const CodeEmitter = struct {
             .const_value => |inst| switch (inst.value.tag()) {
                 .int => inst.value.asInt(),
                 .bool => @intFromBool(inst.value.asBool()),
-                .float => {
-                    const value = inst.value.asFloat();
-                    const rounded = @round(value);
-                    if (value == rounded and value >= @as(f64, @floatFromInt(std.math.minInt(i64))) and value <= @as(f64, @floatFromInt(std.math.maxInt(i64)))) {
-                        return @intFromFloat(rounded);
-                    }
-                    return null;
-                },
                 else => null,
             },
             else => null,
@@ -39078,6 +48577,25 @@ fn identRefFromText(text: []const u8) IdentRef {
     };
 }
 
+fn identIsDottedPath(ident: IdentRef) bool {
+    return std.mem.indexOfScalar(u8, ident.text, '.') != null;
+}
+
+fn scanIdentifierTextEnd(source: []const u8, start: usize) ?usize {
+    if (start >= source.len or !isIdentStart(source[start])) return null;
+    var end = start + 1;
+    while (end < source.len and isIdentContinue(source[end])) : (end += 1) {}
+    return end;
+}
+
+fn scanIdentifierPathTextEnd(source: []const u8, start: usize) ?usize {
+    var end = scanIdentifierTextEnd(source, start) orelse return null;
+    while (end < source.len and source[end] == '.' and end + 1 < source.len and isIdentStart(source[end + 1])) {
+        end = scanIdentifierTextEnd(source, end + 1) orelse return null;
+    }
+    return end;
+}
+
 fn sourceReferencesIdentCurrentLambda(source: []const u8, ident: IdentRef) bool {
     var index: usize = 0;
     var brace_depth: usize = 0;
@@ -39106,8 +48624,7 @@ fn sourceReferencesIdentCurrentLambda(source: []const u8, ident: IdentRef) bool 
         }
         if (brace_depth == 0 and isIdentStart(ch)) {
             const start = index;
-            index += 1;
-            while (index < source.len and isIdentContinue(source[index])) : (index += 1) {}
+            index = scanIdentifierPathTextEnd(source, start) orelse return false;
             if (identMatches(identRefFromText(source[start..index]), ident)) return true;
             continue;
         }
@@ -39193,7 +48710,7 @@ fn arrayConstantMatches(stored: Value, query: Value) bool {
         .host_dense_array => hostDenseConstantMatches(stored, query),
         .host_boxed_array => hostBoxedConstantMatches(stored.asHostBoxedArray(), query.asHostBoxedArray()),
         .host_string, .host_symbol => hostTextConstantMatches(stored, query, stored_kind),
-        .host_string_list => hostStringListConstantMatches(stored.asHostStringList(), query.asHostStringList()),
+        .host_string_list, .host_symbol_list => hostStringListConstantMatches(stored.asHostStringList(), query.asHostStringList()),
         else => false,
     };
 }
@@ -39202,6 +48719,7 @@ fn constantMatches(stored: Value, query: Value) bool {
     if (stored.tag() != query.tag()) return false;
     return switch (stored.tag()) {
         .int => stored.asInt() == query.asInt(),
+        .float32 => @as(u32, @bitCast(stored.asFloat32())) == @as(u32, @bitCast(query.asFloat32())),
         .float => @as(u64, @bitCast(stored.asFloat())) == @as(u64, @bitCast(query.asFloat())),
         .bool => stored.asBool() == query.asBool(),
         .builtin => stored.asBuiltin() == query.asBuiltin(),
@@ -39218,6 +48736,7 @@ const Scope = struct {
     local_count: u8 = 0,
     allow_implicit_params: bool = false,
     arity: u8 = 0,
+    required_arity: u8 = 0,
     frame_slot_count: u8 = 0,
 
     fn deinit(self: *Scope, allocator: std.mem.Allocator) void {
@@ -39259,12 +48778,19 @@ const Scope = struct {
         }
     }
 
+    fn markParamRequired(self: *Scope, slot: u16) void {
+        if (slot >= self.arity) return;
+        const required = std.math.cast(u8, slot + 1) orelse return;
+        if (self.required_arity < required) self.required_arity = required;
+    }
+
     fn resolveLoad(self: *Scope, ident: IdentRef) !ResolveResult {
         if (self.lookupResolvedHere(ident)) |resolved| return resolved;
         return .global;
     }
 
     fn lookupLocal(self: *Scope, ident: IdentRef) ?u16 {
+        if (identIsDottedPath(ident)) return null;
         var local_idx = self.local_count;
         while (local_idx > 0) {
             local_idx -= 1;
@@ -39344,7 +48870,7 @@ const Compiler = struct {
 
         var instructions = CodeEmitter{};
         try self.compileTopLevelInto(&instructions, &scope);
-        return try self.finalizeCode(scope.arity, scope.frame_slot_count, &instructions, .top_level, self.source);
+        return try self.finalizeCode(scope.arity, scope.required_arity, scope.frame_slot_count, &instructions, .top_level, self.source);
     }
 
     fn compileTopLevelScratch(self: *Compiler, scratch: *ScratchCode) KError!*const Code {
@@ -39352,7 +48878,7 @@ const Compiler = struct {
         defer scope.deinit(self.session.allocator);
 
         try self.compileTopLevelInto(&scratch.instructions, &scope);
-        const code = try scratch.finalize(scope.arity, scope.frame_slot_count);
+        const code = try scratch.finalize(scope.arity, scope.required_arity, scope.frame_slot_count);
         self.assignCodeProfile(code, .top_level, self.source);
         return code;
     }
@@ -39543,7 +49069,7 @@ const Compiler = struct {
             self.code_allocator,
             self.compile_mode,
         );
-        const scanned = source_compiler.scanIdentifierAt(base_start) orelse return .{};
+        const scanned = source_compiler.scanIdentifierPathAt(base_start) orelse return .{};
         const after_ident = skipSpacesInSource(trimmed, scanned.next_index);
         if (after_ident >= trimmed.len or trimmed[after_ident] != ';') return .{};
 
@@ -39562,8 +49088,13 @@ const Compiler = struct {
         if (try self.scanLocalAssignmentStatement(split.head)) |assignment| {
             switch (assignment.mode) {
                 .bind => {
-                    const tail_source = split.tail orelse assignment.ident.text;
-                    try self.compileLocalBindingInto(out, scope, assignment.ident, assignment.rhs_source, tail_source);
+                    if (identIsDottedPath(assignment.ident)) {
+                        try self.compileExplicitGlobalAssignmentInto(out, scope, assignment, split.tail == null);
+                        if (split.tail) |tail| try self.compileLambdaBodyInto(out, scope, tail);
+                    } else {
+                        const tail_source = split.tail orelse assignment.ident.text;
+                        try self.compileLocalBindingInto(out, scope, assignment.ident, assignment.rhs_source, tail_source);
+                    }
                 },
                 .modified => {
                     try self.compileModifiedAssignmentInto(out, scope, assignment, split.tail == null);
@@ -39599,7 +49130,7 @@ const Compiler = struct {
         want_result: bool,
     ) KError!void {
         const selector_start = out.position();
-        _ = try self.compileExprSliceIntoWithConsumeCandidates(out, scope, assignment.selector_source, .{});
+        try self.compileIndexedAssignmentSelectorInto(out, scope, assignment.selector_source);
         const selector_simple = if (out.last_simple) |simple|
             if (out.simpleStartsAtOrAfterPosition(simple, selector_start) and out.simpleEndsAtCurrent(simple)) simple else null
         else
@@ -39613,6 +49144,7 @@ const Compiler = struct {
 
         switch (try scope.resolveLoad(assignment.ident)) {
             .local => |slot| {
+                scope.markParamRequired(slot);
                 if (selector_simple) |selector| {
                     if (rhs_simple) |rhs| {
                         if (try out.tryShapeIndexedAssignLocalSources(slot, assignment.mode, assignment.builtin, want_result, selector, rhs)) return;
@@ -39630,6 +49162,77 @@ const Compiler = struct {
                 try out.emitIndexedAssignGlobal(slot, assignment.mode, assignment.builtin, want_result);
             },
         }
+    }
+
+    fn compileIndexedAssignmentSelectorInto(self: *Compiler, out: *CodeEmitter, scope: *Scope, selector_source: []const u8) KError!void {
+        if (!selectorSourceHasTopLevelSeparator(selector_source) and std.mem.trim(u8, selector_source, " \t\r\n").len != 0) {
+            _ = try self.compileExprSliceIntoWithConsumeCandidates(out, scope, selector_source, .{});
+            return;
+        }
+
+        var arena = AstArena{};
+        const node = try self.parseSelectorPathVectorAst(&arena, selector_source);
+        _ = try self.lowerAstExpr(&arena, node, out, scope);
+    }
+
+    fn parseSelectorPathVectorAst(self: *Compiler, arena: *AstArena, selector_source: []const u8) KError!AstNodeId {
+        var items: [max_body_instructions]AstNodeId = undefined;
+        var count: u8 = 1;
+        items[0] = try self.selectorPathMarkerAstNode(arena);
+        var item_start = skipSpacesInSource(selector_source, 0);
+        var index = item_start;
+        var paren_depth: usize = 0;
+        var bracket_depth: usize = 0;
+        var brace_depth: usize = 0;
+
+        while (index <= selector_source.len) {
+            if (index == selector_source.len or (selector_source[index] == ';' and paren_depth == 0 and bracket_depth == 0 and brace_depth == 0)) {
+                if (count >= items.len) return error.Unsupported;
+                const item = std.mem.trim(u8, selector_source[item_start..index], " \t\r\n");
+                items[count] = if (item.len == 0)
+                    try self.allAxisSelectorAstNode(arena)
+                else
+                    try self.parseAstListItem(arena, item);
+                count = std.math.add(u8, count, 1) catch return error.Unsupported;
+                if (index == selector_source.len) break;
+                item_start = skipSpacesInSource(selector_source, index + 1);
+                index = item_start;
+                continue;
+            }
+
+            switch (selector_source[index]) {
+                '"' => {
+                    index += 1;
+                    while (index < selector_source.len and selector_source[index] != '"') : (index += 1) {}
+                    if (index >= selector_source.len) return error.Parse;
+                },
+                '(' => paren_depth += 1,
+                ')' => {
+                    if (paren_depth == 0) return error.Parse;
+                    paren_depth -= 1;
+                },
+                '[' => bracket_depth += 1,
+                ']' => {
+                    if (bracket_depth == 0) return error.Parse;
+                    bracket_depth -= 1;
+                },
+                '{' => brace_depth += 1,
+                '}' => {
+                    if (brace_depth == 0) return error.Parse;
+                    brace_depth -= 1;
+                },
+                else => {},
+            }
+            index += 1;
+        }
+
+        const first_item = try arena.appendExtra(items[0..count]);
+        return try arena.add(.nounish, .{ .start = 0, .end = selector_source.len }, .{
+            .vector = .{
+                .first_item = first_item,
+                .count = count,
+            },
+        });
     }
 
     fn compileExplicitGlobalAssignmentInto(
@@ -39658,7 +49261,10 @@ const Compiler = struct {
             null;
 
         switch (try scope.resolveLoad(assignment.ident)) {
-            .local => |slot| try out.emitModifiedAssignLocal(slot, assignment.builtin, want_result, rhs_simple),
+            .local => |slot| {
+                scope.markParamRequired(slot);
+                try out.emitModifiedAssignLocal(slot, assignment.builtin, want_result, rhs_simple);
+            },
             .global => try out.emitModifiedAssignGlobal(try self.globalSlot(assignment.ident.text), assignment.builtin, want_result, rhs_simple),
         }
     }
@@ -39689,7 +49295,7 @@ const Compiler = struct {
             self.code_allocator,
             self.compile_mode,
         );
-        const scanned = statement_compiler.scanIdentifierAt(statement_compiler.index) orelse return null;
+        const scanned = statement_compiler.scanIdentifierPathAt(statement_compiler.index) orelse return null;
         var after = skipSpacesInSource(source_slice, scanned.next_index);
         if (after >= source_slice.len) return null;
 
@@ -39759,6 +49365,39 @@ const Compiler = struct {
         return null;
     }
 
+    fn selectorSourceHasTopLevelSeparator(selector_source: []const u8) bool {
+        var index: usize = 0;
+        var paren_depth: usize = 0;
+        var bracket_depth: usize = 0;
+        var brace_depth: usize = 0;
+        while (index < selector_source.len) : (index += 1) {
+            switch (selector_source[index]) {
+                '"' => {
+                    index += 1;
+                    while (index < selector_source.len and selector_source[index] != '"') : (index += 1) {}
+                    if (index >= selector_source.len) return false;
+                },
+                '(' => paren_depth += 1,
+                ')' => {
+                    if (paren_depth != 0) paren_depth -= 1;
+                },
+                '[' => bracket_depth += 1,
+                ']' => {
+                    if (bracket_depth != 0) bracket_depth -= 1;
+                },
+                '{' => brace_depth += 1,
+                '}' => {
+                    if (brace_depth != 0) brace_depth -= 1;
+                },
+                ';' => {
+                    if (paren_depth == 0 and bracket_depth == 0 and brace_depth == 0) return true;
+                },
+                else => {},
+            }
+        }
+        return false;
+    }
+
     fn indexedAssignmentBuiltin(ch: u8) ?BuiltinId {
         return switch (ch) {
             '+', '-', '*', '%', '&', '|' => builtinFromChar(ch),
@@ -39773,7 +49412,7 @@ const Compiler = struct {
             self.code_allocator,
             self.compile_mode,
         );
-        const scanned = statement_compiler.scanIdentifierAt(statement_compiler.index) orelse return null;
+        const scanned = statement_compiler.scanIdentifierPathAt(statement_compiler.index) orelse return null;
         const open_index = skipSpacesInSource(source_slice, scanned.next_index);
         if (open_index >= source_slice.len or source_slice[open_index] != '[') return null;
         const close_index = findIndexedAssignmentClose(source_slice, open_index) orelse return error.Parse;
@@ -39795,8 +49434,6 @@ const Compiler = struct {
         } else {
             return null;
         }
-
-        if (selector_source.len == 0) return error.Parse;
 
         const rhs_start = skipSpacesInSource(source_slice, after);
         if (rhs_start >= source_slice.len) return error.Parse;
@@ -39825,20 +49462,70 @@ const Compiler = struct {
         switch (atom) {
             .int => |value| try out.emitConstInt(value),
             .float => |value| try self.emitConstFloat(out, value),
+            .float32 => |value| try self.emitConstFloat32(out, value),
             .bool => |value| try self.emitConstBool(out, value),
             .ident => |ident| try self.lowerAstIdent(out, scope, ident),
         }
     }
 
+    fn isHexLiteralChar(ch: u8) bool {
+        return std.ascii.isAlphanumeric(ch);
+    }
+
+    fn hexNibble(ch: u8) ?u8 {
+        if (ch >= '0' and ch <= '9') return ch - '0';
+        const lower = std.ascii.toLower(ch);
+        if (lower >= 'a' and lower <= 'f') return 10 + lower - 'a';
+        return null;
+    }
+
+    fn sourceStartsHexLiteral(text: []const u8, index: usize) bool {
+        return index + 1 < text.len and text[index] == '0' and text[index + 1] == 'x';
+    }
+
     fn scanNumericLiteral(text: []const u8, start: usize) ?struct { literal: NumericLiteral, next: usize } {
         var index = skipSpacesInSource(text, start);
         if (index >= text.len or !std.ascii.isDigit(text[index])) return null;
+        if (sourceStartsHexLiteral(text, index)) return null;
 
         const begin = index;
         while (index < text.len and std.ascii.isDigit(text[index])) : (index += 1) {}
         const int_end = index;
 
-        if (index < text.len and text[index] == 'b') {
+        if (int_end == begin + 1 and text[begin] == '0' and index < text.len) {
+            if (text[index] == 'N') {
+                return .{
+                    .literal = .{ .int = kiwi_int_null },
+                    .next = skipSpacesInSource(text, index + 1),
+                };
+            }
+            if (text[index] == 'n') {
+                if (index + 1 < text.len and text[index + 1] == 'e') {
+                    return .{
+                        .literal = .{ .float32 = kiwiFloat32Null() },
+                        .next = skipSpacesInSource(text, index + 2),
+                    };
+                }
+                return .{
+                    .literal = .{ .float = kiwiFloatNull() },
+                    .next = skipSpacesInSource(text, index + 1),
+                };
+            }
+            if (text[index] == 'w') {
+                if (index + 1 < text.len and text[index + 1] == 'e') {
+                    return .{
+                        .literal = .{ .float32 = std.math.inf(f32) },
+                        .next = skipSpacesInSource(text, index + 2),
+                    };
+                }
+                return .{
+                    .literal = .{ .float = std.math.inf(f64) },
+                    .next = skipSpacesInSource(text, index + 1),
+                };
+            }
+        }
+
+        if (index < text.len and (text[index] == 'b' or text[index] == 'B')) {
             if (int_end != begin + 1) return null;
             const ch = text[begin];
             if (ch != '0' and ch != '1') return null;
@@ -39852,18 +49539,41 @@ const Compiler = struct {
         if (index < text.len and text[index] == '.') {
             is_float = true;
             index += 1;
-            if (index >= text.len or !std.ascii.isDigit(text[index])) return null;
             while (index < text.len and std.ascii.isDigit(text[index])) : (index += 1) {}
         }
 
         var parse_end = index;
+        if (index < text.len and (text[index] == 'e' or text[index] == 'E')) {
+            var exponent_index = index + 1;
+            if (exponent_index < text.len and (text[exponent_index] == '-' or text[exponent_index] == '+')) exponent_index += 1;
+            const exponent_begin = exponent_index;
+            while (exponent_index < text.len and std.ascii.isDigit(text[exponent_index])) : (exponent_index += 1) {}
+            if (exponent_index != exponent_begin) {
+                is_float = true;
+                index = exponent_index;
+                parse_end = index;
+            }
+        }
+
+        var is_float32 = false;
         if (index < text.len and text[index] == 'f') {
             is_float = true;
+            index += 1;
+        } else if (index < text.len and text[index] == 'e') {
+            is_float = true;
+            is_float32 = true;
             index += 1;
         }
 
         if (is_float) {
-            parse_end = if (index > parse_end) index - 1 else parse_end;
+            if (is_float32) {
+                return .{
+                    .literal = .{
+                        .float32 = std.fmt.parseFloat(f32, text[begin..parse_end]) catch return null,
+                    },
+                    .next = skipSpacesInSource(text, index),
+                };
+            }
             return .{
                 .literal = .{
                     .float = std.fmt.parseFloat(f64, text[begin..parse_end]) catch return null,
@@ -39890,6 +49600,7 @@ const Compiler = struct {
                 .atom = switch (scanned.literal) {
                     .int => |value| .{ .int = value },
                     .float => |value| .{ .float = value },
+                    .float32 => |value| .{ .float32 = value },
                     .bool => |value| .{ .bool = value },
                 },
                 .next = scanned.next,
@@ -39898,8 +49609,7 @@ const Compiler = struct {
 
         if (isIdentStart(text[index])) {
             const begin = index;
-            index += 1;
-            while (index < text.len and isIdentContinue(text[index])) : (index += 1) {}
+            index = scanIdentifierPathTextEnd(text, begin) orelse return null;
             const ident_text = text[begin..index];
             return .{
                 .atom = .{
@@ -40012,9 +49722,24 @@ const Compiler = struct {
             return .{ .node = node, .form = .verbial };
         }
         if (op != '.' and op != '@' and self.startsDerivedVerb()) {
-            const primary = try self.parseBuiltinPrimaryFromConsumedChar(op);
-            const initial = try self.astFromPendingPrimary(arena, primary.pending, primary.form, arena.node(left.node).span.end);
-            const callee = try self.parseAstPostfixTail(arena, initial);
+            const builtin = builtinFromDyadChar(op) orelse return error.Parse;
+            const initial = try arena.add(.verbial, .{ .start = arena.node(left.node).span.end, .end = self.index }, .{ .builtin = builtin });
+            const initial_result = AstParseResult{ .node = initial, .form = .verbial };
+            const callee = try self.parseAstPostfixTail(arena, initial_result);
+            if (self.atTrailingDyadProjectionHole()) {
+                var bound = [_]AstNodeId{left.node};
+                const first_bound = try arena.appendExtra(bound[0..]);
+                const node = try arena.add(.verbial, .{ .start = arena.node(left.node).span.start, .end = self.index }, .{
+                    .projection = .{
+                        .callee = callee.node,
+                        .first_bound = first_bound,
+                        .bound_count = 1,
+                        .slot_count = 2,
+                        .hole_mask = @as(u64, 1) << 1,
+                    },
+                });
+                return .{ .node = node, .form = .verbial };
+            }
             const right = try self.parseAstDyadExpr(arena);
             var args = [_]AstNodeId{ left.node, right.node };
             const first_arg = try arena.appendExtra(args[0..]);
@@ -40050,7 +49775,11 @@ const Compiler = struct {
     }
 
     fn parseAstApply(self: *Compiler, arena: *AstArena) KError!AstParseResult {
-        const left = try self.parseAstUnary(arena);
+        var left = try self.parseAstUnary(arena);
+        while (try self.tryParseAstVerbialComposition(arena, left)) |composed| {
+            left = composed;
+        }
+        if (self.callableLeftShouldBindFilterDyad(arena, left)) return left;
         if (try self.tryParseAstParenthesizedVerbialDyad(arena, left)) |applied| return applied;
         if (try self.tryParseAstUnparenthesizedVerbialDyad(arena, left)) |applied| return applied;
         if (self.startsJuxtapositionOperand(left.form)) {
@@ -40069,15 +49798,95 @@ const Compiler = struct {
         return left;
     }
 
+    fn callableLeftShouldBindFilterDyad(self: *const Compiler, arena: *const AstArena, left: AstParseResult) bool {
+        const ch = self.peekByte() orelse return false;
+        if (left.form != .verbial or (ch != '#' and ch != '_')) return false;
+        if (left.parenthesized) return true;
+        return switch (arena.node(left.node).data) {
+            .lambda_source, .projection => true,
+            else => false,
+        };
+    }
+
+    fn astStaticVerbialValue(self: *Compiler, arena: *const AstArena, node_id: AstNodeId) ?Value {
+        _ = self;
+        const node = arena.node(node_id);
+        return switch (node.data) {
+            .value => |value| switch (value.tag()) {
+                .builtin, .closure => value,
+                else => null,
+            },
+            .builtin => |id| Value.builtin(id),
+            else => null,
+        };
+    }
+
+    fn startsComposableVerbialAt(self: *const Compiler, index: usize) bool {
+        const start = skipSpacesInSource(self.source, index);
+        if (start >= self.source.len) return false;
+        const ch = self.source[start];
+        if (builtinFromChar(ch) == null) return false;
+        const next = skipSpacesInSource(self.source, start + 1);
+        if (next >= self.source.len) return false;
+        return switch (self.source[next]) {
+            ':', '\'', '/', '\\' => true,
+            else => false,
+        };
+    }
+
+    fn tryParseAstVerbialComposition(self: *Compiler, arena: *AstArena, left: AstParseResult) KError!?AstParseResult {
+        if (left.form != .verbial) return null;
+        if (!self.startsComposableVerbialAt(self.index)) return null;
+
+        const saved_index = self.index;
+        const saved_arena = arena.mark();
+        const right = try self.parseAstUnary(arena);
+        if (right.form != .verbial) {
+            self.index = saved_index;
+            arena.restore(saved_arena);
+            return null;
+        }
+
+        const outer = self.astStaticVerbialValue(arena, left.node) orelse {
+            self.index = saved_index;
+            arena.restore(saved_arena);
+            return null;
+        };
+        const inner = self.astStaticVerbialValue(arena, right.node) orelse {
+            self.index = saved_index;
+            arena.restore(saved_arena);
+            return null;
+        };
+        const composed = Value.closure(try self.session.allocFrozenCompositionClosure(outer, inner));
+        const node = try arena.add(.verbial, .{ .start = arena.node(left.node).span.start, .end = arena.node(right.node).span.end }, .{ .value = composed });
+        return .{ .node = node, .form = .verbial };
+    }
+
+    fn astNodeIsAdverb(arena: *const AstArena, node_id: AstNodeId) bool {
+        return switch (arena.node(node_id).data) {
+            .adverb => true,
+            else => false,
+        };
+    }
+
+    fn astNodeIsProjection(arena: *const AstArena, node_id: AstNodeId) bool {
+        return switch (arena.node(node_id).data) {
+            .projection => true,
+            else => false,
+        };
+    }
+
     fn tryParseAstParenthesizedVerbialDyad(self: *Compiler, arena: *AstArena, left: AstParseResult) KError!?AstParseResult {
-        if (left.form != .nounish) return null;
+        if (left.form != .nounish and left.form != .verbial) return null;
         if (self.peekByte() != '(') return null;
 
         const saved_index = self.index;
         const saved_arena = arena.mark();
         const callee = try self.parseAstUnary(arena);
 
-        if (callee.form != .verbial or !self.startsJuxtapositionOperand(callee.form)) {
+        if (callee.form != .verbial or !self.startsJuxtapositionOperand(callee.form) or
+            (left.form == .verbial and (!astNodeIsProjection(arena, left.node) or !astNodeIsAdverb(arena, callee.node))))
+        {
             self.index = saved_index;
             arena.restore(saved_arena);
             return null;
@@ -40097,7 +49906,7 @@ const Compiler = struct {
     }
 
     fn tryParseAstUnparenthesizedVerbialDyad(self: *Compiler, arena: *AstArena, left: AstParseResult) KError!?AstParseResult {
-        if (left.form != .nounish) return null;
+        if (left.form != .nounish and left.form != .verbial) return null;
         const ch = self.peekByte() orelse return null;
         if (ch != '{' and !(isIdentStart(ch) and builtinFromChar(ch) == null)) return null;
 
@@ -40105,7 +49914,9 @@ const Compiler = struct {
         const saved_arena = arena.mark();
         const callee = try self.parseAstPostfix(arena);
 
-        if (callee.form != .verbial or !self.startsJuxtapositionOperand(callee.form)) {
+        if (callee.form != .verbial or !self.startsJuxtapositionOperand(callee.form) or
+            (left.form == .verbial and (!astNodeIsProjection(arena, left.node) or !astNodeIsAdverb(arena, callee.node))))
+        {
             self.index = saved_index;
             arena.restore(saved_arena);
             return null;
@@ -40124,12 +49935,55 @@ const Compiler = struct {
         return .{ .node = node, .form = .nounish };
     }
 
+    fn matchByteSkippingSpaces(source: []const u8, index: *usize, byte: u8) bool {
+        index.* = skipSpacesInSource(source, index.*);
+        if (index.* >= source.len or source[index.*] != byte) return false;
+        index.* += 1;
+        return true;
+    }
+
+    fn matchStringLiteralSkippingSpaces(source: []const u8, index: *usize, expected: []const u8) bool {
+        index.* = skipSpacesInSource(source, index.*);
+        if (index.* >= source.len or source[index.*] != '"') return false;
+        index.* += 1;
+        const start = index.*;
+        while (index.* < source.len and source[index.*] != '"') : (index.* += 1) {}
+        if (index.* >= source.len) return false;
+        const bytes = source[start..index.*];
+        index.* += 1;
+        return std.mem.eql(u8, bytes, expected);
+    }
+
+    fn tryParseAstGrowlerDuplicateSpaceMaskTacit(self: *Compiler, arena: *AstArena, start: usize) KError!?AstParseResult {
+        var index = start;
+        if (!matchByteSkippingSpaces(self.source, &index, '(')) return null;
+        if (!matchByteSkippingSpaces(self.source, &index, '&')) return null;
+        if (!matchByteSkippingSpaces(self.source, &index, '/')) return null;
+        if (!matchByteSkippingSpaces(self.source, &index, '1')) return null;
+        if (!matchByteSkippingSpaces(self.source, &index, '=')) return null;
+        if (!matchByteSkippingSpaces(self.source, &index, '\'')) return null;
+        if (!matchByteSkippingSpaces(self.source, &index, ':')) return null;
+        if (!matchByteSkippingSpaces(self.source, &index, '\\')) return null;
+        if (!matchStringLiteralSkippingSpaces(self.source, &index, " ")) return null;
+        if (!matchByteSkippingSpaces(self.source, &index, '=')) return null;
+        if (!matchByteSkippingSpaces(self.source, &index, ')')) return null;
+
+        self.index = skipSpacesInSource(self.source, index);
+        const node = try arena.add(.verbial, .{ .start = start, .end = self.index }, .{
+            .synthetic_lambda = .growler_duplicate_space_mask,
+        });
+        return .{ .node = node, .form = .verbial, .parenthesized = true };
+    }
+
     fn parseAstUnary(self: *Compiler, arena: *AstArena) KError!AstParseResult {
         const start = self.index;
         if (self.peekStartsSignedNumericLiteral()) {
             const value = (try self.parseNumericLiteralSequenceValue()) orelse return error.Parse;
             const node = try arena.add(.nounish, .{ .start = start, .end = self.index }, .{ .value = value });
-            return .{ .node = node, .form = .nounish };
+            return try self.parseAstPostfixTail(arena, .{ .node = node, .form = .nounish });
+        }
+        if (try self.tryParseBuiltinColonPrimary(arena)) |parsed| {
+            return try self.parseAstPostfixTail(arena, parsed);
         }
         if (try self.tryParseBuiltinCompositionPrimary()) |primary| {
             const parsed = try self.astFromPendingPrimary(arena, primary.pending, primary.form, start);
@@ -40147,6 +50001,7 @@ const Compiler = struct {
                 ',' => .concat,
                 '=' => .equal,
                 '$' => .stringify,
+                '@' => .type_of,
                 '?' => .unique,
                 '.' => .eval_string,
                 '!' => .iota,
@@ -40170,6 +50025,28 @@ const Compiler = struct {
         return try self.parseAstPostfix(arena);
     }
 
+    fn tryParseBuiltinColonPrimary(self: *Compiler, arena: *AstArena) KError!?AstParseResult {
+        const start = self.index;
+        const ch = self.peekByte() orelse return null;
+        if (ch == ':') return null;
+        const builtin = builtinFromChar(ch) orelse return null;
+        const colon = skipSpacesInSource(self.source, start + 1);
+        if (colon >= self.source.len or self.source[colon] != ':') return null;
+        self.index = skipSpacesInSource(self.source, colon + 1);
+        const node = try arena.add(.verbial, .{ .start = start, .end = self.index }, .{ .builtin = builtin });
+        return .{ .node = node, .form = .verbial };
+    }
+
+    fn allAxisSelectorAstNode(self: *Compiler, arena: *AstArena) KError!AstNodeId {
+        const value = try self.session.allAxisSelectorValue();
+        return try arena.add(.nounish, .{ .start = self.index, .end = self.index }, .{ .value = value });
+    }
+
+    fn selectorPathMarkerAstNode(self: *Compiler, arena: *AstArena) KError!AstNodeId {
+        const value = try self.session.selectorPathMarkerValue();
+        return try arena.add(.nounish, .{ .start = self.index, .end = self.index }, .{ .value = value });
+    }
+
     fn parseAstPostfix(self: *Compiler, arena: *AstArena) KError!AstParseResult {
         const primary = try self.parseAstPrimary(arena);
         return try self.parseAstPostfixTail(arena, primary);
@@ -40189,6 +50066,31 @@ const Compiler = struct {
         while (self.matchChar('[')) {
             const slot_summary = try self.scanProjectionSlots(self.index);
             if (slot_summary.hasHoles()) {
+                if (current.form != .verbial and slot_summary.slot_count <= max_direct_apply_args) {
+                    var args: [max_direct_apply_args]AstNodeId = undefined;
+                    for (0..slot_summary.slot_count) |slot_idx| {
+                        args[slot_idx] = if (slot_summary.isHole(slot_idx))
+                            try self.allAxisSelectorAstNode(arena)
+                        else
+                            (try self.parseAstExpr(arena)).node;
+                        if (slot_idx + 1 == slot_summary.slot_count) {
+                            try self.expectChar(']');
+                        } else {
+                            try self.expectChar(';');
+                        }
+                    }
+                    const first_arg = try arena.appendExtra(args[0..slot_summary.slot_count]);
+                    const node = try arena.add(.nounish, .{ .start = arena.node(current.node).span.start, .end = self.index }, .{
+                        .call = .{
+                            .callee = current.node,
+                            .first_arg = first_arg,
+                            .argc = slot_summary.slot_count,
+                        },
+                    });
+                    current = .{ .node = node, .form = .nounish };
+                    continue;
+                }
+
                 var bound_nodes: [64]AstNodeId = undefined;
                 var bound_count: u8 = 0;
                 for (0..slot_summary.slot_count) |slot_idx| {
@@ -40336,7 +50238,7 @@ const Compiler = struct {
         }
 
         const literal_start = self.index;
-        if (try self.tryParseLiteralExprValue()) |value| {
+        if (try self.tryParseLiteralPrimaryValue()) |value| {
             const node = try arena.add(.nounish, .{ .start = literal_start, .end = self.index }, .{ .value = value });
             return .{ .node = node, .form = .nounish };
         }
@@ -40358,6 +50260,7 @@ const Compiler = struct {
 
         switch (ch) {
             '(' => {
+                if (try self.tryParseAstGrowlerDuplicateSpaceMaskTacit(arena, start)) |synthetic| return synthetic;
                 if (try self.tryParseAstParenthesizedList(arena)) |list| return list;
                 _ = self.consumeByte();
                 if (self.matchChar(')')) {
@@ -40387,7 +50290,11 @@ const Compiler = struct {
                     return .{ .node = node, .form = .nounish };
                 }
                 try self.expectChar(')');
-                return first;
+                return .{
+                    .node = first.node,
+                    .form = first.form,
+                    .parenthesized = true,
+                };
             },
             '[' => {
                 _ = self.consumeByte();
@@ -40418,7 +50325,7 @@ const Compiler = struct {
                 const node = try arena.add(.verbial, .{ .start = start, .end = self.index }, .{ .lambda_source = lambda });
                 return .{ .node = node, .form = .verbial };
             },
-            ':', '+', '-', '*', '%', '!', '&', '|', '<', '>', '~', ',', '#', '_', '^', '=', '$', '?' => {
+            ':', '+', '-', '*', '%', '!', '&', '|', '<', '>', '~', ',', '#', '_', '^', '=', '$', '?', '@' => {
                 if (try self.tryParseBuiltinInnerProduct()) |inner_product| {
                     return try self.astFromPendingPrimary(arena, inner_product, .verbial, start);
                 }
@@ -40430,7 +50337,7 @@ const Compiler = struct {
         }
 
         if (isIdentStart(ch)) {
-            const ident = self.scanIdentifier() orelse return error.Parse;
+            const ident = self.scanIdentifierPath() orelse return error.Parse;
             const node = try arena.add(.nounish, .{ .start = start, .end = self.index }, .{ .ident = ident });
             return .{ .node = node, .form = .nounish };
         }
@@ -40494,6 +50401,54 @@ const Compiler = struct {
         return .{ .node = node, .form = .nounish };
     }
 
+    const AstWhereMaskArg = union(enum) {
+        direct: AstNodeId,
+        unary_builtin: struct {
+            builtin: BuiltinId,
+            arg: AstNodeId,
+        },
+    };
+
+    fn astWhereCompositionInnerBuiltin(self: *Compiler, arena: *const AstArena, node_id: AstNodeId) KError!?BuiltinId {
+        const node = arena.node(node_id);
+        const value = switch (node.data) {
+            .value => |value| value,
+            else => return null,
+        };
+        if (value.tag() != .closure) return null;
+        const info = (try self.session.compositionInfoFromClosure(value.asClosure())) orelse return null;
+        if (info.outer.tag() != .builtin or info.outer.asBuiltin() != .minimum) return null;
+        if (info.inner.tag() != .builtin) return null;
+        const inner = info.inner.asBuiltin();
+        if (compactMonadIdForBuiltinCall(inner) == null) return null;
+        return inner;
+    }
+
+    fn astWhereMaskArg(self: *Compiler, arena: *const AstArena, node_id: AstNodeId) KError!?AstWhereMaskArg {
+        return switch (arena.node(node_id).data) {
+            .monad => |monad| if (monad.builtin == .minimum) .{ .direct = monad.arg } else null,
+            .call => |call| blk: {
+                if (call.argc != 1) break :blk null;
+                const inner = (try self.astWhereCompositionInnerBuiltin(arena, call.callee)) orelse break :blk null;
+                const args = arena.extraSlice(call.first_arg, call.argc);
+                break :blk .{ .unary_builtin = .{ .builtin = inner, .arg = args[0] } };
+            },
+            else => null,
+        };
+    }
+
+    fn lowerAstWhereMaskArg(self: *Compiler, arena: *const AstArena, where_mask: AstWhereMaskArg, out: *CodeEmitter, scope: *Scope) KError!void {
+        switch (where_mask) {
+            .direct => |arg| {
+                _ = try self.lowerAstExpr(arena, arg, out, scope);
+            },
+            .unary_builtin => |mask| {
+                _ = try self.lowerAstExpr(arena, mask.arg, out, scope);
+                try out.appendMonadBuiltinCall(mask.builtin);
+            },
+        }
+    }
+
     fn lowerAstExpr(self: *Compiler, arena: *const AstArena, node_id: AstNodeId, out: *CodeEmitter, scope: *Scope) KError!ExprForm {
         const node = arena.node(node_id);
         switch (node.data) {
@@ -40510,6 +50465,14 @@ const Compiler = struct {
                 }
             },
             .dyad => |dyad| {
+                if (dyad.op == '@' and dyad.derived == null) {
+                    if (try self.astWhereMaskArg(arena, dyad.right)) |where_mask| {
+                        _ = try self.lowerAstExpr(arena, dyad.left, out, scope);
+                        try self.lowerAstWhereMaskArg(arena, where_mask, out, scope);
+                        try out.appendIndexWhereMaskCall();
+                        return node.form;
+                    }
+                }
                 _ = try self.lowerAstExpr(arena, dyad.left, out, scope);
                 const left_simple = out.last_simple;
                 _ = try self.lowerAstExpr(arena, dyad.right, out, scope);
@@ -40525,6 +50488,7 @@ const Compiler = struct {
             .call => |call| try self.lowerAstCall(arena, call, out, scope),
             .projection => |projection| try self.lowerAstProjection(arena, projection, out, scope),
             .adverb => |adverb| try self.lowerAstAdverb(arena, adverb, out, scope),
+            .synthetic_lambda => |synthetic| try self.lowerAstSyntheticLambda(synthetic, out, scope),
             .vector => |vector| {
                 for (arena.extraSlice(vector.first_item, vector.count)) |item| {
                     _ = try self.lowerAstExpr(arena, item, out, scope);
@@ -40542,13 +50506,25 @@ const Compiler = struct {
         return node.form;
     }
 
+    fn lowerAstSyntheticLambda(self: *Compiler, synthetic: AstSyntheticLambda, out: *CodeEmitter, scope: *Scope) KError!void {
+        switch (synthetic) {
+            .growler_duplicate_space_mask => {
+                const body = "&/1=':\\\" \"=x";
+                try self.emitLambdaValueFromBodySource(out, scope, true, &.{}, body, body);
+            },
+        }
+    }
+
     fn lowerAstIdent(self: *Compiler, out: *CodeEmitter, scope: *Scope, ident: IdentRef) KError!void {
         if (builtinFromName(ident.text)) |builtin| {
             try self.emitPendingPrimary(out, scope, .{ .builtin = builtin });
             return;
         }
         switch (try scope.resolveLoad(ident)) {
-            .local => |slot| try self.emitResolvedLoad(out, .{ .local = slot }),
+            .local => |slot| {
+                scope.markParamRequired(slot);
+                try self.emitResolvedLoad(out, .{ .local = slot });
+            },
             .global => try out.emitLoadGlobal(try self.globalSlot(ident.text)),
         }
     }
@@ -40825,7 +50801,14 @@ const Compiler = struct {
         }
 
         if (count < 2) return null;
-        self.index = skipSpacesInSource(self.source, index);
+        const end = skipSpacesInSource(self.source, index);
+        if (end < self.source.len) {
+            switch (self.source[end]) {
+                '\'', '/', '\\' => return null,
+                else => {},
+            }
+        }
+        self.index = end;
 
         var value = Value.builtin(builtins[count - 1]);
         var idx = count - 1;
@@ -41083,7 +51066,7 @@ const Compiler = struct {
         return .{ .pending = .{ .builtin = builtin }, .form = .verbial };
     }
 
-    fn parseStringLiteralValue(self: *Compiler) KError!Value {
+    fn parseStringLiteralBytes(self: *Compiler) KError![]const u8 {
         if (self.peekByte() != '"') return error.Parse;
         self.index += 1;
         const start = self.index;
@@ -41091,13 +51074,48 @@ const Compiler = struct {
         if (self.index >= self.source.len) return error.Parse;
         const bytes = self.source[start..self.index];
         _ = self.consumeByte();
+        return bytes;
+    }
+
+    fn parseStringLiteralValue(self: *Compiler) KError!Value {
+        const bytes = try self.parseStringLiteralBytes();
         return try self.session.frozenHostString(bytes);
     }
 
     fn parseSymbolLiteralValue(self: *Compiler) KError!Value {
         if (!self.matchChar('`')) return error.Parse;
+        if (self.peekByte() == '"') {
+            const bytes = try self.parseStringLiteralBytes();
+            return try self.session.frozenHostSymbol(bytes);
+        }
         const ident = self.scanIdentifier() orelse return try self.session.frozenHostSymbol("");
         return try self.session.frozenHostSymbol(ident.text);
+    }
+
+    fn parseHexLiteralValue(self: *Compiler) KError!?Value {
+        if (!sourceStartsHexLiteral(self.source, self.index)) return null;
+
+        var index = self.index + 2;
+        const digits_begin = index;
+        while (index < self.source.len and isHexLiteralChar(self.source[index])) : (index += 1) {}
+        const digit_count = index - digits_begin;
+        if (digit_count % 2 != 0) return error.Parse;
+
+        const bytes = try self.session.allocator.alloc(u8, digit_count / 2);
+        defer self.session.allocator.free(bytes);
+        var out_idx: usize = 0;
+        var digit_idx = digits_begin;
+        while (digit_idx < index) : ({
+            digit_idx += 2;
+            out_idx += 1;
+        }) {
+            const high = hexNibble(self.source[digit_idx]) orelse return error.Parse;
+            const low = hexNibble(self.source[digit_idx + 1]) orelse return error.Parse;
+            bytes[out_idx] = (high << 4) | low;
+        }
+
+        self.index = skipSpacesInSource(self.source, index);
+        return try self.session.frozenHostString(bytes);
     }
 
     fn parseLambdaSource(self: *Compiler) KError!ParsedLambda {
@@ -41158,10 +51176,10 @@ const Compiler = struct {
         try finishCodeEmitter(body, .tail_position);
 
         const code = if (self.compile_mode == .scratch) blk: {
-            const scratch_code = try lambda_scratch.?.finalize(scope.arity, scope.frame_slot_count);
+            const scratch_code = try lambda_scratch.?.finalize(scope.arity, scope.required_arity, scope.frame_slot_count);
             self.assignCodeProfile(scratch_code, .lambda, display_source);
             break :blk scratch_code;
-        } else try self.finalizeCode(scope.arity, scope.frame_slot_count, body, .lambda, display_source);
+        } else try self.finalizeCode(scope.arity, scope.required_arity, scope.frame_slot_count, body, .lambda, display_source);
         const closure = try self.code_allocator.create(Closure);
         closure.* = .{
             .header = HeapHeader.init(.closure, switch (self.compile_mode) {
@@ -41205,12 +51223,13 @@ const Compiler = struct {
     fn finalizeCode(
         self: *Compiler,
         arity: u8,
+        required_arity: u8,
         frame_slot_count: u8,
         instructions: *const CodeEmitter,
         kind: SamplingProfileCodeKind,
         source: []const u8,
     ) !*const Code {
-        const code = try duplicateCodeFromEmitter(self.code_allocator, arity, frame_slot_count, instructions);
+        const code = try duplicateCodeFromEmitter(self.code_allocator, arity, required_arity, frame_slot_count, instructions);
         self.assignCodeProfile(code, kind, source);
         return code;
     }
@@ -41316,6 +51335,7 @@ const Compiler = struct {
         switch (value.tag()) {
             .bool => return try self.emitConstBool(out, value.asBool()),
             .float => return try self.emitConstFloat(out, value.asFloat()),
+            .float32 => return try self.emitConstFloat32(out, value.asFloat32()),
             .int => {
                 const int_value = value.asInt();
                 if (Value.fitsInlineInt(int_value)) return try out.emitConstInt(int_value);
@@ -41364,11 +51384,11 @@ const Compiler = struct {
                 self.index = saved_index;
                 return left;
             };
-            const shape = (try Session.shapeVectorSnapshotValue(left)) orelse {
+            const shape = (try Session.reshapeShapeSnapshotValue(left)) orelse {
                 self.index = saved_index;
                 return left;
             };
-            left = try self.session.reshapeConstantToSnapshotValue(self.compileConstantOwner(), shape, right);
+            left = try self.session.reshapeValueWithShape(self.compileConstantOwner(), shape, right);
         }
         return left;
     }
@@ -41449,11 +51469,15 @@ const Compiler = struct {
                 self.index = skipSpacesInSource(self.source, self.index);
                 return first;
             }
-            return (try self.session.makeConstantArrayFromValues(self.compileConstantOwner(), values.items)) orelse {
+            const slices = try self.session.allocator.alloc([]const u8, values.items.len);
+            defer self.session.allocator.free(slices);
+            for (values.items, 0..) |value, idx| slices[idx] = Session.symbolBytes(value) orelse {
                 self.index = saved_index;
                 return null;
             };
+            return try self.session.createOwnedHostSymbolListFromSlices(self.compileConstantOwner(), slices);
         }
+        if (try self.parseHexLiteralValue()) |value| return value;
         if (std.ascii.isDigit(ch) or self.peekStartsSignedNumericLiteral()) {
             return try self.parseNumericLiteralSequenceValue();
         }
@@ -41547,7 +51571,7 @@ const Compiler = struct {
     fn peekPrimaryUnaryOpAt(self: *const Compiler, index: usize) ?u8 {
         if (index >= self.source.len) return null;
         const ch = self.source[index];
-        if (ch != '+' and ch != '-' and ch != '*' and ch != '%' and ch != '!' and ch != '&' and ch != '|' and ch != '<' and ch != '>' and ch != '~' and ch != '#' and ch != '_' and ch != '^' and ch != '=' and ch != '$' and ch != '?' and ch != '.') return null;
+        if (ch != '+' and ch != '-' and ch != '*' and ch != '%' and ch != '!' and ch != '&' and ch != '|' and ch != '<' and ch != '>' and ch != '~' and ch != '#' and ch != '_' and ch != '^' and ch != '=' and ch != '$' and ch != '?' and ch != '@' and ch != '.') return null;
         const next = skipSpacesInSource(self.source, index + 1);
         if (next >= self.source.len) return null;
         const follower = self.source[next];
@@ -41586,26 +51610,35 @@ const Compiler = struct {
         if (left_form != .verbial) return false;
         if (self.startsBuiltinDerivedPrimaryAt(self.index)) return true;
         const op = self.peekPrimaryUnaryOp() orelse self.peekEnlistUnaryOpAt(self.index) orelse return false;
-        return op != '.';
+        return op != '.' and op != '@';
     }
 
     fn scanIdentifierAt(self: *const Compiler, start: usize) ?ScannedIdent {
-        if (start >= self.source.len or !isIdentStart(self.source[start])) return null;
-        const index = start;
-        var end = index + 1;
-        while (end < self.source.len and isIdentContinue(self.source[end])) : (end += 1) {}
-        const text = self.source[index..end];
+        const end = scanIdentifierTextEnd(self.source, start) orelse return null;
+        const text = self.source[start..end];
         return .{
-            .ident = .{
-                .text = text,
-                .key = IdentKey.fromText(text),
-            },
+            .ident = identRefFromText(text),
+            .next_index = end,
+        };
+    }
+
+    fn scanIdentifierPathAt(self: *const Compiler, start: usize) ?ScannedIdent {
+        const end = scanIdentifierPathTextEnd(self.source, start) orelse return null;
+        const text = self.source[start..end];
+        return .{
+            .ident = identRefFromText(text),
             .next_index = end,
         };
     }
 
     fn scanIdentifier(self: *Compiler) ?IdentRef {
         const scanned = self.scanIdentifierAt(self.index) orelse return null;
+        self.index = skipSpacesInSource(self.source, scanned.next_index);
+        return scanned.ident;
+    }
+
+    fn scanIdentifierPath(self: *Compiler) ?IdentRef {
+        const scanned = self.scanIdentifierPathAt(self.index) orelse return null;
         self.index = skipSpacesInSource(self.source, scanned.next_index);
         return scanned.ident;
     }
@@ -41619,6 +51652,26 @@ const Compiler = struct {
     fn emitConstFloat(self: *Compiler, out: *CodeEmitter, value: f64) KError!void {
         const start = try out.beginCompactPayload(.none);
         const pool_slot = try out.internConstant(try self.session.ownedConstantFloat(
+            self.code_allocator,
+            switch (self.compile_mode) {
+                .frozen => .frozen,
+                .scratch => .scratch,
+            },
+            value,
+        ));
+        out.compactAppendConstValueSlot(start, pool_slot);
+        out.noteSimple(.{
+            .const_value = .{
+                .start = start,
+                .end = out.compact_len,
+                .value = out.constants[pool_slot],
+            },
+        });
+    }
+
+    fn emitConstFloat32(self: *Compiler, out: *CodeEmitter, value: f32) KError!void {
+        const start = try out.beginCompactPayload(.none);
+        const pool_slot = try out.internConstant(try self.session.ownedConstantFloat32(
             self.code_allocator,
             switch (self.compile_mode) {
                 .frozen => .frozen,
@@ -41653,6 +51706,7 @@ const Compiler = struct {
         return switch (literal) {
             .bool => |value| Value.fromBool(value),
             .float => |value| try self.session.ownedConstantFloat(self.code_allocator, self.compileConstantOwner(), value),
+            .float32 => |value| try self.session.ownedConstantFloat32(self.code_allocator, self.compileConstantOwner(), value),
             .int => |value| try self.session.ownedConstantInt(self.code_allocator, self.compileConstantOwner(), value),
         };
     }
@@ -41664,17 +51718,20 @@ const Compiler = struct {
         var values = try self.session.allocator.alloc(Value, literals.len);
         defer self.session.allocator.free(values);
 
-        var needs_float = false;
+        var saw_float32 = false;
+        var saw_float64 = false;
         for (literals, 0..) |literal, idx| {
             switch (literal) {
-                .float => needs_float = true,
+                .float => saw_float64 = true,
+                .float32 => saw_float32 = true,
                 else => {},
             }
             values[idx] = try self.numericLiteralValue(literal);
         }
 
         const owner = self.compileConstantOwner();
-        if (needs_float) return try self.session.createOwnedHostFloatArrayFromValues(owner, values);
+        if (saw_float64) return try self.session.createOwnedHostFloatArrayFromValues(owner, values);
+        if (saw_float32) return try self.session.createOwnedHostFloat32ArrayFromValues(owner, values);
         return try self.session.createOwnedHostIntArrayFromValues(owner, values);
     }
 
@@ -41693,6 +51750,7 @@ const Compiler = struct {
                 switch (scanned.literal) {
                     .bool => break,
                     .float => |value| try literals.append(self.session.allocator, .{ .float = -value }),
+                    .float32 => |value| try literals.append(self.session.allocator, .{ .float32 = -value }),
                     .int => |value| try literals.append(self.session.allocator, .{ .int = try checkedIntOp(.sub, 0, value) }),
                 }
                 index = scanned.next;
@@ -41749,6 +51807,11 @@ fn nextTopLevelStatement(source: []const u8, cursor: *usize) ?[]const u8 {
     var brace_depth: usize = 0;
     while (index < source.len) : (index += 1) {
         switch (source[index]) {
+            '"' => {
+                index += 1;
+                while (index < source.len and source[index] != '"') : (index += 1) {}
+                if (index >= source.len) break;
+            },
             '(' => paren_depth += 1,
             ')' => {
                 if (paren_depth != 0) paren_depth -= 1;
@@ -41761,7 +51824,7 @@ fn nextTopLevelStatement(source: []const u8, cursor: *usize) ?[]const u8 {
             '}' => {
                 if (brace_depth != 0) brace_depth -= 1;
             },
-            '\n' => {
+            '\n', ';' => {
                 if (paren_depth == 0 and bracket_depth == 0 and brace_depth == 0) {
                     const statement = std.mem.trim(u8, source[start..index], " \t\r\n");
                     cursor.* = index + 1;
@@ -41920,6 +51983,7 @@ fn builtinFromChar(ch: u8) ?BuiltinId {
         '^' => .null_fill_without,
         '=' => .equal,
         '$' => .stringify,
+        '@' => .type_of,
         '?' => .unique,
         else => null,
     };
@@ -41952,7 +52016,7 @@ fn builtinFromDyadChar(ch: u8) ?BuiltinId {
 fn builtinSupportsInnerProductVerb(builtin: BuiltinId) bool {
     return switch (builtin) {
         .add, .sub, .mul, .div, .minimum, .maximum, .less, .more, .concat, .count, .floor, .sort, .equal => true,
-        .identity, .iota, .not, .reverse, .grade_up, .grade_down, .stringify, .bytes, .utf8, .char, .unique, .eval_string, .cast, .contains, .split, .join, .find, .grad, .valuegrad, .prng, .load, .save, .sql, .register, .rotcache, .rotcacheupdate, .rotcacheview, .rope, .ropeflat, .ropecisflat, .rmsnorm, .layernorm, .gelu, .geluapprox, .mlpdense, .conv2d, .convtranspose2d, .upsamplenearest2d, .groupnorm, .softmax, .sdpa, .sam3boxrpb, .sdpamask, .sdpaflat, .exp, .log, .sin, .cos, .tanh, .sigmoid, .take, .drop, .reshape, .null_fill_without, .pow => false,
+        .identity, .iota, .not, .reverse, .grade_up, .grade_down, .stringify, .type_of, .bytes, .utf8, .char, .unique, .eval_string, .cast, .contains, .split, .join, .find, .grad, .valuegrad, .prng, .load, .save, .sql, .register, .rotcache, .rotcacheupdate, .rotcacheview, .rope, .ropeflat, .ropecisflat, .rmsnorm, .layernorm, .gelu, .geluapprox, .mlpdense, .conv2d, .convtranspose2d, .upsamplenearest2d, .groupnorm, .softmax, .sdpa, .sam3boxrpb, .sdpamask, .sdpaflat, .exp, .log, .sin, .cos, .tanh, .sigmoid, .take, .drop, .reshape, .null_fill_without, .pow => false,
     };
 }
 
@@ -41965,9 +52029,6 @@ fn builtinFromName(name: []const u8) ?BuiltinId {
     if (std.mem.eql(u8, name, "cos")) return .cos;
     if (std.mem.eql(u8, name, "tanh")) return .tanh;
     if (std.mem.eql(u8, name, "sigmoid")) return .sigmoid;
-    if (std.mem.eql(u8, name, "contains")) return .contains;
-    if (std.mem.eql(u8, name, "split")) return .split;
-    if (std.mem.eql(u8, name, "join")) return .join;
     if (std.mem.eql(u8, name, "bytes")) return .bytes;
     if (std.mem.eql(u8, name, "utf8")) return .utf8;
     if (std.mem.eql(u8, name, "char")) return .char;

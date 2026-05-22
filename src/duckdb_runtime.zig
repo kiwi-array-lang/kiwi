@@ -625,25 +625,33 @@ pub const DataChunk = struct {
         return c.duckdb_data_chunk_get_vector(self.raw, @intCast(index));
     }
 
-    pub fn rowIsValid(self: *const DataChunk, index: usize, row: usize) bool {
+    pub fn vectorData(self: *const DataChunk, index: usize) !*const anyopaque {
         const raw_vector = self.vector(index);
-        const validity = c.duckdb_vector_get_validity(raw_vector);
-        if (validity == null) return true;
+        return c.duckdb_vector_get_data(raw_vector) orelse error.DuckDbUnexpectedResult;
+    }
+
+    pub fn validity(self: *const DataChunk, index: usize) ?[*]const u64 {
+        const raw_vector = self.vector(index);
+        return c.duckdb_vector_get_validity(raw_vector);
+    }
+
+    pub fn rowIsValid(self: *const DataChunk, index: usize, row: usize) bool {
+        const maybe_mask = self.validity(index);
+        if (maybe_mask == null) return true;
+        const mask = maybe_mask.?;
         const entry_idx = row / 64;
         const idx_in_entry = row % 64;
-        return (validity[entry_idx] & (@as(u64, 1) << @intCast(idx_in_entry))) != 0;
+        return (mask[entry_idx] & (@as(u64, 1) << @intCast(idx_in_entry))) != 0;
     }
 
     pub fn rowBool(self: *const DataChunk, index: usize, row: usize) !bool {
-        const raw_vector = self.vector(index);
-        const data = c.duckdb_vector_get_data(raw_vector) orelse return error.DuckDbUnexpectedResult;
+        const data = try self.vectorData(index);
         const items: [*]const bool = @ptrCast(@alignCast(data));
         return items[row];
     }
 
     pub fn rowInt(self: *const DataChunk, index: usize, row: usize, type_id: TypeId) !i64 {
-        const raw_vector = self.vector(index);
-        const data = c.duckdb_vector_get_data(raw_vector) orelse return error.DuckDbUnexpectedResult;
+        const data = try self.vectorData(index);
         return switch (type_id) {
             .tinyint => @as([*]const i8, @ptrCast(@alignCast(data)))[row],
             .smallint => @as([*]const i16, @ptrCast(@alignCast(data)))[row],
@@ -658,8 +666,7 @@ pub const DataChunk = struct {
     }
 
     pub fn rowFloat(self: *const DataChunk, index: usize, row: usize, type_id: TypeId) !f64 {
-        const raw_vector = self.vector(index);
-        const data = c.duckdb_vector_get_data(raw_vector) orelse return error.DuckDbUnexpectedResult;
+        const data = try self.vectorData(index);
         return switch (type_id) {
             .float => @as([*]const f32, @ptrCast(@alignCast(data)))[row],
             .double => @as([*]const f64, @ptrCast(@alignCast(data)))[row],

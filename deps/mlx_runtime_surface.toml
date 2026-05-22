@@ -1,0 +1,320 @@
+[metadata]
+description = "MLX feature surface used by Kiwi's native bridge and CUDA kiwi_runtime trimming."
+bridge = "csrc/mlxc_mini.cpp"
+cuda_profile_patches = [
+  "deps/patches/mlx/0005-cuda-build-compat.patch",
+  "deps/patches/mlx/0006-cuda-kiwi-runtime-subset.patch",
+]
+
+[[required]]
+name = "device_array_runtime"
+reason = "Kiwi creates, inspects, evaluates, and releases MLX arrays/devices/streams."
+bridge_symbols = [
+  "mlx_array_set_data",
+  "mlx_array_eval",
+  "mlx_device_is_available",
+  "mlxc_set_default_device_type",
+]
+cuda_sources = [
+  "allocator.cpp",
+  "device.cpp",
+  "device_info.cpp",
+  "eval.cpp",
+  "event.cu",
+  "worker.cpp",
+]
+
+[[required]]
+name = "safetensors_io"
+reason = "Kiwi exposes MLX-backed tensor loading and saving."
+bridge_symbols = [
+  "mlx_load_safetensors",
+  "mlx_load_safetensor_tensor",
+  "mlx_save_safetensors",
+]
+cuda_sources = [
+  "load.cpp",
+]
+
+[[required]]
+name = "elementwise_unary_binary"
+reason = "Kiwi verbs and ML builtins lower to MLX elementwise primitives."
+bridge_symbols = [
+  "mlx_add",
+  "mlx_divide",
+  "mlxc_exp",
+  "mlxc_gelu",
+  "mlxc_log",
+  "mlxc_sigmoid",
+]
+mlx_calls = [
+  "mlx::core::divide",
+  "mlx::core::erf",
+  "mlx::core::exp",
+  "mlx::core::log",
+]
+cuda_sources = [
+  "binary_two.cu",
+  "ternary.cu",
+  "binary/",
+  "unary/",
+]
+
+[[required]]
+name = "reductions_scans_sort"
+reason = "Kiwi uses MLX reductions, scans, arg reductions, and sort/grade paths."
+bridge_symbols = [
+  "mlx_sum",
+  "mlx_cumsum",
+  "mlx_argmax",
+  "mlx_argsort",
+]
+mlx_calls = [
+  "mlx::core::sum",
+  "mlx::core::argmax",
+]
+cuda_sources = [
+  "arg_reduce.cu",
+  "reduce.cu",
+  "reduce/",
+  "scan.cu",
+  "sort.cu",
+]
+
+[[required]]
+name = "shape_indexing_copy"
+reason = "Kiwi array shape, take/drop, where, boolean indexing, concat, and stack operations use MLX indexing and copy paths."
+bridge_symbols = [
+  "mlx_arange",
+  "mlx_slice",
+  "mlx_take",
+  "mlxc_bool_where_indices",
+  "mlxc_where",
+  "mlx_concatenate",
+]
+mlx_calls = [
+  "mlx::core::arange",
+  "mlx::core::slice",
+  "mlx::core::take",
+  "mlx::core::where",
+]
+cuda_sources = [
+  "arange.cu",
+  "copy.cu",
+  "copy/",
+  "indexing.cpp",
+  "slicing.cpp",
+]
+
+[[required]]
+name = "matmul_mlp"
+reason = "Kiwi exposes matrix multiply and MLP dense helpers."
+bridge_symbols = [
+  "mlx_matmul",
+  "mlxc_mlp_dense",
+]
+mlx_calls = [
+  "mlx::core::matmul",
+]
+cuda_sources = [
+  "cublas_utils.cpp",
+  "matmul.cpp",
+  "gemms/cublas_gemm.cpp",
+  "gemms/gather_gemm.cu",
+  "gemms/gemv.cu",
+  "gemms/grouped_gemm_unaligned.cu",
+]
+
+[[required]]
+name = "softmax"
+reason = "Kiwi's softmax builtin calls MLX last-axis softmax directly."
+bridge_symbols = [
+  "mlxc_softmax_last_axis",
+]
+mlx_calls = [
+  "mlx::core::softmax",
+]
+cuda_sources = [
+  "softmax.cu",
+]
+
+[[required]]
+name = "convolution"
+reason = "Kiwi exposes conv2d and conv_transpose2d through MLX."
+bridge_symbols = [
+  "mlxc_conv2d",
+  "mlxc_conv2d_bias",
+  "mlxc_conv_transpose2d",
+]
+mlx_calls = [
+  "mlx::core::conv2d",
+  "mlx::core::conv_transpose2d",
+]
+cuda_sources = [
+  "conv.cpp",
+  "conv/gemm_conv.cu",
+  "conv/gemm_grouped_conv.cu",
+  "cudnn_utils.cpp",
+]
+
+[[required]]
+name = "normalization"
+reason = "Kiwi exposes layernorm, rmsnorm, and groupnorm helpers."
+bridge_symbols = [
+  "mlxc_layer_norm",
+  "mlxc_group_norm",
+  "mlxc_rms_norm",
+]
+mlx_calls = [
+  "mlx::core::fast::layer_norm",
+  "mlx::core::fast::rms_norm",
+]
+cuda_sources = [
+  "layer_norm.cu",
+  "rms_norm.cu",
+]
+
+[[required]]
+name = "rope"
+reason = "Kiwi exposes RoPE builtins backed by MLX fast::rope."
+bridge_symbols = [
+  "mlxc_rope",
+  "mlxc_rope_freqs",
+]
+mlx_calls = [
+  "mlx::core::fast::rope",
+]
+cuda_sources = [
+  "rope.cu",
+]
+
+[[required]]
+name = "attention"
+reason = "Kiwi exposes SDPA builtins backed by MLX fast scaled-dot-product attention."
+bridge_symbols = [
+  "mlxc_sdpa_none",
+  "mlxc_sdpa_causal",
+  "mlxc_sdpa_masked",
+]
+mlx_calls = [
+  "mlx::core::fast::scaled_dot_product_attention",
+]
+cuda_sources = [
+  "scaled_dot_product_attention.cpp",
+  "scaled_dot_product_attention.cu",
+  "softmax.cu",
+  "cudnn_utils.cpp",
+]
+
+[[required]]
+name = "compile_autograd"
+reason = "Kiwi exposes hot compiled helpers and value-and-grad paths."
+bridge_symbols = [
+  "mlxc_hot_value_and_grad",
+  "mlxc_lowered_value_and_grad",
+]
+mlx_calls = [
+  "mlx::core::compile",
+  "mlx::core::value_and_grad",
+]
+cuda_sources = [
+  "compiled.cpp",
+  "custom_kernel.cpp",
+  "jit_module.cpp",
+  "kernel_utils.cu",
+]
+
+[[disabled]]
+name = "quantized_fp8"
+reason = "Kiwi does not expose MLX quantized matmul, QMM, QQMM, Quantize, or FP8 conversion APIs."
+cuda_sources = [
+  "quantized/affine_quantize.cu",
+  "quantized/fp_quantize.cu",
+  "quantized/quantized.cpp",
+  "quantized/qqmm.cpp",
+  "quantized/qqmm_utils.cu",
+  "quantized/convert_fp8.cu",
+  "quantized/qmm/",
+]
+stub_primitives = [
+  "QuantizedMatmul",
+  "GatherQMM",
+  "QQMatmul",
+  "Quantize",
+  "ConvertFP8",
+]
+forbidden_mlx_calls = [
+  "QuantizedMatmul",
+  "GatherQMM",
+  "QQMatmul",
+]
+
+[[disabled]]
+name = "fft"
+reason = "Kiwi does not expose MLX FFT builtins."
+cuda_sources = [
+  "fft.cu",
+]
+stub_primitives = [
+  "FFT",
+]
+forbidden_mlx_calls = [
+  "mlx::core::fft",
+]
+
+[[disabled]]
+name = "distributed_collectives_cuda"
+reason = "Kiwi does not expose MLX distributed collective operations."
+cuda_sources = [
+  "distributed.cu",
+]
+stub_primitives = [
+  "AllReduce",
+  "AllGather",
+  "ReduceScatter",
+]
+forbidden_mlx_calls = [
+  "all_reduce",
+  "all_gather",
+  "reduce_scatter",
+]
+
+[[disabled]]
+name = "random_bits"
+reason = "Kiwi's PRNG path does not expose MLX RandomBits."
+cuda_sources = [
+  "random.cu",
+]
+stub_primitives = [
+  "RandomBits",
+]
+forbidden_mlx_calls = [
+  "mlx::core::random",
+  "RandomBits",
+]
+
+[[disabled]]
+name = "hadamard"
+reason = "Kiwi does not expose MLX Hadamard transform."
+cuda_sources = [
+  "hadamard.cu",
+]
+stub_primitives = [
+  "Hadamard",
+]
+forbidden_mlx_calls = [
+  "mlx::core::hadamard",
+]
+
+[[disabled]]
+name = "logsumexp"
+reason = "Kiwi does not expose MLX LogSumExp directly; SDPA keeps its own required CUDA sources."
+cuda_sources = [
+  "logsumexp.cu",
+]
+stub_primitives = [
+  "LogSumExp",
+]
+forbidden_mlx_calls = [
+  "mlx::core::logsumexp",
+]

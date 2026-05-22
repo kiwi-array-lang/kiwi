@@ -1,20 +1,17 @@
 diff --git a/mlx/backend/metal/make_compiled_preamble.sh b/mlx/backend/metal/make_compiled_preamble.sh
-index bb55ed3a..dbc8a7ba 100644
+index 68aefb0f..714f2e70 100644
 --- a/mlx/backend/metal/make_compiled_preamble.sh
 +++ b/mlx/backend/metal/make_compiled_preamble.sh
-@@ -32,27 +32,33 @@ mkdir -p "$OUTPUT_DIR"
+@@ -51,24 +51,33 @@ if [ -n "$HDRS" ]; then
+ fi
  
- # Use the metal compiler to get a list of headers (with depth)
- CCC="xcrun -sdk macosx metal -x metal"
--HDRS=$( $CCC -I"$SRC_DIR" -I"$JIT_INCLUDES" -DMLX_METAL_JIT -E -P -CC -C -H "$INPUT_FILE" $CFLAGS -w 2>&1 1>/dev/null )
--
--# Remove any included system frameworks (for MetalPerformancePrimitive headers)
+ # Remove any included system frameworks (for MetalPerformancePrimitive headers)
 -HDRS=$(echo "$HDRS" | grep -v "Xcode")
 +declare -a HDRS_LINES=()
 +while IFS= read -r line; do
 +  HDRS_LINES+=("$line")
 +done < <(
-+  $CCC -I"$SRC_DIR" -I"$JIT_INCLUDES" -DMLX_METAL_JIT -E -P -CC -C -H "$INPUT_FILE" $CFLAGS -w 2>&1 1>/dev/null |
++  printf '%s\n' "$HDRS" |
 +  grep -v "Xcode"
 +)
  

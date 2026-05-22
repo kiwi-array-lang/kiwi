@@ -57,7 +57,7 @@ fn appendPrototypeShape(allocator: std.mem.Allocator, out: *std.ArrayList(u8), s
     try out.append(allocator, ')');
 }
 
-fn appendFlatIntVector(allocator: std.mem.Allocator, out: *std.ArrayList(u8), items: []const i32, base: usize, len: usize) anyerror!void {
+fn appendFlatIntVector(comptime T: type, allocator: std.mem.Allocator, out: *std.ArrayList(u8), items: []const T, base: usize, len: usize) anyerror!void {
     if (len == 0) {
         try out.appendSlice(allocator, "!0");
         return;
@@ -72,9 +72,10 @@ fn appendFlatIntVector(allocator: std.mem.Allocator, out: *std.ArrayList(u8), it
 
 fn appendFlatFloatVector(
     comptime api: anytype,
+    comptime T: type,
     allocator: std.mem.Allocator,
     out: *std.ArrayList(u8),
-    items: []const f32,
+    items: []const T,
     base: usize,
     len: usize,
 ) anyerror!void {
@@ -160,23 +161,29 @@ fn appendShape(
     try out.append(allocator, ')');
 }
 
-fn renderIntItems(self: anytype, shape: []const i32, items: []const i32, top_level: bool) anyerror![]u8 {
-    var out = std.ArrayList(u8).empty;
-    errdefer out.deinit(self.allocator);
-    try appendShape(i32, appendFlatIntVector, self.allocator, &out, items, shape, 0, top_level, .int);
-    return try out.toOwnedSlice(self.allocator);
-}
-
-fn renderFloatItems(comptime api: anytype, self: *api.Session, shape: []const i32, items: []const f32, top_level: bool) anyerror![]u8 {
+fn renderIntItems(comptime T: type, self: anytype, shape: []const i32, items: []const T, top_level: bool) anyerror![]u8 {
     const appendFlat = struct {
-        fn append(allocator: std.mem.Allocator, out: *std.ArrayList(u8), values: []const f32, base: usize, len: usize) anyerror!void {
-            try appendFlatFloatVector(api, allocator, out, values, base, len);
+        fn append(allocator: std.mem.Allocator, out: *std.ArrayList(u8), values: []const T, base: usize, len: usize) anyerror!void {
+            try appendFlatIntVector(T, allocator, out, values, base, len);
         }
     }.append;
 
     var out = std.ArrayList(u8).empty;
     errdefer out.deinit(self.allocator);
-    try appendShape(f32, appendFlat, self.allocator, &out, items, shape, 0, top_level, .float);
+    try appendShape(T, appendFlat, self.allocator, &out, items, shape, 0, top_level, .int);
+    return try out.toOwnedSlice(self.allocator);
+}
+
+fn renderFloatItems(comptime api: anytype, comptime T: type, self: *api.Session, shape: []const i32, items: []const T, top_level: bool) anyerror![]u8 {
+    const appendFlat = struct {
+        fn append(allocator: std.mem.Allocator, out: *std.ArrayList(u8), values: []const T, base: usize, len: usize) anyerror!void {
+            try appendFlatFloatVector(api, T, allocator, out, values, base, len);
+        }
+    }.append;
+
+    var out = std.ArrayList(u8).empty;
+    errdefer out.deinit(self.allocator);
+    try appendShape(T, appendFlat, self.allocator, &out, items, shape, 0, top_level, .float);
     return try out.toOwnedSlice(self.allocator);
 }
 
@@ -214,15 +221,30 @@ pub fn renderBackendArray(
     for (owned.shape(), 0..) |dim, idx| shape[idx] = @intCast(dim);
 
     return switch (owned.dtype()) {
-        api.c.MLX_INT32, api.c.MLX_INT64, api.c.MLX_UINT32 => blk: {
+        api.c.MLX_INT32 => blk: {
             const items = try owned.readInts(self.allocator);
             defer self.allocator.free(items);
-            break :blk try renderIntItems(self, shape, items, top_level);
+            break :blk try renderIntItems(i32, self, shape, items, top_level);
         },
-        api.c.MLX_FLOAT16, api.c.MLX_FLOAT32, api.c.MLX_FLOAT64, api.c.MLX_BFLOAT16 => blk: {
+        api.c.MLX_UINT32 => blk: {
+            const items = try owned.readUInt32s(self.allocator);
+            defer self.allocator.free(items);
+            break :blk try renderIntItems(u32, self, shape, items, top_level);
+        },
+        api.c.MLX_INT64 => blk: {
+            const items = try owned.readInt64s(self.allocator);
+            defer self.allocator.free(items);
+            break :blk try renderIntItems(i64, self, shape, items, top_level);
+        },
+        api.c.MLX_FLOAT16, api.c.MLX_FLOAT32, api.c.MLX_BFLOAT16 => blk: {
             const items = try owned.readFloats(self.allocator);
             defer self.allocator.free(items);
-            break :blk try renderFloatItems(api, self, shape, items, top_level);
+            break :blk try renderFloatItems(api, f32, self, shape, items, top_level);
+        },
+        api.c.MLX_FLOAT64 => blk: {
+            const items = try owned.readFloat64s(self.allocator);
+            defer self.allocator.free(items);
+            break :blk try renderFloatItems(api, f64, self, shape, items, top_level);
         },
         api.c.MLX_BOOL => blk: {
             const items = try owned.readBools(self.allocator);

@@ -8,25 +8,63 @@ if [[ -f "$KIWI_ROOT/scripts/kiwi_cuda_defaults.sh" ]]; then
 else
   WORKSPACE_ROOT="$(cd "$KIWI_ROOT/../.." && pwd)"
 fi
-RUNTIME_DIR="$KIWI_ROOT/python/runtime"
-JUPYTER_DIR="$KIWI_ROOT/python/jupyter"
-DIST_DIR="${KIWILANG_WHEEL_DIST_DIR:-$KIWI_ROOT/out/python-wheels/dist}"
-PREFIX="${KIWILANG_WHEEL_PREFIX:-$KIWI_ROOT/out/python-wheels/native-prefix}"
-OPTIMIZE="${KIWILANG_WHEEL_OPTIMIZE:-ReleaseFast}"
-RUNTIME_BACKEND="${KIWILANG_WHEEL_RUNTIME_BACKEND:-mlx}"
-MLX_BACKEND="${KIWILANG_WHEEL_MLX_BACKEND:-auto}"
-MLXC_MINI_BRIDGE="${KIWILANG_WHEEL_MLXC_MINI_BRIDGE:-}"
+CORE_DIR="$KIWI_ROOT/python/runtime"
+DEFAULT_JUPYTER_DIR="$WORKSPACE_ROOT/extensions/jupyter-kiwi"
+JUPYTER_DIR="${KIWI_ARRAY_WHEEL_JUPYTER_DIR:-$DEFAULT_JUPYTER_DIR}"
+HOST_DIR="$KIWI_ROOT/python/host"
+CPU_DIR="$KIWI_ROOT/python/cpu"
+METAL_DIR="$KIWI_ROOT/python/metal"
+CUDA12_DIR="$KIWI_ROOT/python/cuda12"
+DIST_DIR="${KIWI_ARRAY_WHEEL_DIST_DIR:-$KIWI_ROOT/out/python-wheels/dist}"
+PREFIX_EXPLICIT=0
+if [[ -n "${KIWI_ARRAY_WHEEL_PREFIX:-}" ]]; then
+  PREFIX_EXPLICIT=1
+fi
+PREFIX="${KIWI_ARRAY_WHEEL_PREFIX:-$KIWI_ROOT/out/python-wheels/native-prefix}"
+OPTIMIZE="${KIWI_ARRAY_WHEEL_OPTIMIZE:-ReleaseFast}"
+TARGET="${KIWI_ARRAY_WHEEL_TARGET:-}"
+RUNTIME_BACKEND="${KIWI_ARRAY_WHEEL_RUNTIME_BACKEND:-host}"
+MLX_BACKEND="${KIWI_ARRAY_WHEEL_MLX_BACKEND:-auto}"
+MLXC_MINI_BRIDGE="${KIWI_ARRAY_WHEEL_MLXC_MINI_BRIDGE:-}"
+APPLE_SDK="${KIWI_ARRAY_WHEEL_APPLE_SDK:-${SDKROOT:-}}"
 UV_BIN="${UV:-uv}"
-SKIP_NATIVE_BUILD="${KIWILANG_WHEEL_SKIP_NATIVE_BUILD:-0}"
-ALLOW_MISSING_DUCKDB="${KIWILANG_ALLOW_MISSING_DUCKDB:-0}"
-BUILD_JUPYTER="${KIWILANG_WHEEL_BUILD_JUPYTER:-1}"
+SKIP_NATIVE_BUILD="${KIWI_ARRAY_WHEEL_SKIP_NATIVE_BUILD:-0}"
+ALLOW_MISSING_DUCKDB="${KIWI_ARRAY_ALLOW_MISSING_DUCKDB:-0}"
+BUILD_JUPYTER="${KIWI_ARRAY_WHEEL_BUILD_JUPYTER:-1}"
+RUNTIME_PACKAGE_TARGET="${KIWI_ARRAY_WHEEL_RUNTIME_PACKAGE:-host}"
+BUILD_CORE="${KIWI_ARRAY_WHEEL_BUILD_CORE:-}"
+BUILD_HOST="${KIWI_ARRAY_WHEEL_BUILD_HOST:-}"
+BUILD_CPU="${KIWI_ARRAY_WHEEL_BUILD_CPU:-}"
+BUILD_METAL="${KIWI_ARRAY_WHEEL_BUILD_METAL:-}"
+BUILD_CUDA12="${KIWI_ARRAY_WHEEL_BUILD_CUDA12:-${KIWI_ARRAY_WHEEL_BUILD_RUNTIME_MLX_CUDA12:-}}"
+UV_PROJECT_ENVIRONMENT="${KIWI_ARRAY_WHEEL_UV_PROJECT_ENVIRONMENT:-${UV_PROJECT_ENVIRONMENT:-$KIWI_ROOT/out/python-wheels/.uv-env-$(uname -s)-$(uname -m)-$RUNTIME_PACKAGE_TARGET}}"
+export UV_PROJECT_ENVIRONMENT
+
+if [ -z "${MACOSX_DEPLOYMENT_TARGET:-}" ] && [[ "$TARGET" =~ -macos\.([0-9]+)\.([0-9]+) ]]; then
+  export MACOSX_DEPLOYMENT_TARGET="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
+fi
 
 cleanup_python_build_artifacts() {
-  rm -rf \
-    "$RUNTIME_DIR/build" \
-    "$RUNTIME_DIR/src/kiwilang.egg-info" \
-    "$JUPYTER_DIR/build" \
-    "$JUPYTER_DIR/src/kiwilang_jupyter_kernel.egg-info"
+  local paths=(
+    "$CORE_DIR/build" \
+    "$CORE_DIR/src/kiwi_array.egg-info" \
+    "$HOST_DIR/build" \
+    "$HOST_DIR/src/kiwi_array_host.egg-info" \
+    "$CPU_DIR/build" \
+    "$CPU_DIR/src/kiwi_array_cpu.egg-info" \
+    "$METAL_DIR/build" \
+    "$METAL_DIR/src/kiwi_array_metal.egg-info" \
+    "$CUDA12_DIR/build" \
+    "$CUDA12_DIR/src/kiwi_array_cuda12.egg-info"
+  )
+  if [ -n "$JUPYTER_DIR" ]; then
+    paths+=(
+      "$JUPYTER_DIR/build"
+      "$JUPYTER_DIR/src/kiwi_array_jupyter.egg-info"
+      "$JUPYTER_DIR/src/kiwi_array_jupyter_kernel.egg-info"
+    )
+  fi
+  rm -rf "${paths[@]}"
 }
 
 trap cleanup_python_build_artifacts EXIT
@@ -34,7 +72,7 @@ trap cleanup_python_build_artifacts EXIT
 case "$RUNTIME_BACKEND" in
   host|mlx) ;;
   *)
-    echo "unsupported KIWILANG_WHEEL_RUNTIME_BACKEND: $RUNTIME_BACKEND" >&2
+    echo "unsupported KIWI_ARRAY_WHEEL_RUNTIME_BACKEND: $RUNTIME_BACKEND" >&2
     exit 2
     ;;
 esac
@@ -42,7 +80,54 @@ esac
 case "$MLX_BACKEND" in
   auto|cpu|metal|cuda) ;;
   *)
-    echo "unsupported KIWILANG_WHEEL_MLX_BACKEND: $MLX_BACKEND" >&2
+    echo "unsupported KIWI_ARRAY_WHEEL_MLX_BACKEND: $MLX_BACKEND" >&2
+    exit 2
+    ;;
+esac
+
+case "$RUNTIME_PACKAGE_TARGET" in
+  core)
+    STAGE_RUNTIME_PACKAGE=""
+    BUILD_CORE="${BUILD_CORE:-1}"
+    BUILD_HOST="${BUILD_HOST:-0}"
+    BUILD_CPU="${BUILD_CPU:-0}"
+    BUILD_METAL="${BUILD_METAL:-0}"
+    BUILD_CUDA12="${BUILD_CUDA12:-0}"
+    ;;
+  host)
+    STAGE_RUNTIME_PACKAGE="$HOST_DIR/src/kiwi_array_host"
+    BUILD_CORE="${BUILD_CORE:-1}"
+    BUILD_HOST="${BUILD_HOST:-1}"
+    BUILD_CPU="${BUILD_CPU:-0}"
+    BUILD_METAL="${BUILD_METAL:-0}"
+    BUILD_CUDA12="${BUILD_CUDA12:-0}"
+    ;;
+  cpu)
+    STAGE_RUNTIME_PACKAGE="$CPU_DIR/src/kiwi_array_cpu"
+    BUILD_CORE="${BUILD_CORE:-0}"
+    BUILD_HOST="${BUILD_HOST:-0}"
+    BUILD_CPU="${BUILD_CPU:-1}"
+    BUILD_METAL="${BUILD_METAL:-0}"
+    BUILD_CUDA12="${BUILD_CUDA12:-0}"
+    ;;
+  metal)
+    STAGE_RUNTIME_PACKAGE="$METAL_DIR/src/kiwi_array_metal"
+    BUILD_CORE="${BUILD_CORE:-0}"
+    BUILD_HOST="${BUILD_HOST:-0}"
+    BUILD_CPU="${BUILD_CPU:-0}"
+    BUILD_METAL="${BUILD_METAL:-1}"
+    BUILD_CUDA12="${BUILD_CUDA12:-0}"
+    ;;
+  cuda12|mlx-cuda12)
+    STAGE_RUNTIME_PACKAGE="$CUDA12_DIR/src/kiwi_array_cuda12"
+    BUILD_CORE="${BUILD_CORE:-0}"
+    BUILD_HOST="${BUILD_HOST:-0}"
+    BUILD_CPU="${BUILD_CPU:-0}"
+    BUILD_METAL="${BUILD_METAL:-0}"
+    BUILD_CUDA12="${BUILD_CUDA12:-1}"
+    ;;
+  *)
+    echo "unsupported KIWI_ARRAY_WHEEL_RUNTIME_PACKAGE: $RUNTIME_PACKAGE_TARGET" >&2
     exit 2
     ;;
 esac
@@ -111,6 +196,7 @@ BUILD_ARGS=(
   "0"
   "-Doptimize=$OPTIMIZE"
   "-Dpublic-cli=true"
+  "-Dcli-name=kiwi"
   "-Dinstall-sdk=true"
   "-Druntime-backend=$RUNTIME_BACKEND"
   "-Dmlx-backend=$MLX_BACKEND"
@@ -122,8 +208,16 @@ BUILD_ARGS=(
   "$PREFIX"
 )
 
+if [ -n "$TARGET" ]; then
+  BUILD_ARGS+=("-Dtarget=$TARGET")
+fi
+
 if [ -n "$MLXC_MINI_BRIDGE" ]; then
   BUILD_ARGS+=("-Dmlxc-mini-bridge=$MLXC_MINI_BRIDGE")
+fi
+
+if [ -n "$APPLE_SDK" ]; then
+  BUILD_ARGS+=("-Dapple-sdk=$APPLE_SDK")
 fi
 
 if [ -n "$DUCKDB_PREFIX" ]; then
@@ -133,36 +227,66 @@ elif [ -d "$KIWI_ROOT/.deps/duckdb" ]; then
 fi
 
 mkdir -p "$DIST_DIR"
-rm -f "$DIST_DIR"/kiwilang-*.whl "$DIST_DIR"/kiwilang_jupyter_kernel-*.whl
+rm -f \
+  "$DIST_DIR"/kiwi_array-*.whl \
+  "$DIST_DIR"/kiwi_array_jupyter-*.whl \
+  "$DIST_DIR"/kiwi_array_host-*.whl \
+  "$DIST_DIR"/kiwi_array_cpu-*.whl \
+  "$DIST_DIR"/kiwi_array_metal-*.whl \
+  "$DIST_DIR"/kiwi_array_cuda12-*.whl
 cleanup_python_build_artifacts
 
-if [ "$SKIP_NATIVE_BUILD" != "1" ]; then
+if [ -n "$STAGE_RUNTIME_PACKAGE" ] && [ "$SKIP_NATIVE_BUILD" != "1" ]; then
   rm -rf "$PREFIX"
   (cd "$KIWI_ROOT" && "$ZIG_BIN" "${BUILD_ARGS[@]}")
-else
+elif [ -n "$STAGE_RUNTIME_PACKAGE" ] && [ "$PREFIX_EXPLICIT" != "1" ]; then
   PREFIX="$KIWI_ROOT/zig-out"
 fi
 
-STAGE_ARGS=(
-  "$SCRIPT_DIR/stage_runtime_payload.py"
-  "--prefix"
-  "$PREFIX"
-  "--runtime-backend"
-  "$RUNTIME_BACKEND"
-  "--mlx-prefix"
-  "$MLX_PREFIX"
-)
+if [ -n "$STAGE_RUNTIME_PACKAGE" ]; then
+  STAGE_ARGS=(
+    "$SCRIPT_DIR/stage_runtime_payload.py"
+    "--prefix"
+    "$PREFIX"
+    "--runtime-backend"
+    "$RUNTIME_BACKEND"
+    "--runtime-package"
+    "$STAGE_RUNTIME_PACKAGE"
+    "--mlx-prefix"
+    "$MLX_PREFIX"
+  )
 
-if [ -n "$DUCKDB_PREFIX" ]; then
-  STAGE_ARGS+=("--duckdb-prefix" "$DUCKDB_PREFIX")
-fi
-if [ "$ALLOW_MISSING_DUCKDB" = "1" ]; then
-  STAGE_ARGS+=("--allow-missing-duckdb")
+  if [ -n "$DUCKDB_PREFIX" ]; then
+    STAGE_ARGS+=("--duckdb-prefix" "$DUCKDB_PREFIX")
+  fi
+  if [ "$ALLOW_MISSING_DUCKDB" = "1" ]; then
+    STAGE_ARGS+=("--allow-missing-duckdb")
+  fi
+
+  "$UV_BIN" run --python 3.11 python "${STAGE_ARGS[@]}"
 fi
 
-"$UV_BIN" run --python 3.11 python "${STAGE_ARGS[@]}"
-"$UV_BIN" build --wheel --out-dir "$DIST_DIR" "$RUNTIME_DIR"
-if [ "$BUILD_JUPYTER" != "0" ]; then
+if [ "$BUILD_CORE" != "0" ]; then
+  "$UV_BIN" build --wheel --out-dir "$DIST_DIR" "$CORE_DIR"
+fi
+if [ "$BUILD_HOST" != "0" ]; then
+  "$UV_BIN" build --wheel --out-dir "$DIST_DIR" "$HOST_DIR"
+fi
+if [ "$BUILD_CPU" != "0" ]; then
+  "$UV_BIN" build --wheel --out-dir "$DIST_DIR" "$CPU_DIR"
+fi
+if [ "$BUILD_METAL" != "0" ]; then
+  "$UV_BIN" build --wheel --out-dir "$DIST_DIR" "$METAL_DIR"
+fi
+if [ "$BUILD_CUDA12" != "0" ]; then
+  "$UV_BIN" build --wheel --out-dir "$DIST_DIR" "$CUDA12_DIR"
+fi
+if [ "$BUILD_JUPYTER" != "0" ] && [ "$BUILD_CORE" != "0" ]; then
+  if [ ! -f "$JUPYTER_DIR/pyproject.toml" ]; then
+    echo "kiwi-array-jupyter source not found: $JUPYTER_DIR" >&2
+    echo "set KIWI_ARRAY_WHEEL_JUPYTER_DIR or KIWI_ARRAY_WHEEL_BUILD_JUPYTER=0" >&2
+    exit 1
+  fi
   "$UV_BIN" build --wheel --out-dir "$DIST_DIR" "$JUPYTER_DIR"
 fi
 

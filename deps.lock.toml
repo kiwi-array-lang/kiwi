@@ -1,10 +1,17 @@
 [repos.mlx]
 url = "https://github.com/ml-explore/mlx.git"
-rev = "ce45c52505c8158ea48d2a54e8caae05efd86bfe"
+rev = "68cf2fddd8de5edd8ab3d926391772b2e2cedad8"
 patches = [
+  "deps/patches/mlx/0002-kiwi-runtime-kernels.patch",
   "deps/patches/mlx/0003-space-safe-compiled-preamble.patch",
+  "deps/patches/mlx/0005-cuda-build-compat.patch",
+  "deps/patches/mlx/0006-cuda-kiwi-runtime-subset.patch",
+  "deps/patches/mlx/0007-cuda-worker-idle-wait.patch",
 ]
 
 [repos.mlx_c]
 url = "https://github.com/ml-explore/mlx-c.git"
 rev = "0726ca922fc902c4c61ef9c27d94132be418e945"
+patches = [
+  "deps/patches/mlx-c/0001-gate-bfloat16-on-arm-feature.patch",
+]

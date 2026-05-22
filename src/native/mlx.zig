@@ -216,6 +216,10 @@ pub const Array = struct {
         return .{ .handle = c.mlx_array_new_float32(value) };
     }
 
+    pub fn fromFloat64(value: f64) Array {
+        return .{ .handle = c.mlx_array_new_float64(value) };
+    }
+
     pub fn fromBoolSlice(data: []const bool, dims: []const i32) Array {
         return .{ .handle = c.mlx_array_new_data(data.ptr, dims.ptr, @intCast(dims.len), c.MLX_BOOL) };
     }
@@ -242,8 +246,16 @@ pub const Array = struct {
         return fromSliceChecked(data.ptr, dims, c.MLX_INT32);
     }
 
+    pub fn fromInt64SliceChecked(data: []const i64, dims: []const i32) Error!Array {
+        return fromSliceChecked(data.ptr, dims, c.MLX_INT64);
+    }
+
     pub fn fromFloatSliceChecked(data: []const f32, dims: []const i32) Error!Array {
         return fromSliceChecked(data.ptr, dims, c.MLX_FLOAT32);
+    }
+
+    pub fn fromFloat64SliceChecked(data: []const f64, dims: []const i32) Error!Array {
+        return fromSliceChecked(data.ptr, dims, c.MLX_FLOAT64);
     }
 
     pub fn fromBfloat16BitsSliceChecked(data: []const u16, dims: []const i32) Error!Array {
@@ -339,6 +351,14 @@ pub const Array = struct {
         return self.readSlice(allocator, i32, c.mlx_array_data_int32);
     }
 
+    pub fn readUInt32s(self: Array, allocator: std.mem.Allocator) (Error || std.mem.Allocator.Error)![]u32 {
+        return self.readSlice(allocator, u32, c.mlx_array_data_uint32);
+    }
+
+    pub fn readInt64s(self: Array, allocator: std.mem.Allocator) (Error || std.mem.Allocator.Error)![]i64 {
+        return self.readSlice(allocator, i64, c.mlx_array_data_int64);
+    }
+
     pub fn readFloats(self: Array, allocator: std.mem.Allocator) (Error || std.mem.Allocator.Error)![]f32 {
         return switch (self.dtype()) {
             c.MLX_FLOAT32 => self.readSlice(allocator, f32, c.mlx_array_data_float32),
@@ -347,6 +367,13 @@ pub const Array = struct {
                 defer casted.deinit();
                 break :blk casted.readSlice(allocator, f32, c.mlx_array_data_float32);
             },
+            else => error.UnsupportedType,
+        };
+    }
+
+    pub fn readFloat64s(self: Array, allocator: std.mem.Allocator) (Error || std.mem.Allocator.Error)![]f64 {
+        return switch (self.dtype()) {
+            c.MLX_FLOAT64 => self.readSlice(allocator, f64, c.mlx_array_data_float64),
             else => error.UnsupportedType,
         };
     }

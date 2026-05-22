@@ -38,6 +38,7 @@ const wasm_base_export_symbols = &.{
     "kiwi_last_display_mime_len",
     "kiwi_last_display_data_ptr",
     "kiwi_last_display_data_len",
+    "kiwi_syntax_tokenize",
 };
 
 const wasm_webgpu_export_symbols = &.{
@@ -66,6 +67,7 @@ const wasm_webgpu_export_symbols = &.{
     "kiwi_last_display_data_ptr",
     "kiwi_last_display_data_len",
     "kiwi_force_backend_surface",
+    "kiwi_syntax_tokenize",
 };
 
 fn addWasmBuildOptions(
@@ -139,8 +141,62 @@ fn addRelocatableMlxRPath(root_module: *std.Build.Module, target: std.Build.Reso
     }
 }
 
+fn isAppleTarget(target: std.Build.ResolvedTarget) bool {
+    return switch (target.result.os.tag) {
+        .macos, .ios, .watchos, .tvos, .visionos => true,
+        else => false,
+    };
+}
+
+fn addAppleFrameworkPath(step: anytype, apple_sdk: ?[]const u8) void {
+    if (apple_sdk) |sdk| {
+        step.root_module.addFrameworkPath(.{
+            .cwd_relative = step.step.owner.fmt("{s}/System/Library/Frameworks", .{sdk}),
+        });
+    }
+}
+
+fn linkAppleAccelerate(step: anytype, target: std.Build.ResolvedTarget, apple_sdk: ?[]const u8) void {
+    if (!isAppleTarget(target)) return;
+    addAppleFrameworkPath(step, apple_sdk);
+    step.root_module.linkFramework("Accelerate", .{});
+}
+
 fn mlxRuntimeLibDir(b: *std.Build, mlx_prefix: []const u8) []const u8 {
     return b.fmt("{s}/lib", .{mlx_prefix});
+}
+
+fn mlxSharedLibraryName(target: std.Build.ResolvedTarget) ?[]const u8 {
+    return switch (target.result.os.tag) {
+        .linux => "libmlx.so",
+        .macos, .ios, .watchos, .tvos, .visionos => "libmlx.dylib",
+        else => null,
+    };
+}
+
+fn installMlxRuntimeFile(b: *std.Build, lib_dir: []const u8, name: []const u8) void {
+    const path = b.fmt("{s}/{s}", .{ lib_dir, name });
+    if (!pathExistsAbsolute(path)) return;
+    b.getInstallStep().dependOn(&b.addInstallLibFile(.{ .cwd_relative = path }, name).step);
+}
+
+fn installExternalMlx(
+    b: *std.Build,
+    runtime_backend: RuntimeBackend,
+    target: std.Build.ResolvedTarget,
+    mlx_prefix: []const u8,
+) void {
+    if (runtime_backend != .mlx) return;
+    const lib_dir = mlxRuntimeLibDir(b, mlx_prefix);
+    const lib_name = mlxSharedLibraryName(target) orelse return;
+    installMlxRuntimeFile(b, lib_dir, lib_name);
+    switch (target.result.os.tag) {
+        .macos, .ios, .watchos, .tvos, .visionos => {
+            installMlxRuntimeFile(b, lib_dir, "libjaccl.dylib");
+            installMlxRuntimeFile(b, lib_dir, "mlx.metallib");
+        },
+        else => {},
+    }
 }
 
 fn configureRunMlxLibraryPath(
@@ -209,6 +265,72 @@ fn addHostOnlyImports(
     root_module.addImport("kiwi_runtime_c", runtime_c);
 }
 
+fn addHostSimdSources(root_module: *std.Build.Module, target: std.Build.ResolvedTarget) void {
+    switch (target.result.cpu.arch) {
+        .aarch64 => root_module.addCSourceFiles(.{
+            .files = &.{
+                "csrc/host_cpu.c",
+                "csrc/host_sum.c",
+                "csrc/host_sum_neon.c",
+                "csrc/host_find.c",
+                "csrc/host_find_neon.c",
+                "csrc/host_compare.c",
+                "csrc/host_compare_neon.c",
+                "csrc/host_dyad.c",
+                "csrc/host_dyad_neon.c",
+                "csrc/host_blas.c",
+                "csrc/host_mask_neon.c",
+                "csrc/string_mask_neon.c",
+            },
+            .flags = &.{ "-std=c11", "-fno-sanitize=undefined" },
+            .language = .c,
+        }),
+        .x86_64 => {
+            root_module.addCSourceFiles(.{
+                .files = &.{
+                    "csrc/host_cpu.c",
+                    "csrc/host_sum.c",
+                    "csrc/host_sum_sse2.c",
+                    "csrc/host_find.c",
+                    "csrc/host_find_sse2.c",
+                    "csrc/host_compare.c",
+                    "csrc/host_compare_sse2.c",
+                    "csrc/host_dyad.c",
+                    "csrc/host_blas.c",
+                },
+                .flags = &.{ "-std=c11", "-fno-sanitize=undefined" },
+                .language = .c,
+            });
+            root_module.addCSourceFiles(.{
+                .files = &.{
+                    "csrc/host_sum_avx2.c",
+                    "csrc/host_find_avx2.c",
+                    "csrc/host_compare_avx2.c",
+                },
+                .flags = &.{ "-std=c11", "-fno-sanitize=undefined", "-mavx2" },
+                .language = .c,
+            });
+            root_module.addCSourceFiles(.{
+                .files = &.{
+                    "csrc/host_compare_sse41.c",
+                },
+                .flags = &.{ "-std=c11", "-fno-sanitize=undefined", "-msse4.1" },
+                .language = .c,
+            });
+            root_module.addCSourceFiles(.{
+                .files = &.{
+                    "csrc/host_sum_avx512.c",
+                    "csrc/host_find_avx512.c",
+                    "csrc/host_compare_avx512.c",
+                },
+                .flags = &.{ "-std=c11", "-fno-sanitize=undefined", "-mavx512f", "-mavx512bw", "-mevex512" },
+                .language = .c,
+            });
+        },
+        else => {},
+    }
+}
+
 fn addRuntimeImports(
     b: *std.Build,
     root_module: *std.Build.Module,
@@ -223,6 +345,7 @@ fn addRuntimeImports(
         .mlx => addNativeMlxImports(b, root_module, target, optimize, mlx_c_include, mlx_prefix, mlxc_mini_bridge),
         .host => addHostOnlyImports(b, root_module, target, optimize),
     }
+    addHostSimdSources(root_module, target);
 }
 
 fn addDuckDbImports(
@@ -299,6 +422,7 @@ fn linkMlxDeps(
     mlx_backend: MlxBackend,
     mlx_linkage: MlxLinkage,
     mlxc_mini_bridge: ?[]const u8,
+    apple_sdk: ?[]const u8,
 ) void {
     if (runtime_backend != .mlx) return;
     const mlx_link_opts: std.Build.Module.LinkSystemLibraryOptions = switch (mlx_linkage) {
@@ -324,8 +448,8 @@ fn linkMlxDeps(
         .linux => step.root_module.linkSystemLibrary("stdc++", .{}),
         else => step.root_module.linkSystemLibrary("c++", .{}),
     }
-    if (target.result.os.tag == .macos) {
-        step.root_module.linkFramework("Accelerate", .{});
+    if (isAppleTarget(target)) {
+        linkAppleAccelerate(step, target, apple_sdk);
         switch (mlx_backend) {
             .metal, .auto => {
                 step.root_module.linkFramework("Metal", .{});
@@ -341,10 +465,12 @@ fn linkHostDeps(
     step: anytype,
     runtime_backend: RuntimeBackend,
     target: std.Build.ResolvedTarget,
+    apple_sdk: ?[]const u8,
 ) void {
     if (target.result.cpu.arch == .wasm32) return;
     if (runtime_backend != .host) return;
     step.root_module.linkSystemLibrary("c", .{});
+    linkAppleAccelerate(step, target, apple_sdk);
 }
 
 pub fn build(b: *std.Build) void {
@@ -387,6 +513,7 @@ pub fn build(b: *std.Build) void {
         ".deps/mlx-c",
     );
     const mlxc_mini_bridge = b.option([]const u8, "mlxc-mini-bridge", "Link an external MLX helper bridge library instead of compiling csrc/mlxc_mini.cpp.");
+    const apple_sdk = b.option([]const u8, "apple-sdk", "Apple SDK root used to locate system frameworks for targeted macOS builds.");
     const duckdb_prefix_option = b.option([]const u8, "duckdb-prefix", "External DuckDB install prefix. If unset, prefer .deps/duckdb when present. When set, prefer an install root that contains include/ and lib/.");
     const default_duckdb_prefix = b.pathFromRoot(".deps/duckdb");
     const duckdb_prefix = if (duckdb_prefix_option) |raw|
@@ -429,10 +556,11 @@ pub fn build(b: *std.Build) void {
         .root_module = module,
     });
     exe.each_lib_rpath = false;
-    linkMlxDeps(exe, runtime_backend, target, mlx_backend, mlx_linkage, mlxc_mini_bridge);
-    linkHostDeps(exe, runtime_backend, target);
+    linkMlxDeps(exe, runtime_backend, target, mlx_backend, mlx_linkage, mlxc_mini_bridge, apple_sdk);
+    linkHostDeps(exe, runtime_backend, target, apple_sdk);
     linkDuckDb(exe, target, duckdb_prefix, !public_cli);
     b.installArtifact(exe);
+    installExternalMlx(b, runtime_backend, target, mlx_prefix);
     installExternalDuckDb(b, target, duckdb_prefix);
 
     const run_cmd = b.addRunArtifact(exe);
@@ -458,8 +586,8 @@ pub fn build(b: *std.Build) void {
             .root_module = bridge_module,
         });
         bridge_shared.each_lib_rpath = false;
-        linkMlxDeps(bridge_shared, runtime_backend, target, mlx_backend, mlx_linkage, mlxc_mini_bridge);
-        linkHostDeps(bridge_shared, runtime_backend, target);
+        linkMlxDeps(bridge_shared, runtime_backend, target, mlx_backend, mlx_linkage, mlxc_mini_bridge, apple_sdk);
+        linkHostDeps(bridge_shared, runtime_backend, target, apple_sdk);
         linkDuckDb(bridge_shared, target, duckdb_prefix, !public_cli);
         b.installArtifact(bridge_shared);
         bridge_shared.installHeader(b.path("bridge/include/kiwi_bridge.h"), "kiwi_bridge.h");
@@ -488,8 +616,8 @@ pub fn build(b: *std.Build) void {
             .root_module = test_module,
         });
         tests.each_lib_rpath = false;
-        linkMlxDeps(tests, runtime_backend, target, mlx_backend, mlx_linkage, mlxc_mini_bridge);
-        linkHostDeps(tests, runtime_backend, target);
+        linkMlxDeps(tests, runtime_backend, target, mlx_backend, mlx_linkage, mlxc_mini_bridge, apple_sdk);
+        linkHostDeps(tests, runtime_backend, target, apple_sdk);
         linkDuckDb(tests, target, duckdb_prefix, !public_cli);
         const test_run = b.addRunArtifact(tests);
         configureRunLibraryPath(test_run, runtime_backend, target, mlx_prefix);

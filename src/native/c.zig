@@ -79,6 +79,7 @@ pub const c = struct {
     pub extern fn mlx_array_new_bool(val: bool) mlx_array;
     pub extern fn mlx_array_new_int(val: c_int) mlx_array;
     pub extern fn mlx_array_new_float32(val: f32) mlx_array;
+    pub extern fn mlx_array_new_float64(val: f64) mlx_array;
     pub extern fn mlx_array_new_data(
         data: ?*const anyopaque,
         shape: [*]const c_int,
@@ -104,8 +105,11 @@ pub const c = struct {
     pub extern fn mlx_array_item_float32(out: *f32, arr: mlx_array) c_int;
     pub extern fn mlx_array_item_float64(out: *f64, arr: mlx_array) c_int;
     pub extern fn mlx_array_data_bool(arr: mlx_array) ?[*]const bool;
+    pub extern fn mlx_array_data_uint32(arr: mlx_array) ?[*]const u32;
     pub extern fn mlx_array_data_int32(arr: mlx_array) ?[*]const i32;
+    pub extern fn mlx_array_data_int64(arr: mlx_array) ?[*]const i64;
     pub extern fn mlx_array_data_float32(arr: mlx_array) ?[*]const f32;
+    pub extern fn mlx_array_data_float64(arr: mlx_array) ?[*]const f64;
 
     pub extern fn mlx_device_new() mlx_device;
     pub extern fn mlx_device_new_type(device_type: mlx_device_type, index: c_int) mlx_device;

@@ -136,6 +136,11 @@ const placeholder = struct {
             return initArray(c.MLX_FLOAT32, &.{});
         }
 
+        pub fn fromFloat64(value: f64) Self.Array {
+            _ = value;
+            return initArray(c.MLX_FLOAT64, &.{});
+        }
+
         pub fn fromBoolSlice(data: []const bool, dims: []const i32) Self.Array {
             _ = data;
             return initArray(c.MLX_BOOL, dims);
@@ -151,6 +156,11 @@ const placeholder = struct {
             return initArray(c.MLX_FLOAT32, dims);
         }
 
+        pub fn fromFloat64Slice(data: []const f64, dims: []const i32) Self.Array {
+            _ = data;
+            return initArray(c.MLX_FLOAT64, dims);
+        }
+
         pub fn fromBoolSliceChecked(data: []const bool, dims: []const i32) (Self.Error || std.mem.Allocator.Error)!Self.Array {
             _ = data;
             return initArray(c.MLX_BOOL, dims);
@@ -161,9 +171,29 @@ const placeholder = struct {
             return initArray(c.MLX_INT32, dims);
         }
 
+        pub fn fromInt64SliceChecked(data: []const i64, dims: []const i32) (Self.Error || std.mem.Allocator.Error)!Self.Array {
+            _ = data;
+            return initArray(c.MLX_INT64, dims);
+        }
+
         pub fn fromFloatSliceChecked(data: []const f32, dims: []const i32) (Self.Error || std.mem.Allocator.Error)!Self.Array {
             _ = data;
             return initArray(c.MLX_FLOAT32, dims);
+        }
+
+        pub fn fromFloat64SliceChecked(data: []const f64, dims: []const i32) (Self.Error || std.mem.Allocator.Error)!Self.Array {
+            _ = data;
+            return initArray(c.MLX_FLOAT64, dims);
+        }
+
+        pub fn fromBfloat16BitsSliceChecked(data: []const u16, dims: []const i32) (Self.Error || std.mem.Allocator.Error)!Self.Array {
+            _ = data;
+            return initArray(c.MLX_BFLOAT16, dims);
+        }
+
+        pub fn fromBytesChecked(data: []const u8, dims: []const i32, elem_dtype: c.mlx_dtype) (Self.Error || std.mem.Allocator.Error)!Self.Array {
+            _ = data;
+            return initArray(elem_dtype, dims);
         }
 
         pub fn ndim(self: Self.Array) usize {
@@ -219,7 +249,25 @@ const placeholder = struct {
             return error.MlxFailure;
         }
 
+        pub fn readUInt32s(self: Self.Array, allocator: std.mem.Allocator) (Self.Error || std.mem.Allocator.Error)![]u32 {
+            _ = self;
+            _ = allocator;
+            return error.MlxFailure;
+        }
+
+        pub fn readInt64s(self: Self.Array, allocator: std.mem.Allocator) (Self.Error || std.mem.Allocator.Error)![]i64 {
+            _ = self;
+            _ = allocator;
+            return error.MlxFailure;
+        }
+
         pub fn readFloats(self: Self.Array, allocator: std.mem.Allocator) (Self.Error || std.mem.Allocator.Error)![]f32 {
+            _ = self;
+            _ = allocator;
+            return error.MlxFailure;
+        }
+
+        pub fn readFloat64s(self: Self.Array, allocator: std.mem.Allocator) (Self.Error || std.mem.Allocator.Error)![]f64 {
             _ = self;
             _ = allocator;
             return error.MlxFailure;

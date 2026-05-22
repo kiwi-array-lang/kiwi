@@ -11,31 +11,35 @@ fi
 source "$WORKSPACE_ROOT/scripts/kiwi_cuda_defaults.sh"
 
 PLATFORM="${PLATFORM:-linux/amd64}"
-BASE_IMAGE="${KIWILANG_COLAB_BASE_IMAGE:-$KIWI_CUDA_12_8_BASE_IMAGE}"
-IMAGE_TAG="${KIWILANG_COLAB_IMAGE_TAG:-$KIWI_HOSTED_NOTEBOOK_CUDA_IMAGE_TAG}"
+BASE_IMAGE="${KIWI_ARRAY_COLAB_BASE_IMAGE:-$KIWI_CUDA_12_8_BASE_IMAGE}"
+IMAGE_TAG="${KIWI_ARRAY_COLAB_IMAGE_TAG:-$KIWI_HOSTED_NOTEBOOK_CUDA_IMAGE_TAG}"
 MLX_ARCH="${MLX_ARCH:-x86_64}"
-MLX_SOURCE_DEPS_DIR="${MLX_SOURCE_DEPS_DIR:-$WORKSPACE_ROOT/.artifacts/mlx/linux-${MLX_ARCH}-cuda-colab128-source-deps}"
-MLX_INSTALL_PREFIX="${MLX_INSTALL_PREFIX:-$WORKSPACE_ROOT/.artifacts/mlx/linux-${MLX_ARCH}-cuda-colab128-install}"
-MLX_BUILD_DIR="${MLX_BUILD_DIR:-$WORKSPACE_ROOT/.artifacts/mlx/linux-${MLX_ARCH}-cuda-colab128-build}"
-DUCKDB_DEPS_DIR="${DUCKDB_DEPS_DIR:-$WORKSPACE_ROOT/.artifacts/duckdb/linux-${MLX_ARCH}-cuda-colab128}"
+CACHE_LABEL="${KIWI_ARRAY_COLAB_CACHE_LABEL:-cuda-colab128}"
+MLX_SOURCE_DEPS_DIR="${MLX_SOURCE_DEPS_DIR:-$WORKSPACE_ROOT/.artifacts/mlx/linux-${MLX_ARCH}-${CACHE_LABEL}-source-deps}"
+MLX_INSTALL_PREFIX="${MLX_INSTALL_PREFIX:-$WORKSPACE_ROOT/.artifacts/mlx/linux-${MLX_ARCH}-${CACHE_LABEL}-install}"
+MLX_BUILD_DIR="${MLX_BUILD_DIR:-$WORKSPACE_ROOT/.artifacts/mlx/linux-${MLX_ARCH}-${CACHE_LABEL}-build}"
+DUCKDB_DEPS_DIR="${DUCKDB_DEPS_DIR:-$WORKSPACE_ROOT/.artifacts/duckdb/linux-${MLX_ARCH}-${CACHE_LABEL}}"
 MLX_LOCK_FILE="${MLX_LOCK_FILE:-}"
-WHEEL_DIST_DIR="${KIWILANG_WHEEL_DIST_DIR:-$KIWI_ROOT/out/python-wheels/colab-cuda128}"
-REPAIRED_DIST_DIR="${KIWILANG_REPAIRED_WHEEL_DIST_DIR:-$KIWI_ROOT/out/python-wheels/colab-cuda128-repaired}"
+WHEEL_DIST_DIR="${KIWI_ARRAY_WHEEL_DIST_DIR:-$KIWI_ROOT/out/python-wheels/colab-cuda128}"
+REPAIRED_DIST_DIR="${KIWI_ARRAY_REPAIRED_WHEEL_DIST_DIR:-$KIWI_ROOT/out/python-wheels/colab-cuda128-repaired}"
 MLXC_MINI_BRIDGE_LIB="${MLXC_MINI_BRIDGE_LIB:-kiwi_mlx_bridge}"
 CUDA_ARCHITECTURES="${MLX_CUDA_ARCHITECTURES:-$KIWI_HOSTED_NOTEBOOK_CUDA_ARCHITECTURES}"
+CUDA_KERNEL_PROFILE="${KIWI_MLX_CUDA_KERNEL_PROFILE:-${MLX_CUDA_KERNEL_PROFILE:-$KIWI_HOSTED_NOTEBOOK_CUDA_KERNEL_PROFILE}}"
 BUILD_PARALLEL_VALUE="${BUILD_PARALLEL:-$KIWI_HOSTED_NOTEBOOK_CUDA_BUILD_PARALLEL}"
 AUDITWHEEL_PLAT="${AUDITWHEEL_PLAT:-$KIWI_HOSTED_NOTEBOOK_CUDA_AUDITWHEEL_PLAT}"
-REPAIR_WHEEL="${KIWILANG_REPAIR_WHEEL:-$KIWI_HOSTED_NOTEBOOK_CUDA_REPAIR_WHEEL}"
-ALLOW_REPAIR_FAILURE="${KIWILANG_ALLOW_REPAIR_FAILURE:-$KIWI_HOSTED_NOTEBOOK_CUDA_ALLOW_REPAIR_FAILURE}"
+DEFAULT_AUDITWHEEL_EXCLUDES="libcuda.so.1 libcublasLt.so.12 libcudnn.so.9 libcudnn_adv.so.9 libcudnn_cnn.so.9 libcudnn_engines_precompiled.so.9 libcudnn_engines_runtime_compiled.so.9 libcudnn_graph.so.9 libcudnn_heuristic.so.9 libcudnn_ops.so.9 libnccl.so.2 libnvrtc.so.12"
+AUDITWHEEL_EXCLUDES="${KIWI_ARRAY_AUDITWHEEL_EXCLUDES:-$DEFAULT_AUDITWHEEL_EXCLUDES}"
+REPAIR_WHEEL="${KIWI_ARRAY_REPAIR_WHEEL:-$KIWI_HOSTED_NOTEBOOK_CUDA_REPAIR_WHEEL}"
+ALLOW_REPAIR_FAILURE="${KIWI_ARRAY_ALLOW_REPAIR_FAILURE:-$KIWI_HOSTED_NOTEBOOK_CUDA_ALLOW_REPAIR_FAILURE}"
 
 require_single_wheel() {
   local dir="$1"
   shopt -s nullglob
-  local wheels=("$dir"/kiwilang-*.whl)
+  local wheels=("$dir"/kiwi_array_cuda12-*.whl)
   shopt -u nullglob
 
   if (( ${#wheels[@]} != 1 )); then
-    printf 'expected one kiwilang wheel in %s, found %d\n' "$dir" "${#wheels[@]}" >&2
+    printf 'expected one kiwi-array-cuda12 wheel in %s, found %d\n' "$dir" "${#wheels[@]}" >&2
     exit 1
   fi
 
@@ -52,6 +56,30 @@ sha256_file() {
     printf 'unable to locate shasum or sha256sum\n' >&2
     exit 1
   fi
+}
+
+sha256_stream() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | awk '{print $1}'
+  else
+    printf 'unable to locate shasum or sha256sum\n' >&2
+    exit 1
+  fi
+}
+
+source_deps_cache_key() {
+  {
+    if [[ -n "$MLX_LOCK_FILE" && -f "$MLX_LOCK_FILE" ]]; then
+      printf 'lock:%s:%s\n' "$MLX_LOCK_FILE" "$(sha256_file "$MLX_LOCK_FILE")"
+    fi
+    if [[ -d "$KIWI_ROOT/deps/patches/mlx" ]]; then
+      find "$KIWI_ROOT/deps/patches/mlx" -type f -name '*.patch' -print | sort | while IFS= read -r patch; do
+        printf 'patch:%s:%s\n' "${patch#$KIWI_ROOT/}" "$(sha256_file "$patch")"
+      done
+    fi
+  } | sha256_stream
 }
 
 json_escape() {
@@ -106,11 +134,11 @@ verify_wheel_payload() {
   local entry
   local listing
   local required_entries=(
-    "kiwilang/notebook.py"
-    "kiwilang/lib/libduckdb.so"
-    "kiwilang/lib/libkiwi_mlx_bridge.so"
-    "kiwilang/lib/libmlx.so"
-    "kiwilang/native/libkiwi_bridge.so"
+    "kiwi_array_cuda12/lib/libduckdb.so"
+    "kiwi_array_cuda12/lib/libkiwi_mlx_bridge.so"
+    "kiwi_array_cuda12/lib/libmlx.so"
+    "kiwi_array_cuda12/bin/kiwi"
+    "kiwi_array_cuda12/native/libkiwi_bridge.so"
   )
 
   listing="$(mktemp)"
@@ -129,7 +157,7 @@ verify_wheel_payload() {
 
 write_build_manifest() {
   local wheel="$1"
-  local manifest="$WHEEL_DIST_DIR/kiwilang-hosted-notebook-cuda-build.json"
+  local manifest="$WHEEL_DIST_DIR/kiwi-array-cuda12-hosted-notebook-cuda-build.json"
   local source_commit="unknown"
   local source_state="unknown"
 
@@ -152,9 +180,11 @@ write_build_manifest() {
     printf '  "image_tag": "%s",\n' "$(json_escape "$IMAGE_TAG")"
     printf '  "mlx_backend": "cuda",\n'
     printf '  "mlx_cuda_architectures": "%s",\n' "$(json_escape "$CUDA_ARCHITECTURES")"
+    printf '  "mlx_cuda_kernel_profile": "%s",\n' "$(json_escape "$CUDA_KERNEL_PROFILE")"
     printf '  "build_parallel": %s,\n' "$BUILD_PARALLEL_VALUE"
     printf '  "repair_wheel": "%s",\n' "$(json_escape "$REPAIR_WHEEL")"
     printf '  "auditwheel_plat": "%s",\n' "$(json_escape "$AUDITWHEEL_PLAT")"
+    printf '  "auditwheel_excludes": "%s",\n' "$(json_escape "$AUDITWHEEL_EXCLUDES")"
     printf '  "source_commit": "%s",\n' "$(json_escape "$source_commit")"
     printf '  "source_state": "%s",\n' "$(json_escape "$source_state")"
     printf '  "generated_at_utc": "%s"\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -189,6 +219,8 @@ elif [[ -z "$MLX_LOCK_FILE" && -f "$KIWI_ROOT/deps.lock.toml" ]]; then
   MLX_LOCK_FILE="$KIWI_ROOT/deps.lock.toml"
 fi
 
+SOURCE_DEPS_CACHE_KEY="$(source_deps_cache_key)"
+
 docker build \
   --platform "$PLATFORM" \
   --build-arg BASE_IMAGE="$BASE_IMAGE" \
@@ -198,7 +230,7 @@ docker build \
 
 mkdir -p "$WHEEL_DIST_DIR" "$REPAIRED_DIST_DIR"
 if [[ "$REPAIR_WHEEL" == "0" ]]; then
-  rm -f "$REPAIRED_DIST_DIR"/kiwilang-*.whl
+  rm -f "$REPAIRED_DIST_DIR"/kiwi_array_cuda12-*.whl
 fi
 prepare_docker_volume_args
 
@@ -212,63 +244,81 @@ docker run \
   -e DUCKDB_DEPS_DIR="$DUCKDB_DEPS_DIR" \
   -e KIWI_ZIG_REAL=/usr/local/bin/zig \
   -e KIWI_DUCKDB_PLATFORM=linux-x86_64 \
-  -e KIWILANG_ALLOW_REPAIR_FAILURE="$ALLOW_REPAIR_FAILURE" \
-  -e KIWILANG_REPAIR_WHEEL="$REPAIR_WHEEL" \
-  -e KIWILANG_REPAIRED_WHEEL_DIST_DIR="$REPAIRED_DIST_DIR" \
-  -e KIWILANG_WHEEL_BUILD_JUPYTER=0 \
-  -e KIWILANG_WHEEL_DIST_DIR="$WHEEL_DIST_DIR" \
-  -e KIWILANG_WHEEL_MLX_BACKEND=cuda \
-  -e KIWILANG_WHEEL_MLXC_MINI_BRIDGE="$MLXC_MINI_BRIDGE_LIB" \
-  -e KIWILANG_WHEEL_RUNTIME_BACKEND=mlx \
+  -e KIWI_ARRAY_ALLOW_REPAIR_FAILURE="$ALLOW_REPAIR_FAILURE" \
+  -e KIWI_ARRAY_REPAIR_WHEEL="$REPAIR_WHEEL" \
+  -e KIWI_ARRAY_REPAIRED_WHEEL_DIST_DIR="$REPAIRED_DIST_DIR" \
+  -e KIWI_ARRAY_WHEEL_BUILD_JUPYTER=0 \
+  -e KIWI_ARRAY_WHEEL_DIST_DIR="$WHEEL_DIST_DIR" \
+  -e KIWI_ARRAY_WHEEL_MLX_BACKEND=cuda \
+  -e KIWI_ARRAY_WHEEL_MLXC_MINI_BRIDGE="$MLXC_MINI_BRIDGE_LIB" \
+  -e KIWI_ARRAY_WHEEL_RUNTIME_BACKEND=mlx \
+  -e KIWI_ARRAY_WHEEL_RUNTIME_PACKAGE=cuda12 \
   -e KIWI_SOURCE_ROOT="$KIWI_ROOT" \
   -e KIWI_DUCKDB_PREFIX="$DUCKDB_DEPS_DIR/duckdb" \
   -e KIWI_MLX_C_INCLUDE="$MLX_SOURCE_DEPS_DIR/mlx-c" \
   -e KIWI_MLX_SOURCE_DEPS_DIR="$MLX_SOURCE_DEPS_DIR" \
   -e KIWI_MLX_PREFIX="$MLX_INSTALL_PREFIX" \
+  -e KIWI_MLX_SOURCE_DEPS_CACHE_KEY="$SOURCE_DEPS_CACHE_KEY" \
   -e KIWI_PUBLIC_LOCK_FILE="$MLX_LOCK_FILE" \
+  -e KIWI_CUDA_DISABLE_SM80_QMM="$KIWI_CUDA_DISABLE_SM80_QMM" \
+  -e KIWI_MLX_CUDA_KERNEL_PROFILE="$CUDA_KERNEL_PROFILE" \
   -e MLX_BACKEND=cuda \
   -e MLX_BUILD_DIR="$MLX_BUILD_DIR" \
   -e MLX_C_INCLUDE_ROOT="$MLX_SOURCE_DEPS_DIR/mlx-c" \
   -e MLX_CUDA_ARCHITECTURES="$CUDA_ARCHITECTURES" \
+  -e MLX_CUDA_KERNEL_PROFILE="$CUDA_KERNEL_PROFILE" \
   -e MLX_INSTALL_PREFIX="$MLX_INSTALL_PREFIX" \
   -e MLX_SRC_DIR="$MLX_SOURCE_DEPS_DIR/src/mlx" \
   -e MLXC_MINI_BRIDGE_LIB="$MLXC_MINI_BRIDGE_LIB" \
   -e AUDITWHEEL_PLAT="$AUDITWHEEL_PLAT" \
-  -e UV_PROJECT_ENVIRONMENT=/tmp/kiwilang-colab-uv \
+  -e AUDITWHEEL_EXCLUDES="$AUDITWHEEL_EXCLUDES" \
+  -e UV_PROJECT_ENVIRONMENT=/tmp/kiwi-array-colab-uv \
   "${DOCKER_VOLUME_ARGS[@]}" \
   -w "$WORKSPACE_ROOT" \
   "$IMAGE_TAG" \
   bash -lc '
     set -euo pipefail
     export LD_LIBRARY_PATH="$MLX_INSTALL_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-    if [[ ! -d "$MLX_SRC_DIR" || ! -d "$MLX_C_INCLUDE_ROOT/mlx" ]]; then
+    source_cache_stamp="$KIWI_MLX_SOURCE_DEPS_DIR/.kiwi-source-cache-key"
+    current_source_cache_key=""
+    if [[ -f "$source_cache_stamp" ]]; then
+      current_source_cache_key="$(cat "$source_cache_stamp")"
+    fi
+    if [[ ! -d "$MLX_SRC_DIR" || ! -d "$MLX_C_INCLUDE_ROOT/mlx" || "$current_source_cache_key" != "$KIWI_MLX_SOURCE_DEPS_CACHE_KEY" ]]; then
       bootstrap_args=(--fetch-only)
       if [[ -n "$KIWI_PUBLIC_LOCK_FILE" ]]; then
         bootstrap_args+=(--lock-file "$KIWI_PUBLIC_LOCK_FILE")
       fi
       KIWI_DEPS_DIR="$KIWI_MLX_SOURCE_DEPS_DIR" \
         bash "$KIWI_SOURCE_ROOT/scripts/bootstrap_deps.sh" "${bootstrap_args[@]}"
+      printf "%s\n" "$KIWI_MLX_SOURCE_DEPS_CACHE_KEY" > "$source_cache_stamp"
     fi
     scripts/build_linux_mlx.sh
     bash scripts/build_linux_mlxc_mini_bridge.sh "$MLX_INSTALL_PREFIX" "$MLXC_MINI_BRIDGE_LIB"
     KIWI_DEPS_DIR="$DUCKDB_DEPS_DIR" bash "$KIWI_SOURCE_ROOT/scripts/bootstrap_duckdb.sh"
     cd "$KIWI_SOURCE_ROOT"
     packaging/wheels/build_wheels.sh
-    if [[ "$KIWILANG_REPAIR_WHEEL" != "0" ]]; then
+    if [[ "$KIWI_ARRAY_REPAIR_WHEEL" != "0" ]]; then
       shopt -s nullglob
-      wheels=("$KIWILANG_WHEEL_DIST_DIR"/kiwilang-*.whl)
+      wheels=("$KIWI_ARRAY_WHEEL_DIST_DIR"/kiwi_array_cuda12-*.whl)
       if (( ${#wheels[@]} != 1 )); then
-        printf "expected one kiwilang wheel, found %d\n" "${#wheels[@]}" >&2
+        printf "expected one kiwi-array-cuda12 wheel, found %d\n" "${#wheels[@]}" >&2
         exit 1
       fi
       repair_tmp="$(mktemp -d)"
-      rm -f "$KIWILANG_REPAIRED_WHEEL_DIST_DIR"/kiwilang-*.whl
-      if uvx --from auditwheel auditwheel repair --plat "$AUDITWHEEL_PLAT" -w "$repair_tmp" "${wheels[0]}"; then
-        mv "$repair_tmp"/kiwilang-*.whl "$KIWILANG_REPAIRED_WHEEL_DIST_DIR"/
+      rm -f "$KIWI_ARRAY_REPAIRED_WHEEL_DIST_DIR"/kiwi_array_cuda12-*.whl
+      repair_args=(--plat "$AUDITWHEEL_PLAT" -w "$repair_tmp")
+      if [[ -n "$AUDITWHEEL_EXCLUDES" ]]; then
+        for exclude in $AUDITWHEEL_EXCLUDES; do
+          repair_args+=(--exclude "$exclude")
+        done
+      fi
+      if uvx --from auditwheel auditwheel repair "${repair_args[@]}" "${wheels[0]}"; then
+        mv "$repair_tmp"/kiwi_array_cuda12-*.whl "$KIWI_ARRAY_REPAIRED_WHEEL_DIST_DIR"/
         rmdir "$repair_tmp"
       else
         rm -rf "$repair_tmp"
-        if [[ "$KIWILANG_ALLOW_REPAIR_FAILURE" == "1" ]]; then
+        if [[ "$KIWI_ARRAY_ALLOW_REPAIR_FAILURE" == "1" ]]; then
           printf "auditwheel repair failed; direct Colab test wheel remains at %s\n" "${wheels[0]}" >&2
         else
           exit 1

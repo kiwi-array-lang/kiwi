@@ -3,16 +3,25 @@ requires = ["setuptools>=82", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "kiwilang"
-version = "0.2.33"
-description = "Python bridge and native runtime payload for Kiwi."
+name = "kiwi-array"
+version = "0.2.50"
+description = "Python loader, IPython magics, backend discovery, and CLI launcher for Kiwi."
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+  "kiwi-array-host==0.2.50",
+]
 
 [project.optional-dependencies]
+host = ["kiwi-array-host==0.2.50"]
+cpu = ["kiwi-array-cpu==0.2.50"]
+metal = ["kiwi-array-metal==0.2.50"]
+cuda12 = ["kiwi-array-cuda12==0.2.50"]
 notebook = ["ipython>=8"]
-jupyter = ["kiwilang-jupyter-kernel==0.2.33"]
+jupyter = ["kiwi-array-jupyter==0.2.50"]
+
+[project.scripts]
+kiwi = "kiwi_array.cli:main"
 
 [dependency-groups]
 dev = [
@@ -20,11 +29,14 @@ dev = [
   "pytest>=8.3",
 ]
 
+[tool.uv.sources]
+kiwi-array-host = { path = "../host", editable = true }
+kiwi-array-cpu = { path = "../cpu", editable = true }
+kiwi-array-metal = { path = "../metal", editable = true }
+kiwi-array-cuda12 = { path = "../cuda12", editable = true }
+
 [tool.setuptools.package-dir]
 "" = "src"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-
-[tool.setuptools.package-data]
-kiwilang = ["native/*", "lib/*", "licenses/*"]

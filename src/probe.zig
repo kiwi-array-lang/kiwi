@@ -56,6 +56,10 @@ pub const ProbeResult = struct {
     apply_scan_generic_count: usize,
     apply_each_right_generic_count: usize,
     apply_each_left_generic_count: usize,
+    apply_each_prior_fast_bit_count: usize,
+    apply_each_prior_fast_bit_element_count: usize,
+    apply_each_prior_generic_count: usize,
+    apply_each_prior_generic_element_count: usize,
     apply_each_right_fast_string_contains_count: usize,
     apply_each_fast_unary_lifted_count: usize,
     apply_each_fast_dense_count: usize,
@@ -290,6 +294,10 @@ pub fn collectProbeResult(session: *runtime.Session, name: []const u8, err_name:
         .apply_scan_generic_count = session.debugApplyScanGenericCount(),
         .apply_each_right_generic_count = session.debugApplyEachRightGenericCount(),
         .apply_each_left_generic_count = session.debugApplyEachLeftGenericCount(),
+        .apply_each_prior_fast_bit_count = session.debugApplyEachPriorFastBitCount(),
+        .apply_each_prior_fast_bit_element_count = session.debugApplyEachPriorFastBitElementCount(),
+        .apply_each_prior_generic_count = session.debugApplyEachPriorGenericCount(),
+        .apply_each_prior_generic_element_count = session.debugApplyEachPriorGenericElementCount(),
         .apply_each_right_fast_string_contains_count = session.debugApplyEachRightFastStringContainsCount(),
         .apply_each_fast_unary_lifted_count = session.debugApplyEachFastUnaryLiftedCount(),
         .apply_each_fast_dense_count = session.debugApplyEachFastDenseCount(),
@@ -517,6 +525,10 @@ pub fn writeProbeResultText(writer: anytype, result: ProbeResult) !void {
     try writer.print("apply_scan_generic_count={d}\n", .{result.apply_scan_generic_count});
     try writer.print("apply_each_right_generic_count={d}\n", .{result.apply_each_right_generic_count});
     try writer.print("apply_each_left_generic_count={d}\n", .{result.apply_each_left_generic_count});
+    try writer.print("apply_each_prior_fast_bit_count={d}\n", .{result.apply_each_prior_fast_bit_count});
+    try writer.print("apply_each_prior_fast_bit_element_count={d}\n", .{result.apply_each_prior_fast_bit_element_count});
+    try writer.print("apply_each_prior_generic_count={d}\n", .{result.apply_each_prior_generic_count});
+    try writer.print("apply_each_prior_generic_element_count={d}\n", .{result.apply_each_prior_generic_element_count});
     try writer.print("apply_each_right_fast_string_contains_count={d}\n", .{result.apply_each_right_fast_string_contains_count});
     try writer.print("apply_each_fast_unary_lifted_count={d}\n", .{result.apply_each_fast_unary_lifted_count});
     try writer.print("apply_each_fast_dense_count={d}\n", .{result.apply_each_fast_dense_count});

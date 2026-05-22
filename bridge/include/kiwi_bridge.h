@@ -50,12 +50,35 @@ typedef struct {
   uintptr_t display_data_len;
 } kiwi_eval_result_s;
 
+typedef enum {
+  KIWI_SYNTAX_TOKEN_PLAIN = 0,
+  KIWI_SYNTAX_TOKEN_NUMBER = 1,
+  KIWI_SYNTAX_TOKEN_STRING = 2,
+  KIWI_SYNTAX_TOKEN_SYMBOL = 3,
+  KIWI_SYNTAX_TOKEN_IDENTIFIER = 4,
+  KIWI_SYNTAX_TOKEN_BUILTIN = 5,
+  KIWI_SYNTAX_TOKEN_ADVERB = 6,
+  KIWI_SYNTAX_TOKEN_COMMENT = 7,
+  KIWI_SYNTAX_TOKEN_PUNCTUATION = 8,
+} kiwi_syntax_token_kind_e;
+
+typedef struct {
+  kiwi_syntax_token_kind_e kind;
+  uintptr_t start;
+  uintptr_t end;
+} kiwi_syntax_token_s;
+
 kiwi_session_t* kiwi_session_create(kiwi_device_preference_e device);
 void kiwi_session_destroy(kiwi_session_t* session);
 kiwi_eval_result_s kiwi_session_eval(
     kiwi_session_t* session,
     const char* source,
     uintptr_t source_len);
+uintptr_t kiwi_syntax_tokenize(
+    const char* source,
+    uintptr_t source_len,
+    kiwi_syntax_token_s* out_tokens,
+    uintptr_t out_capacity);
 kiwi_status_e kiwi_session_set_global_float_array(
     kiwi_session_t* session,
     const char* name,

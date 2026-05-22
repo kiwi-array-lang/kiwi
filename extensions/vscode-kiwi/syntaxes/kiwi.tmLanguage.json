@@ -1,0 +1,106 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "kiwi",
+  "scopeName": "source.kiwi",
+  "patterns": [
+    {
+      "include": "#comments"
+    },
+    {
+      "include": "#strings"
+    },
+    {
+      "include": "#symbols"
+    },
+    {
+      "include": "#numbers"
+    },
+    {
+      "include": "#adverbs"
+    },
+    {
+      "include": "#builtins"
+    },
+    {
+      "include": "#identifiers"
+    },
+    {
+      "include": "#punctuation"
+    }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "match": "(^|[ \\t])(/.*)$",
+          "captures": {
+            "2": {
+              "name": "comment.line.slash.kiwi"
+            }
+          }
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.kiwi",
+          "begin": "\"",
+          "end": "\"|$"
+        }
+      ]
+    },
+    "symbols": {
+      "patterns": [
+        {
+          "name": "constant.other.symbol.kiwi",
+          "match": "`[A-Za-z_][A-Za-z0-9_]*|`"
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.kiwi",
+          "match": "(?<![A-Za-z0-9_])(?:-?0[Nn]|-?0we|-?0w|-?0x[0-9A-Fa-f]+|-?(?:\\d+(?:\\.\\d*)?|\\.\\d+)(?:[eE][+-]?\\d+)?[ef]?|[01]+b)(?![A-Za-z0-9_])"
+        }
+      ]
+    },
+    "adverbs": {
+      "patterns": [
+        {
+          "name": "keyword.operator.adverb.kiwi",
+          "match": "[/\\\\']:"
+        },
+        {
+          "name": "keyword.operator.adverb.kiwi",
+          "match": "[/\\\\']"
+        }
+      ]
+    },
+    "builtins": {
+      "patterns": [
+        {
+          "name": "keyword.operator.kiwi",
+          "match": "[:+\\-*%!&|<>=~,#_^=$?]"
+        }
+      ]
+    },
+    "identifiers": {
+      "patterns": [
+        {
+          "name": "variable.other.kiwi",
+          "match": "\\b[A-Za-z_][A-Za-z0-9_]*\\b"
+        }
+      ]
+    },
+    "punctuation": {
+      "patterns": [
+        {
+          "name": "punctuation.definition.kiwi",
+          "match": "[()\\[\\]{};.@]"
+        }
+      ]
+    }
+  }
+}

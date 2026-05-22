@@ -1,0 +1,298 @@
+diff --git a/mlx/backend/cuda/gemms/block_mask.cu b/mlx/backend/cuda/gemms/block_mask.cu
+index 82160a1b..6addc736 100644
+--- a/mlx/backend/cuda/gemms/block_mask.cu
++++ b/mlx/backend/cuda/gemms/block_mask.cu
+@@ -92,7 +92,9 @@ void block_mask_copy(
+   int64_t mask_mat_size =
+       int64_t(mask.shape()[mask_ndim - 2]) * mask.shape()[mask_ndim - 1];
+
+-  auto [num_blocks, block_dims] = get_launch_args(src, src.size() > INT32_MAX);
++  auto launch_args = get_launch_args(src, src.size() > INT32_MAX);
++  dim3 num_blocks = std::get<0>(launch_args);
++  uint32_t block_dims = std::get<1>(launch_args);
+
+   dispatch_float_types(src.dtype(), "block_mask_copy", [&](auto type_tag) {
+     using T = cuda_type_t<MLX_GET_TYPE(type_tag)>;
+diff --git a/mlx/backend/cuda/CMakeLists.txt b/mlx/backend/cuda/CMakeLists.txt
+--- a/mlx/backend/cuda/CMakeLists.txt
++++ b/mlx/backend/cuda/CMakeLists.txt
+@@ -3,6 +3,22 @@
+ # * Use .cu/.cuh if code contains device code, and .cpp/.h if not.
+ # * Device-only code should be put in device/ subdir.
+ # * Files in device/ subdir should not include files outside.
++set(MLX_CUDA_KERNEL_PROFILE
++    "default"
++    CACHE STRING "CUDA kernel profile to build (default or kiwi_runtime)")
++set_property(CACHE MLX_CUDA_KERNEL_PROFILE PROPERTY STRINGS default
++                                                    kiwi_runtime)
++string(TOLOWER "${MLX_CUDA_KERNEL_PROFILE}"
++               MLX_CUDA_KERNEL_PROFILE_NORMALIZED)
++if(MLX_CUDA_KERNEL_PROFILE_NORMALIZED STREQUAL "kiwi_runtime")
++  set(MLX_KIWI_CUDA_RUNTIME_PROFILE ON)
++  message(STATUS "CUDA kernel profile: kiwi_runtime")
++elseif(NOT MLX_CUDA_KERNEL_PROFILE_NORMALIZED STREQUAL "default")
++  message(
++    FATAL_ERROR
++      "unsupported MLX_CUDA_KERNEL_PROFILE: ${MLX_CUDA_KERNEL_PROFILE}")
++endif()
++
+ target_sources(
+   mlx
+   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/allocator.cpp
+@@ -58,27 +74,37 @@ target_sources(
+           ${CMAKE_CURRENT_SOURCE_DIR}/sort.cu
+           ${CMAKE_CURRENT_SOURCE_DIR}/ternary.cu
+           ${CMAKE_CURRENT_SOURCE_DIR}/utils.cpp
+-          ${CMAKE_CURRENT_SOURCE_DIR}/quantized/affine_quantize.cu
+-          ${CMAKE_CURRENT_SOURCE_DIR}/quantized/fp_quantize.cu
+-          ${CMAKE_CURRENT_SOURCE_DIR}/quantized/quantized.cpp
+-          ${CMAKE_CURRENT_SOURCE_DIR}/quantized/qqmm.cpp
+-          ${CMAKE_CURRENT_SOURCE_DIR}/quantized/qqmm_utils.cu
+-          ${CMAKE_CURRENT_SOURCE_DIR}/quantized/convert_fp8.cu
+           ${CMAKE_CURRENT_SOURCE_DIR}/worker.cpp)
+
+ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/binary)
+-add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/quantized/qmm)
+ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/unary)
+
++if(MLX_KIWI_CUDA_RUNTIME_PROFILE)
++  target_sources(
++    mlx PRIVATE
++                ${CMAKE_CURRENT_SOURCE_DIR}/quantized/kiwi_disabled_quantized.cpp)
++  target_compile_definitions(mlx PRIVATE MLX_KIWI_CUDA_RUNTIME_PROFILE)
++else()
++  target_sources(
++    mlx
++    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/quantized/affine_quantize.cu
++            ${CMAKE_CURRENT_SOURCE_DIR}/quantized/fp_quantize.cu
++            ${CMAKE_CURRENT_SOURCE_DIR}/quantized/quantized.cpp
++            ${CMAKE_CURRENT_SOURCE_DIR}/quantized/qqmm.cpp
++            ${CMAKE_CURRENT_SOURCE_DIR}/quantized/qqmm_utils.cu
++            ${CMAKE_CURRENT_SOURCE_DIR}/quantized/convert_fp8.cu)
++  add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/quantized/qmm)
++
+ # fp4 is not available on < 12.8
+ if(CMAKE_CUDA_COMPILER_VERSION VERSION_LESS 12.8.0)
+   target_include_directories(mlx PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/quantized/)
+   target_sources(mlx
+                  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/quantized/no_qqmm_impl.cpp)
+ else()
+   target_sources(
+     mlx PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/quantized/qqmm_impl.cpp
+                 ${CMAKE_CURRENT_SOURCE_DIR}/quantized/cublas_qqmm.cpp)
+ endif()
++endif()
+
+ if(CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 12.9.0)
+   target_sources(
+diff --git a/mlx/backend/cuda/quantized/kiwi_disabled_quantized.cpp b/mlx/backend/cuda/quantized/kiwi_disabled_quantized.cpp
+new file mode 100644
+--- /dev/null
++++ b/mlx/backend/cuda/quantized/kiwi_disabled_quantized.cpp
+@@ -0,0 +1,41 @@
++#include "mlx/fast_primitives.h"
++#include "mlx/primitives.h"
++
++#include <stdexcept>
++
++namespace mlx::core {
++namespace {
++[[noreturn]] void throw_disabled_quantized_cuda() {
++  throw std::runtime_error(
++      "[kiwi_runtime] MLX CUDA quantized and FP8 kernels are not included "
++      "in this build.");
++}
++} // namespace
++
++void QuantizedMatmul::eval_gpu(const std::vector<array>&, array&) {
++  throw_disabled_quantized_cuda();
++}
++
++void GatherQMM::eval_gpu(const std::vector<array>&, array&) {
++  throw_disabled_quantized_cuda();
++}
++
++void QQMatmul::eval_gpu(const std::vector<array>&, array&) {
++  throw_disabled_quantized_cuda();
++}
++
++namespace fast {
++
++void Quantize::eval_gpu(
++    const std::vector<array>&,
++    std::vector<array>&) {
++  throw_disabled_quantized_cuda();
++}
++
++void ConvertFP8::eval_gpu(
++    const std::vector<array>&,
++    std::vector<array>&) {
++  throw_disabled_quantized_cuda();
++}
++} // namespace fast
++} // namespace mlx::core
+diff --git a/mlx/backend/cuda/quantized/qmm/CMakeLists.txt b/mlx/backend/cuda/quantized/qmm/CMakeLists.txt
+index 3b88403e..ae2563d7 100644
+--- a/mlx/backend/cuda/quantized/qmm/CMakeLists.txt
++++ b/mlx/backend/cuda/quantized/qmm/CMakeLists.txt
+@@ -1,3 +1,33 @@
++option(
++  MLX_KIWI_DISABLE_CUDA_SM80_QMM
++  "Disable optimized SM80 quantized matmul kernels and use MLX's naive QMM fallback"
++  OFF)
++option(
++  MLX_KIWI_DISABLE_CUDA_SM90_QMM
++  "Disable optimized SM90 quantized matmul kernels and use MLX's naive QMM fallback"
++  OFF)
++
++set(MLX_KIWI_ENABLE_CUDA_SM80_QMM ON)
++set(MLX_KIWI_ENABLE_CUDA_SM90_QMM ON)
++if(DEFINED MLX_CUDA_ARCHITECTURES)
++  set(MLX_KIWI_ENABLE_CUDA_SM80_QMM OFF)
++  set(MLX_KIWI_ENABLE_CUDA_SM90_QMM OFF)
++  foreach(arch IN LISTS MLX_CUDA_ARCHITECTURES)
++    if(arch MATCHES "^([89][0-9]|[1-9][0-9][0-9])a?(-real|-virtual)?$")
++      set(MLX_KIWI_ENABLE_CUDA_SM80_QMM ON)
++    endif()
++    if(arch MATCHES "^90a(-real|-virtual)?$")
++      set(MLX_KIWI_ENABLE_CUDA_SM90_QMM ON)
++    endif()
++  endforeach()
++endif()
++if(MLX_KIWI_DISABLE_CUDA_SM80_QMM)
++  set(MLX_KIWI_ENABLE_CUDA_SM80_QMM OFF)
++endif()
++if(MLX_KIWI_DISABLE_CUDA_SM90_QMM)
++  set(MLX_KIWI_ENABLE_CUDA_SM90_QMM OFF)
++endif()
++
+ target_sources(
+   mlx
+   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/qmm.cu
+@@ -8,12 +38,26 @@ target_sources(
+           ${CMAKE_CURRENT_SOURCE_DIR}/qmm_impl_naive_m32_k.cu
+           ${CMAKE_CURRENT_SOURCE_DIR}/qmm_impl_naive_m32_n.cu
+           ${CMAKE_CURRENT_SOURCE_DIR}/qmm_impl_naive_m64_k.cu
+-          ${CMAKE_CURRENT_SOURCE_DIR}/qmm_impl_naive_m64_n.cu
+-          ${CMAKE_CURRENT_SOURCE_DIR}/qmm_impl_sm80_m16.cu
+-          ${CMAKE_CURRENT_SOURCE_DIR}/qmm_impl_sm80_m32.cu
+-          ${CMAKE_CURRENT_SOURCE_DIR}/qmm_impl_sm80_m64.cu
+-          ${CMAKE_CURRENT_SOURCE_DIR}/qmm_impl_sm90_m128_n16_m1.cu
+-          ${CMAKE_CURRENT_SOURCE_DIR}/qmm_impl_sm90_m128_n32_m1.cu
+-          ${CMAKE_CURRENT_SOURCE_DIR}/qmm_impl_sm90_m128_n64_m2.cu
+-          ${CMAKE_CURRENT_SOURCE_DIR}/qmm_impl_sm90_m128_n128_m2.cu
+-          ${CMAKE_CURRENT_SOURCE_DIR}/qmm_impl_sm90_m128_n256_m2.cu)
++          ${CMAKE_CURRENT_SOURCE_DIR}/qmm_impl_naive_m64_n.cu)
++
++if(MLX_KIWI_ENABLE_CUDA_SM90_QMM)
++  target_sources(
++    mlx
++    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/qmm_impl_sm90_m128_n16_m1.cu
++            ${CMAKE_CURRENT_SOURCE_DIR}/qmm_impl_sm90_m128_n32_m1.cu
++            ${CMAKE_CURRENT_SOURCE_DIR}/qmm_impl_sm90_m128_n64_m2.cu
++            ${CMAKE_CURRENT_SOURCE_DIR}/qmm_impl_sm90_m128_n128_m2.cu
++            ${CMAKE_CURRENT_SOURCE_DIR}/qmm_impl_sm90_m128_n256_m2.cu)
++else()
++  target_compile_definitions(mlx PRIVATE MLX_KIWI_DISABLE_CUDA_SM90_QMM)
++endif()
++
++if(MLX_KIWI_ENABLE_CUDA_SM80_QMM)
++  target_sources(
++    mlx
++    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/qmm_impl_sm80_m16.cu
++            ${CMAKE_CURRENT_SOURCE_DIR}/qmm_impl_sm80_m32.cu
++            ${CMAKE_CURRENT_SOURCE_DIR}/qmm_impl_sm80_m64.cu)
++else()
++  target_compile_definitions(mlx PRIVATE MLX_KIWI_DISABLE_CUDA_SM80_QMM)
++endif()
+diff --git a/mlx/backend/cuda/quantized/qmm/qmm.cu b/mlx/backend/cuda/quantized/qmm/qmm.cu
+index 93982b08..2469ec14 100644
+--- a/mlx/backend/cuda/quantized/qmm/qmm.cu
++++ b/mlx/backend/cuda/quantized/qmm/qmm.cu
+@@ -16,7 +16,8 @@ inline bool is_last_2_dims_row_contiguous(const array& x) {
+
+ } // namespace
+
+-#if defined(MLX_CUDA_SM90A_ENABLED)
++#if defined(MLX_CUDA_SM90A_ENABLED) && \
++    !defined(MLX_KIWI_DISABLE_CUDA_SM90_QMM)
+ // Defined in qmm_impl_sm90_xxx.cu files.
+ template <typename TileShape, typename ClusterShape>
+ void qmm_impl_sm90(
+@@ -42,6 +43,10 @@ bool supports_qmm_sm90(
+     int group_size,
+     QuantizationMode mode,
+     cu::Device& device) {
++#if !defined(MLX_CUDA_SM90A_ENABLED) || \
++    defined(MLX_KIWI_DISABLE_CUDA_SM90_QMM)
++  return false;
++#endif
+   if (device.compute_capability_major() != 9) {
+     return false;
+   }
+@@ -82,7 +87,8 @@ void qmm_sm90(
+     int group_size,
+     cu::CommandEncoder& encoder,
+     Stream s) {
+-#if defined(MLX_CUDA_SM90A_ENABLED)
++#if defined(MLX_CUDA_SM90A_ENABLED) && \
++    !defined(MLX_KIWI_DISABLE_CUDA_SM90_QMM)
+   auto dispatch = [&]<int tile_m, int tile_n, int cluster_m>() {
+     using cute::Int;
+     using TileShapeMN = cute::Shape<Int<tile_m>, Int<tile_n>>;
+@@ -105,9 +111,12 @@ void qmm_sm90(
+ #else
+   throw std::runtime_error(
+       "[quantized_matmul] Hopper-only kernel is not available.");
+-#endif // defined(MLX_CUDA_SM90A_ENABLED)
++#endif // defined(MLX_CUDA_SM90A_ENABLED) &&
++       // !defined(MLX_KIWI_DISABLE_CUDA_SM90_QMM)
+ }
+
++#if !defined(MLX_KIWI_DISABLE_CUDA_SM80_QMM)
++
+ // Defined in qmm_impl_sm80_xxx.cu files.
+ template <int TileM>
+ void qmm_impl_sm80(
+@@ -197,6 +206,41 @@ void qmm_sm80(
+   }
+ }
+
++#else
++
++bool supports_qmm_sm80(
++    const array&,
++    const array&,
++    const array&,
++    const std::optional<array>&,
++    const array&,
++    bool,
++    int,
++    int,
++    QuantizationMode,
++    cu::Device&) {
++  return false;
++}
++
++void qmm_sm80(
++    const array&,
++    const array&,
++    const array&,
++    const std::optional<array>&,
++    const std::optional<array>&,
++    const std::optional<array>&,
++    array&,
++    int,
++    int,
++    QuantizationMode,
++    cu::CommandEncoder&) {
++  throw std::runtime_error(
++      "[quantized_matmul] SM80 optimized kernel is disabled; "
++      "MLX should select qmm_naive instead.");
++}
++
++#endif // !defined(MLX_KIWI_DISABLE_CUDA_SM80_QMM)
++
+ // Defined in qmm_impl_naive_xxx.cu files.
+ template <int TileM, bool KMajor>
+ void qmm_impl_naive(

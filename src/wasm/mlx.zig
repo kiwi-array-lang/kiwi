@@ -261,6 +261,10 @@ pub const Array = struct {
         return init(kiwi_bridge_scalar_f32(value), c.MLX_FLOAT32, &.{}) catch unreachable;
     }
 
+    pub fn fromFloat64(_: f64) Array {
+        unreachable;
+    }
+
     pub fn fromBoolSlice(data: []const bool, dims: []const i32) Array {
         return init(kiwi_bridge_array_bool(ptrAsU32(data.ptr), ptrAsU32(dims.ptr), @intCast(dims.len)), c.MLX_BOOL, dims) catch unreachable;
     }
@@ -277,12 +281,20 @@ pub const Array = struct {
         return init(kiwi_bridge_array_i32(ptrAsU32(data.ptr), ptrAsU32(dims.ptr), @intCast(dims.len)), c.MLX_INT32, dims);
     }
 
+    pub fn fromInt64SliceChecked(_: []const i64, _: []const i32) Error!Array {
+        return error.UnsupportedType;
+    }
+
     pub fn fromFloatSlice(data: []const f32, dims: []const i32) Array {
         return init(kiwi_bridge_array_f32(ptrAsU32(data.ptr), ptrAsU32(dims.ptr), @intCast(dims.len)), c.MLX_FLOAT32, dims) catch unreachable;
     }
 
     pub fn fromFloatSliceChecked(data: []const f32, dims: []const i32) Error!Array {
         return init(kiwi_bridge_array_f32(ptrAsU32(data.ptr), ptrAsU32(dims.ptr), @intCast(dims.len)), c.MLX_FLOAT32, dims);
+    }
+
+    pub fn fromFloat64SliceChecked(_: []const f64, _: []const i32) Error!Array {
+        return error.UnsupportedType;
     }
 
     pub fn ndim(self: *const Array) usize {
@@ -329,8 +341,20 @@ pub const Array = struct {
         return self.readSlice(allocator, i32, kiwi_bridge_read_i32);
     }
 
+    pub fn readUInt32s(_: Array, _: std.mem.Allocator) (Error || std.mem.Allocator.Error)![]u32 {
+        return error.UnsupportedType;
+    }
+
+    pub fn readInt64s(_: Array, _: std.mem.Allocator) (Error || std.mem.Allocator.Error)![]i64 {
+        return error.UnsupportedType;
+    }
+
     pub fn readFloats(self: Array, allocator: std.mem.Allocator) (Error || std.mem.Allocator.Error)![]f32 {
         return self.readSlice(allocator, f32, kiwi_bridge_read_f32);
+    }
+
+    pub fn readFloat64s(_: Array, _: std.mem.Allocator) (Error || std.mem.Allocator.Error)![]f64 {
+        return error.UnsupportedType;
     }
 
     pub fn add(ctx: Context, left: Array, right: Array) Error!Array {

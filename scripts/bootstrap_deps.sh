@@ -34,11 +34,14 @@ default behavior:
   - expose MLX C headers at .deps/mlx-c
 
 environment:
-  - KIWI_MLX_BACKEND=cpu|metal (default: metal on macOS, cpu on Linux)
+  - KIWI_MLX_BACKEND=cpu|metal|cuda (default: metal on macOS, cpu on Linux)
   - KIWI_MLX_LINKAGE=shared|static (default: shared)
-  - KIWI_MLX_METAL_KERNEL_PROFILE=default|kiwi_minimal|kiwi_core
-    (default: default; `kiwi_minimal` and `kiwi_core` are experimental
-    size-reduction profiles)
+  - KIWI_MLX_METAL_KERNEL_PROFILE=default|kiwi_runtime
+    (default: default; `kiwi_runtime` keeps the precompiled Metal kernels used by
+    Kiwi's native MLX bridge/runtime surface)
+  - KIWI_MLX_CUDA_KERNEL_PROFILE=default|kiwi_runtime
+    (default: default; `kiwi_runtime` keeps the CUDA kernels used by Kiwi's
+    native MLX bridge/runtime surface)
   - KIWI_DEPS_DIR=<path> (default: .deps under the repository root)
   - KIWI_DUCKDB_VERSION=<version> (default: 1.5.2)
   - KIWI_DUCKDB_URL=<asset-url> (override the default release asset)
@@ -220,6 +223,7 @@ build_mlx() {
   local linkage
   local macos_deployment_target
   local metal_kernel_profile
+  local cuda_kernel_profile
   local clang_bin
   local clangxx_bin
   local -a cmake_args
@@ -229,6 +233,7 @@ build_mlx() {
   linkage="${KIWI_MLX_LINKAGE:-shared}"
   macos_deployment_target="${KIWI_MLX_MACOS_DEPLOYMENT_TARGET:-}"
   metal_kernel_profile="${KIWI_MLX_METAL_KERNEL_PROFILE:-default}"
+  cuda_kernel_profile="${KIWI_MLX_CUDA_KERNEL_PROFILE:-${MLX_CUDA_KERNEL_PROFILE:-default}}"
 
   rm -rf "$build_dir" "$install_dir"
   mkdir -p "$DEPS_DIR/build" "$fetchcontent_dir"
@@ -313,6 +318,7 @@ build_mlx() {
             -DMLX_BUILD_CPU=ON
             -DMLX_BUILD_METAL=OFF
             -DMLX_BUILD_CUDA=ON
+            "-DMLX_CUDA_KERNEL_PROFILE=$cuda_kernel_profile"
           )
           if [[ -n "${MLX_CUDA_ARCHITECTURES:-}" ]]; then
             cmake_args+=("-DMLX_CUDA_ARCHITECTURES=$MLX_CUDA_ARCHITECTURES")
@@ -337,6 +343,7 @@ host_os=$host_os
 backend=$backend
 linkage=$linkage
 metal_kernel_profile=$metal_kernel_profile
+cuda_kernel_profile=$cuda_kernel_profile
 macos_deployment_target=$macos_deployment_target
 EOF
   printf 'built MLX install at %s\n' "$install_dir"

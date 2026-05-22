@@ -1,0 +1,137 @@
+{
+  "name": "kiwi-k",
+  "displayName": "kiwi-k",
+  "description": "Minimal kiwi language support and REPL send commands for .k files.",
+  "version": "0.0.6",
+  "publisher": "kiwi-array",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kiwi-array-lang/kiwi.git",
+    "directory": "extensions/vscode-kiwi"
+  },
+  "engines": {
+    "vscode": "^1.92.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "keywords": [
+    "kiwi",
+    "k",
+    "array language"
+  ],
+  "icon": "assets/kiwi.png",
+  "main": "./src/extension.js",
+  "scripts": {
+    "test": "node test/extension.test.js"
+  },
+  "activationEvents": [
+    "onLanguage:kiwi",
+    "onCommand:kiwi.startRepl",
+    "onCommand:kiwi.evalSelectionOrLine",
+    "onCommand:kiwi.evalBlock",
+    "onCommand:kiwi.evalFile",
+    "onCommand:kiwi.resetSession"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "kiwi",
+        "aliases": [
+          "kiwi"
+        ],
+        "extensions": [
+          ".k"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "kiwi",
+        "scopeName": "source.kiwi",
+        "path": "./syntaxes/kiwi.tmLanguage.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "kiwi.startRepl",
+        "title": "kiwi: Start REPL"
+      },
+      {
+        "command": "kiwi.evalSelectionOrLine",
+        "title": "kiwi: Eval Selection or Current Statement"
+      },
+      {
+        "command": "kiwi.evalBlock",
+        "title": "kiwi: Eval Current Block"
+      },
+      {
+        "command": "kiwi.evalFile",
+        "title": "kiwi: Eval File"
+      },
+      {
+        "command": "kiwi.resetSession",
+        "title": "kiwi: Reset Session"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "kiwi.evalSelectionOrLine",
+        "key": "shift+enter",
+        "mac": "shift+enter",
+        "when": "editorTextFocus && editorLangId == kiwi"
+      },
+      {
+        "command": "kiwi.evalBlock",
+        "key": "ctrl+enter",
+        "mac": "cmd+enter",
+        "when": "editorTextFocus && editorLangId == kiwi"
+      },
+      {
+        "command": "kiwi.evalFile",
+        "key": "ctrl+shift+enter",
+        "mac": "cmd+shift+enter",
+        "when": "editorTextFocus && editorLangId == kiwi"
+      }
+    ],
+    "configurationDefaults": {
+      "[kiwi]": {
+        "editor.tabSize": 1,
+        "editor.insertSpaces": true,
+        "editor.detectIndentation": false
+      }
+    },
+    "configuration": {
+      "title": "kiwi",
+      "properties": {
+        "kiwi.binaryPath": {
+          "type": "string",
+          "default": "kiwi",
+          "description": "Path to the kiwi executable used for the integrated terminal REPL."
+        },
+        "kiwi.replArgs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Extra arguments passed when starting the kiwi REPL."
+        },
+        "kiwi.workingDirectory": {
+          "type": "string",
+          "default": "",
+          "description": "Working directory for the kiwi REPL terminal. Empty uses the first workspace folder."
+        },
+        "kiwi.environment": {
+          "type": "object",
+          "default": {},
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Environment variables passed to the kiwi REPL terminal."
+        }
+      }
+    }
+  }
+}

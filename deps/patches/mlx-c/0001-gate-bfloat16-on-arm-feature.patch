@@ -1,0 +1,13 @@
+diff --git a/mlx/c/half.h b/mlx/c/half.h
+index 2d4554e..db967bc 100644
+--- a/mlx/c/half.h
++++ b/mlx/c/half.h
+@@ -13,7 +13,7 @@ typedef __fp16 float16_t;
+ #endif
+
+-#if defined(__ARM_FEATURE_BF16) || defined(__aarch64__)
++#if defined(__ARM_FEATURE_BF16)
+ #define HAS_BFLOAT16
+ #include <arm_bf16.h>
+ typedef __bf16 bfloat16_t;
+ #endif
