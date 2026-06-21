@@ -3,7 +3,7 @@ FROM ${BASE_IMAGE}
 
 ARG TARGETARCH
 ARG CMAKE_VERSION=3.31.6
-ARG ZIG_VERSION=0.15.2
+ARG ZIG_VERSION=0.17.0-dev.633+9c5655093
 ARG UV_VERSION=0.9.21
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -43,7 +43,11 @@ RUN case "$TARGETARCH" in \
       amd64) zig_arch='x86_64' ;; \
       *) echo "unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
     esac \
- && curl -fL --retry 5 --retry-all-errors --retry-delay 2 "https://ziglang.org/download/${ZIG_VERSION}/zig-${zig_arch}-linux-${ZIG_VERSION}.tar.xz" -o /tmp/zig.tar.xz \
+ && case "$ZIG_VERSION" in \
+      *-dev.*) zig_url="https://ziglang.org/builds/zig-${zig_arch}-linux-${ZIG_VERSION}.tar.xz" ;; \
+      *) zig_url="https://ziglang.org/download/${ZIG_VERSION}/zig-${zig_arch}-linux-${ZIG_VERSION}.tar.xz" ;; \
+    esac \
+ && curl -fL --retry 5 --retry-all-errors --retry-delay 2 "$zig_url" -o /tmp/zig.tar.xz \
  && tar -C /opt -xf /tmp/zig.tar.xz \
  && ln -s "/opt/zig-${zig_arch}-linux-${ZIG_VERSION}/zig" /usr/local/bin/zig \
  && rm /tmp/zig.tar.xz \

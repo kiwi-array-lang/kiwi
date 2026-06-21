@@ -4,21 +4,21 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "kiwi-array"
-version = "0.2.50"
+version = "0.2.62"
 description = "Python loader, IPython magics, backend discovery, and CLI launcher for Kiwi."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-  "kiwi-array-host==0.2.50",
+  "kiwi-array-host==0.2.62",
 ]
 
 [project.optional-dependencies]
-host = ["kiwi-array-host==0.2.50"]
-cpu = ["kiwi-array-cpu==0.2.50"]
-metal = ["kiwi-array-metal==0.2.50"]
-cuda12 = ["kiwi-array-cuda12==0.2.50"]
+host = ["kiwi-array-host==0.2.62"]
+cpu = ["kiwi-array-cpu==0.2.62"]
+metal = ["kiwi-array-metal==0.2.62"]
+cuda12 = ["kiwi-array-cuda12==0.2.62"]
 notebook = ["ipython>=8"]
-jupyter = ["kiwi-array-jupyter==0.2.50"]
+jupyter = ["kiwi-array-jupyter==0.2.62"]
 
 [project.scripts]
 kiwi = "kiwi_array.cli:main"

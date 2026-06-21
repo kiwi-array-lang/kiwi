@@ -10,13 +10,14 @@ const wasm_exports_accelerator_handles = build_options.wasm_exports_accelerator_
 
 var heap_offset: usize = 4096;
 var session: ?runtime.Session = null;
+var bench_code: ?*const runtime.Code = null;
 var last_value: ?runtime.Value = null;
 var last_array_info: ?runtime.WasmArrayInfo = null;
 var last_rendered: ?[]u8 = null;
 var last_display_mime: ?[]u8 = null;
 var last_display_data: ?[]u8 = null;
 var last_echo: bool = false;
-var last_error_buf: [512]u8 = [_]u8{0} ** 512;
+var last_error_buf: [512]u8 = @as([512]u8, @splat(0));
 var last_error_len: u32 = 0;
 
 fn alignForward(value: usize, alignment: usize) usize {
@@ -136,6 +137,7 @@ fn ensureLastDisplay() bool {
 
 fn deviceFromInt(raw: u32) runtime_device.DevicePreference {
     return switch (raw) {
+        0 => .auto,
         1 => .cpu,
         2 => .gpu,
         else => .cpu,
@@ -218,7 +220,7 @@ fn isSingleTopLevelAssignment(trimmed: []const u8) bool {
             ':' => {
                 if (paren_depth != 0 or bracket_depth != 0 or brace_depth != 0) continue;
                 if (idx == 0) return false;
-                const lhs = std.mem.trimRight(u8, trimmed[0..idx], " \t");
+                const lhs = std.mem.trimEnd(u8, trimmed[0..idx], " \t");
                 if (lhs.len == 0) return false;
                 var ident_idx: usize = 0;
                 while (ident_idx < lhs.len and isIdentContinue(lhs[ident_idx])) : (ident_idx += 1) {}
@@ -271,6 +273,7 @@ pub export fn kiwi_init(device: u32) i32 {
         existing.deinit();
         session = null;
     }
+    bench_code = null;
     session = runtime.Session.initWithDevice(std.heap.wasm_allocator, deviceFromInt(device)) catch |err| {
         setLastError(null, err);
         return 1;
@@ -280,6 +283,7 @@ pub export fn kiwi_init(device: u32) i32 {
 
 pub export fn kiwi_deinit() void {
     clearLastValue();
+    bench_code = null;
     if (session) |*existing| {
         existing.deinit();
         session = null;
@@ -318,6 +322,55 @@ pub export fn kiwi_eval(ptr: u32, len: u32) i32 {
     last_echo = shouldEchoEvalLine(source);
     last_array_info = null;
     last_value = result;
+    return 0;
+}
+
+pub export fn kiwi_bench_prepare(ptr: u32, len: u32) i32 {
+    clearLastValue();
+    clearLastError();
+    bench_code = null;
+    const active = &(session orelse {
+        setLastError(null, error.Name);
+        return 1;
+    });
+    const source = bytesAt(ptr, len);
+    bench_code = active.compile(source) catch |err| {
+        setLastError(active, err);
+        return 1;
+    };
+    return 0;
+}
+
+pub export fn kiwi_bench_run(loops: u32) i32 {
+    clearLastValue();
+    clearLastError();
+    const active = &(session orelse {
+        setLastError(null, error.Name);
+        return 1;
+    });
+    const code = bench_code orelse {
+        setLastError(active, error.Parse);
+        return 1;
+    };
+    if (loops == 0) {
+        setLastError(active, error.Parse);
+        return 1;
+    }
+
+    var idx: u32 = 0;
+    while (idx < loops) : (idx += 1) {
+        const value = active.evalCodeEphemeral(code) catch |err| {
+            setLastError(active, err);
+            return 1;
+        };
+        active.forceValue(value) catch |err| {
+            active.discardValue(value);
+            setLastError(active, err);
+            return 1;
+        };
+        active.discardValue(value);
+    }
+    last_echo = false;
     return 0;
 }
 
@@ -371,6 +424,44 @@ pub export fn kiwi_last_bool() u32 {
         .float => @intFromBool(value.asFloat() != 0),
         else => 0,
     };
+}
+
+pub export fn kiwi_last_int_vector_len() u32 {
+    const value = last_value orelse return 0;
+    const len = runtime.debugActiveHostLen(value) orelse return 0;
+    return std.math.cast(u32, len) orelse std.math.maxInt(u32);
+}
+
+pub export fn kiwi_copy_last_int_vector_u8(out_ptr: u32, out_capacity: u32) u32 {
+    clearLastError();
+    const active = &(session orelse {
+        setLastError(null, error.Name);
+        return 0;
+    });
+    const value = last_value orelse {
+        setLastError(active, error.Type);
+        return 0;
+    };
+    const len = runtime.debugActiveHostLen(value) orelse {
+        setLastError(active, error.Type);
+        return 0;
+    };
+    const count = @min(len, @as(usize, @intCast(out_capacity)));
+    const out = bytesAt(out_ptr, @intCast(count));
+    var idx: usize = 0;
+    while (idx < count) : (idx += 1) {
+        const raw = runtime.debugActiveHostIntAt(value, idx) catch |err| {
+            setLastError(active, err);
+            return 0;
+        };
+        out[idx] = if (raw < 0)
+            0
+        else if (raw > 255)
+            255
+        else
+            @intCast(raw);
+    }
+    return @intCast(count);
 }
 
 pub export fn kiwi_last_array_handle() u32 {
@@ -438,6 +529,25 @@ pub export fn kiwi_last_display_data_ptr() u32 {
 pub export fn kiwi_last_display_data_len() u32 {
     if (!ensureLastDisplay()) return 0;
     return @intCast(last_display_data.?.len);
+}
+
+pub export fn kiwi_kernel_trace_reset() void {
+    if (session) |*active| active.resetKernelTrace();
+}
+
+pub export fn kiwi_kernel_trace_set_active(active: u32) void {
+    if (session) |*current| current.setKernelTraceActive(active != 0);
+}
+
+pub export fn kiwi_kernel_trace_simd_kind_count() u32 {
+    return @intCast(runtime.debug_simd_kernel_count);
+}
+
+pub export fn kiwi_kernel_trace_simd_count(index: u32) u32 {
+    const current = &(session orelse return 0);
+    if (index >= runtime.debug_simd_kernel_count) return 0;
+    const kernel: runtime.DebugSimdKernel = @enumFromInt(index);
+    return std.math.cast(u32, current.debugSimdKernelCount(kernel)) orelse std.math.maxInt(u32);
 }
 
 pub export fn kiwi_force_backend_surface() i32 {

@@ -146,8 +146,8 @@ fn executeDenseAutodiffProgramMlx(
 
     const ctx = try api.backendContext(self);
 
-    var forward: [api.dense_autodiff_max_nodes]api.mlx.Array = [_]api.mlx.Array{api.mlx.Array.empty()} ** api.dense_autodiff_max_nodes;
-    var adjoint: [api.dense_autodiff_max_nodes]api.mlx.Array = [_]api.mlx.Array{api.mlx.Array.empty()} ** api.dense_autodiff_max_nodes;
+    var forward: [api.dense_autodiff_max_nodes]api.mlx.Array = @as([api.dense_autodiff_max_nodes]api.mlx.Array, @splat(api.mlx.Array.empty()));
+    var adjoint: [api.dense_autodiff_max_nodes]api.mlx.Array = @as([api.dense_autodiff_max_nodes]api.mlx.Array, @splat(api.mlx.Array.empty()));
     defer {
         for (forward[0..program.len]) |*item| item.deinit();
         for (adjoint[0..program.len]) |*item| item.deinit();

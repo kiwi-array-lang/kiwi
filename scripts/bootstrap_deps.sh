@@ -192,6 +192,11 @@ sync_locked_repo() {
     fi
   fi
 
+  if git -C "$repo_dir" rev-parse --verify HEAD >/dev/null 2>&1; then
+    git -C "$repo_dir" reset --hard >/dev/null
+    git -C "$repo_dir" clean -fdx >/dev/null
+  fi
+
   git -C "$repo_dir" fetch --force --tags origin "$rev" >/dev/null
   git -C "$repo_dir" checkout --detach FETCH_HEAD >/dev/null
   git -C "$repo_dir" reset --hard FETCH_HEAD >/dev/null

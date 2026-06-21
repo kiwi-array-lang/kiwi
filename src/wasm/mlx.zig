@@ -257,6 +257,10 @@ pub const Array = struct {
         return init(kiwi_bridge_scalar_i32(value), c.MLX_INT32, &.{}) catch unreachable;
     }
 
+    pub fn fromInt64(_: i64) Error!Array {
+        return unsupported();
+    }
+
     pub fn fromFloat(value: f32) Array {
         return init(kiwi_bridge_scalar_f32(value), c.MLX_FLOAT32, &.{}) catch unreachable;
     }

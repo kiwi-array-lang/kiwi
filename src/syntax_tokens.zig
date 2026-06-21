@@ -10,6 +10,7 @@ pub const TokenKind = enum(c_int) {
     adverb = 6,
     comment = 7,
     punctuation = 8,
+    lambda_brace = 9,
 };
 
 pub const Token = extern struct {
@@ -101,6 +102,12 @@ pub fn tokenize(source: []const u8, buffer: *TokenBuffer) void {
         if (isBuiltin(ch)) {
             index += 1;
             buffer.emit(.builtin, start, index);
+            continue;
+        }
+
+        if (isLambdaBrace(ch)) {
+            index += 1;
+            buffer.emit(.lambda_brace, start, index);
             continue;
         }
 
@@ -248,9 +255,13 @@ fn isOpeningPunctuation(ch: u8) bool {
     return ch == '(' or ch == '[' or ch == '{' or ch == ';';
 }
 
+fn isLambdaBrace(ch: u8) bool {
+    return ch == '{' or ch == '}';
+}
+
 fn isPunctuation(ch: u8) bool {
     return switch (ch) {
-        '(', ')', '[', ']', '{', '}', ';', '.', '@' => true,
+        '(', ')', '[', ']', ';', '.', '@' => true,
         else => false,
     };
 }
@@ -302,4 +313,24 @@ test "tokenizes boolean vector literal as one number token" {
 
     try std.testing.expectEqual(TokenKind.number, tokens[2].kind);
     try std.testing.expectEqualStrings("101001b", source[tokens[2].start..tokens[2].end]);
+}
+
+test "tokenizes lambda braces separately from punctuation" {
+    const source = "{x+1}[2]";
+    var tokens: [16]Token = undefined;
+    var buffer = TokenBuffer{ .tokens = tokens[0..] };
+    tokenize(source, &buffer);
+
+    try std.testing.expectEqual(TokenKind.lambda_brace, tokens[0].kind);
+    try std.testing.expectEqualStrings("{", source[tokens[0].start..tokens[0].end]);
+    try std.testing.expectEqual(TokenKind.identifier, tokens[1].kind);
+    try std.testing.expectEqual(TokenKind.builtin, tokens[2].kind);
+    try std.testing.expectEqual(TokenKind.number, tokens[3].kind);
+    try std.testing.expectEqual(TokenKind.lambda_brace, tokens[4].kind);
+    try std.testing.expectEqualStrings("}", source[tokens[4].start..tokens[4].end]);
+    try std.testing.expectEqual(TokenKind.punctuation, tokens[5].kind);
+    try std.testing.expectEqualStrings("[", source[tokens[5].start..tokens[5].end]);
+    try std.testing.expectEqual(TokenKind.number, tokens[6].kind);
+    try std.testing.expectEqual(TokenKind.punctuation, tokens[7].kind);
+    try std.testing.expectEqualStrings("]", source[tokens[7].start..tokens[7].end]);
 }

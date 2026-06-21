@@ -1,0 +1,130 @@
+{
+  "$schema": "vscode://schemas/color-theme",
+  "name": "Kiwi Dark",
+  "type": "dark",
+  "semanticHighlighting": true,
+  "colors": {
+    "activityBar.background": "#0e1216",
+    "activityBar.foreground": "#dce7d3",
+    "activityBarBadge.background": "#56b6c2",
+    "activityBarBadge.foreground": "#090b0d",
+    "badge.background": "#56b6c2",
+    "badge.foreground": "#090b0d",
+    "button.background": "#dce7d3",
+    "button.foreground": "#090b0d",
+    "button.hoverBackground": "#f0f4ec",
+    "editor.background": "#090b0d",
+    "editor.foreground": "#ebdbb2",
+    "editor.lineHighlightBackground": "#131920",
+    "editor.selectionBackground": "#364049",
+    "editor.selectionHighlightBackground": "#232a31",
+    "editorCursor.foreground": "#dce7d3",
+    "editorError.foreground": "#fb4934",
+    "editorGroupHeader.tabsBackground": "#0e1216",
+    "editorIndentGuide.activeBackground1": "#364049",
+    "editorIndentGuide.background1": "#232a31",
+    "editorLineNumber.activeForeground": "#a89984",
+    "editorLineNumber.foreground": "#43493f",
+    "editorWhitespace.foreground": "#232a31",
+    "input.background": "#131920",
+    "input.border": "#364049",
+    "input.foreground": "#ebdbb2",
+    "list.activeSelectionBackground": "#232a31",
+    "list.activeSelectionForeground": "#dce7d3",
+    "list.hoverBackground": "#131920",
+    "panel.background": "#0e1216",
+    "panel.border": "#232a31",
+    "sideBar.background": "#12171c",
+    "sideBar.foreground": "#858585",
+    "sideBarSectionHeader.background": "#171d23",
+    "sideBarTitle.foreground": "#dce7d3",
+    "statusBar.background": "#0e1216",
+    "statusBar.foreground": "#dce7d3",
+    "tab.activeBackground": "#090b0d",
+    "tab.activeForeground": "#dce7d3",
+    "tab.border": "#232a31",
+    "tab.inactiveBackground": "#0e1216",
+    "tab.inactiveForeground": "#858585",
+    "terminal.ansiBrightRed": "#fb4934",
+    "terminal.ansiBrightYellow": "#fabd2f",
+    "terminal.ansiCyan": "#56b6c2",
+    "terminal.ansiGreen": "#98c379",
+    "terminal.ansiRed": "#fb4934",
+    "terminal.ansiYellow": "#d79921"
+  },
+  "tokenColors": [
+    {
+      "name": "Kiwi source",
+      "scope": "source.kiwi",
+      "settings": {
+        "foreground": "#ebdbb2"
+      }
+    },
+    {
+      "name": "Kiwi identifiers",
+      "scope": "variable.other.kiwi",
+      "settings": {
+        "foreground": "#ebdbb2"
+      }
+    },
+    {
+      "name": "Kiwi numbers",
+      "scope": "constant.numeric.kiwi",
+      "settings": {
+        "foreground": "#98c379"
+      }
+    },
+    {
+      "name": "Kiwi symbols",
+      "scope": "constant.other.symbol.kiwi",
+      "settings": {
+        "foreground": "#56b6c2"
+      }
+    },
+    {
+      "name": "Kiwi verbs",
+      "scope": "keyword.operator.kiwi",
+      "settings": {
+        "foreground": "#fe8019"
+      }
+    },
+    {
+      "name": "Kiwi adverbs",
+      "scope": "keyword.operator.adverb.kiwi",
+      "settings": {
+        "foreground": "#fb4934"
+      }
+    },
+    {
+      "name": "Kiwi strings",
+      "scope": "string.quoted.double.kiwi",
+      "settings": {
+        "foreground": "#d79921"
+      }
+    },
+    {
+      "name": "Kiwi lambda braces",
+      "scope": [
+        "punctuation.definition.lambda.begin.kiwi",
+        "punctuation.definition.lambda.end.kiwi"
+      ],
+      "settings": {
+        "foreground": "#bd93f9"
+      }
+    },
+    {
+      "name": "Kiwi punctuation",
+      "scope": "punctuation.definition.kiwi",
+      "settings": {
+        "foreground": "#a89984"
+      }
+    },
+    {
+      "name": "Kiwi comments",
+      "scope": "comment.line.slash.kiwi",
+      "settings": {
+        "foreground": "#928374"
+      }
+    }
+  ]
+}

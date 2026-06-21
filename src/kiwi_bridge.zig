@@ -1,5 +1,6 @@
 const builtin = @import("builtin");
 const std = @import("std");
+const platform = @import("platform.zig");
 const runtime_device = @import("device.zig");
 const repl_meta = @import("repl_meta.zig");
 const runtime = @import("runtime.zig");
@@ -332,7 +333,7 @@ fn parseLine(raw: []const u8) !ParsedLine {
         expr = expr[digits_len..];
     }
 
-    expr = std.mem.trimLeft(u8, expr, " \t");
+    expr = std.mem.trimStart(u8, expr, " \t");
     if (expr.len == 0) return error.Parse;
     return .{ .timing = .{ .loops = loops, .expr = expr } };
 }
@@ -345,7 +346,7 @@ fn sanitizeLine(raw: []const u8) ?[]const u8 {
     var idx: usize = 0;
     while (idx < line.len) : (idx += 1) {
         if (line[idx] == '/' and idx > 0 and std.ascii.isWhitespace(line[idx - 1])) {
-            const trimmed = std.mem.trimRight(u8, line[0..idx], " \t");
+            const trimmed = std.mem.trimEnd(u8, line[0..idx], " \t");
             if (trimmed.len == 0) return null;
             return trimmed;
         }
@@ -431,7 +432,7 @@ fn isSingleTopLevelAssignment(trimmed: []const u8) bool {
             ':' => {
                 if (paren_depth != 0 or bracket_depth != 0 or brace_depth != 0) continue;
                 if (idx == 0) return false;
-                const lhs = std.mem.trimRight(u8, trimmed[0..idx], " \t");
+                const lhs = std.mem.trimEnd(u8, trimmed[0..idx], " \t");
                 if (lhs.len == 0) return false;
                 var ident_idx: usize = 0;
                 while (ident_idx < lhs.len and isIdentContinue(lhs[ident_idx])) : (ident_idx += 1) {}
@@ -468,7 +469,7 @@ fn evalTiming(session: *runtime.Session, allocator: std.mem.Allocator, request: 
 }
 
 fn monotonicNanos() u64 {
-    return @intCast(std.time.nanoTimestamp());
+    return @intCast(platform.monotonicNanos());
 }
 
 pub export fn kiwi_session_create(device: kiwi_device_preference_e) ?*kiwi_session {

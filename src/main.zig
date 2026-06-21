@@ -1,5 +1,6 @@
 const std = @import("std");
 const build_options = @import("build_options");
+const platform = @import("platform.zig");
 const runtime_device = @import("device.zig");
 const profile = @import("profile.zig");
 const probe = @import("probe.zig");
@@ -41,6 +42,7 @@ const bench_tools = if (enable_bench_cli) @import("bench_internal.zig") else str
         _: f64,
         _: usize,
         _: usize,
+        _: bool,
     ) !void {
         return error.InvalidArgument;
     }
@@ -88,6 +90,18 @@ const bench_tools = if (enable_bench_cli) @import("bench_internal.zig") else str
         return error.InvalidArgument;
     }
 
+    pub fn auditHostScanCli(_: std.mem.Allocator, _: f64, _: usize) !void {
+        return error.InvalidArgument;
+    }
+
+    pub fn auditHostWhereCli(_: std.mem.Allocator, _: f64, _: usize) !void {
+        return error.InvalidArgument;
+    }
+
+    pub fn auditHostMatmulCli(_: std.mem.Allocator, _: f64, _: usize) !void {
+        return error.InvalidArgument;
+    }
+
     pub fn resolveVectorSize(_: []const u8, requested_size: usize) usize {
         return requested_size;
     }
@@ -127,6 +141,7 @@ pub const ExecRequest = struct {
 
 pub const BenchRequest = struct {
     case_name: []const u8,
+    cached_only: bool = false,
 };
 
 pub const ProbeRequest = struct {
@@ -153,6 +168,10 @@ pub const DebugRequest = enum {
     audit_dense_autodiff,
     find_lookup_stages,
     host_compare_stages,
+    host_where_stages,
+    host_scan_stages,
+    host_transpose_stages,
+    host_matmul_stages,
     layout,
 };
 
@@ -216,20 +235,20 @@ fn toBenchBackendMode(mode: BenchBackendMode) bench_tools.BackendMode {
     };
 }
 
-pub fn main() void {
-    run() catch |err| switch (err) {
+pub fn main(init: std.process.Init) void {
+    run(init.gpa, init.minimal.args) catch |err| switch (err) {
         error.InvalidArgument, error.ScriptFailed => std.process.exit(1),
         else => std.debug.panic("{s}", .{@errorName(err)}),
     };
 }
 
-fn run() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+fn run(allocator: std.mem.Allocator, process_args: std.process.Args) !void {
+    var arg_it = try std.process.Args.Iterator.initAllocator(process_args, allocator);
+    defer arg_it.deinit();
+    var args_list = std.ArrayList([]const u8).empty;
+    defer args_list.deinit(allocator);
+    while (arg_it.next()) |arg| try args_list.append(allocator, arg);
+    const args = args_list.items;
 
     const parsed = try parseCliArgs(allocator, args[1..]);
     defer parsed.deinit(allocator);
@@ -237,12 +256,18 @@ fn run() !void {
 
     switch (parsed.request) {
         .repl => try repl(allocator, device, parsed.backend_mode),
-        .help => try help(std.fs.File.stdout().deprecatedWriter()),
-        .version => try std.fs.File.stdout().deprecatedWriter().print("{s}\n", .{version.string}),
+        .help => {
+            var stdout = platform.stdoutWriter();
+            try help(&stdout);
+        },
+        .version => {
+            var stdout = platform.stdoutWriter();
+            try stdout.print("{s}\n", .{version.string});
+        },
         .exec => |request| try executeRequest(allocator, device, parsed.backend_mode, request),
         .bench => |request| {
             if (comptime enable_bench_cli) {
-                try bench_tools.runBenchCli(allocator, device, toBenchBackendMode(parsed.backend_mode), request.case_name, parsed.target_batch_ms, parsed.vector_size, parsed.matmul_size);
+                try bench_tools.runBenchCli(allocator, device, toBenchBackendMode(parsed.backend_mode), request.case_name, parsed.target_batch_ms, parsed.vector_size, parsed.matmul_size, request.cached_only);
             } else {
                 return invalidArgument();
             }
@@ -262,6 +287,22 @@ fn run() !void {
                 if (!enable_debug_cli) return invalidArgument();
                 try bench_tools.auditHostCompareCli(allocator, parsed.target_batch_ms, parsed.vector_size);
             },
+            .host_where_stages => {
+                if (!enable_debug_cli) return invalidArgument();
+                try bench_tools.auditHostWhereCli(allocator, parsed.target_batch_ms, parsed.vector_size);
+            },
+            .host_scan_stages => {
+                if (!enable_debug_cli) return invalidArgument();
+                try bench_tools.auditHostScanCli(allocator, parsed.target_batch_ms, parsed.vector_size);
+            },
+            .host_transpose_stages => {
+                if (!enable_debug_cli) return invalidArgument();
+                try bench_tools.auditHostTransposeCli(allocator, parsed.target_batch_ms);
+            },
+            .host_matmul_stages => {
+                if (!enable_debug_cli) return invalidArgument();
+                try bench_tools.auditHostMatmulCli(allocator, parsed.target_batch_ms, parsed.matmul_size);
+            },
             .layout => {
                 if (!enable_debug_cli) return invalidArgument();
                 try printLayoutDebug();
@@ -272,7 +313,7 @@ fn run() !void {
 
 fn printLayoutDebug() !void {
     const facts = runtime.debugRuntimeLayoutFacts();
-    const writer = std.fs.File.stdout().deprecatedWriter();
+    var writer = platform.stdoutWriter();
     try writer.print(
         "value size={d} align={d}\n" ++
             "heap_header size={d} align={d}\n" ++
@@ -313,6 +354,7 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Cli
     var exec_argv: []const []const u8 = &.{};
     var interactive = false;
     var bench_case: ?[]const u8 = null;
+    var bench_cached_only = false;
     var probe_input: ?ExecInput = null;
     var probe_setup_sources = std.ArrayList([]const u8).empty;
     defer probe_setup_sources.deinit(allocator);
@@ -376,6 +418,12 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Cli
             idx += 1;
             if (idx >= args.len) return invalidArgument();
             options.matmul_size = try std.fmt.parseUnsigned(usize, args[idx], 10);
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--cached-only")) {
+            if (!enable_bench_cli) return invalidArgument();
+            if (mode != .auto and mode != .bench) return invalidArgument();
+            bench_cached_only = true;
             continue;
         }
         if (std.mem.eql(u8, arg, "-i")) {
@@ -501,6 +549,14 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Cli
                     debug_request = .find_lookup_stages;
                 } else if (std.mem.eql(u8, arg, "host-compare-stages")) {
                     debug_request = .host_compare_stages;
+                } else if (std.mem.eql(u8, arg, "host-where-stages")) {
+                    debug_request = .host_where_stages;
+                } else if (std.mem.eql(u8, arg, "host-scan-stages")) {
+                    debug_request = .host_scan_stages;
+                } else if (std.mem.eql(u8, arg, "host-transpose-stages")) {
+                    debug_request = .host_transpose_stages;
+                } else if (std.mem.eql(u8, arg, "host-matmul-stages")) {
+                    debug_request = .host_matmul_stages;
                 } else if (std.mem.eql(u8, arg, "layout")) {
                     debug_request = .layout;
                 } else {
@@ -516,7 +572,7 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Cli
         else
             .repl,
         .exec => .{ .exec = .{ .input = exec_input orelse return invalidArgument(), .interactive = interactive, .argv = exec_argv } },
-        .bench => .{ .bench = .{ .case_name = bench_case orelse return invalidArgument() } },
+        .bench => .{ .bench = .{ .case_name = bench_case orelse return invalidArgument(), .cached_only = bench_cached_only } },
         .probe => .{ .probe = .{
             .input = probe_input orelse return invalidArgument(),
             .setup_sources = try probe_setup_sources.toOwnedSlice(allocator),
@@ -553,7 +609,7 @@ fn writeUsage(writer: anytype) !void {
     );
     if (comptime enable_bench_cli) {
         try writer.print(
-            "  {s} bench [--device cpu|gpu] [--backend auto|host|mlx_cpu|mlx_gpu] [--target-batch-ms N] [--size N] [--matmul-size N] case  (case: name, all, all-full, or stress)\n",
+            "  {s} bench [--cached-only] [--device cpu|gpu] [--backend auto|host|mlx_cpu|mlx_gpu] [--target-batch-ms N] [--size N] [--matmul-size N] case  (case: name, all, all-full, or stress)\n",
             .{cli_invocation},
         );
     }
@@ -571,8 +627,8 @@ fn writeUsage(writer: anytype) !void {
     }
     if (comptime enable_debug_cli) {
         try writer.print(
-            "  {s} debug audit-dense-autodiff\n  {s} debug [--target-batch-ms N] [--size N] find-lookup-stages\n  {s} debug [--target-batch-ms N] [--size N] host-compare-stages\n  {s} debug layout\n",
-            .{ cli_invocation, cli_invocation, cli_invocation, cli_invocation },
+            "  {s} debug audit-dense-autodiff\n  {s} debug [--target-batch-ms N] [--size N] find-lookup-stages\n  {s} debug [--target-batch-ms N] [--size N] host-compare-stages\n  {s} debug [--target-batch-ms N] [--size N] host-where-stages\n  {s} debug [--target-batch-ms N] [--size N] host-scan-stages\n  {s} debug [--target-batch-ms N] host-transpose-stages\n  {s} debug [--target-batch-ms N] [--matmul-size N] host-matmul-stages\n  {s} debug layout\n",
+            .{ cli_invocation, cli_invocation, cli_invocation, cli_invocation, cli_invocation, cli_invocation, cli_invocation, cli_invocation },
         );
     }
 }
@@ -611,7 +667,8 @@ fn help(writer: anytype) !void {
 }
 
 fn usage() !void {
-    try writeUsage(std.fs.File.stderr().deprecatedWriter());
+    var stderr = platform.stderrWriter();
+    try writeUsage(&stderr);
     return error.InvalidArgument;
 }
 
@@ -697,8 +754,7 @@ fn denseBackendLabel(backend: runtime.DenseExecBackend, device: runtime_device.D
 }
 
 fn denseCountSummary(session: *runtime.Session, device: runtime_device.DevicePreference, comptime use_exec_counts: bool, buffer: []u8) []const u8 {
-    var stream = std.io.fixedBufferStream(buffer);
-    const writer = stream.writer();
+    var writer = std.Io.Writer.fixed(buffer);
     var first = true;
     const kinds = [_]runtime.DenseRegionKind{
         .numeric_dyad,
@@ -726,7 +782,7 @@ fn denseCountSummary(session: *runtime.Session, device: runtime_device.DevicePre
             first = false;
         }
     }
-    return if (first) "none" else stream.getWritten();
+    return if (first) "none" else writer.buffered();
 }
 
 fn emitBackendReport(session: *runtime.Session, device: runtime_device.DevicePreference, backend_mode: BenchBackendMode, writer: anytype) !void {
@@ -773,8 +829,8 @@ fn replSession(session: *runtime.Session, allocator: std.mem.Allocator) !void {
     var input = try repl_input.ReplInput.init(allocator);
     defer input.deinit();
 
-    const stdout = std.fs.File.stdout().deprecatedWriter();
-    const stderr = std.fs.File.stderr().deprecatedWriter();
+    var stdout = platform.stdoutWriter();
+    var stderr = platform.stderrWriter();
 
     while (true) {
         const line = (try input.readLine(" ")) orelse return;
@@ -783,14 +839,14 @@ fn replSession(session: *runtime.Session, allocator: std.mem.Allocator) !void {
         if (sanitizeLine(line) != null) try input.rememberLine(line);
 
         const parsed = parseLine(line) catch |err| {
-            try writeRuntimeError(null, stderr, err);
+            try writeRuntimeError(null, &stderr, err);
             continue;
         };
         switch (parsed) {
             .skip => continue,
             .eval => |trimmed| {
                 const value = session.evalSource(trimmed) catch |err| {
-                    try writeRuntimeError(session, stderr, err);
+                    try writeRuntimeError(session, &stderr, err);
                     continue;
                 };
                 if (!shouldEchoEvalLine(trimmed)) continue;
@@ -804,7 +860,7 @@ fn replSession(session: *runtime.Session, allocator: std.mem.Allocator) !void {
             },
             .timing => |request| {
                 const text = evalTiming(session, allocator, request) catch |err| {
-                    try writeRuntimeError(session, stderr, err);
+                    try writeRuntimeError(session, &stderr, err);
                     continue;
                 };
                 defer allocator.free(text);
@@ -834,12 +890,13 @@ fn executeRequest(allocator: std.mem.Allocator, device: runtime_device.DevicePre
 
 fn executeProbeRequest(allocator: std.mem.Allocator, device: runtime_device.DevicePreference, backend_mode: BenchBackendMode, request: ProbeRequest) !void {
     if (!runtime.enable_probe_instrumentation) {
-        try std.fs.File.stderr().deprecatedWriter().writeAll("probe is unavailable in stripped builds\n");
+        var stderr = platform.stderrWriter();
+        try stderr.writeAll("probe is unavailable in stripped builds\n");
         return error.InvalidArgument;
     }
     const result = try collectProbeRequestResult(allocator, device, backend_mode, request);
 
-    const stdout = std.fs.File.stdout().deprecatedWriter();
+    var stdout = platform.stdoutWriter();
     if (request.json_stdout or request.json_out != null) {
         const out = try probe.allocJsonString(allocator, result);
         defer allocator.free(out);
@@ -847,27 +904,28 @@ fn executeProbeRequest(allocator: std.mem.Allocator, device: runtime_device.Devi
         if (request.json_stdout) {
             try stdout.print("{s}\n", .{out});
         } else {
-            try probe.writeProbeResultText(stdout, result);
+            try probe.writeProbeResultText(&stdout, result);
         }
 
         if (request.json_out) |path| {
-            try std.fs.cwd().writeFile(.{ .sub_path = path, .data = out });
+            try platform.writeFile(path, out);
         }
         return;
     }
 
-    try probe.writeProbeResultText(stdout, result);
+    try probe.writeProbeResultText(&stdout, result);
 }
 
 fn executeProfileRequest(allocator: std.mem.Allocator, device: runtime_device.DevicePreference, backend_mode: BenchBackendMode, request: ProfileRequest) !void {
     if (!runtime.enable_sampling_profile) {
-        try std.fs.File.stderr().deprecatedWriter().writeAll("profile is unavailable in stripped builds\n");
+        var stderr = platform.stderrWriter();
+        try stderr.writeAll("profile is unavailable in stripped builds\n");
         return error.InvalidArgument;
     }
     const result = try collectProfileRequestResult(allocator, device, backend_mode, request);
     defer result.deinit(allocator);
 
-    const stdout = std.fs.File.stdout().deprecatedWriter();
+    var stdout = platform.stdoutWriter();
     if (request.json_stdout or request.json_out != null) {
         const out = try probe.allocJsonString(allocator, result);
         defer allocator.free(out);
@@ -875,16 +933,16 @@ fn executeProfileRequest(allocator: std.mem.Allocator, device: runtime_device.De
         if (request.json_stdout) {
             try stdout.print("{s}\n", .{out});
         } else {
-            try profile.writeProfileResultText(stdout, result);
+            try profile.writeProfileResultText(&stdout, result);
         }
 
         if (request.json_out) |path| {
-            try std.fs.cwd().writeFile(.{ .sub_path = path, .data = out });
+            try platform.writeFile(path, out);
         }
         return;
     }
 
-    try profile.writeProfileResultText(stdout, result);
+    try profile.writeProfileResultText(&stdout, result);
 }
 
 pub fn collectProbeRequestResult(allocator: std.mem.Allocator, device: runtime_device.DevicePreference, backend_mode: BenchBackendMode, request: ProbeRequest) !probe.ProbeResult {
@@ -910,6 +968,7 @@ pub fn collectProbeRequestResult(allocator: std.mem.Allocator, device: runtime_d
     }
 
     session.resetDebugStructuralExecutionCounters();
+    session.resetDebugDenseFusionStats();
     session.setDebugProbeActive(true);
     defer session.setDebugProbeActive(false);
     switch (request.input) {
@@ -950,7 +1009,9 @@ pub fn collectProfileRequestResult(allocator: std.mem.Allocator, device: runtime
 
     const started_ns = monotonicNanos();
     var err_name: ?[]const u8 = null;
-    const null_writer = std.io.null_writer;
+    var discard_buffer: [1024]u8 = undefined;
+    var discard = std.Io.Writer.Discarding.init(&discard_buffer);
+    const null_writer = &discard.writer;
 
     switch (request.input) {
         .expr => |source| {
@@ -988,20 +1049,18 @@ fn execInputLabel(input: ExecInput) []const u8 {
 }
 
 fn readSourceFromFile(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
-    const file = std.fs.cwd().openFile(path, .{}) catch |err| {
-        const stderr = std.fs.File.stderr().deprecatedWriter();
+    return platform.readFileAlloc(allocator, path, max_source_bytes) catch |err| {
+        var stderr = platform.stderrWriter();
         switch (err) {
             error.FileNotFound => try stderr.print("{s}: {s}: file not found\n", .{ cli_invocation, path }),
             else => try stderr.print("{s}: {s}: cannot read file ({s})\n", .{ cli_invocation, path, @errorName(err) }),
         }
         return error.ScriptFailed;
     };
-    defer file.close();
-    return try file.readToEndAlloc(allocator, max_source_bytes);
 }
 
 fn readSourceFromStdin(allocator: std.mem.Allocator) ![]u8 {
-    return try std.fs.File.stdin().readToEndAlloc(allocator, max_source_bytes);
+    return try platform.readStdinAlloc(allocator, max_source_bytes);
 }
 
 fn execPathSource(session: *runtime.Session, allocator: std.mem.Allocator, path: []const u8, device: runtime_device.DevicePreference, backend_mode: BenchBackendMode) !void {
@@ -1018,11 +1077,13 @@ fn execStdinSource(session: *runtime.Session, allocator: std.mem.Allocator, devi
 }
 
 fn execBufferedSource(session: *runtime.Session, allocator: std.mem.Allocator, path: []const u8, source: []const u8, device: runtime_device.DevicePreference, backend_mode: BenchBackendMode) !void {
-    try execSource(session, path, source, std.fs.File.stdout().deprecatedWriter(), std.fs.File.stderr().deprecatedWriter());
-    if (std.process.getEnvVarOwned(allocator, "KIWI_BENCH_BACKEND_REPORT")) |flag| {
+    var stdout = platform.stdoutWriter();
+    var stderr = platform.stderrWriter();
+    try execSource(session, path, source, &stdout, &stderr);
+    if (platform.getEnvVarOwned(allocator, "KIWI_BENCH_BACKEND_REPORT")) |flag| {
         defer allocator.free(flag);
         if (flag.len != 0 and !std.mem.eql(u8, flag, "0")) {
-            try emitBackendReport(session, device, backend_mode, std.fs.File.stderr().deprecatedWriter());
+            try emitBackendReport(session, device, backend_mode, &stderr);
         }
     } else |_| {}
 }
@@ -1187,6 +1248,7 @@ fn sanitizeScript(allocator: std.mem.Allocator, source: []const u8) ?[]u8 {
 
     while (lines.next()) |raw| {
         const line = sanitizeLine(raw) orelse continue;
+        if (repl_meta.command(line) != null) return null;
         if (std.mem.startsWith(u8, line, "\\t")) return null;
         if (saw_eval) cleaned.append(allocator, '\n') catch return null;
         cleaned.appendSlice(allocator, line) catch return null;
@@ -1311,7 +1373,7 @@ fn isSingleTopLevelAssignment(trimmed: []const u8) bool {
             ':' => {
                 if (paren_depth != 0 or bracket_depth != 0 or brace_depth != 0) continue;
                 if (idx == 0) return false;
-                const lhs = std.mem.trimRight(u8, trimmed[0..idx], " \t");
+                const lhs = std.mem.trimEnd(u8, trimmed[0..idx], " \t");
                 if (lhs.len == 0) return false;
                 var ident_idx: usize = 0;
                 while (ident_idx < lhs.len and isIdentContinue(lhs[ident_idx])) : (ident_idx += 1) {}
@@ -1348,7 +1410,7 @@ fn parseLine(raw: []const u8) !ParsedLine {
         expr = expr[digits_len..];
     }
 
-    expr = std.mem.trimLeft(u8, expr, " \t");
+    expr = std.mem.trimStart(u8, expr, " \t");
     if (expr.len == 0) return error.Parse;
     return .{ .timing = .{ .loops = loops, .expr = expr } };
 }
@@ -1361,7 +1423,7 @@ fn sanitizeLine(raw: []const u8) ?[]const u8 {
     var idx: usize = 0;
     while (idx < line.len) : (idx += 1) {
         if (line[idx] == '/' and idx > 0 and std.ascii.isWhitespace(line[idx - 1])) {
-            const trimmed = std.mem.trimRight(u8, line[0..idx], " \t");
+            const trimmed = std.mem.trimEnd(u8, line[0..idx], " \t");
             if (trimmed.len == 0) return null;
             return trimmed;
         }
@@ -1389,14 +1451,17 @@ fn runTimingRequest(session: *runtime.Session, request: TimingRequest) !u64 {
     const started = monotonicNanos();
     var idx: usize = 0;
     while (idx < request.loops) : (idx += 1) {
-        const value = try session.evalCode(code);
-        try session.forceValue(value);
+        {
+            const value = try session.evalCodeEphemeral(code);
+            defer session.discardValue(value);
+            try session.forceValue(value);
+        }
     }
     return monotonicNanos() - started;
 }
 
 fn monotonicNanos() u64 {
-    return @intCast(std.time.nanoTimestamp());
+    return @intCast(platform.monotonicNanos());
 }
 
 const max_source_bytes = 1 << 20;

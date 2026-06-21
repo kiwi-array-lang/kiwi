@@ -48,6 +48,77 @@ size_t kiwi_host_find_f64_scalar(const double* items, size_t len, double query) 
   return len;
 }
 
+void kiwi_host_find_i8_build_table_i32(int32_t* table, const int8_t* items, size_t len, int32_t miss) {
+  for (size_t i = 0; i < 256; ++i) {
+    table[i] = miss;
+  }
+  for (size_t i = len; i > 0; --i) {
+    const size_t idx = i - 1;
+    table[(uint8_t)items[idx]] = (int32_t)idx;
+  }
+}
+
+void kiwi_host_find_i16_build_table_i32(int32_t* table, const int16_t* items, size_t len, int32_t miss) {
+  for (size_t i = 0; i < 65536; ++i) {
+    table[i] = miss;
+  }
+  for (size_t i = len; i > 0; --i) {
+    const size_t idx = i - 1;
+    table[(uint16_t)items[idx]] = (int32_t)idx;
+  }
+}
+
+uint8_t kiwi_host_find_i8_lookup_table_i32(int32_t* out, const int32_t* table, const int8_t* queries, size_t len, int32_t miss) {
+  uint8_t saw_miss = 0;
+  for (size_t i = 0; i < len; ++i) {
+    const int32_t value = table[(uint8_t)queries[i]];
+    out[i] = value;
+    saw_miss |= (uint8_t)(value == miss);
+  }
+  return saw_miss;
+}
+
+uint8_t kiwi_host_find_i16_lookup_table_i8_queries_i32(int32_t* out, const int32_t* table, const int8_t* queries, size_t len, int32_t miss) {
+  uint8_t saw_miss = 0;
+  for (size_t i = 0; i < len; ++i) {
+    const int32_t value = table[(uint16_t)(int16_t)queries[i]];
+    out[i] = value;
+    saw_miss |= (uint8_t)(value == miss);
+  }
+  return saw_miss;
+}
+
+uint8_t kiwi_host_find_i16_lookup_table_i32(int32_t* out, const int32_t* table, const int16_t* queries, size_t len, int32_t miss) {
+  uint8_t saw_miss = 0;
+  for (size_t i = 0; i < len; ++i) {
+    const int32_t value = table[(uint16_t)queries[i]];
+    out[i] = value;
+    saw_miss |= (uint8_t)(value == miss);
+  }
+  return saw_miss;
+}
+
+void kiwi_host_find_i8_lookup_table_i64_null(int64_t* out, const int32_t* table, const int8_t* queries, size_t len, int32_t miss, int64_t null_value) {
+  for (size_t i = 0; i < len; ++i) {
+    const int32_t value = table[(uint8_t)queries[i]];
+    out[i] = value == miss ? null_value : (int64_t)value;
+  }
+}
+
+void kiwi_host_find_i16_lookup_table_i8_queries_i64_null(int64_t* out, const int32_t* table, const int8_t* queries, size_t len, int32_t miss, int64_t null_value) {
+  for (size_t i = 0; i < len; ++i) {
+    const int32_t value = table[(uint16_t)(int16_t)queries[i]];
+    out[i] = value == miss ? null_value : (int64_t)value;
+  }
+}
+
+void kiwi_host_find_i16_lookup_table_i64_null(int64_t* out, const int32_t* table, const int16_t* queries, size_t len, int32_t miss, int64_t null_value) {
+  for (size_t i = 0; i < len; ++i) {
+    const int32_t value = table[(uint16_t)queries[i]];
+    out[i] = value == miss ? null_value : (int64_t)value;
+  }
+}
+
 static const KiwiHostFindDispatch kiwi_host_find_scalar_dispatch = {
     kiwi_host_find_i8_scalar,
     kiwi_host_find_i16_scalar,

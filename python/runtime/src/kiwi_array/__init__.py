@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-__version__ = "0.2.50"
+__version__ = "0.2.62"
 
 
 def load_ipython_extension(ipython):

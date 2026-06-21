@@ -13,7 +13,8 @@
     "vscode": "^1.92.0"
   },
   "categories": [
-    "Programming Languages"
+    "Programming Languages",
+    "Themes"
   ],
   "keywords": [
     "kiwi",
@@ -51,6 +52,18 @@
         "language": "kiwi",
         "scopeName": "source.kiwi",
         "path": "./syntaxes/kiwi.tmLanguage.json"
+      }
+    ],
+    "themes": [
+      {
+        "label": "Kiwi Dark",
+        "uiTheme": "vs-dark",
+        "path": "./themes/kiwi-dark-color-theme.json"
+      },
+      {
+        "label": "Kiwi Light",
+        "uiTheme": "vs",
+        "path": "./themes/kiwi-light-color-theme.json"
       }
     ],
     "commands": [

@@ -66,7 +66,16 @@ fn appendFlatIntVector(comptime T: type, allocator: std.mem.Allocator, out: *std
     if (len == 1) try out.append(allocator, ',');
     for (0..len) |idx| {
         if (idx != 0) try out.append(allocator, ' ');
-        try out.writer(allocator).print("{d}", .{items[base + idx]});
+        const item = items[base + idx];
+        if (comptime T == i64) {
+            if (item == std.math.minInt(i64)) {
+                try out.appendSlice(allocator, "0N");
+            } else {
+                try out.print(allocator, "{d}", .{item});
+            }
+        } else {
+            try out.print(allocator, "{d}", .{item});
+        }
     }
 }
 
@@ -113,7 +122,7 @@ fn appendFlatBoolNumericVector(allocator: std.mem.Allocator, out: *std.ArrayList
     if (len == 1) try out.append(allocator, ',');
     for (0..len) |idx| {
         if (idx != 0) try out.append(allocator, ' ');
-        try out.writer(allocator).print("{d}", .{@intFromBool(items[base + idx])});
+        try out.print(allocator, "{d}", .{@intFromBool(items[base + idx])});
     }
 }
 
@@ -210,7 +219,12 @@ pub fn renderBackendArray(
     if (owned.ndim() == 0) {
         return switch (owned.dtype()) {
             api.c.MLX_BOOL => self.allocator.dupe(u8, if (try owned.boolItem()) "1b" else "0b"),
-            api.c.MLX_INT32, api.c.MLX_INT64, api.c.MLX_UINT32 => std.fmt.allocPrint(self.allocator, "{d}", .{try owned.intItem()}),
+            api.c.MLX_INT64 => blk: {
+                const item = try owned.intItem();
+                if (item == std.math.minInt(i64)) break :blk try self.allocator.dupe(u8, "0N");
+                break :blk try std.fmt.allocPrint(self.allocator, "{d}", .{item});
+            },
+            api.c.MLX_INT32, api.c.MLX_UINT32 => std.fmt.allocPrint(self.allocator, "{d}", .{try owned.intItem()}),
             api.c.MLX_FLOAT16, api.c.MLX_FLOAT32, api.c.MLX_FLOAT64, api.c.MLX_BFLOAT16 => api.formatFloat(self.allocator, try owned.floatItem()),
             else => error.Type,
         };

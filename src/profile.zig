@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform.zig");
 const runtime = @import("runtime.zig");
 
 pub const default_sample_hz: usize = 1000;
@@ -50,10 +51,10 @@ const Sampler = struct {
     session: *runtime.Session,
     sample_period_ns: u64,
     stop: std.atomic.Value(u8) = std.atomic.Value(u8).init(0),
-    label_counts: [label_sample_count]usize = [_]usize{0} ** label_sample_count,
-    op_counts: [op_sample_count]usize = [_]usize{0} ** op_sample_count,
-    function_counts: [runtime.sampling_profile_max_callable_slot_count]usize = [_]usize{0} ** runtime.sampling_profile_max_callable_slot_count,
-    code_counts: [runtime.sampling_profile_max_code_count]usize = [_]usize{0} ** runtime.sampling_profile_max_code_count,
+    label_counts: [label_sample_count]usize = @as([label_sample_count]usize, @splat(0)),
+    op_counts: [op_sample_count]usize = @as([op_sample_count]usize, @splat(0)),
+    function_counts: [runtime.sampling_profile_max_callable_slot_count]usize = @as([runtime.sampling_profile_max_callable_slot_count]usize, @splat(0)),
+    code_counts: [runtime.sampling_profile_max_code_count]usize = @as([runtime.sampling_profile_max_code_count]usize, @splat(0)),
     total_samples: usize = 0,
 
     fn sampleOnce(self: *Sampler) void {
@@ -81,7 +82,7 @@ const Sampler = struct {
                 if (self.stop.load(.acquire) != 0) return;
                 const now = monotonicNanos();
                 if (now >= deadline) break;
-                std.Thread.sleep(@min(deadline - now, @as(u64, std.time.ns_per_ms)));
+                platform.sleepNanos(@min(deadline - now, @as(u64, std.time.ns_per_ms)));
             }
         }
     }
@@ -148,7 +149,7 @@ fn sampleThreadMain(sampler: *Sampler) void {
 }
 
 fn monotonicNanos() u64 {
-    return @intCast(std.time.nanoTimestamp());
+    return @intCast(platform.monotonicNanos());
 }
 
 fn makeLabelCounts(counts: [label_sample_count]usize) [label_sample_count]NamedCount {

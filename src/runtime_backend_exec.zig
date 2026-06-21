@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform.zig");
 
 fn mlxDtypeIsFloat(comptime api: anytype, dtype: api.c.mlx_dtype) bool {
     return dtype == api.c.MLX_FLOAT16 or
@@ -55,9 +56,9 @@ fn sliceMlxAxis0Range(
 ) api.KError!api.mlx.Array {
     const ndim = value.ndim();
     if (ndim == 0) return error.Type;
-    var start_buf: [api.numeric_array_max_rank]i32 = [_]i32{0} ** api.numeric_array_max_rank;
-    var stop_buf: [api.numeric_array_max_rank]i32 = [_]i32{0} ** api.numeric_array_max_rank;
-    var stride_buf: [api.numeric_array_max_rank]i32 = [_]i32{1} ** api.numeric_array_max_rank;
+    var start_buf: [api.numeric_array_max_rank]i32 = @as([api.numeric_array_max_rank]i32, @splat(0));
+    var stop_buf: [api.numeric_array_max_rank]i32 = @as([api.numeric_array_max_rank]i32, @splat(0));
+    var stride_buf: [api.numeric_array_max_rank]i32 = @as([api.numeric_array_max_rank]i32, @splat(1));
     const shape = value.shape();
     for (0..ndim) |idx| stop_buf[idx] = shape[idx];
     start_buf[0] = std.math.cast(i32, start) orelse return error.Unsupported;
@@ -163,6 +164,37 @@ fn dotTensor(
         arr = casted;
     }
     return arr;
+}
+
+fn scalarFloatQueryTensorForTargetDtype(
+    comptime api: anytype,
+    self: *api.Session,
+    value: api.Value,
+    target_dtype: api.c.mlx_dtype,
+) api.KError!?api.mlx.Array {
+    if (!mlxDtypeIsFloat(api, target_dtype) or target_dtype == api.c.MLX_FLOAT64) return null;
+    const query = api.numericFloatAt(value, 0) catch return null;
+
+    var arr = api.mlx.Array.fromFloat(@floatCast(query));
+    errdefer arr.deinit();
+    if (target_dtype == api.c.MLX_FLOAT32) return arr;
+
+    const ctx = try api.backendContext(self);
+    const casted = api.mlx.Array.cast(ctx.*, arr, target_dtype) catch |err| return api.mapMlxError(err);
+    arr.deinit();
+    return casted;
+}
+
+fn mlxInt64Scalar(
+    comptime api: anytype,
+    value: i64,
+) api.KError!api.mlx.Array {
+    return api.mlx.Array.fromInt64(value) catch |err| return api.mapMlxError(err);
+}
+
+fn mlxFindNullScalar(comptime api: anytype, self: *api.Session) api.KError!api.mlx.Array {
+    _ = self;
+    return try mlxInt64Scalar(api, std.math.minInt(i64));
 }
 
 pub fn tryFastBackendMatrixRowFoldEachDerived(
@@ -371,45 +403,60 @@ pub fn tryFastBackendNumericVectorFindValue(
     defer left_arr.deinit();
     if (left_arr.ndim() != 1) return null;
 
-    var right_arr = try backendTensor(api, self, right);
+    var right_arr = if (query_len == 1)
+        (try scalarFloatQueryTensorForTargetDtype(api, self, right, left_arr.dtype())) orelse try backendTensor(api, self, right)
+    else
+        try backendTensor(api, self, right);
     defer right_arr.deinit();
+    try preserveFloatArrayDtypeWithScalar(api, self, &left_arr, &right_arr);
+
     if (query_len == 1) {
         if (right_arr.ndim() > 1) return null;
         if (right_arr.ndim() == 1) {
             const shape = right_arr.shape();
             if (shape.len != 1 or shape[0] != 1) return error.Type;
         }
+        if (left_len == 0) {
+            const out = try mlxFindNullScalar(api, self);
+            return try api.wrapManagedBackendArray(self, out);
+        }
         const ctx = try api.backendContext(self);
         var mask = api.mlx.Array.equal(ctx.*, left_arr, right_arr) catch |err| return api.mapMlxError(err);
         defer mask.deinit();
 
-        var indices = api.mlx.Array.boolWhereIndices(ctx.*, mask) catch |err| return api.mapMlxError(err);
-        defer indices.deinit();
-        if (indices.ndim() != 1) return error.Type;
-        const match_count: usize = @intCast(indices.shape()[0]);
-        if (match_count == 0) return try api.intValue(self, @intCast(left_len));
-
-        var first = try sliceMlxAxis0Range(api, self, indices, 0, 1);
+        var mask_i32 = api.mlx.Array.cast(ctx.*, mask, api.c.MLX_INT32) catch |err| return api.mapMlxError(err);
+        defer mask_i32.deinit();
+        var first = api.mlx.Array.argmax(ctx.*, mask_i32) catch |err| return api.mapMlxError(err);
         defer first.deinit();
-        const first_items = first.readInts(self.allocator) catch |err| return api.mapMlxError(err);
-        defer self.allocator.free(first_items);
-        if (first_items.len != 1) return error.Internal;
-        return try api.intValue(self, first_items[0]);
+        var first_i64 = api.mlx.Array.cast(ctx.*, first, api.c.MLX_INT64) catch |err| return api.mapMlxError(err);
+        defer first_i64.deinit();
+
+        var hit_count = api.mlx.Array.maxAxis0(ctx.*, mask_i32) catch |err| return api.mapMlxError(err);
+        defer hit_count.deinit();
+        var zero = api.mlx.Array.fromInt(0);
+        defer zero.deinit();
+        var hit = api.mlx.Array.greater(ctx.*, hit_count, zero) catch |err| return api.mapMlxError(err);
+        defer hit.deinit();
+
+        var null_value = try mlxFindNullScalar(api, self);
+        defer null_value.deinit();
+        const selected = api.mlx.Array.where(ctx.*, hit, first_i64, null_value) catch |err| return api.mapMlxError(err);
+        return try api.wrapManagedBackendArray(self, selected);
     }
 
     const query_len_i32 = std.math.cast(i32, query_len) orelse return error.Unsupported;
     if (query_len == 0) {
         const dims = [_]i32{query_len_i32};
-        const empty = api.mlx.Array.fromIntSlice(&[_]i32{}, &dims);
+        const empty = api.mlx.Array.fromInt64SliceChecked(&[_]i64{}, &dims) catch |err| return api.mapMlxError(err);
         return try api.wrapManagedBackendArray(self, empty);
     }
     const miss_index = std.math.cast(i32, left_len) orelse return error.Unsupported;
     if (left_len == 0) {
-        const miss_items = try self.allocator.alloc(i32, query_len);
+        const miss_items = try self.allocator.alloc(i64, query_len);
         defer self.allocator.free(miss_items);
-        @memset(miss_items, miss_index);
+        @memset(miss_items, std.math.minInt(i64));
         const dims = [_]i32{query_len_i32};
-        const misses = api.mlx.Array.fromIntSlice(miss_items, &dims);
+        const misses = api.mlx.Array.fromInt64SliceChecked(miss_items, &dims) catch |err| return api.mapMlxError(err);
         return try api.wrapManagedBackendArray(self, misses);
     }
 
@@ -438,12 +485,21 @@ pub fn tryFastBackendNumericVectorFindValue(
     defer row_indices.deinit();
     var row_index_col = api.mlx.Array.reshape(ctx.*, row_indices, &[_]i32{ left_len_i32, 1 }) catch |err| return api.mapMlxError(err);
     defer row_index_col.deinit();
-    const miss_value = api.mlx.Array.fromInt(miss_index);
+    var miss_value = api.mlx.Array.fromInt(miss_index);
+    defer miss_value.deinit();
     var selected = api.mlx.Array.where(ctx.*, mask, row_index_col, miss_value) catch |err| return api.mapMlxError(err);
     defer selected.deinit();
 
-    const first = api.mlx.Array.minAxis0(ctx.*, selected) catch |err| return api.mapMlxError(err);
-    return try api.wrapManagedBackendArray(self, first);
+    var first = api.mlx.Array.minAxis0(ctx.*, selected) catch |err| return api.mapMlxError(err);
+    defer first.deinit();
+    var first_i64 = api.mlx.Array.cast(ctx.*, first, api.c.MLX_INT64) catch |err| return api.mapMlxError(err);
+    defer first_i64.deinit();
+    var miss_mask = api.mlx.Array.equal(ctx.*, first, miss_value) catch |err| return api.mapMlxError(err);
+    defer miss_mask.deinit();
+    var null_value = try mlxFindNullScalar(api, self);
+    defer null_value.deinit();
+    const normalized = api.mlx.Array.where(ctx.*, miss_mask, null_value, first_i64) catch |err| return api.mapMlxError(err);
+    return try api.wrapManagedBackendArray(self, normalized);
 }
 
 pub fn tryFastBackendArgmaxValue(
@@ -461,14 +517,14 @@ pub fn tryFastBackendArgmaxValue(
     if (!has_backend_residency) return null;
 
     const materialize_start_ns: u64 = if (comptime api.enable_probe_instrumentation)
-        @intCast(std.time.nanoTimestamp())
+        @intCast(platform.monotonicNanos())
     else
         0;
     var arr = try backendTensor(api, self, value);
     defer arr.deinit();
     if (arr.ndim() != 1) return null;
     const kernel_start_ns: u64 = if (comptime api.enable_probe_instrumentation)
-        @intCast(std.time.nanoTimestamp())
+        @intCast(platform.monotonicNanos())
     else
         0;
 
@@ -478,7 +534,7 @@ pub fn tryFastBackendArgmaxValue(
 
     const idx = out.intItem() catch |err| return api.mapMlxError(err);
     if (comptime api.enable_probe_instrumentation) {
-        const finish_ns: u64 = @intCast(std.time.nanoTimestamp());
+        const finish_ns: u64 = @intCast(platform.monotonicNanos());
         self.debug_backend_argmax_fast_count += 1;
         self.debug_backend_argmax_materialize_ns +%= kernel_start_ns - materialize_start_ns;
         self.debug_backend_argmax_kernel_ns +%= finish_ns - kernel_start_ns;

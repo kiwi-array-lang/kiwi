@@ -1,8 +1,6 @@
 const std = @import("std");
 
-pub const c = @cImport({
-    @cInclude("duckdb.h");
-});
+pub const c = @import("duckdb_c");
 
 pub const ArrowFlag = struct {
     pub const dictionary_ordered: i64 = 1;
@@ -134,7 +132,7 @@ pub const Connection = struct {
         diagnostic.* = null;
         var self = Connection{ .allocator = allocator };
 
-        const path_z = if (db_path) |path| try allocator.dupeZ(u8, path) else null;
+        const path_z = if (db_path) |path| try allocator.dupeSentinel(u8, path, 0) else null;
         defer if (path_z) |buf| allocator.free(buf);
 
         if (c.duckdb_open(if (path_z) |buf| buf.ptr else null, &self.db) == c.DuckDBError) {
@@ -202,7 +200,7 @@ pub const Connection = struct {
 
     fn querySingleCountWithDiagnostic(self: *Connection, sql: []const u8, diagnostic: *?[]u8) !usize {
         diagnostic.* = null;
-        const sql_z = try self.allocator.dupeZ(u8, sql);
+        const sql_z = try self.allocator.dupeSentinel(u8, sql, 0);
         defer self.allocator.free(sql_z);
 
         var raw = std.mem.zeroInit(c.duckdb_result, .{});
@@ -229,7 +227,7 @@ pub const Connection = struct {
 
     fn loadConfiguredExtensionsWithDiagnostic(self: *Connection, diagnostic: *?[]u8) !void {
         diagnostic.* = null;
-        const extension_path = std.process.getEnvVarOwned(self.allocator, "KIWI_DUCKDB_EXTENSION_LOAD_PATH") catch |err| switch (err) {
+        const extension_path = getEnvVarOwned(self.allocator, "KIWI_DUCKDB_EXTENSION_LOAD_PATH") catch |err| switch (err) {
             error.EnvironmentVariableNotFound => return,
             else => return err,
         };
@@ -255,7 +253,7 @@ pub const Connection = struct {
         const sql = try std.fmt.allocPrint(self.allocator, "LOAD {s}", .{quoted});
         defer self.allocator.free(sql);
 
-        const sql_z = try self.allocator.dupeZ(u8, sql);
+        const sql_z = try self.allocator.dupeSentinel(u8, sql, 0);
         defer self.allocator.free(sql_z);
 
         var raw = std.mem.zeroInit(c.duckdb_result, .{});
@@ -272,7 +270,7 @@ pub const Appender = struct {
     raw: c.duckdb_appender = null,
 
     pub fn init(conn: *Connection, table_name: []const u8) !Appender {
-        const table_z = try conn.allocator.dupeZ(u8, table_name);
+        const table_z = try conn.allocator.dupeSentinel(u8, table_name, 0);
         defer conn.allocator.free(table_z);
 
         var self = Appender{ .allocator = conn.allocator };
@@ -393,7 +391,7 @@ pub const PreparedStatement = struct {
 
     pub fn initWithDiagnostic(conn: *Connection, sql: []const u8, diagnostic: *?[]u8) !PreparedStatement {
         diagnostic.* = null;
-        const sql_z = try conn.allocator.dupeZ(u8, sql);
+        const sql_z = try conn.allocator.dupeSentinel(u8, sql, 0);
         defer conn.allocator.free(sql_z);
 
         var self = PreparedStatement{ .allocator = conn.allocator };
@@ -758,6 +756,13 @@ fn buildArrowSummary(
         .first_batch_row_count = first_batch_row_count,
         .fields = fields,
     };
+}
+
+fn getEnvVarOwned(allocator: std.mem.Allocator, name: []const u8) ![]u8 {
+    const name_z = try allocator.dupeSentinel(u8, name, 0);
+    defer allocator.free(name_z);
+    const raw = std.c.getenv(name_z.ptr) orelse return error.EnvironmentVariableNotFound;
+    return try allocator.dupe(u8, std.mem.span(raw));
 }
 
 fn dupZString(allocator: std.mem.Allocator, text: [*:0]const u8) ![]u8 {

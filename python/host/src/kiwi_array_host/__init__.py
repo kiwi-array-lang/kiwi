@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-__version__ = "0.2.50"
+__version__ = "0.2.62"
 
 
 def _package_root() -> Path:

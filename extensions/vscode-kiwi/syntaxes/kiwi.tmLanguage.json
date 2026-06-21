@@ -25,6 +25,9 @@
       "include": "#identifiers"
     },
     {
+      "include": "#lambdaBraces"
+    },
+    {
       "include": "#punctuation"
     }
   ],
@@ -94,11 +97,23 @@
         }
       ]
     },
+    "lambdaBraces": {
+      "patterns": [
+        {
+          "name": "punctuation.definition.lambda.begin.kiwi",
+          "match": "\\{"
+        },
+        {
+          "name": "punctuation.definition.lambda.end.kiwi",
+          "match": "\\}"
+        }
+      ]
+    },
     "punctuation": {
       "patterns": [
         {
           "name": "punctuation.definition.kiwi",
-          "match": "[()\\[\\]{};.@]"
+          "match": "[()\\[\\];.@]"
         }
       ]
     }

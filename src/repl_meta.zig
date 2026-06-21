@@ -1,4 +1,65 @@
 const std = @import("std");
+const build_options = @import("build_options");
+
+const runtime_has_mlx = if (@hasDecl(build_options, "runtime_has_mlx")) build_options.runtime_has_mlx else true;
+const runtime_has_duckdb = if (@hasDecl(build_options, "runtime_has_duckdb")) build_options.runtime_has_duckdb else true;
+const runtime_has_wasm_duckdb_bridge = if (@hasDecl(build_options, "runtime_has_wasm_duckdb_bridge")) build_options.runtime_has_wasm_duckdb_bridge else false;
+const runtime_has_relations = runtime_has_duckdb or runtime_has_wasm_duckdb_bridge;
+const runtime_has_load_builtin = runtime_has_mlx or runtime_has_relations;
+const runtime_has_save_builtin = runtime_has_mlx;
+const runtime_has_sql_builtin = runtime_has_relations;
+const runtime_has_exec_builtin = runtime_has_duckdb;
+const runtime_has_register_builtin = runtime_has_duckdb;
+
+const load_save_refcard =
+    if (runtime_has_load_builtin and runtime_has_save_builtin)
+        "load save\n"
+    else if (runtime_has_load_builtin)
+        "load\n"
+    else if (runtime_has_save_builtin)
+        "save\n"
+    else
+        "";
+
+const sql_exec_register_refcard =
+    if (runtime_has_sql_builtin and runtime_has_exec_builtin and runtime_has_register_builtin)
+        "sql exec register\n"
+    else if (runtime_has_sql_builtin and runtime_has_exec_builtin)
+        "sql exec\n"
+    else if (runtime_has_sql_builtin and runtime_has_register_builtin)
+        "sql register\n"
+    else if (runtime_has_exec_builtin and runtime_has_register_builtin)
+        "exec register\n"
+    else if (runtime_has_sql_builtin)
+        "sql\n"
+    else if (runtime_has_exec_builtin)
+        "exec\n"
+    else if (runtime_has_register_builtin)
+        "register\n"
+    else
+        "";
+
+const optional_builtin_refcard =
+    "built-in verbs:\n" ++
+    load_save_refcard ++
+    sql_exec_register_refcard ++
+    "grad valuegrad\n" ++
+    "\n";
+
+const mlx_refcard =
+    if (runtime_has_mlx)
+        "mlx:\n" ++
+            "rotcache rotcacheupdate\n" ++
+            "rotcacheview rope ropeflat\n" ++
+            "ropecisflat rmsnorm layernorm\n" ++
+            "gelu geluapprox mlpdense\n" ++
+            "conv2d convtranspose2d\n" ++
+            "upsamplenearest2d groupnorm\n" ++
+            "softmax sdpa sam3boxrpb\n" ++
+            "sdpamask sdpaflat\n" ++
+            "\n"
+    else
+        "";
 
 pub const Command = union(enum) {
     exit,
@@ -70,20 +131,8 @@ pub const compact_refcard =
     "`i$\"ab\" -> 97 98\n" ++
     "`I$\"23\" -> 23\n" ++
     "\n" ++
-    "built-in verbs:\n" ++
-    "load save sql register\n" ++
-    "grad valuegrad\n" ++
-    "\n" ++
-    "mlx:\n" ++
-    "rotcache rotcacheupdate\n" ++
-    "rotcacheview rope ropeflat\n" ++
-    "ropecisflat rmsnorm layernorm\n" ++
-    "gelu geluapprox mlpdense\n" ++
-    "conv2d convtranspose2d\n" ++
-    "upsamplenearest2d groupnorm\n" ++
-    "softmax sdpa sam3boxrpb\n" ++
-    "sdpamask sdpaflat\n" ++
-    "\n" ++
+    optional_builtin_refcard ++
+    mlx_refcard ++
     "meta:\n" ++
     "\\ refcard\n" ++
     "\\t:n expr time\n" ++
@@ -96,6 +145,10 @@ pub fn command(raw: []const u8) ?Command {
     return null;
 }
 
+fn expectTextAvailability(text: []const u8, needle: []const u8, available: bool) !void {
+    try std.testing.expectEqual(available, std.mem.indexOf(u8, text, needle) != null);
+}
+
 test "bare backslash returns compact refcard" {
     const cmd = command("\\") orelse return error.TestUnexpectedResult;
     switch (cmd) {
@@ -103,8 +156,13 @@ test "bare backslash returns compact refcard" {
             try std.testing.expect(std.mem.startsWith(u8, text, "verb  monad       dyad"));
             try std.testing.expect(std.mem.indexOf(u8, text, "verb  monad       dyad") != null);
             try std.testing.expect(std.mem.indexOf(u8, text, "?     rng,unique  find,rng") != null);
-            try std.testing.expect(std.mem.indexOf(u8, text, "mlx:\n") != null);
-            try std.testing.expect(std.mem.indexOf(u8, text, "rotcache rotcacheupdate") != null);
+            try expectTextAvailability(text, "load", runtime_has_load_builtin);
+            try expectTextAvailability(text, "save", runtime_has_save_builtin);
+            try expectTextAvailability(text, "sql", runtime_has_sql_builtin);
+            try expectTextAvailability(text, "exec", runtime_has_exec_builtin);
+            try expectTextAvailability(text, "register", runtime_has_register_builtin);
+            try expectTextAvailability(text, "mlx:\n", runtime_has_mlx);
+            try expectTextAvailability(text, "rotcache rotcacheupdate", runtime_has_mlx);
         },
         else => return error.TestUnexpectedResult,
     }

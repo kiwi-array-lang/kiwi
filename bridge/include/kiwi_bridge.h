@@ -60,6 +60,7 @@ typedef enum {
   KIWI_SYNTAX_TOKEN_ADVERB = 6,
   KIWI_SYNTAX_TOKEN_COMMENT = 7,
   KIWI_SYNTAX_TOKEN_PUNCTUATION = 8,
+  KIWI_SYNTAX_TOKEN_LAMBDA_BRACE = 9,
 } kiwi_syntax_token_kind_e;
 
 typedef struct {

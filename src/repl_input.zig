@@ -1,5 +1,6 @@
 const builtin = @import("builtin");
 const std = @import("std");
+const platform = @import("platform.zig");
 
 const Allocator = std.mem.Allocator;
 const max_history_entries: usize = 1_000;
@@ -8,6 +9,7 @@ const supports_interactive_editor = switch (builtin.os.tag) {
     .windows, .wasi => false,
     else => true,
 };
+const TerminalControlChar = enum { min, time };
 
 pub const ReplInput = struct {
     allocator: Allocator,
@@ -16,8 +18,8 @@ pub const ReplInput = struct {
 
     pub fn init(allocator: Allocator) !ReplInput {
         const interactive = supports_interactive_editor and
-            std.fs.File.stdin().isTty() and
-            std.fs.File.stdout().isTty();
+            platform.isStdinTty() and
+            platform.isStdoutTty();
         var history = if (interactive)
             try History.init(allocator)
         else
@@ -85,7 +87,7 @@ const History = struct {
     }
 
     fn add(self: *History, line: []const u8) !void {
-        const clean = std.mem.trimRight(u8, line, "\r");
+        const clean = std.mem.trimEnd(u8, line, "\r");
         if (std.mem.trim(u8, clean, " \t").len == 0) return;
         const appended = try self.appendOwned(clean);
         if (!appended) return;
@@ -104,18 +106,15 @@ const History = struct {
 
     fn loadFromDisk(self: *History) !void {
         const path = self.path orelse return;
-        const file = openPathForRead(path) catch |err| switch (err) {
+        const data = platform.readFileAlloc(self.allocator, path, max_history_file_bytes) catch |err| switch (err) {
             error.FileNotFound => return,
             else => return err,
         };
-        defer file.close();
-
-        const data = try file.readToEndAlloc(self.allocator, max_history_file_bytes);
         defer self.allocator.free(data);
 
         var lines = std.mem.tokenizeScalar(u8, data, '\n');
         while (lines.next()) |raw| {
-            const line = std.mem.trimRight(u8, raw, "\r");
+            const line = std.mem.trimEnd(u8, raw, "\r");
             if (line.len == 0) continue;
             _ = try self.appendOwned(line);
         }
@@ -123,11 +122,8 @@ const History = struct {
 
     fn appendToDisk(self: *History, line: []const u8) !void {
         const path = self.path orelse return;
-        var file = try createPathForAppend(path);
-        defer file.close();
-        try file.seekFromEnd(0);
-        try file.writeAll(line);
-        try file.writeAll("\n");
+        try platform.appendFile(path, line);
+        try platform.appendFile(path, "\n");
     }
 };
 
@@ -261,7 +257,7 @@ const EditorKey = union(enum) {
 };
 
 fn defaultHistoryPath(allocator: Allocator) !?[]u8 {
-    if (std.process.getEnvVarOwned(allocator, "KIWI_HISTORY")) |raw| {
+    if (platform.getEnvVarOwned(allocator, "KIWI_HISTORY")) |raw| {
         if (raw.len == 0) {
             allocator.free(raw);
             return null;
@@ -272,7 +268,7 @@ fn defaultHistoryPath(allocator: Allocator) !?[]u8 {
         else => return err,
     }
 
-    if (std.process.getEnvVarOwned(allocator, "HOME")) |home| {
+    if (platform.getEnvVarOwned(allocator, "HOME")) |home| {
         defer allocator.free(home);
         return try std.fmt.allocPrint(allocator, "{s}/.kiwi_history", .{home});
     } else |err| switch (err) {
@@ -282,28 +278,31 @@ fn defaultHistoryPath(allocator: Allocator) !?[]u8 {
 }
 
 fn readBufferedLine(allocator: Allocator, prompt: []const u8) !?[]u8 {
-    const stdin = std.fs.File.stdin().deprecatedReader();
-    const stdout = std.fs.File.stdout().deprecatedWriter();
+    var stdout = platform.stdoutWriter();
     try stdout.writeAll(prompt);
 
     var line = std.ArrayList(u8).empty;
     errdefer line.deinit(allocator);
 
-    stdin.streamUntilDelimiter(line.writer(allocator), '\n', null) catch |err| switch (err) {
-        error.EndOfStream => {
-            try stdout.writeByte('\n');
-            return null;
-        },
-        else => return err,
-    };
+    while (true) {
+        const byte = readByte(std.posix.STDIN_FILENO) catch |err| switch (err) {
+            error.EndOfStream => {
+                try stdout.writeByte('\n');
+                return null;
+            },
+            else => return err,
+        };
+        if (byte == '\n') break;
+        try line.append(allocator, byte);
+    }
     return try line.toOwnedSlice(allocator);
 }
 
 fn readInteractiveLine(allocator: Allocator, prompt: []const u8, history: *History) !?[]u8 {
     if (!supports_interactive_editor) return readBufferedLine(allocator, prompt);
 
-    const stdin = std.fs.File.stdin();
-    const stdout = std.fs.File.stdout();
+    const stdin = std.posix.STDIN_FILENO;
+    var stdout = platform.stdoutWriter();
     var terminal = RawTerminalState.init(stdin) catch return readBufferedLine(allocator, prompt);
     defer terminal.deinit(stdin);
 
@@ -375,11 +374,11 @@ fn readInteractiveLine(allocator: Allocator, prompt: []const u8, history: *Histo
             },
         }
 
-        try redrawLine(stdout, prompt, line.slice(), line.cursor);
+        try redrawLine(&stdout, prompt, line.slice(), line.cursor);
     }
 }
 
-fn redrawLine(stdout: std.fs.File, prompt: []const u8, line: []const u8, cursor: usize) !void {
+fn redrawLine(stdout: *platform.FdWriter, prompt: []const u8, line: []const u8, cursor: usize) !void {
     try stdout.writeAll("\r");
     try stdout.writeAll(prompt);
     try stdout.writeAll(line);
@@ -391,17 +390,7 @@ fn redrawLine(stdout: std.fs.File, prompt: []const u8, line: []const u8, cursor:
     }
 }
 
-fn openPathForRead(path: []const u8) !std.fs.File {
-    if (std.fs.path.isAbsolute(path)) return std.fs.openFileAbsolute(path, .{});
-    return std.fs.cwd().openFile(path, .{});
-}
-
-fn createPathForAppend(path: []const u8) !std.fs.File {
-    if (std.fs.path.isAbsolute(path)) return std.fs.createFileAbsolute(path, .{ .truncate = false });
-    return std.fs.cwd().createFile(path, .{ .truncate = false });
-}
-
-fn readEditorKey(stdin: std.fs.File) !EditorKey {
+fn readEditorKey(stdin: std.posix.fd_t) !EditorKey {
     const byte = readByte(stdin) catch |err| switch (err) {
         error.EndOfStream => return .eof,
         else => return err,
@@ -421,7 +410,7 @@ fn readEditorKey(stdin: std.fs.File) !EditorKey {
     };
 }
 
-fn readEscapeSequence(stdin: std.fs.File) !EditorKey {
+fn readEscapeSequence(stdin: std.posix.fd_t) !EditorKey {
     const first = readByte(stdin) catch return .{ .byte = 0x1b };
     if (first == '[') {
         const second = readByte(stdin) catch return .{ .byte = 0x1b };
@@ -454,10 +443,10 @@ fn readEscapeSequence(stdin: std.fs.File) !EditorKey {
     return .{ .byte = 0x1b };
 }
 
-fn readByte(file: std.fs.File) !u8 {
+fn readByte(fd: std.posix.fd_t) !u8 {
     var buffer: [1]u8 = undefined;
     while (true) {
-        const read_len = try file.read(&buffer);
+        const read_len = try std.posix.read(fd, &buffer);
         if (read_len == 0) return error.EndOfStream;
         return buffer[0];
     }
@@ -466,8 +455,8 @@ fn readByte(file: std.fs.File) !u8 {
 const RawTerminalState = if (supports_interactive_editor) struct {
     original: std.posix.termios,
 
-    fn init(file: std.fs.File) !RawTerminalState {
-        var raw = try std.posix.tcgetattr(file.handle);
+    fn init(fd: std.posix.fd_t) !RawTerminalState {
+        var raw = try std.posix.tcgetattr(fd);
         const original = raw;
         raw.iflag.BRKINT = false;
         raw.iflag.ICRNL = false;
@@ -481,22 +470,45 @@ const RawTerminalState = if (supports_interactive_editor) struct {
         raw.lflag.ICANON = false;
         raw.lflag.IEXTEN = false;
         raw.lflag.ISIG = false;
-        raw.cc[@intFromEnum(std.c.V.MIN)] = 1;
-        raw.cc[@intFromEnum(std.c.V.TIME)] = 0;
-        try std.posix.tcsetattr(file.handle, .FLUSH, raw);
+        raw.cc[terminalControlCharIndex(.min)] = 1;
+        raw.cc[terminalControlCharIndex(.time)] = 0;
+        try std.posix.tcsetattr(fd, .FLUSH, raw);
         return .{ .original = original };
     }
 
-    fn deinit(self: *const RawTerminalState, file: std.fs.File) void {
-        std.posix.tcsetattr(file.handle, .NOW, self.original) catch {};
+    fn deinit(self: *const RawTerminalState, fd: std.posix.fd_t) void {
+        std.posix.tcsetattr(fd, .NOW, self.original) catch {};
     }
 } else struct {
-    fn init(_: std.fs.File) !RawTerminalState {
+    fn init(_: std.posix.fd_t) !RawTerminalState {
         return error.Unsupported;
     }
 
-    fn deinit(_: *const RawTerminalState, _: std.fs.File) void {}
+    fn deinit(_: *const RawTerminalState, _: std.posix.fd_t) void {}
 };
+
+fn terminalControlCharIndex(comptime control: TerminalControlChar) usize {
+    if (comptime builtin.os.tag == .linux) {
+        return switch (builtin.cpu.arch) {
+            .mips, .mipsel, .mips64, .mips64el => switch (control) {
+                .min => 4,
+                .time => 5,
+            },
+            .powerpc, .powerpcle, .powerpc64, .powerpc64le => switch (control) {
+                .min => 5,
+                .time => 7,
+            },
+            else => switch (control) {
+                .min => 6,
+                .time => 5,
+            },
+        };
+    }
+    return switch (control) {
+        .min => @intFromEnum(std.c.V.MIN),
+        .time => @intFromEnum(std.c.V.TIME),
+    };
+}
 
 test "history cursor preserves draft while browsing" {
     var history = try History.initWithPath(std.testing.allocator, null);

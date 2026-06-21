@@ -3,7 +3,7 @@
 #include <immintrin.h>
 
 #if defined(__clang__) && (defined(__x86_64__) || defined(_M_X64))
-#pragma clang attribute push(__attribute__((target("avx512f,avx512bw,evex512"))), apply_to=function)
+#pragma clang attribute push(__attribute__((target("avx512f,avx512bw"))), apply_to=function)
 #endif
 
 static inline int kiwi_host_compare_i64_tail(int64_t left, int64_t right, int op) {

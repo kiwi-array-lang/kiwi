@@ -5,6 +5,8 @@ Minimal VS Code support for kiwi `.k` files.
 ## Features
 
 - syntax highlighting for kiwi source
+- distinct TextMate scopes for lambda braces (`{` and `}`)
+- bundled `Kiwi Dark` and `Kiwi Light` color themes matching the Kiwi syntax palette
 - one-space indentation defaults for `.k` files
 - bracket and quote pairing, without backtick auto-close
 - integrated-terminal REPL commands:
@@ -32,3 +34,7 @@ it sends the smallest complete line-oriented statement around the cursor,
 expanding across balanced `()`, `[]`, and `{}` while ignoring strings and
 comments. `cmd+enter` / `ctrl+enter` sends the surrounding blank-line block and
 expands it when needed to avoid cutting through a multiline statement.
+
+The bundled `Kiwi Dark` and `Kiwi Light` themes apply the same token roles as
+the web REPL and Apple apps. Other active VS Code themes can still style the
+Kiwi grammar through the contributed TextMate scopes.

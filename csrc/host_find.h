@@ -10,6 +10,15 @@ size_t kiwi_host_find_i32(const int32_t* items, size_t len, int32_t query);
 size_t kiwi_host_find_i64(const int64_t* items, size_t len, int64_t query);
 size_t kiwi_host_find_f64(const double* items, size_t len, double query);
 
+void kiwi_host_find_i8_build_table_i32(int32_t* table, const int8_t* items, size_t len, int32_t miss);
+void kiwi_host_find_i16_build_table_i32(int32_t* table, const int16_t* items, size_t len, int32_t miss);
+uint8_t kiwi_host_find_i8_lookup_table_i32(int32_t* out, const int32_t* table, const int8_t* queries, size_t len, int32_t miss);
+uint8_t kiwi_host_find_i16_lookup_table_i8_queries_i32(int32_t* out, const int32_t* table, const int8_t* queries, size_t len, int32_t miss);
+uint8_t kiwi_host_find_i16_lookup_table_i32(int32_t* out, const int32_t* table, const int16_t* queries, size_t len, int32_t miss);
+void kiwi_host_find_i8_lookup_table_i64_null(int64_t* out, const int32_t* table, const int8_t* queries, size_t len, int32_t miss, int64_t null_value);
+void kiwi_host_find_i16_lookup_table_i8_queries_i64_null(int64_t* out, const int32_t* table, const int8_t* queries, size_t len, int32_t miss, int64_t null_value);
+void kiwi_host_find_i16_lookup_table_i64_null(int64_t* out, const int32_t* table, const int16_t* queries, size_t len, int32_t miss, int64_t null_value);
+
 size_t kiwi_host_find_i8_scalar(const int8_t* items, size_t len, int8_t query);
 size_t kiwi_host_find_i16_scalar(const int16_t* items, size_t len, int16_t query);
 size_t kiwi_host_find_i32_scalar(const int32_t* items, size_t len, int32_t query);

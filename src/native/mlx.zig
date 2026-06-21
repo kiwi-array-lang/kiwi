@@ -212,6 +212,11 @@ pub const Array = struct {
         return .{ .handle = c.mlx_array_new_int(value) };
     }
 
+    pub fn fromInt64(value: i64) Error!Array {
+        const data = [_]i64{value};
+        return try fromInt64SliceChecked(&data, &.{});
+    }
+
     pub fn fromFloat(value: f32) Array {
         return .{ .handle = c.mlx_array_new_float32(value) };
     }
@@ -928,7 +933,7 @@ pub fn loadSafetensors(
     ctx: Context,
     path: []const u8,
 ) (Error || std.mem.Allocator.Error)![]NamedArray {
-    const zpath = try allocator.dupeZ(u8, path);
+    const zpath = try allocator.dupeSentinel(u8, path, 0);
     defer allocator.free(zpath);
 
     var cpu_ctx: ?Context = null;
@@ -1010,7 +1015,7 @@ pub fn loadSafetensorTensor(
     dtype: c.mlx_dtype,
     data_offset: u64,
 ) (Error || std.mem.Allocator.Error)!Array {
-    const zpath = try allocator.dupeZ(u8, path);
+    const zpath = try allocator.dupeSentinel(u8, path, 0);
     defer allocator.free(zpath);
 
     var cpu_ctx: ?Context = null;
@@ -1056,7 +1061,7 @@ pub fn saveSafetensors(
 ) (Error || std.mem.Allocator.Error)!void {
     std.debug.assert(names.len == arrays.len);
 
-    const zpath = try allocator.dupeZ(u8, path);
+    const zpath = try allocator.dupeSentinel(u8, path, 0);
     defer allocator.free(zpath);
 
     const map = c.mlx_map_string_to_array_new();
@@ -1065,7 +1070,7 @@ pub fn saveSafetensors(
     defer _ = c.mlx_map_string_to_string_free(metadata);
 
     for (names, arrays) |name, array| {
-        const zname = try allocator.dupeZ(u8, name);
+        const zname = try allocator.dupeSentinel(u8, name, 0);
         defer allocator.free(zname);
         try check(c.mlx_map_string_to_array_insert(map, zname.ptr, array.handle));
     }

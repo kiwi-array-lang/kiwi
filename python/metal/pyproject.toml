@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "kiwi-array-metal"
-version = "0.2.50"
+version = "0.2.62"
 description = "MLX Metal native runtime payload for Kiwi Array."
 readme = "README.md"
 requires-python = ">=3.11"

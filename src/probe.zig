@@ -6,10 +6,41 @@ pub const ProbeCase = struct {
     source: []const u8,
 };
 
+pub const KernelProbeResult = struct {
+    simd: [runtime.debug_simd_kernel_count]runtime.DebugNameCount,
+
+    fn backendHasCounts(entries: []const runtime.DebugNameCount) bool {
+        for (entries) |entry| {
+            if (entry.count != 0) return true;
+        }
+        return false;
+    }
+
+    fn writeBackendJson(entries: []const runtime.DebugNameCount, stringify: anytype) !void {
+        try stringify.beginObject();
+        for (entries) |entry| {
+            if (entry.count == 0) continue;
+            try stringify.objectField(entry.name);
+            try stringify.write(entry.count);
+        }
+        try stringify.endObject();
+    }
+
+    pub fn jsonStringify(self: KernelProbeResult, stringify: anytype) !void {
+        try stringify.beginObject();
+        if (backendHasCounts(self.simd[0..])) {
+            try stringify.objectField("simd");
+            try writeBackendJson(self.simd[0..], stringify);
+        }
+        try stringify.endObject();
+    }
+};
+
 pub const ProbeResult = struct {
     name: []const u8,
     status: []const u8,
     err_name: ?[]const u8,
+    kernels: KernelProbeResult,
     host_realization_count: usize,
     structural_host_realization_count: usize,
     backend_realization_count: usize,
@@ -61,6 +92,9 @@ pub const ProbeResult = struct {
     apply_each_prior_generic_count: usize,
     apply_each_prior_generic_element_count: usize,
     apply_each_right_fast_string_contains_count: usize,
+    apply_each_fast_numeric_unary_count: usize,
+    apply_each_fast_numeric_vector_code_count: usize,
+    apply_each_fast_numeric_closure_count: usize,
     apply_each_fast_unary_lifted_count: usize,
     apply_each_fast_dense_count: usize,
     apply_each_fast_dense_miss_unsupported_base_count: usize,
@@ -126,6 +160,10 @@ pub const ProbeResult = struct {
     code_compile_unsupported_opcode_top_counts: [runtime.debug_top_opcode_count]runtime.DebugNameCount,
     code_indexed_assign_sources_count: usize,
     code_indexed_assign_stack_count: usize,
+    dense_fusion_enabled: bool,
+    dense_fusion_add_fold_map_candidates: usize,
+    dense_fusion_add_fold_map_hits: usize,
+    dense_fusion_add_fold_map_disabled: usize,
     host_fold_fast_count: usize,
     host_scan_fast_count: usize,
     host_fold_scan_miss_unsupported_builtin_count: usize,
@@ -244,10 +282,12 @@ pub fn shouldRunCase(selected: []const []const u8, name: []const u8) bool {
 }
 
 pub fn collectProbeResult(session: *runtime.Session, name: []const u8, err_name: ?[]const u8) ProbeResult {
+    const dense_fusion = session.debugDenseFusionStats();
     return .{
         .name = name,
         .status = if (err_name == null) "ok" else "error",
         .err_name = err_name,
+        .kernels = .{ .simd = session.debugSimdKernelCounts() },
         .host_realization_count = session.debugHostRealizationCount(),
         .structural_host_realization_count = session.debugStructuralHostRealizationCount(),
         .backend_realization_count = session.debugBackendRealizationCount(),
@@ -299,6 +339,9 @@ pub fn collectProbeResult(session: *runtime.Session, name: []const u8, err_name:
         .apply_each_prior_generic_count = session.debugApplyEachPriorGenericCount(),
         .apply_each_prior_generic_element_count = session.debugApplyEachPriorGenericElementCount(),
         .apply_each_right_fast_string_contains_count = session.debugApplyEachRightFastStringContainsCount(),
+        .apply_each_fast_numeric_unary_count = session.debugApplyEachFastNumericUnaryCount(),
+        .apply_each_fast_numeric_vector_code_count = session.debugApplyEachFastNumericVectorCodeCount(),
+        .apply_each_fast_numeric_closure_count = session.debugApplyEachFastNumericClosureCount(),
         .apply_each_fast_unary_lifted_count = session.debugApplyEachFastUnaryLiftedCount(),
         .apply_each_fast_dense_count = session.debugApplyEachFastDenseCount(),
         .apply_each_fast_dense_miss_unsupported_base_count = session.debugApplyEachFastDenseMissCount(.unsupported_base),
@@ -364,6 +407,10 @@ pub fn collectProbeResult(session: *runtime.Session, name: []const u8, err_name:
         .code_compile_unsupported_opcode_top_counts = session.debugCodeCompileUnsupportedOpcodeTopCounts(),
         .code_indexed_assign_sources_count = session.debugCodeIndexedAssignSourcesCount(),
         .code_indexed_assign_stack_count = session.debugCodeIndexedAssignStackCount(),
+        .dense_fusion_enabled = dense_fusion.enabled,
+        .dense_fusion_add_fold_map_candidates = dense_fusion.compact_add_fold_map_candidates,
+        .dense_fusion_add_fold_map_hits = dense_fusion.compact_add_fold_map_hits,
+        .dense_fusion_add_fold_map_disabled = dense_fusion.compact_add_fold_map_disabled,
         .host_fold_fast_count = session.debugHostFoldFastCount(),
         .host_scan_fast_count = session.debugHostScanFastCount(),
         .host_fold_scan_miss_unsupported_builtin_count = session.debugHostFoldScanMissCount(.unsupported_builtin),
@@ -474,11 +521,23 @@ pub fn collectProbeResult(session: *runtime.Session, name: []const u8, err_name:
     };
 }
 
+fn writeKernelProbeBackendText(writer: anytype, backend: []const u8, entries: []const runtime.DebugNameCount) !void {
+    for (entries) |entry| {
+        if (entry.count == 0) continue;
+        try writer.print("kernel.{s}.{s}={d}\n", .{ backend, entry.name, entry.count });
+    }
+}
+
+fn writeKernelProbeText(writer: anytype, kernels: KernelProbeResult) !void {
+    try writeKernelProbeBackendText(writer, "simd", kernels.simd[0..]);
+}
+
 pub fn writeProbeResultText(writer: anytype, result: ProbeResult) !void {
     try writer.print("probe {s} status={s}", .{ result.name, result.status });
     if (result.err_name) |err_name| try writer.print(" err={s}", .{err_name});
     try writer.writeByte('\n');
 
+    try writeKernelProbeText(writer, result.kernels);
     try writer.print("host_realization_count={d}\n", .{result.host_realization_count});
     try writer.print("structural_host_realization_count={d}\n", .{result.structural_host_realization_count});
     try writer.print("backend_realization_count={d}\n", .{result.backend_realization_count});
@@ -530,6 +589,9 @@ pub fn writeProbeResultText(writer: anytype, result: ProbeResult) !void {
     try writer.print("apply_each_prior_generic_count={d}\n", .{result.apply_each_prior_generic_count});
     try writer.print("apply_each_prior_generic_element_count={d}\n", .{result.apply_each_prior_generic_element_count});
     try writer.print("apply_each_right_fast_string_contains_count={d}\n", .{result.apply_each_right_fast_string_contains_count});
+    try writer.print("apply_each_fast_numeric_unary_count={d}\n", .{result.apply_each_fast_numeric_unary_count});
+    try writer.print("apply_each_fast_numeric_vector_code_count={d}\n", .{result.apply_each_fast_numeric_vector_code_count});
+    try writer.print("apply_each_fast_numeric_closure_count={d}\n", .{result.apply_each_fast_numeric_closure_count});
     try writer.print("apply_each_fast_unary_lifted_count={d}\n", .{result.apply_each_fast_unary_lifted_count});
     try writer.print("apply_each_fast_dense_count={d}\n", .{result.apply_each_fast_dense_count});
     try writer.print("apply_each_fast_dense_miss_unsupported_base_count={d}\n", .{result.apply_each_fast_dense_miss_unsupported_base_count});
@@ -619,6 +681,10 @@ pub fn writeProbeResultText(writer: anytype, result: ProbeResult) !void {
     try writer.writeByte('\n');
     try writer.print("code_indexed_assign_sources_count={d}\n", .{result.code_indexed_assign_sources_count});
     try writer.print("code_indexed_assign_stack_count={d}\n", .{result.code_indexed_assign_stack_count});
+    try writer.print("dense_fusion_enabled={s}\n", .{if (result.dense_fusion_enabled) "true" else "false"});
+    try writer.print("dense_fusion_add_fold_map_candidates={d}\n", .{result.dense_fusion_add_fold_map_candidates});
+    try writer.print("dense_fusion_add_fold_map_hits={d}\n", .{result.dense_fusion_add_fold_map_hits});
+    try writer.print("dense_fusion_add_fold_map_disabled={d}\n", .{result.dense_fusion_add_fold_map_disabled});
     try writer.print("host_fold_fast_count={d}\n", .{result.host_fold_fast_count});
     try writer.print("host_scan_fast_count={d}\n", .{result.host_scan_fast_count});
     try writer.print("host_fold_scan_miss_unsupported_builtin_count={d}\n", .{result.host_fold_scan_miss_unsupported_builtin_count});
@@ -729,7 +795,7 @@ pub fn writeProbeResultText(writer: anytype, result: ProbeResult) !void {
 }
 
 pub fn allocJsonString(allocator: std.mem.Allocator, value: anytype) ![]u8 {
-    var out: std.io.Writer.Allocating = .init(allocator);
+    var out: std.Io.Writer.Allocating = .init(allocator);
     errdefer out.deinit();
     var stringify: std.json.Stringify = .{
         .writer = &out.writer,

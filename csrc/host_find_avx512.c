@@ -4,7 +4,7 @@
 #include <immintrin.h>
 
 #if defined(__clang__)
-#pragma clang attribute push(__attribute__((target("avx512f,avx512bw,evex512"))), apply_to=function)
+#pragma clang attribute push(__attribute__((target("avx512f,avx512bw"))), apply_to=function)
 #endif
 
 #if defined(_MSC_VER)

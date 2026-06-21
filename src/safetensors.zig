@@ -1,5 +1,6 @@
 const zig_builtin = @import("builtin");
 const std = @import("std");
+const platform = @import("platform.zig");
 
 pub const Dtype = enum {
     bool,
@@ -58,25 +59,17 @@ pub const Error = error{
     UnsupportedTarget,
 };
 
-pub const ParseFileHeaderError = if (zig_builtin.target.cpu.arch == .wasm32)
-    Error || std.mem.Allocator.Error
-else
-    Error || std.mem.Allocator.Error || std.fs.File.OpenError || std.fs.File.ReadError || std.fs.File.StatError;
-
-fn openPathForRead(path: []const u8) !std.fs.File {
-    if (std.fs.path.isAbsolute(path)) return std.fs.openFileAbsolute(path, .{});
-    return std.fs.cwd().openFile(path, .{});
-}
+pub const ParseFileHeaderError = anyerror;
 
 pub fn parseFileHeader(allocator: std.mem.Allocator, path: []const u8) ParseFileHeaderError!ParsedFile {
     if (comptime zig_builtin.target.cpu.arch == .wasm32) {
         return error.UnsupportedTarget;
     }
 
-    const file = try openPathForRead(path);
+    const file = try platform.openFileRead(path);
     defer file.close();
 
-    const file_size = (try file.stat()).size;
+    const file_size = try file.size();
 
     var header_len_buf: [8]u8 = undefined;
     if (try file.readAll(&header_len_buf) != header_len_buf.len) return error.InvalidHeader;

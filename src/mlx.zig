@@ -66,7 +66,7 @@ const placeholder = struct {
 
     fn initShape(dims: []const i32) [max_rank]c_int {
         std.debug.assert(dims.len <= max_rank);
-        var out = [_]c_int{0} ** max_rank;
+        var out = @as([max_rank]c_int, @splat(0));
         for (dims, 0..) |dim, idx| out[idx] = dim;
         return out;
     }
@@ -103,7 +103,7 @@ const placeholder = struct {
         handle: c.mlx_array = .{ .ctx = null },
         dtype_value: c.mlx_dtype = c.MLX_INT32,
         shape_len: u8 = 0,
-        shape_buf: [max_rank]c_int = [_]c_int{0} ** max_rank,
+        shape_buf: [max_rank]c_int = @as([max_rank]c_int, @splat(0)),
 
         pub fn empty() Self.Array {
             return .{};
@@ -129,6 +129,11 @@ const placeholder = struct {
         pub fn fromInt(value: i32) Self.Array {
             _ = value;
             return initArray(c.MLX_INT32, &.{});
+        }
+
+        pub fn fromInt64(value: i64) Self.Error!Self.Array {
+            _ = value;
+            return initArray(c.MLX_INT64, &.{});
         }
 
         pub fn fromFloat(value: f32) Self.Array {
