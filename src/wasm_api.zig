@@ -547,7 +547,7 @@ pub export fn kiwi_kernel_trace_simd_count(index: u32) u32 {
     const current = &(session orelse return 0);
     if (index >= runtime.debug_simd_kernel_count) return 0;
     const kernel: runtime.DebugSimdKernel = @enumFromInt(index);
-    return std.math.cast(u32, current.debugSimdKernelCount(kernel)) orelse std.math.maxInt(u32);
+    return std.math.cast(u32, current.debugRuntimeStats().simd_kernel_counts[@intFromEnum(kernel)]) orelse std.math.maxInt(u32);
 }
 
 pub export fn kiwi_force_backend_surface() i32 {

@@ -8,7 +8,7 @@ const runtime_has_relations = runtime_has_duckdb or runtime_has_wasm_duckdb_brid
 const runtime_has_load_builtin = runtime_has_mlx or runtime_has_relations;
 const runtime_has_save_builtin = runtime_has_mlx;
 const runtime_has_sql_builtin = runtime_has_relations;
-const runtime_has_exec_builtin = runtime_has_duckdb;
+const runtime_has_exec_builtin = runtime_has_duckdb or runtime_has_wasm_duckdb_bridge;
 const runtime_has_register_builtin = runtime_has_duckdb;
 
 const load_save_refcard =

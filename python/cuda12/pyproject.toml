@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "kiwi-array-cuda12"
-version = "0.2.62"
+version = "0.4.1"
 description = "CUDA 12 MLX runtime payload for Kiwi Array."
 readme = "README.md"
 requires-python = ">=3.11"

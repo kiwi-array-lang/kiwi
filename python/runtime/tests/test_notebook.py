@@ -128,20 +128,34 @@ def test_run_smoke_reports_basic_checks() -> None:
     assert "scalar: ok 2" in format_smoke_text(checks)
 
 
+def test_run_smoke_accepts_float_rendered_gradients() -> None:
+    session = FakeSession(
+        [
+            FakeResult(text="2"),
+            FakeResult(text="6"),
+            FakeResult(text="2.0 4.0 6.0"),
+        ]
+    )
+
+    checks = run_smoke(session)
+
+    assert checks[-1] == SmokeCheck(name="grad", ok=True, detail="2.0 4.0 6.0")
+
+
 def test_run_smoke_can_check_mlx_global_path() -> None:
     session = FakeMlxSession(
         [
             FakeResult(text="2"),
             FakeResult(text="6"),
-            FakeResult(text="2 4 6"),
-            FakeResult(text="2 4 6"),
+            FakeResult(text="2.0 4.0 6.0"),
+            FakeResult(text="2.0 4.0 6.0"),
         ]
     )
 
     checks = run_smoke(session, include_mlx=True)
 
     assert session.mlx_globals == [("kx", (3,))]
-    assert checks[-1] == SmokeCheck(name="mlx_global", ok=True, detail="2 4 6")
+    assert checks[-1] == SmokeCheck(name="mlx_global", ok=True, detail="2.0 4.0 6.0")
 
 
 def test_load_extension_registers_k_and_kiwi_magics() -> None:

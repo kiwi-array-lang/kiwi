@@ -4,12 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "kiwi-array-jupyter"
-version = "0.2.62"
+version = "0.4.1"
 description = "Jupyter kernel for Kiwi."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-  "kiwi-array==0.2.62",
+  "kiwi-array==0.4.1",
   "ipykernel>=6.29",
   "jupyter_client>=8.6",
   "jupyter_core>=5.7",

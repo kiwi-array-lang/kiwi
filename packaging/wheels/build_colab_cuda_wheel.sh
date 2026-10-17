@@ -224,6 +224,7 @@ SOURCE_DEPS_CACHE_KEY="$(source_deps_cache_key)"
 docker build \
   --platform "$PLATFORM" \
   --build-arg BASE_IMAGE="$BASE_IMAGE" \
+  --build-arg ZIG_VERSION="$KIWI_ZIG_VERSION" \
   -t "$IMAGE_TAG" \
   -f "$WORKSPACE_ROOT/scripts/kiwi-zig-linux-builder.Dockerfile" \
   "$WORKSPACE_ROOT"
@@ -233,11 +234,17 @@ if [[ "$REPAIR_WHEEL" == "0" ]]; then
   rm -f "$REPAIRED_DIST_DIR"/kiwi_array_cuda12-*.whl
 fi
 prepare_docker_volume_args
+NATIVE_PREFIX="${KIWI_ARRAY_WHEEL_PREFIX:-$KIWI_ROOT/out/python-wheels/native-prefix}"
+append_docker_volume_for_path "$NATIVE_PREFIX"
 
-docker run \
+run_cuda_container() {
+  local phase="$1"
+  docker run \
   --rm \
   --platform "$PLATFORM" \
   --user "$(id -u):$(id -g)" \
+  -e KIWI_CUDA_BUILD_PHASE="$phase" \
+  -e KIWI_ARRAY_WHEEL_PREFIX="$NATIVE_PREFIX" \
   -e DEVELOPER_DIR=/tmp \
   -e HOME=/tmp \
   -e BUILD_PARALLEL="$BUILD_PARALLEL_VALUE" \
@@ -254,7 +261,6 @@ docker run \
   -e KIWI_ARRAY_WHEEL_RUNTIME_BACKEND=mlx \
   -e KIWI_ARRAY_WHEEL_RUNTIME_PACKAGE=cuda12 \
   -e KIWI_ARRAY_WHEEL_TARGET=x86_64-linux-gnu \
-  -e KIWI_ARRAY_WHEEL_ZIG_MAKER_OPT=Debug \
   -e KIWI_SOURCE_ROOT="$KIWI_ROOT" \
   -e KIWI_DUCKDB_PREFIX="$DUCKDB_DEPS_DIR/duckdb" \
   -e KIWI_MLX_C_INCLUDE="$MLX_SOURCE_DEPS_DIR/mlx-c" \
@@ -281,23 +287,31 @@ docker run \
   bash -lc '
     set -euo pipefail
     export LD_LIBRARY_PATH="$MLX_INSTALL_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-    source_cache_stamp="$KIWI_MLX_SOURCE_DEPS_DIR/.kiwi-source-cache-key"
-    current_source_cache_key=""
-    if [[ -f "$source_cache_stamp" ]]; then
-      current_source_cache_key="$(cat "$source_cache_stamp")"
-    fi
-    if [[ ! -d "$MLX_SRC_DIR" || ! -d "$MLX_C_INCLUDE_ROOT/mlx" || "$current_source_cache_key" != "$KIWI_MLX_SOURCE_DEPS_CACHE_KEY" ]]; then
-      bootstrap_args=(--fetch-only)
-      if [[ -n "$KIWI_PUBLIC_LOCK_FILE" ]]; then
-        bootstrap_args+=(--lock-file "$KIWI_PUBLIC_LOCK_FILE")
+    if [[ "$KIWI_CUDA_BUILD_PHASE" != package ]]; then
+      source_cache_stamp="$KIWI_MLX_SOURCE_DEPS_DIR/.kiwi-source-cache-key"
+      current_source_cache_key=""
+      if [[ -f "$source_cache_stamp" ]]; then
+        current_source_cache_key="$(cat "$source_cache_stamp")"
       fi
-      KIWI_DEPS_DIR="$KIWI_MLX_SOURCE_DEPS_DIR" \
-        bash "$KIWI_SOURCE_ROOT/scripts/bootstrap_deps.sh" "${bootstrap_args[@]}"
-      printf "%s\n" "$KIWI_MLX_SOURCE_DEPS_CACHE_KEY" > "$source_cache_stamp"
+      if [[ ! -d "$MLX_SRC_DIR" || ! -d "$MLX_C_INCLUDE_ROOT/mlx" || "$current_source_cache_key" != "$KIWI_MLX_SOURCE_DEPS_CACHE_KEY" ]]; then
+        bootstrap_args=(--fetch-only)
+        if [[ -n "$KIWI_PUBLIC_LOCK_FILE" ]]; then
+          bootstrap_args+=(--lock-file "$KIWI_PUBLIC_LOCK_FILE")
+        fi
+        KIWI_DEPS_DIR="$KIWI_MLX_SOURCE_DEPS_DIR" \
+          bash "$KIWI_SOURCE_ROOT/scripts/bootstrap_deps.sh" "${bootstrap_args[@]}"
+        printf "%s\n" "$KIWI_MLX_SOURCE_DEPS_CACHE_KEY" > "$source_cache_stamp"
+      fi
+      scripts/build_linux_mlx.sh
+      bash scripts/build_linux_mlxc_mini_bridge.sh "$MLX_INSTALL_PREFIX" "$MLXC_MINI_BRIDGE_LIB"
+      KIWI_DEPS_DIR="$DUCKDB_DEPS_DIR" bash "$KIWI_SOURCE_ROOT/scripts/bootstrap_duckdb.sh"
     fi
-    scripts/build_linux_mlx.sh
-    bash scripts/build_linux_mlxc_mini_bridge.sh "$MLX_INSTALL_PREFIX" "$MLXC_MINI_BRIDGE_LIB"
-    KIWI_DEPS_DIR="$DUCKDB_DEPS_DIR" bash "$KIWI_SOURCE_ROOT/scripts/bootstrap_duckdb.sh"
+    if [[ "$KIWI_CUDA_BUILD_PHASE" == deps ]]; then
+      exit 0
+    fi
+    if [[ "$KIWI_CUDA_BUILD_PHASE" == package ]]; then
+      export KIWI_ARRAY_WHEEL_SKIP_NATIVE_BUILD=1
+    fi
     cd "$KIWI_SOURCE_ROOT"
     packaging/wheels/build_wheels.sh
     if [[ "$KIWI_ARRAY_REPAIR_WHEEL" != "0" ]]; then
@@ -315,7 +329,7 @@ docker run \
           repair_args+=(--exclude "$exclude")
         done
       fi
-      if uvx --from auditwheel auditwheel repair "${repair_args[@]}" "${wheels[0]}"; then
+      if uvx --from auditwheel --with "patchelf>=0.14.5" auditwheel repair "${repair_args[@]}" "${wheels[0]}"; then
         mv "$repair_tmp"/kiwi_array_cuda12-*.whl "$KIWI_ARRAY_REPAIRED_WHEEL_DIST_DIR"/
         rmdir "$repair_tmp"
       else
@@ -328,6 +342,34 @@ docker run \
       fi
     fi
   '
+}
+
+if [[ "$(uname -s)" == Darwin && "$(uname -m)" == arm64 ]]; then
+  # Rosetta cannot run this Zig checkpoint's x86_64 build runner reliably.
+  # Keep CUDA dependencies and wheel repair in Linux; compile Kiwi on the host.
+  run_cuda_container deps
+  host_zig="${KIWI_ZIG:-${ZIG_BIN:-$WORKSPACE_ROOT/tools/zig}}"
+  if [[ ! -x "$host_zig" ]]; then
+    host_zig="$(command -v zig)"
+  fi
+  rm -rf "$NATIVE_PREFIX"
+  (
+    cd "$KIWI_ROOT"
+    "$host_zig" build \
+      -Dpublic-cli=true -Dcli-name=kiwi -Dinstall-sdk=true \
+      -Druntime-backend=mlx -Dmlx-backend=cuda -Dmlx-linkage=dynamic \
+      -Dstrip=true -Dstrip-instrumentation=true -Doptimize=ReleaseFast \
+      -Dtarget=x86_64-linux-gnu \
+      "-Dmlx-prefix=$MLX_INSTALL_PREFIX" \
+      "-Dmlx-c-include=$MLX_SOURCE_DEPS_DIR/mlx-c" \
+      "-Dmlxc-mini-bridge=$MLXC_MINI_BRIDGE_LIB" \
+      "-Dduckdb-prefix=$DUCKDB_DEPS_DIR/duckdb" \
+      --prefix "$NATIVE_PREFIX"
+  )
+  run_cuda_container package
+else
+  run_cuda_container all
+fi
 
 wheel="$(require_single_wheel "$WHEEL_DIST_DIR")"
 verify_wheel_payload "$wheel"

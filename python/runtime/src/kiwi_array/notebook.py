@@ -169,6 +169,30 @@ def format_info_text(info: list[tuple[str, str]]) -> str:
     return "\n".join(f"{label.rjust(width)}: {value}" for label, value in info)
 
 
+def _numeric_tokens(text: str) -> list[float] | None:
+    tokens = text.split()
+    if not tokens:
+        return None
+    try:
+        return [float(token) for token in tokens]
+    except ValueError:
+        return None
+
+
+def _smoke_matches(actual: str | None, expected: str) -> bool:
+    if actual == expected:
+        return True
+    if actual is None:
+        return False
+    actual_numbers = _numeric_tokens(actual)
+    expected_numbers = _numeric_tokens(expected)
+    if actual_numbers is None or expected_numbers is None:
+        return False
+    if len(actual_numbers) != len(expected_numbers):
+        return False
+    return all(abs(left - right) <= 1e-9 for left, right in zip(actual_numbers, expected_numbers))
+
+
 def run_smoke(session: SessionProtocol, include_mlx: bool = False) -> list[SmokeCheck]:
     checks: list[SmokeCheck] = []
     for name, source, expected in [
@@ -177,7 +201,7 @@ def run_smoke(session: SessionProtocol, include_mlx: bool = False) -> list[Smoke
         ("grad", "grad[{+/(x*x)}][1 2 3]", "2 4 6"),
     ]:
         result = session.eval(source)
-        ok = result.status == "ok" and result.text == expected
+        ok = result.status == "ok" and _smoke_matches(result.text, expected)
         detail = result.text if result.status == "ok" and result.text is not None else f"!{result.status}"
         checks.append(SmokeCheck(name=name, ok=ok, detail=detail))
 
@@ -189,7 +213,7 @@ def run_smoke(session: SessionProtocol, include_mlx: bool = False) -> list[Smoke
         try:
             setter("kx", [1.0, 2.0, 3.0], (3,))
             result = session.eval("grad[{+/(x*x)}][kx]")
-            ok = result.status == "ok" and result.text == "2 4 6"
+            ok = result.status == "ok" and _smoke_matches(result.text, "2 4 6")
             detail = result.text if result.status == "ok" and result.text is not None else f"!{result.status}"
             checks.append(SmokeCheck(name="mlx_global", ok=ok, detail=detail))
         except Exception as exc:

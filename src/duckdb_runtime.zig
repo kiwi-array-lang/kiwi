@@ -219,12 +219,6 @@ pub const Connection = struct {
         return @intCast(value);
     }
 
-    fn loadConfiguredExtensions(self: *Connection) !void {
-        var diagnostic: ?[]u8 = null;
-        defer if (diagnostic) |text| self.allocator.free(text);
-        try self.loadConfiguredExtensionsWithDiagnostic(&diagnostic);
-    }
-
     fn loadConfiguredExtensionsWithDiagnostic(self: *Connection, diagnostic: *?[]u8) !void {
         diagnostic.* = null;
         const extension_path = getEnvVarOwned(self.allocator, "KIWI_DUCKDB_EXTENSION_LOAD_PATH") catch |err| switch (err) {
@@ -237,12 +231,6 @@ pub const Connection = struct {
         if (trimmed.len == 0) return;
 
         try self.loadExtensionPathWithDiagnostic(trimmed, diagnostic);
-    }
-
-    fn loadExtensionPath(self: *Connection, extension_path: []const u8) !void {
-        var diagnostic: ?[]u8 = null;
-        defer if (diagnostic) |text| self.allocator.free(text);
-        try self.loadExtensionPathWithDiagnostic(extension_path, &diagnostic);
     }
 
     fn loadExtensionPathWithDiagnostic(self: *Connection, extension_path: []const u8, diagnostic: *?[]u8) !void {

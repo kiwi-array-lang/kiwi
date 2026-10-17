@@ -2,6 +2,7 @@ pub fn createHostDenseArrayFromBackendArray(
     comptime api: anytype,
     self: *api.Session,
     owner: api.HeapOwner,
+    handle: *const api.NumericArray,
     array: api.mlx.Array,
 ) api.KError!*api.HostDenseArray {
     var owned = array.clone() catch |err| return api.mapMlxError(err);
@@ -29,7 +30,7 @@ pub fn createHostDenseArrayFromBackendArray(
                 }
             }
 
-            var out = try api.allocOwnedHostIntResult(self, owner, .bit, len);
+            var out = try api.allocHostIntResultForHandle(self, owner, handle, .bit, len);
             for (items, 0..) |item, idx| try api.hostIntResultSet(&out, idx, @intFromBool(item));
             const host = api.hostIntResultArrayPtr(&out);
             api.bitClearUnusedTail(host.storage.bit, host.logical_len);
@@ -49,7 +50,7 @@ pub fn createHostDenseArrayFromBackendArray(
             for (items, 0..) |item, idx| values[idx] = item;
 
             const analysis = api.analyzeIntSlice(values);
-            var out = try api.allocOwnedHostIntResult(self, owner, analysis.kind, len);
+            var out = try api.allocHostIntResultForHandle(self, owner, handle, analysis.kind, len);
             for (values, 0..) |item, idx| try api.hostIntResultSet(&out, idx, item);
             const host = api.hostIntResultArrayPtr(&out);
             if (analysis.kind == .bit) api.bitClearUnusedTail(host.storage.bit, host.logical_len);
@@ -66,7 +67,7 @@ pub fn createHostDenseArrayFromBackendArray(
             for (items, 0..) |item, idx| values[idx] = item;
 
             const analysis = api.analyzeIntSlice(values);
-            var out = try api.allocOwnedHostIntResult(self, owner, analysis.kind, len);
+            var out = try api.allocHostIntResultForHandle(self, owner, handle, analysis.kind, len);
             for (values, 0..) |item, idx| try api.hostIntResultSet(&out, idx, item);
             const host = api.hostIntResultArrayPtr(&out);
             if (analysis.kind == .bit) api.bitClearUnusedTail(host.storage.bit, host.logical_len);
@@ -79,7 +80,7 @@ pub fn createHostDenseArrayFromBackendArray(
             defer self.allocator.free(items);
 
             const analysis = api.analyzeIntSlice(items);
-            var out = try api.allocOwnedHostIntResult(self, owner, analysis.kind, len);
+            var out = try api.allocHostIntResultForHandle(self, owner, handle, analysis.kind, len);
             for (items, 0..) |item, idx| try api.hostIntResultSet(&out, idx, item);
             const host = api.hostIntResultArrayPtr(&out);
             if (analysis.kind == .bit) api.bitClearUnusedTail(host.storage.bit, host.logical_len);
@@ -91,7 +92,7 @@ pub fn createHostDenseArrayFromBackendArray(
             const items = owned.readFloats(self.allocator) catch |err| return api.mapMlxError(err);
             defer self.allocator.free(items);
 
-            const out = try api.allocOwnedHostFloat32Result(self, owner, len);
+            const out = try api.allocHostFloat32ResultForHandle(self, owner, handle, len);
             @memcpy(out.items, items);
             const analysis = api.analyzeFloatSlice32(out.items);
             api.hostDenseSetFlags(out.array, analysis.flags);
@@ -101,7 +102,7 @@ pub fn createHostDenseArrayFromBackendArray(
             const items = owned.readFloat64s(self.allocator) catch |err| return api.mapMlxError(err);
             defer self.allocator.free(items);
 
-            const out = try api.allocOwnedHostFloatResult(self, owner, len);
+            const out = try api.allocHostFloatResultForHandle(self, owner, handle, len);
             @memcpy(out.items, items);
             const analysis = api.analyzeFloatSlice(out.items);
             api.hostDenseSetFlags(out.array, analysis.flags);
@@ -117,7 +118,7 @@ pub fn tryEnsureManagedBackendRealizationForHandle(
     handle: *api.NumericArray,
 ) api.KError!?*api.BackendArray {
     if (handle.mlx) |array| {
-        if (comptime api.enable_probe_instrumentation) self.debug_mlx_realization_reuse_count += 1;
+        if (comptime api.enable_probe_instrumentation) self.debug.mlx_realization_reuse_count += 1;
         api.touchBackendAttachment(self, handle);
         return array;
     }
@@ -146,21 +147,20 @@ pub fn tryEnsureManagedBackendRealizationForHandle(
             array
         else
             (try api.tryEnsureHostRealizationForHandle(self, handle) orelse return null);
-        break :blk try api.createBackendArrayFromHostArray(self, host);
+        break :blk try api.createBackendArrayFromHostArray(self, api.Value.numericArray(handle), host);
     };
     errdefer materialized.deinit();
     const owned = try api.allocManagedBackendPayload(self, materialized);
     materialized = api.mlx.Array.empty();
     if (comptime api.enable_probe_instrumentation) {
-        self.debug_mlx_realization_count += 1;
+        self.debug.mlx_realization_count += 1;
         if (handle.structural != .materialized) {
-            self.debug_structural_mlx_realization_count += 1;
-            self.debug_numeric_structural_mlx_realization_counts[@intFromEnum(handle.structural)] += 1;
+            self.debug.structural_mlx_realization_count += 1;
+            self.debug.numeric_structural_mlx_realization_counts[@intFromEnum(handle.structural)] += 1;
         }
-        if (had_host_attachment) self.debug_mlx_promotion_count += 1;
+        if (had_host_attachment) self.debug.mlx_promotion_count += 1;
     }
     handle.mlx = owned;
-    api.syncNumericArrayChildren(handle);
     api.touchBackendAttachment(self, handle);
     if (handle.host != null) api.enforceDualResidentBudget(self, handle);
     return owned;

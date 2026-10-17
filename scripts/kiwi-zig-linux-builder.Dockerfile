@@ -3,7 +3,7 @@ FROM ${BASE_IMAGE}
 
 ARG TARGETARCH
 ARG CMAKE_VERSION=3.31.6
-ARG ZIG_VERSION=0.17.0-dev.633+9c5655093
+ARG ZIG_VERSION
 ARG UV_VERSION=0.9.21
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -27,6 +27,9 @@ RUN apt-get update \
     xz-utils \
  && rm -rf /var/lib/apt/lists/*
 
+# Avoid smart-HTTP clone failures seen through Docker's HTTP/2 transport.
+RUN git config --system http.version HTTP/1.1
+
 RUN case "$TARGETARCH" in \
       arm64) cmake_arch='aarch64' ;; \
       amd64) cmake_arch='x86_64' ;; \
@@ -38,7 +41,8 @@ RUN case "$TARGETARCH" in \
  && rm /tmp/cmake.tar.gz \
  && cmake --version
 
-RUN case "$TARGETARCH" in \
+RUN test -n "$ZIG_VERSION" \
+ && case "$TARGETARCH" in \
       arm64) zig_arch='aarch64' ;; \
       amd64) zig_arch='x86_64' ;; \
       *) echo "unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \

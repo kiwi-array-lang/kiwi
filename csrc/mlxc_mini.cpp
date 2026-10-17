@@ -4,7 +4,6 @@
 #include <cmath>
 #include <fstream>
 #include <numeric>
-#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -16,9 +15,7 @@
 #include "mlx/c/map.h"
 #include "mlx/c/ops.h"
 #include "mlx/c/stream.h"
-#include "mlx/c/string.h"
 #include "mlx/c/vector.h"
-#include "mlx/c/version.h"
 #include "mlx/fast.h"
 #include "mlx/io.h"
 #include "mlx/mlx.h"
@@ -30,7 +27,6 @@ using mlx::core::array;
 using StringToArrayMap = std::unordered_map<std::string, array>;
 using StringToStringMap = std::unordered_map<std::string, std::string>;
 using StringToArrayIter = StringToArrayMap::iterator;
-using StringToStringIter = StringToStringMap::iterator;
 
 enum LoweredProgramTag : uint8_t {
   LOWERED_PARAM = 1,
@@ -372,14 +368,6 @@ StringToArrayIter& get_string_to_array_iter(mlx_map_string_to_array_iterator it)
 
 StringToArrayMap& get_string_to_array_iter_map(mlx_map_string_to_array_iterator it) {
   return *ptr<StringToArrayMap>(it.map_ctx);
-}
-
-StringToStringIter& get_string_to_string_iter(mlx_map_string_to_string_iterator it) {
-  return *ptr<StringToStringIter>(it.ctx);
-}
-
-StringToStringMap& get_string_to_string_iter_map(mlx_map_string_to_string_iterator it) {
-  return *ptr<StringToStringMap>(it.map_ctx);
 }
 
 int replace_array(mlx_array* out, const array& value) {
@@ -900,15 +888,6 @@ std::vector<array> mlp_dense_impl(const std::vector<array>& inputs) {
 
 } // namespace
 
-extern "C" mlx_string mlx_string_new(void) {
-  return mlx_string{new std::string()};
-}
-
-extern "C" void mlx_set_error_handler(
-    mlx_error_handler_func,
-    void*,
-    void (*)(void*)) {}
-
 extern "C" void _mlx_error(const char* file, const int line, const char* fmt, ...) {
   std::fprintf(stderr, "mlx-c-mini error at %s:%d: ", file ? file : "<unknown>", line);
   va_list args;
@@ -916,45 +895,6 @@ extern "C" void _mlx_error(const char* file, const int line, const char* fmt, ..
   std::vfprintf(stderr, fmt, args);
   va_end(args);
   std::fprintf(stderr, "\n");
-}
-
-extern "C" mlx_string mlx_string_new_data(const char* str) {
-  return mlx_string{new std::string(str ? str : "")};
-}
-
-extern "C" int mlx_string_set(mlx_string* str, const mlx_string src) {
-  try {
-    if (!str->ctx) {
-      str->ctx = new std::string();
-    }
-    *ptr<std::string>(str->ctx) = *ptr<std::string>(src.ctx);
-    return 0;
-  } catch (std::exception& e) {
-    mlx_error(e.what());
-    return 1;
-  }
-}
-
-extern "C" const char* mlx_string_data(mlx_string str) {
-  return str.ctx ? ptr<std::string>(str.ctx)->c_str() : "";
-}
-
-extern "C" int mlx_string_free(mlx_string str) {
-  delete ptr<std::string>(str.ctx);
-  return 0;
-}
-
-extern "C" int mlx_version(mlx_string* str) {
-  try {
-    if (!str->ctx) {
-      str->ctx = new std::string();
-    }
-    *ptr<std::string>(str->ctx) = mlx::core::version();
-    return 0;
-  } catch (std::exception& e) {
-    mlx_error(e.what());
-    return 1;
-  }
 }
 
 extern "C" mlx_array mlx_array_new(void) {
@@ -982,40 +922,8 @@ extern "C" mlx_array mlx_array_new_float32(float val) {
   return mlx_array{new array(val, mlx::core::float32)};
 }
 
-extern "C" mlx_array mlx_array_new_float(float val) {
-  return mlx_array_new_float32(val);
-}
-
 extern "C" mlx_array mlx_array_new_float64(double val) {
   return mlx_array{new array(val, mlx::core::float64)};
-}
-
-extern "C" mlx_array mlx_array_new_double(double val) {
-  return mlx_array_new_float64(val);
-}
-
-extern "C" int mlx_array_set_bool(mlx_array* arr, bool val) {
-  return replace_array(arr, array(val));
-}
-
-extern "C" int mlx_array_set_int(mlx_array* arr, int val) {
-  return replace_array(arr, array(val));
-}
-
-extern "C" int mlx_array_set_float32(mlx_array* arr, float val) {
-  return replace_array(arr, array(val, mlx::core::float32));
-}
-
-extern "C" int mlx_array_set_float(mlx_array* arr, float val) {
-  return mlx_array_set_float32(arr, val);
-}
-
-extern "C" int mlx_array_set_float64(mlx_array* arr, double val) {
-  return replace_array(arr, array(val, mlx::core::float64));
-}
-
-extern "C" int mlx_array_set_double(mlx_array* arr, double val) {
-  return mlx_array_set_float64(arr, val);
 }
 
 extern "C" int mlx_array_set_data(
@@ -1072,16 +980,8 @@ extern "C" mlx_array mlx_array_new_data(
   return out;
 }
 
-extern "C" size_t mlx_array_itemsize(const mlx_array arr) {
-  return get_array_const(arr).itemsize();
-}
-
 extern "C" size_t mlx_array_size(const mlx_array arr) {
   return get_array_const(arr).size();
-}
-
-extern "C" size_t mlx_array_nbytes(const mlx_array arr) {
-  return get_array_const(arr).nbytes();
 }
 
 extern "C" size_t mlx_array_ndim(const mlx_array arr) {
@@ -1092,10 +992,6 @@ extern "C" const int* mlx_array_shape(const mlx_array arr) {
   return (const int*)get_array_const(arr).shape().data();
 }
 
-extern "C" int mlx_array_dim(const mlx_array arr, int dim) {
-  return get_array_const(arr).shape(dim);
-}
-
 extern "C" mlx_dtype mlx_array_dtype(const mlx_array arr) {
   return to_c_dtype(get_array_const(arr).dtype());
 }
@@ -1104,21 +1000,6 @@ extern "C" int mlx_array_eval(mlx_array arr) {
   try {
     get_array(arr).eval();
     get_array(arr).wait();
-    return 0;
-  } catch (std::exception& e) {
-    mlx_error(e.what());
-    return 1;
-  }
-}
-
-extern "C" int mlx_array_tostring(mlx_string* str, const mlx_array arr) {
-  try {
-    if (!str->ctx) {
-      str->ctx = new std::string();
-    }
-    std::ostringstream os;
-    os << get_array_const(arr);
-    *ptr<std::string>(str->ctx) = os.str();
     return 0;
   } catch (std::exception& e) {
     mlx_error(e.what());
@@ -1267,21 +1148,6 @@ extern "C" mlx_map_string_to_array mlx_map_string_to_array_new(void) {
   return mlx_map_string_to_array{new StringToArrayMap()};
 }
 
-extern "C" int mlx_map_string_to_array_set(
-    mlx_map_string_to_array* map,
-    const mlx_map_string_to_array src) {
-  try {
-    if (!map->ctx) {
-      map->ctx = new StringToArrayMap();
-    }
-    get_string_to_array_map(*map) = get_string_to_array_map_const(src);
-    return 0;
-  } catch (std::exception& e) {
-    mlx_error(e.what());
-    return 1;
-  }
-}
-
 extern "C" int mlx_map_string_to_array_free(mlx_map_string_to_array map) {
   delete ptr<StringToArrayMap>(map.ctx);
   return 0;
@@ -1296,23 +1162,6 @@ extern "C" int mlx_map_string_to_array_insert(
         std::string(key ? key : ""),
         get_array_const(value));
     return 0;
-  } catch (std::exception& e) {
-    mlx_error(e.what());
-    return 1;
-  }
-}
-
-extern "C" int mlx_map_string_to_array_get(
-    mlx_array* value,
-    const mlx_map_string_to_array map,
-    const char* key) {
-  try {
-    const auto& cpp_map = get_string_to_array_map_const(map);
-    auto it = cpp_map.find(key ? key : "");
-    if (it == cpp_map.end()) {
-      return 2;
-    }
-    return replace_array(value, it->second);
   } catch (std::exception& e) {
     mlx_error(e.what());
     return 1;
@@ -1361,95 +1210,9 @@ extern "C" mlx_map_string_to_string mlx_map_string_to_string_new(void) {
   return mlx_map_string_to_string{new StringToStringMap()};
 }
 
-extern "C" int mlx_map_string_to_string_set(
-    mlx_map_string_to_string* map,
-    const mlx_map_string_to_string src) {
-  try {
-    if (!map->ctx) {
-      map->ctx = new StringToStringMap();
-    }
-    get_string_to_string_map(*map) = get_string_to_string_map_const(src);
-    return 0;
-  } catch (std::exception& e) {
-    mlx_error(e.what());
-    return 1;
-  }
-}
-
 extern "C" int mlx_map_string_to_string_free(mlx_map_string_to_string map) {
   delete ptr<StringToStringMap>(map.ctx);
   return 0;
-}
-
-extern "C" int mlx_map_string_to_string_insert(
-    mlx_map_string_to_string map,
-    const char* key,
-    const char* value) {
-  try {
-    get_string_to_string_map(map).insert_or_assign(
-        std::string(key ? key : ""),
-        std::string(value ? value : ""));
-    return 0;
-  } catch (std::exception& e) {
-    mlx_error(e.what());
-    return 1;
-  }
-}
-
-extern "C" int mlx_map_string_to_string_get(
-    const char** value,
-    const mlx_map_string_to_string map,
-    const char* key) {
-  try {
-    const auto& cpp_map = get_string_to_string_map_const(map);
-    auto it = cpp_map.find(key ? key : "");
-    if (it == cpp_map.end()) {
-      return 2;
-    }
-    *value = it->second.c_str();
-    return 0;
-  } catch (std::exception& e) {
-    mlx_error(e.what());
-    return 1;
-  }
-}
-
-extern "C" mlx_map_string_to_string_iterator mlx_map_string_to_string_iterator_new(
-    mlx_map_string_to_string map) {
-  try {
-    return mlx_map_string_to_string_iterator{
-        new StringToStringIter(get_string_to_string_map(map).begin()),
-        map.ctx};
-  } catch (std::exception& e) {
-    mlx_error(e.what());
-    return mlx_map_string_to_string_iterator{nullptr, nullptr};
-  }
-}
-
-extern "C" int mlx_map_string_to_string_iterator_free(
-    mlx_map_string_to_string_iterator it) {
-  delete ptr<StringToStringIter>(it.ctx);
-  return 0;
-}
-
-extern "C" int mlx_map_string_to_string_iterator_next(
-    const char** key,
-    const char** value,
-    mlx_map_string_to_string_iterator it) {
-  try {
-    auto& iter = get_string_to_string_iter(it);
-    auto& map = get_string_to_string_iter_map(it);
-    if (iter == map.end()) {
-      return 2;
-    }
-    *key = iter->first.c_str();
-    *value = iter->second.c_str();
-    ++iter;
-    return 0;
-  } catch (std::exception& e) {
-    mlx_error(e.what());
-    return 1;
-  }
 }
 
 extern "C" int mlx_load_safetensors(

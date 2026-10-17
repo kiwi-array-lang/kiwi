@@ -1,5 +1,4 @@
 const std = @import("std");
-const platform = @import("platform.zig");
 
 fn mlxDtypeIsFloat(comptime api: anytype, dtype: api.c.mlx_dtype) bool {
     return dtype == api.c.MLX_FLOAT16 or
@@ -235,7 +234,7 @@ pub fn tryFastBackendMatrixRowFoldBuiltin(
     const shape = api.valueNumericMatrixShape(matrix) orelse return null;
     if (shape.rows == 0 or shape.cols == 0) return null;
 
-    const has_backend_residency = api.isBackendArrayValue(matrix) or api.hasBackendRealization(matrix);
+    const has_backend_residency = api.hasBackendRealization(matrix);
     const planned_backend: api.DenseExecBackend = switch (self.dense_backend_override) {
         .host => return null,
         .mlx => .mlx,
@@ -393,9 +392,7 @@ pub fn tryFastBackendNumericVectorFindValue(
     const left_len = api.numericFlatLen(left) orelse return null;
     const query_len = api.numericRowQueryLen(right) orelse return null;
 
-    const has_backend_residency = api.isBackendArrayValue(left) or
-        api.isBackendArrayValue(right) or
-        api.hasBackendRealization(left) or
+    const has_backend_residency = api.hasBackendRealization(left) or
         api.hasBackendRealization(right);
     if (!has_backend_residency) return null;
 
@@ -513,32 +510,18 @@ pub fn tryFastBackendArgmaxValue(
     if (len == 0) return error.Type;
     if (len == 1) return try api.intValue(self, 0);
 
-    const has_backend_residency = api.isBackendArrayValue(value) or api.hasBackendRealization(value);
+    const has_backend_residency = api.hasBackendRealization(value);
     if (!has_backend_residency) return null;
 
-    const materialize_start_ns: u64 = if (comptime api.enable_probe_instrumentation)
-        @intCast(platform.monotonicNanos())
-    else
-        0;
     var arr = try backendTensor(api, self, value);
     defer arr.deinit();
     if (arr.ndim() != 1) return null;
-    const kernel_start_ns: u64 = if (comptime api.enable_probe_instrumentation)
-        @intCast(platform.monotonicNanos())
-    else
-        0;
 
     const ctx = try api.backendContext(self);
     var out = api.mlx.Array.argmax(ctx.*, arr) catch |err| return api.mapMlxError(err);
     defer out.deinit();
 
     const idx = out.intItem() catch |err| return api.mapMlxError(err);
-    if (comptime api.enable_probe_instrumentation) {
-        const finish_ns: u64 = @intCast(platform.monotonicNanos());
-        self.debug_backend_argmax_fast_count += 1;
-        self.debug_backend_argmax_materialize_ns +%= kernel_start_ns - materialize_start_ns;
-        self.debug_backend_argmax_kernel_ns +%= finish_ns - kernel_start_ns;
-    }
     return try api.intValue(self, idx);
 }
 

@@ -28,11 +28,6 @@ pub const c = struct {
         ctx: ?*anyopaque,
     };
 
-    pub const mlx_map_string_to_string_iterator = extern struct {
-        ctx: ?*anyopaque,
-        map_ctx: ?*anyopaque,
-    };
-
     pub const mlx_dtype = enum(c_int) {
         MLX_BOOL,
         MLX_UINT8,
@@ -128,20 +123,11 @@ pub const c = struct {
     pub extern fn mlx_vector_array_append_value(vec: mlx_vector_array, val: mlx_array) c_int;
 
     pub extern fn mlx_map_string_to_array_new() mlx_map_string_to_array;
-    pub extern fn mlx_map_string_to_array_set(
-        map: *mlx_map_string_to_array,
-        src: mlx_map_string_to_array,
-    ) c_int;
     pub extern fn mlx_map_string_to_array_free(map: mlx_map_string_to_array) c_int;
     pub extern fn mlx_map_string_to_array_insert(
         map: mlx_map_string_to_array,
         key: [*:0]const u8,
         value: mlx_array,
-    ) c_int;
-    pub extern fn mlx_map_string_to_array_get(
-        value: *mlx_array,
-        map: mlx_map_string_to_array,
-        key: [*:0]const u8,
     ) c_int;
     pub extern fn mlx_map_string_to_array_iterator_new(
         map: mlx_map_string_to_array,
@@ -156,32 +142,7 @@ pub const c = struct {
     ) c_int;
 
     pub extern fn mlx_map_string_to_string_new() mlx_map_string_to_string;
-    pub extern fn mlx_map_string_to_string_set(
-        map: *mlx_map_string_to_string,
-        src: mlx_map_string_to_string,
-    ) c_int;
     pub extern fn mlx_map_string_to_string_free(map: mlx_map_string_to_string) c_int;
-    pub extern fn mlx_map_string_to_string_insert(
-        map: mlx_map_string_to_string,
-        key: [*:0]const u8,
-        value: [*:0]const u8,
-    ) c_int;
-    pub extern fn mlx_map_string_to_string_get(
-        value: *?[*:0]const u8,
-        map: mlx_map_string_to_string,
-        key: [*:0]const u8,
-    ) c_int;
-    pub extern fn mlx_map_string_to_string_iterator_new(
-        map: mlx_map_string_to_string,
-    ) mlx_map_string_to_string_iterator;
-    pub extern fn mlx_map_string_to_string_iterator_free(
-        it: mlx_map_string_to_string_iterator,
-    ) c_int;
-    pub extern fn mlx_map_string_to_string_iterator_next(
-        key: *?[*:0]const u8,
-        value: *?[*:0]const u8,
-        it: mlx_map_string_to_string_iterator,
-    ) c_int;
 
     pub extern fn mlx_load_safetensors(
         res_0: *mlx_map_string_to_array,

@@ -345,6 +345,11 @@ fn sanitizeLine(raw: []const u8) ?[]const u8 {
 
     var idx: usize = 0;
     while (idx < line.len) : (idx += 1) {
+        if (line[idx] == '"') {
+            idx += 1;
+            while (idx < line.len and line[idx] != '"') : (idx += 1) {}
+            continue;
+        }
         if (line[idx] == '/' and idx > 0 and std.ascii.isWhitespace(line[idx - 1])) {
             const trimmed = std.mem.trimEnd(u8, line[0..idx], " \t");
             if (trimmed.len == 0) return null;

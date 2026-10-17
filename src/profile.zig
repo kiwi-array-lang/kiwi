@@ -59,7 +59,7 @@ const Sampler = struct {
 
     fn sampleOnce(self: *Sampler) void {
         const state = self.session.samplingProfileState();
-        self.label_counts[@intFromEnum(state.label)] += 1;
+        self.label_counts[@backingInt(state.label)] += 1;
         if (state.op) |op| {
             self.op_counts[op] += 1;
         }
@@ -154,9 +154,9 @@ fn monotonicNanos() u64 {
 
 fn makeLabelCounts(counts: [label_sample_count]usize) [label_sample_count]NamedCount {
     var result: [label_sample_count]NamedCount = undefined;
-    inline for (std.meta.fields(runtime.SamplingProfileLabel), 0..) |field, idx| {
+    inline for (@typeInfo(runtime.SamplingProfileLabel).@"enum".field_names, 0..) |field_name, idx| {
         result[idx] = .{
-            .name = field.name,
+            .name = field_name,
             .count = counts[idx],
         };
     }

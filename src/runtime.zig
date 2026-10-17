@@ -17,7 +17,6 @@ const safetensors = @import("safetensors.zig");
 pub const enable_probe_instrumentation = build_options.enable_probe_instrumentation;
 pub const enable_kernel_trace = enable_probe_instrumentation or zig_builtin.target.cpu.arch == .wasm32;
 pub const enable_sampling_profile = build_options.enable_sampling_profile;
-const enable_string_instrumentation = build_options.enable_string_instrumentation;
 const runtime_has_mlx = build_options.runtime_has_mlx;
 const runtime_has_duckdb = build_options.runtime_has_duckdb;
 const runtime_has_wasm_duckdb_bridge = build_options.runtime_has_wasm_duckdb_bridge;
@@ -25,37 +24,157 @@ const runtime_has_relations = runtime_has_duckdb or runtime_has_wasm_duckdb_brid
 const runtime_has_load_builtin = runtime_has_mlx or runtime_has_relations;
 const runtime_has_save_builtin = runtime_has_mlx;
 const runtime_has_sql_builtin = runtime_has_relations;
-const runtime_has_exec_builtin = runtime_has_duckdb;
+const runtime_has_exec_builtin = runtime_has_duckdb or runtime_has_wasm_duckdb_bridge;
 const runtime_has_register_builtin = runtime_has_duckdb;
 const runtime_has_mlx_builtin_surface = runtime_has_mlx;
 const embedded_runtime_limits = zig_builtin.target.os.tag == .freestanding and zig_builtin.target.cpu.arch != .wasm32;
-const DenseProducerMode = enum {
-    composed,
-    direct,
-};
-const dense_producer_mode = std.meta.stringToEnum(DenseProducerMode, build_options.dense_producer_mode) orelse .composed;
-const DenseMaterializeF32Mode = enum {
-    generic,
-    scalar,
-    simd,
-    morsel,
-};
-const dense_materialize_f32_mode = std.meta.stringToEnum(DenseMaterializeF32Mode, build_options.dense_materialize_f32_mode) orelse .morsel;
-const dense_materialize_source_sinks = build_options.dense_materialize_source_sinks;
-const HostCompareMode = enum {
-    auto,
-    c,
-    zig,
-};
-const host_compare_mode = std.meta.stringToEnum(HostCompareMode, build_options.host_compare_mode) orelse .auto;
+
 const kiwi_int_null: i64 = std.math.minInt(i64);
 const kiwi_float_null_bits: u64 = 0x7ff8_0000_0000_0000;
 const all_axis_selector_symbol = "\x00kiwi.all_axis";
 const selector_path_marker_symbol = "\x00kiwi.selector_path";
 
+const backend_wasm_api = .{
+    .Session = Session,
+    .Value = Value,
+    .WasmArrayInfo = WasmArrayInfo,
+    .KError = KError,
+    .mlx = mlx,
+    .wasmAcceleratorPayload = wasmAcceleratorPayload,
+};
+
+const backend_render_api = .{
+    .Session = Session,
+    .BackendArray = BackendArray,
+    .c = c,
+    .formatFloat = formatFloat,
+};
+
+const backend_exec_api = .{
+    .Session = Session,
+    .Value = Value,
+    .NumericArray = NumericArray,
+    .BuiltinId = BuiltinId,
+    .DenseExecBackend = DenseExecBackend,
+    .KError = KError,
+    .c = c,
+    .mlx = mlx,
+    .enable_probe_instrumentation = enable_probe_instrumentation,
+    .runtime_has_mlx = runtime_has_mlx,
+    .isDerivedBuiltinClosure = Session.isDerivedBuiltinClosure,
+    .valueNumericMode = valueNumericMode,
+    .valueNumericMatrixShape = valueNumericMatrixShape,
+    .valueNumericHandle = valueNumericHandle,
+    .numericFlatLen = numericFlatLen,
+    .numericIntAt = numericIntAt,
+    .numericFloatAt = numericFloatAt,
+    .numericRowQueryLen = Session.numericRowQueryLen,
+    .numericArrayIsFirstAxisSlice = numericArrayIsFirstAxisSlice,
+    .numericArrayFirstAxisSliceSource = numericArrayFirstAxisSliceSource,
+    .numericArrayFirstAxisSliceRowStart = numericArrayFirstAxisSliceRowStart,
+    .numericArrayFirstAxisSliceRowStep = numericArrayFirstAxisSliceRowStep,
+    .numericArrayIsFirstAxisIndex = numericArrayIsFirstAxisIndex,
+    .numericArrayFirstAxisIndexSource = numericArrayFirstAxisIndexSource,
+    .numericArrayFirstAxisIndexRows = numericArrayFirstAxisIndexRows,
+    .numericArrayIsFirstAxisConcat = numericArrayIsFirstAxisConcat,
+    .numericArrayFirstAxisConcatLeft = numericArrayFirstAxisConcatLeft,
+    .numericArrayFirstAxisConcatRight = numericArrayFirstAxisConcatRight,
+    .numericArrayIsReshapeView = numericArrayIsReshapeView,
+    .numericArrayReshapeSource = numericArrayReshapeSource,
+    .numericArrayIsTransposeView = numericArrayIsTransposeView,
+    .numericArrayTransposeSource = numericArrayTransposeSource,
+    .hasBackendRealization = hasBackendRealization,
+    .actualDenseBackend = actualDenseBackend,
+    .planDenseReduceScanBackend = planDenseReduceScanBackend,
+    .materializeBackendArray = Session.materializeBackendArray,
+    .backendContext = Session.backendContext,
+    .mapMlxError = mapMlxError,
+    .noteDensePlanDecision = noteDensePlanDecision,
+    .intValue = Session.intValue,
+    .rowwiseMatrixVectorDyad = rowwiseMatrixVectorDyad,
+    .wrapManagedBackendArray = Session.wrapManagedBackendArray,
+    .numeric_array_max_rank = numeric_array_max_rank,
+};
+
+const backend_autodiff_api = .{
+    .Session = Session,
+    .Value = Value,
+    .BuiltinId = BuiltinId,
+    .DerivedVerbKind = DerivedVerbKind,
+    .DenseAutodiffProgram = Session.DenseAutodiffProgram,
+    .DenseAutodiffNodeKind = Session.DenseAutodiffNodeKind,
+    .KError = KError,
+    .c = c,
+    .mlx = mlx,
+    .dense_autodiff_max_nodes = Session.dense_autodiff_max_nodes,
+    .enable_probe_instrumentation = enable_probe_instrumentation,
+    .mapMlxError = mapMlxError,
+    .backendContext = Session.backendContext,
+    .materializeBackendArray = Session.materializeBackendArray,
+    .wrapManagedBackendArray = Session.wrapManagedBackendArray,
+    .numericScalarValueFromF64 = Session.numericScalarValueFromF64,
+    .createManagedHostBoxedArray = Session.createManagedHostBoxedArray,
+    .releaseValue = Session.releaseValue,
+};
+
+const backend_materialize_api = .{
+    .Session = Session,
+    .Value = Value,
+    .NumericArray = NumericArray,
+    .BackendArray = BackendArray,
+    .HostDenseArray = HostDenseArray,
+    .HeapOwner = HeapOwner,
+    .KError = KError,
+    .c = c,
+    .mlx = mlx,
+    .enable_probe_instrumentation = enable_probe_instrumentation,
+    .mapMlxError = mapMlxError,
+    .mutableNumericHandle = mutableNumericHandle,
+    .backendArrayElementCount = backendArrayElementCount,
+    .analyzeIntSlice = analyzeIntSlice,
+    .analyzeFloatSlice = analyzeFloatSlice,
+    .analyzeFloatSlice32 = analyzeFloatSlice32,
+    .bitClearUnusedTail = bitClearUnusedTail,
+    .hostDenseSetFlags = hostDenseSetFlags,
+    .hostDenseSetCachedIntRange = hostDenseSetCachedIntRange,
+    .hostDenseNumericMode = hostDenseNumericMode,
+    .hostIntResultSet = hostIntResultSet,
+    .hostIntResultArrayPtr = hostIntResultArrayPtr,
+    .orderFlagsFromMonotonic = orderFlagsFromMonotonic,
+    .host_dense_flag_normalized = host_dense_flag_normalized,
+    .numericArrayIsRangeIota = numericArrayIsRangeIota,
+    .numericArrayIsFlatSlice = numericArrayIsFlatSlice,
+    .numericArrayIsFlatConcat = numericArrayIsFlatConcat,
+    .numericArrayIsFlatSegments = numericArrayIsFlatSegments,
+    .numericArrayIsFirstAxisSlice = numericArrayIsFirstAxisSlice,
+    .numericArrayIsFirstAxisIndex = numericArrayIsFirstAxisIndex,
+    .numericArrayIsFirstAxisConcat = numericArrayIsFirstAxisConcat,
+    .numericArrayIsReshapeView = numericArrayIsReshapeView,
+    .numericArrayIsTransposeView = numericArrayIsTransposeView,
+    .createBackendArrayFromHostArray = createBackendArrayFromHostArray,
+    .createBackendArrayFromRangeIota = createBackendArrayFromRangeIota,
+    .createBackendArrayFromFlatSlice = createBackendArrayFromFlatSlice,
+    .createBackendArrayFromFlatConcat = createBackendArrayFromFlatConcat,
+    .createBackendArrayFromFlatSegments = createBackendArrayFromFlatSegments,
+    .createBackendArrayFromFirstAxisSlice = createBackendArrayFromFirstAxisSlice,
+    .createBackendArrayFromFirstAxisIndex = createBackendArrayFromFirstAxisIndex,
+    .createBackendArrayFromFirstAxisConcat = createBackendArrayFromFirstAxisConcat,
+    .createBackendArrayFromReshapeView = createBackendArrayFromReshapeView,
+    .createBackendArrayFromTransposeView = createBackendArrayFromTransposeView,
+    .allocHostIntResultForHandle = Session.allocHostIntResultForHandle,
+    .allocHostFloatResultForHandle = Session.allocHostFloatResultForHandle,
+    .allocHostFloat32ResultForHandle = Session.allocHostFloat32ResultForHandle,
+    .allocManagedBackendPayload = Session.allocManagedBackendPayload,
+    .touchBackendAttachment = Session.touchBackendAttachment,
+    .enforceDualResidentBudget = Session.enforceDualResidentBudget,
+    .tryEnsureHostRealizationForHandle = tryEnsureHostRealizationForHandle,
+    .tryEnsureManagedBackendRealizationForHandle = tryEnsureManagedBackendRealizationForHandle,
+};
+
 const wasm_duckdb_bridge = if (runtime_has_wasm_duckdb_bridge) struct {
     extern "bridge" fn kiwi_bridge_duckdb_count(sql_ptr: u32, sql_len: u32) i64;
     extern "bridge" fn kiwi_bridge_duckdb_query_json(sql_ptr: u32, sql_len: u32) i32;
+    extern "bridge" fn kiwi_bridge_duckdb_exec(sql_ptr: u32, sql_len: u32) i32;
     extern "bridge" fn kiwi_bridge_duckdb_last_result_len() u32;
     extern "bridge" fn kiwi_bridge_duckdb_copy_last_result(out_ptr: u32, out_len: u32) u32;
     extern "bridge" fn kiwi_bridge_duckdb_clear_last_result() void;
@@ -64,6 +183,7 @@ const wasm_duckdb_bridge = if (runtime_has_wasm_duckdb_bridge) struct {
 
     const count = kiwi_bridge_duckdb_count;
     const queryJson = kiwi_bridge_duckdb_query_json;
+    const exec = kiwi_bridge_duckdb_exec;
     const lastResultLen = kiwi_bridge_duckdb_last_result_len;
     const copyLastResult = kiwi_bridge_duckdb_copy_last_result;
     const clearLastResult = kiwi_bridge_duckdb_clear_last_result;
@@ -75,6 +195,10 @@ const wasm_duckdb_bridge = if (runtime_has_wasm_duckdb_bridge) struct {
     }
 
     fn queryJson(_: u32, _: u32) i32 {
+        unreachable;
+    }
+
+    fn exec(_: u32, _: u32) i32 {
         unreachable;
     }
 
@@ -258,38 +382,6 @@ pub const BuiltinId = enum(u8) {
     apply,
 };
 
-const StringPerfCounters = if (enable_string_instrumentation) struct {
-    contains_calls: usize = 0,
-    split_calls: usize = 0,
-    join_calls: usize = 0,
-    contains_opcode_ns: u64 = 0,
-    split_opcode_ns: u64 = 0,
-    join_opcode_ns: u64 = 0,
-    contains_helper_ns: u64 = 0,
-    split_helper_ns: u64 = 0,
-    join_helper_ns: u64 = 0,
-    split_search_ns: u64 = 0,
-    split_append_ns: u64 = 0,
-    split_result_ns: u64 = 0,
-    join_result_ns: u64 = 0,
-} else struct {};
-
-pub const StringPerfSnapshot = if (enable_string_instrumentation) struct {
-    contains_calls: usize,
-    split_calls: usize,
-    join_calls: usize,
-    contains_opcode_ns: u64,
-    split_opcode_ns: u64,
-    join_opcode_ns: u64,
-    contains_helper_ns: u64,
-    split_helper_ns: u64,
-    join_helper_ns: u64,
-    split_search_ns: u64,
-    split_append_ns: u64,
-    split_result_ns: u64,
-    join_result_ns: u64,
-} else struct {};
-
 pub const DenseRegionKind = enum(u8) {
     numeric_dyad,
     compare_mask,
@@ -317,25 +409,6 @@ fn rawPtr(raw: u64) usize {
     return @as(usize, @intCast(raw));
 }
 
-fn stringPerfNow() i128 {
-    if (comptime enable_string_instrumentation) {
-        return platform.monotonicNanos();
-    }
-    return 0;
-}
-
-fn stringPerfElapsedSince(start: i128) u64 {
-    if (comptime !enable_string_instrumentation) return 0;
-    const now = stringPerfNow();
-    if (now <= start) return 0;
-    return std.math.cast(u64, now - start) orelse std.math.maxInt(u64);
-}
-
-fn stringPerfAdd(counter: *u64, start: i128) void {
-    if (comptime !enable_string_instrumentation) return;
-    counter.* = std.math.add(u64, counter.*, stringPerfElapsedSince(start)) catch std.math.maxInt(u64);
-}
-
 pub const DensePlanReason = enum(u8) {
     no_backend_support,
     already_backend_resident,
@@ -348,8 +421,8 @@ pub const DensePlanReason = enum(u8) {
     matmul_requires_backend,
 };
 
-const dense_region_kind_count = std.meta.fields(DenseRegionKind).len;
-const dense_exec_backend_count = std.meta.fields(DenseExecBackend).len;
+const dense_region_kind_count = @typeInfo(DenseRegionKind).@"enum".field_names.len;
+const dense_exec_backend_count = @typeInfo(DenseExecBackend).@"enum".field_names.len;
 
 const DenseBackendOverride = enum(u8) {
     auto,
@@ -631,7 +704,6 @@ pub const Value = struct {
 
     const ArraySubkind = enum(u8) {
         numeric_array,
-        host_dense_array,
         host_boxed_array,
         host_string,
         host_symbol,
@@ -642,7 +714,6 @@ pub const Value = struct {
         host_relation,
         host_keyed_store,
         host_table_scalar,
-        backend_array,
     };
 
     pub fn int(value: i64) KError!Value {
@@ -671,7 +742,7 @@ pub const Value = struct {
 
     pub fn builtin(id: BuiltinId) Value {
         return .{
-            .raw = builtin_tag | @as(u64, @intFromEnum(id)),
+            .raw = builtin_tag | @as(u64, @backingInt(id)),
         };
     }
 
@@ -682,6 +753,17 @@ pub const Value = struct {
     }
 
     pub fn array(ptr: anytype) Value {
+        const Child = @typeInfo(@TypeOf(ptr)).pointer.child;
+        if (comptime Child == NumericArray or Child == HostDenseArray or Child == BackendArray) {
+            @compileError("numeric values must use Value.numericArray with a logical handle");
+        }
+        const raw = @intFromPtr(ptr);
+        std.debug.assert((raw & tag_mask) == 0);
+        return .{ .raw = raw | array_tag };
+    }
+
+    pub fn numericArray(ptr: *const NumericArray) Value {
+        std.debug.assert(ptr.header.kind == .numeric_array);
         const raw = @intFromPtr(ptr);
         std.debug.assert((raw & tag_mask) == 0);
         return .{ .raw = raw | array_tag };
@@ -736,7 +818,7 @@ pub const Value = struct {
 
     pub fn asBuiltin(self: Value) BuiltinId {
         std.debug.assert((self.raw & tag_mask) == builtin_tag);
-        return @enumFromInt(self.raw & payload_mask);
+        return @fromBackingInt(@intCast(self.raw & payload_mask));
     }
 
     pub fn asClosure(self: Value) *const Closure {
@@ -750,19 +832,10 @@ pub const Value = struct {
         return self.arrayHeader().kind;
     }
 
-    pub fn activeArrayKind(self: Value) HeapKind {
-        std.debug.assert(self.tag() == .array);
-        return switch (self.arrayKind()) {
-            .numeric_array => self.asNumericArray().activeKind(),
-            else => self.arrayKind(),
-        };
-    }
-
     pub fn arrayOwner(self: Value) HeapOwner {
         std.debug.assert(self.tag() == .array);
         return switch (self.arrayKind()) {
             .numeric_array => self.asNumericArray().header.owner,
-            .host_dense_array => if (self.asHostDenseArray().logical_handle) |handle| handle.header.owner else self.asHostDenseArray().header.owner,
             .host_string,
             .host_symbol,
             .host_string_list,
@@ -774,7 +847,6 @@ pub const Value = struct {
             .host_table_scalar,
             .host_boxed_array,
             => self.arrayHeader().owner,
-            .backend_array => if (self.asBackendArray().logical_handle) |handle| handle.header.owner else self.asBackendArray().header.owner,
             else => unreachable,
         };
     }
@@ -785,24 +857,10 @@ pub const Value = struct {
         return ptr;
     }
 
-    pub fn asHostDenseArray(self: Value) *const HostDenseArray {
-        std.debug.assert(self.arrayKind() == .host_dense_array);
-        const ptr: *const HostDenseArray = @ptrFromInt(rawPtr(self.arrayPtrRaw()));
-        return ptr;
-    }
-
     pub fn asHostBoxedArray(self: Value) *const HostBoxedArray {
         std.debug.assert(self.arrayKind() == .host_boxed_array);
         const ptr: *const HostBoxedArray = @ptrFromInt(rawPtr(self.arrayPtrRaw()));
         return ptr;
-    }
-
-    pub fn asBackendArray(self: Value) *const BackendArray {
-        return switch (self.arrayKind()) {
-            .numeric_array => numericBackendAttachment(self.asNumericArray()) orelse unreachable,
-            .backend_array => @ptrFromInt(rawPtr(self.arrayPtrRaw())),
-            else => unreachable,
-        };
     }
 
     pub fn asHostString(self: Value) *const HostText {
@@ -857,7 +915,6 @@ pub const Value = struct {
         std.debug.assert(self.tag() == .array);
         return switch (self.arrayKind()) {
             .numeric_array => .numeric_array,
-            .host_dense_array => .host_dense_array,
             .host_boxed_array => .host_boxed_array,
             .host_string => .host_string,
             .host_symbol => .host_symbol,
@@ -868,7 +925,6 @@ pub const Value = struct {
             .host_relation => .host_relation,
             .host_keyed_store => .host_keyed_store,
             .host_table_scalar => .host_table_scalar,
-            .backend_array => .backend_array,
             else => unreachable,
         };
     }
@@ -970,7 +1026,6 @@ const HeapKind = enum(u8) {
     boxed_int,
     closure,
     numeric_array,
-    host_dense_array,
     host_boxed_array,
     host_string,
     host_symbol,
@@ -981,7 +1036,6 @@ const HeapKind = enum(u8) {
     host_relation,
     host_keyed_store,
     host_table_scalar,
-    backend_array,
 };
 
 const HeapHeader = struct {
@@ -1146,7 +1200,7 @@ const HostTableColumn = struct {
     kind: HostTableColumnKind,
 };
 
-const TableColumnBuilder = struct {
+const BufferedTableColumnBuilder = struct {
     name: Value,
     source_type: duckdb_runtime.TypeId,
     kind: HostTableColumnKind,
@@ -1182,6 +1236,11 @@ const DirectTableColumnBuilder = struct {
     row_count: usize = 0,
 };
 
+const QueryResultColumnBuilder = union(enum) {
+    direct: DirectTableColumnBuilder,
+    buffered: BufferedTableColumnBuilder,
+};
+
 const HostKeyedLayout = enum(u8) {
     dict,
     table,
@@ -1215,11 +1274,6 @@ fn valueAsHostTableScalar(value: Value) *const HostTableScalar {
     std.debug.assert(value.arrayKind() == .host_table_scalar);
     const ptr: *const HostTableScalar = @ptrFromInt(rawPtr(value.raw & ~Value.array_payload_mask));
     return ptr;
-}
-
-fn hostTableScalar(value: Value) ?*const HostTableScalar {
-    if (value.tag() != .array or value.arrayKind() != .host_table_scalar) return null;
-    return valueAsHostTableScalar(value);
 }
 
 const managed_host_text_intern_limit = 32;
@@ -1492,8 +1546,6 @@ const HostDenseFindCache = struct {
 };
 
 const HostDenseArray = struct {
-    header: HeapHeader align(8),
-    logical_handle: ?*NumericArray = null,
     logical_len: usize,
     flags: u8 = 0,
     int_range_known: bool = false,
@@ -1507,7 +1559,7 @@ const HostDenseArray = struct {
     }
 };
 
-const managed_host_dense_storage_kind_count = std.meta.fields(HostDenseStorageKind).len;
+const managed_host_dense_storage_kind_count = @typeInfo(HostDenseStorageKind).@"enum".field_names.len;
 
 const ManagedHostDenseBufferEntry = struct {
     ptr: *anyopaque,
@@ -1568,13 +1620,6 @@ fn hostDenseStorageElemBytes(kind: HostDenseStorageKind) usize {
     };
 }
 
-fn hostDenseStorageBytesForLen(kind: HostDenseStorageKind, len: usize) usize {
-    return switch (kind) {
-        .bit => bitWordCount(len) * @sizeOf(u64),
-        else => len * hostDenseStorageElemBytes(kind),
-    };
-}
-
 fn hostDenseCapacityLenForBytes(kind: HostDenseStorageKind, bytes: usize) usize {
     return switch (kind) {
         .bit => (bytes / @sizeOf(u64)) * host_bit_word_bits,
@@ -1616,12 +1661,12 @@ fn hostDenseMutableLogicalItems(comptime T: type, array: *const HostDenseArray, 
 }
 
 pub fn debugHostDenseFlags(value: Value) u8 {
-    std.debug.assert(value.tag() == .array and value.activeArrayKind() == .host_dense_array);
+    std.debug.assert((valueNumericHandle(value) orelse unreachable).activeAttachment() == .host);
     return hostDenseIfPresent(value).?.flags;
 }
 
 pub fn debugHostDenseAddress(value: Value) usize {
-    std.debug.assert(value.tag() == .array and value.activeArrayKind() == .host_dense_array);
+    std.debug.assert((valueNumericHandle(value) orelse unreachable).activeAttachment() == .host);
     return @intFromPtr(hostDenseIfPresent(value).?);
 }
 
@@ -1636,41 +1681,37 @@ pub const DebugHostStorageTag = enum {
 };
 
 pub fn debugActiveHostStorageTag(value: Value) ?DebugHostStorageTag {
-    if (value.tag() != .array or value.activeArrayKind() != .host_dense_array) return null;
-    return @enumFromInt(@intFromEnum(std.meta.activeTag(hostDenseIfPresent(value).?.storage)));
+    const handle = valueNumericHandle(value) orelse return null;
+    if (handle.activeAttachment() != .host) return null;
+    return @fromBackingInt(@intCast(@backingInt(std.meta.activeTag(hostDenseIfPresent(value).?.storage))));
 }
 
 pub fn debugHostStorageTagIfPresent(value: Value) ?DebugHostStorageTag {
     const host = hostDenseIfPresent(value) orelse return null;
-    return @enumFromInt(@intFromEnum(std.meta.activeTag(host.storage)));
-}
-
-pub fn debugStringBytes(value: Value) ?[]const u8 {
-    if (value.tag() != .array) return null;
-    return switch (value.arrayKind()) {
-        .host_string => hostTextBytes(value.asHostString()),
-        .host_string_view => hostStringViewBytes(value.asHostStringView()),
-        else => null,
-    };
+    return @fromBackingInt(@intCast(@backingInt(std.meta.activeTag(host.storage))));
 }
 
 pub fn debugActiveHostLen(value: Value) ?usize {
-    if (value.tag() != .array or value.activeArrayKind() != .host_dense_array) return null;
+    const handle = valueNumericHandle(value) orelse return null;
+    if (handle.activeAttachment() != .host) return null;
     return hostDenseIfPresent(value).?.len();
 }
 
 pub fn debugActiveHostCapacityLen(value: Value) ?usize {
-    if (value.tag() != .array or value.activeArrayKind() != .host_dense_array) return null;
+    const handle = valueNumericHandle(value) orelse return null;
+    if (handle.activeAttachment() != .host) return null;
     return hostDenseStorageCapacityLen(hostDenseIfPresent(value).?);
 }
 
 pub fn debugActiveHostIntAt(value: Value, idx: usize) KError!i64 {
-    if (value.tag() != .array or value.activeArrayKind() != .host_dense_array) return error.Type;
+    const handle = valueNumericHandle(value) orelse return error.Type;
+    if (handle.activeAttachment() != .host) return error.Type;
     return hostDenseIntAt(hostDenseIfPresent(value).?, idx);
 }
 
 pub fn debugActiveHostFloatSlice(value: Value) ?[]const f64 {
-    if (value.tag() != .array or value.activeArrayKind() != .host_dense_array) return null;
+    const handle = valueNumericHandle(value) orelse return null;
+    if (handle.activeAttachment() != .host) return null;
     const host = hostDenseIfPresent(value).?;
     return switch (host.storage) {
         .float64 => |items| hostDenseLogicalItems(f64, host, items),
@@ -1679,7 +1720,8 @@ pub fn debugActiveHostFloatSlice(value: Value) ?[]const f64 {
 }
 
 pub fn debugActiveHostFloat32Slice(value: Value) ?[]const f32 {
-    if (value.tag() != .array or value.activeArrayKind() != .host_dense_array) return null;
+    const handle = valueNumericHandle(value) orelse return null;
+    if (handle.activeAttachment() != .host) return null;
     const host = hostDenseIfPresent(value).?;
     return switch (host.storage) {
         .float32 => |items| hostDenseLogicalItems(f32, host, items),
@@ -1720,16 +1762,6 @@ fn maxHostIntStorageKind(left: HostIntStorageKind, right: HostIntStorageKind) Ho
     return if (hostIntStorageRank(left) >= hostIntStorageRank(right)) left else right;
 }
 
-fn widenHostIntStorageKind(kind: HostIntStorageKind) HostIntStorageKind {
-    return switch (kind) {
-        .bit => .int8,
-        .int8 => .int16,
-        .int16 => .int32,
-        .int32 => .int64,
-        .int64 => .int64,
-    };
-}
-
 fn hostIntStorageKindForValue(value: i64) HostIntStorageKind {
     if (std.math.cast(i8, value) != null) return .int8;
     if (std.math.cast(i16, value) != null) return .int16;
@@ -1742,17 +1774,6 @@ fn hostIntStorageKindForRange(min_value: i64, max_value: i64) HostIntStorageKind
     if (std.math.cast(i16, min_value) != null and std.math.cast(i16, max_value) != null) return .int16;
     if (std.math.cast(i32, min_value) != null and std.math.cast(i32, max_value) != null) return .int32;
     return .int64;
-}
-
-fn hostIntStorageKindForSlice(items: []const i64) HostIntStorageKind {
-    if (items.len == 0) return .bit;
-    var min_value = items[0];
-    var max_value = items[0];
-    for (items[1..]) |item| {
-        min_value = @min(min_value, item);
-        max_value = @max(max_value, item);
-    }
-    return hostIntStorageKindForRange(min_value, max_value);
 }
 
 const HostIntRange = struct {
@@ -1804,19 +1825,9 @@ fn hostDenseHasFlag(array: *const HostDenseArray, flag: u8) bool {
     return (array.flags & flag) != 0;
 }
 
-fn numericPayloadManagedRefCount(payload: anytype) usize {
-    if (payload.logical_handle) |handle| {
-        return if (handle.header.owner == .managed) handle.header.ref_count else 0;
-    }
-    return if (payload.header.owner == .managed) payload.header.ref_count else 0;
-}
-
-fn numericPayloadOwner(payload: anytype) HeapOwner {
-    return if (payload.logical_handle) |handle| handle.header.owner else payload.header.owner;
-}
-
-fn hostDenseReusePriority(array: *const HostDenseArray) u8 {
-    return switch (numericPayloadOwner(array)) {
+fn numericValueReusePriority(value: Value) u8 {
+    const handle = valueNumericHandle(value) orelse unreachable;
+    return switch (handle.header.owner) {
         .scratch => 2,
         .managed => 1,
         .frozen => 0,
@@ -2230,77 +2241,17 @@ const NumericStructuralView = struct {
     }
 };
 
-fn numericArrayCopyShape(dst: *NumericArray, src: *const NumericArray) void {
-    dst.rank = src.rank;
-    dst.shape = src.shape;
-}
-
-fn numericArrayShapeEqual(left: *const NumericArray, right: *const NumericArray) bool {
-    if (left.rank != right.rank) return false;
-    return std.mem.eql(i32, left.shapeSlice(), right.shapeSlice());
-}
-
-const LogicalNumericValue = struct {
-    handle: *NumericArray,
-    value: Value,
-};
-
 fn valueNumericHandle(value: Value) ?*const NumericArray {
-    if (value.tag() != .array) return null;
-    return switch (value.arraySubkind()) {
-        .numeric_array => value.asNumericArray(),
-        .host_dense_array => if (value.asHostDenseArray().logical_handle) |handle| handle else null,
-        .backend_array => if (value.asBackendArray().logical_handle) |handle| handle else null,
-        else => null,
-    };
-}
-
-fn logicalHandleForNumericPayloadValue(value: Value) ?*NumericArray {
-    if (value.tag() != .array) return null;
-    return switch (value.arraySubkind()) {
-        .host_dense_array => @constCast(value.asHostDenseArray()).logical_handle,
-        .backend_array => @constCast(value.asBackendArray()).logical_handle,
-        else => null,
-    };
+    if (value.tag() != .array or value.arraySubkind() != .numeric_array) return null;
+    return value.asNumericArray();
 }
 
 fn mutableNumericHandle(value: Value) ?*NumericArray {
-    if (value.tag() != .array) return null;
-    return switch (value.arraySubkind()) {
-        .numeric_array => @constCast(value.asNumericArray()),
-        .host_dense_array, .backend_array => logicalHandleForNumericPayloadValue(value),
-        else => null,
-    };
+    return @constCast(valueNumericHandle(value) orelse return null);
 }
 
 fn numericHandleRequired(value: Value) KError!*NumericArray {
     return mutableNumericHandle(value) orelse error.Type;
-}
-
-fn ensureLogicalNumericValue(self: *Session, value: Value) !LogicalNumericValue {
-    if (value.tag() != .array) return error.Type;
-    return switch (value.arraySubkind()) {
-        .numeric_array => .{
-            .handle = @constCast(value.asNumericArray()),
-            .value = value,
-        },
-        .host_dense_array => blk: {
-            const array = @constCast(value.asHostDenseArray());
-            const canonical = try wrapOwnedHostArrayValue(self, array);
-            break :blk .{
-                .handle = @constCast(canonical.asNumericArray()),
-                .value = canonical,
-            };
-        },
-        .backend_array => blk: {
-            const canonical = try wrapOwnedBackendArrayValue(self, @constCast(value.asBackendArray()));
-            break :blk .{
-                .handle = @constCast(canonical.asNumericArray()),
-                .value = canonical,
-            };
-        },
-        else => error.Type,
-    };
 }
 
 fn numericHostAttachment(handle: *const NumericArray) ?*const HostDenseArray {
@@ -2320,13 +2271,8 @@ fn numericHasBackendAttachment(handle: *const NumericArray) bool {
 }
 
 fn hostDenseIfPresent(value: Value) ?*const HostDenseArray {
-    if (value.tag() != .array) return null;
-    return switch (value.arraySubkind()) {
-        .host_dense_array => value.asHostDenseArray(),
-        .numeric_array => numericHostAttachment(value.asNumericArray()),
-        .backend_array => if (valueNumericHandle(value)) |handle| numericHostAttachment(handle) else null,
-        else => null,
-    };
+    const handle = valueNumericHandle(value) orelse return null;
+    return numericHostAttachment(handle);
 }
 
 fn contiguousHostDenseIfPresentThroughReshape(value: Value) ?*const HostDenseArray {
@@ -2340,13 +2286,8 @@ fn contiguousHostDenseIfPresentThroughReshape(value: Value) ?*const HostDenseArr
 }
 
 fn backendArrayIfPresent(value: Value) ?*const BackendArray {
-    if (value.tag() != .array) return null;
-    return switch (value.arraySubkind()) {
-        .backend_array => value.asBackendArray(),
-        .numeric_array => numericBackendAttachment(value.asNumericArray()),
-        .host_dense_array => if (value.asHostDenseArray().logical_handle) |handle| numericBackendAttachment(handle) else null,
-        else => null,
-    };
+    const handle = valueNumericHandle(value) orelse return null;
+    return numericBackendAttachment(handle);
 }
 
 fn ensureNumericHostAttachmentForDenseView(self: *Session, value: Value) KError!?*const HostDenseArray {
@@ -2450,39 +2391,30 @@ pub fn debugNumericFlatSliceDepth(value: Value) ?usize {
 }
 
 fn debugBackendArrayForValue(value: Value) ?mlx.Array {
-    if (value.tag() != .array) return null;
-    return switch (value.arraySubkind()) {
-        .backend_array => value.asBackendArray().array,
-        .host_dense_array => if (value.asHostDenseArray().logical_handle) |handle|
-            if (numericBackendAttachment(handle)) |backend_array| backend_array.array else null
-        else
-            null,
-        .numeric_array => blk: {
-            const handle = value.asNumericArray();
-            if (numericBackendAttachment(handle)) |backend_array| break :blk backend_array.array;
-            if (numericArrayFlatSliceSource(handle)) |source| break :blk debugBackendArrayForValue(source);
-            if (numericArrayFlatConcatLeft(handle)) |left| {
-                if (debugBackendArrayForValue(left)) |array| break :blk array;
-                const right = numericArrayFlatConcatRight(handle) orelse break :blk null;
-                break :blk debugBackendArrayForValue(right);
+    const handle = valueNumericHandle(value) orelse return null;
+    return blk: {
+        if (numericBackendAttachment(handle)) |backend_array| break :blk backend_array.array;
+        if (numericArrayFlatSliceSource(handle)) |source| break :blk debugBackendArrayForValue(source);
+        if (numericArrayFlatConcatLeft(handle)) |left| {
+            if (debugBackendArrayForValue(left)) |array| break :blk array;
+            const right = numericArrayFlatConcatRight(handle) orelse break :blk null;
+            break :blk debugBackendArrayForValue(right);
+        }
+        if (numericArrayFlatSegmentsValues(handle)) |segments| {
+            for (segments) |segment| {
+                if (debugBackendArrayForValue(segment)) |array| break :blk array;
             }
-            if (numericArrayFlatSegmentsValues(handle)) |segments| {
-                for (segments) |segment| {
-                    if (debugBackendArrayForValue(segment)) |array| break :blk array;
-                }
-            }
-            if (numericArrayFirstAxisSliceSource(handle)) |source| break :blk debugBackendArrayForValue(source);
-            if (numericArrayFirstAxisIndexSource(handle)) |source| break :blk debugBackendArrayForValue(source);
-            if (numericArrayFirstAxisConcatLeft(handle)) |left| {
-                if (debugBackendArrayForValue(left)) |array| break :blk array;
-                const right = numericArrayFirstAxisConcatRight(handle) orelse break :blk null;
-                break :blk debugBackendArrayForValue(right);
-            }
-            if (numericArrayReshapeSource(handle)) |source| break :blk debugBackendArrayForValue(source);
-            if (numericArrayTransposeSource(handle)) |source| break :blk debugBackendArrayForValue(source);
-            break :blk null;
-        },
-        else => null,
+        }
+        if (numericArrayFirstAxisSliceSource(handle)) |source| break :blk debugBackendArrayForValue(source);
+        if (numericArrayFirstAxisIndexSource(handle)) |source| break :blk debugBackendArrayForValue(source);
+        if (numericArrayFirstAxisConcatLeft(handle)) |left| {
+            if (debugBackendArrayForValue(left)) |array| break :blk array;
+            const right = numericArrayFirstAxisConcatRight(handle) orelse break :blk null;
+            break :blk debugBackendArrayForValue(right);
+        }
+        if (numericArrayReshapeSource(handle)) |source| break :blk debugBackendArrayForValue(source);
+        if (numericArrayTransposeSource(handle)) |source| break :blk debugBackendArrayForValue(source);
+        break :blk null;
     };
 }
 
@@ -2566,12 +2498,7 @@ fn numericHandleSupportsStructuralFlatItemsWithoutHost(handle: *const NumericArr
 fn sourceSupportsHostDense(source: Value) bool {
     return switch (source.tag()) {
         .int, .bool, .float, .float32 => true,
-        .array => switch (source.arraySubkind()) {
-            .host_dense_array => true,
-            .numeric_array => true,
-            .backend_array => source.asBackendArray().logical_handle != null,
-            else => false,
-        },
+        .array => valueNumericHandle(source) != null,
         else => false,
     };
 }
@@ -2579,15 +2506,7 @@ fn sourceSupportsHostDense(source: Value) bool {
 fn sourceSupportsCheapHostDense(source: Value) bool {
     return switch (source.tag()) {
         .int, .bool, .float, .float32 => true,
-        .array => switch (source.arraySubkind()) {
-            .host_dense_array => true,
-            .numeric_array => handleSupportsCheapHostDense(source.asNumericArray()),
-            .backend_array => if (source.asBackendArray().logical_handle) |handle|
-                handleSupportsCheapHostDense(handle)
-            else
-                false,
-            else => false,
-        },
+        .array => if (valueNumericHandle(source)) |handle| handleSupportsCheapHostDense(handle) else false,
         else => false,
     };
 }
@@ -2683,15 +2602,7 @@ fn handleSupportsCheapHostDense(handle: *const NumericArray) bool {
 fn numericValueSupportsStructuralFlatItemsWithoutHost(value: Value) bool {
     return switch (value.tag()) {
         .int, .bool, .float => true,
-        .array => switch (value.arraySubkind()) {
-            .host_dense_array => true,
-            .backend_array => if (value.asBackendArray().logical_handle) |handle|
-                numericHandleSupportsStructuralFlatItemsWithoutHost(handle)
-            else
-                false,
-            .numeric_array => numericHandleSupportsStructuralFlatItemsWithoutHost(value.asNumericArray()),
-            else => false,
-        },
+        .array => if (valueNumericHandle(value)) |handle| numericHandleSupportsStructuralFlatItemsWithoutHost(handle) else false,
         else => false,
     };
 }
@@ -2873,7 +2784,7 @@ fn createOwnedStackedNumericArray(self: *Session, owner: HeapOwner, values: []co
                 }
                 const analysis = analyzeFloatSlice32(out.items);
                 hostDenseSetFlags(out.array, analysis.flags);
-                const stacked = try out.value(self);
+                const stacked = out.value();
                 break :blk try applyNonVectorNumericShapeToValue(self, stacked, shape);
             }
 
@@ -2917,7 +2828,7 @@ fn numericStructuralScalarIndexValue(self: *Session, view: NumericStructuralView
     const handle = view.handle;
     if (numericArrayIsFlatSlice(handle)) {
         const source = numericArrayFlatSliceSource(handle) orelse return error.Type;
-        const len = numericVectorLen(Value.array(@constCast(handle))) orelse return error.Type;
+        const len = numericVectorLen(Value.numericArray(handle)) orelse return error.Type;
         const mode = valueNumericMode(source) orelse return error.Type;
         const idx = normalizeIndexOrNull(raw_index, len) orelse return switch (mode) {
             .int => try self.numericPrototypeScalarValue(mode),
@@ -2933,10 +2844,10 @@ fn numericStructuralScalarIndexValue(self: *Session, view: NumericStructuralView
         const right = numericArrayFlatConcatRight(handle) orelse return error.Type;
         const left_len = numericVectorLen(left) orelse return error.Type;
         const total_len = left_len + (numericVectorLen(right) orelse return error.Type);
-        const mode = valueNumericMode(Value.array(@constCast(handle))) orelse return error.Type;
+        const mode = valueNumericMode(Value.numericArray(handle)) orelse return error.Type;
         const idx = normalizeIndexOrNull(raw_index, total_len) orelse return switch (mode) {
             .int => try self.numericPrototypeScalarValue(mode),
-            .float => try numericFloatPrototypeScalarValueFor(self, Value.array(@constCast(handle))),
+            .float => try numericFloatPrototypeScalarValueFor(self, Value.numericArray(handle)),
         };
         if (idx < left_len) {
             return switch (valueNumericMode(left) orelse return error.Type) {
@@ -2951,15 +2862,15 @@ fn numericStructuralScalarIndexValue(self: *Session, view: NumericStructuralView
         };
     }
     if (numericArrayIsFlatSegments(handle)) {
-        const len = numericVectorLen(Value.array(@constCast(handle))) orelse return error.Type;
-        const mode = valueNumericMode(Value.array(@constCast(handle))) orelse return error.Type;
+        const len = numericVectorLen(Value.numericArray(handle)) orelse return error.Type;
+        const mode = valueNumericMode(Value.numericArray(handle)) orelse return error.Type;
         const idx = normalizeIndexOrNull(raw_index, len) orelse return switch (mode) {
             .int => try self.numericPrototypeScalarValue(mode),
-            .float => try numericFloatPrototypeScalarValueFor(self, Value.array(@constCast(handle))),
+            .float => try numericFloatPrototypeScalarValueFor(self, Value.numericArray(handle)),
         };
         return switch (mode) {
-            .int => try self.intValue(try numericIntAt(Value.array(@constCast(handle)), idx)),
-            .float => try numericFloatScalarValueAt(self, Value.array(@constCast(handle)), idx),
+            .int => try self.intValue(try numericIntAt(Value.numericArray(handle), idx)),
+            .float => try numericFloatScalarValueAt(self, Value.numericArray(handle), idx),
         };
     }
     if (numericArrayIsFirstAxisConcat(handle)) {
@@ -2968,7 +2879,7 @@ fn numericStructuralScalarIndexValue(self: *Session, view: NumericStructuralView
         const idx = try normalizeIndex(raw_index, rows);
         var segments = std.ArrayList(FirstAxisMatrixSegment).empty;
         defer segments.deinit(self.allocator);
-        try collectFirstAxisMatrixSegments(self.allocator, Value.array(@constCast(handle)), cols, &segments);
+        try collectFirstAxisMatrixSegments(self.allocator, Value.numericArray(handle), cols, &segments);
         var row_base: usize = 0;
         for (segments.items) |segment| {
             if (idx < row_base + segment.rows) {
@@ -3028,16 +2939,16 @@ fn numericStructuralArithmeticSliceValue(self: *Session, view: NumericStructural
         );
     }
     if (numericArrayIsFlatConcat(handle) and handle.rank == 1 and slice.step == 1) {
-        return try newFlatSliceValue(self, Value.array(@constCast(handle)), slice.start, slice.len);
+        return try newFlatSliceValue(self, Value.numericArray(handle), slice.start, slice.len);
     }
     if (numericArrayIsFlatSegments(handle) and handle.rank == 1 and slice.step == 1) {
-        return try newFlatSliceValue(self, Value.array(@constCast(handle)), slice.start, slice.len);
+        return try newFlatSliceValue(self, Value.numericArray(handle), slice.start, slice.len);
     }
     if (numericArrayIsFirstAxisConcat(handle) and slice.step == 1) {
         const cols: usize = @intCast(handle.shape[1]);
         var segments = std.ArrayList(FirstAxisMatrixSegment).empty;
         defer segments.deinit(self.allocator);
-        try collectFirstAxisMatrixSegments(self.allocator, Value.array(@constCast(handle)), cols, &segments);
+        try collectFirstAxisMatrixSegments(self.allocator, Value.numericArray(handle), cols, &segments);
 
         var selected = std.ArrayList(FirstAxisMatrixSegment).empty;
         defer selected.deinit(self.allocator);
@@ -3120,7 +3031,7 @@ fn numericStructuralArithmeticSliceValue(self: *Session, view: NumericStructural
                 numericShapeFirstAxisSliceSnapshot(handle, slice.len),
             );
         }
-        return try newFirstAxisSliceValueWithStep(self, Value.array(@constCast(handle)), slice.start, slice.len, slice.step);
+        return try newFirstAxisSliceValueWithStep(self, Value.numericArray(handle), slice.start, slice.len, slice.step);
     }
 
     const len = numericArrayRangeLen(handle);
@@ -3251,14 +3162,6 @@ fn numericValueScalarIndexValue(self: *Session, value: Value, raw_index: i64) KE
     return try numericValueFirstAxisCellValue(self, value, handle, raw_index);
 }
 
-fn createManagedHostNumericMatrixRowRange(self: *Session, array: *const HostDenseArray, start_row: usize, row_count: usize, cols: usize) KError!Value {
-    var row_indices = std.ArrayList(usize).empty;
-    defer row_indices.deinit(self.allocator);
-    try row_indices.ensureTotalCapacity(self.allocator, row_count);
-    for (start_row..start_row + row_count) |row_idx| try row_indices.append(self.allocator, row_idx);
-    return try self.createManagedHostNumericMatrixRows(array, row_indices.items, cols);
-}
-
 fn numericValueFirstAxisArithmeticSliceValue(self: *Session, value: Value, slice: ArithmeticIndexSlice) KError!?Value {
     if (NumericStructuralView.init(value)) |structural| {
         if (try numericStructuralArithmeticSliceValue(self, structural, slice)) |result| return result;
@@ -3320,13 +3223,6 @@ fn numericValueRangeIotaSelectorSlice(value: Value, selector: Value) KError!?Ari
         .range_iota => |range| hostRangeIotaViewArithmeticSlice(range, len),
         else => null,
     };
-}
-
-fn numericValueContiguousSelectorSlice(value: Value, selector: Value) KError!?ContiguousIndexSlice {
-    if (try numericValueArithmeticSelectorSlice(value, selector)) |slice| {
-        if (slice.step == 1) return .{ .start = slice.start, .len = slice.len };
-    }
-    return null;
 }
 
 fn numericValueFirstAxisIndexSelectorValue(self: *Session, value: Value, selector: Value) KError!?Value {
@@ -3406,12 +3302,12 @@ fn applyNumericShapeSnapshot(handle: *NumericArray, snapshot: NumericShapeSnapsh
 }
 
 fn applyNonVectorNumericShapeToValue(self: *Session, value: Value, snapshot: ?NumericShapeSnapshot) !Value {
+    _ = self;
     const shape = snapshot orelse return value;
     if (shape.rank <= 1) return value;
-    const logical = try ensureLogicalNumericValue(self, value);
-    applyNumericShapeSnapshot(logical.handle, shape);
-    syncNumericArrayChildren(logical.handle);
-    return logical.value;
+    const handle = mutableNumericHandle(value) orelse return error.Type;
+    applyNumericShapeSnapshot(handle, shape);
+    return value;
 }
 
 fn nonVectorNumericShapeForDyad(left: Value, right: Value) KError!?NumericShapeSnapshot {
@@ -3431,26 +3327,8 @@ fn nonVectorNumericShapeForDyad(left: Value, right: Value) KError!?NumericShapeS
     return left_shape orelse right_shape;
 }
 
-fn hostDenseShapeHandle(array: *const HostDenseArray) ?*const NumericArray {
-    return array.logical_handle;
-}
-
-fn hostDenseNonVectorShape(array: *const HostDenseArray) ?*const NumericArray {
-    const handle = hostDenseShapeHandle(array) orelse return null;
-    return if (handle.rank > 1) handle else null;
-}
-
-fn hostNumericMatrixShape(array: *const HostDenseArray) ?NumericMatrixShape {
-    const handle = hostDenseNonVectorShape(array) orelse return null;
-    if (handle.rank != 2) return null;
-    return .{
-        .rows = @intCast(handle.shape[0]),
-        .cols = @intCast(handle.shape[1]),
-    };
-}
-
-fn hostDenseShapeDims(array: *const HostDenseArray, dims_buf: *[numeric_array_max_rank]i32) []const i32 {
-    if (hostDenseShapeHandle(array)) |handle| {
+fn numericValueShapeDims(value: Value, array: *const HostDenseArray, dims_buf: *[numeric_array_max_rank]i32) []const i32 {
+    if (valueNumericHandle(value)) |handle| {
         if (handle.rank != 0) return handle.shapeSlice();
     }
     dims_buf[0] = @intCast(array.len());
@@ -3935,7 +3813,7 @@ fn valueNumericBitSlice(value: Value) ?HostBitSlice {
 }
 
 fn valueNumericFloat32Slice(value: Value) ?[]const f32 {
-    const array = hostDenseIfPresent(value) orelse return null;
+    const array = contiguousHostDenseIfPresentThroughReshape(value) orelse return null;
     return switch (array.storage) {
         .float32 => |items| hostDenseLogicalItems(f32, array, items),
         else => null,
@@ -4597,11 +4475,6 @@ const ByteMaskSelect = struct {
     offsets: [8]u8,
 };
 
-const StringMaskByteVec = @Vector(8, u8);
-const StringMaskByteShuffle = @Vector(8, i32);
-// Useful for A/B tests, but slower than the scalar byte-table copy on the current
-// 1 MiB space-squeeze workload because the mask is runtime-selected.
-const enable_string_mask_byte_shuffle = false;
 const enable_string_mask_neon = zig_builtin.target.cpu.arch == .aarch64;
 const enable_host_int_sum_vectorized = zig_builtin.target.cpu.arch == .aarch64 or zig_builtin.target.cpu.arch == .x86_64;
 const enable_host_int_sum_zig_vectorized =
@@ -4624,15 +4497,12 @@ const host_kernel_trace_has_simd =
     zig_builtin.target.cpu.arch == .x86_64 or
     (zig_builtin.target.cpu.arch == .wasm32 and std.Target.wasm.featureSetHas(zig_builtin.target.cpu.features, .simd128));
 const enable_host_compare_vectorized =
-    host_compare_mode != .zig and (zig_builtin.target.cpu.arch == .aarch64 or zig_builtin.target.cpu.arch == .x86_64);
+    zig_builtin.target.cpu.arch == .aarch64 or zig_builtin.target.cpu.arch == .x86_64;
 const enable_host_compare_zig_vectorized =
-    host_compare_mode == .zig or (host_compare_mode == .auto and zig_builtin.target.cpu.arch == .wasm32);
+    zig_builtin.target.cpu.arch == .wasm32;
 const enable_host_compare_fast = enable_host_compare_vectorized or enable_host_compare_zig_vectorized;
 const host_compare_vector_min_len = 64;
 const host_compare_zig_vector_bytes = 16;
-const host_compare_native_auto_selective =
-    host_compare_mode == .auto and (zig_builtin.target.cpu.arch == .aarch64 or zig_builtin.target.cpu.arch == .x86_64);
-const host_compare_use_zig_f64_direct = enable_host_compare_zig_vectorized or host_compare_native_auto_selective;
 
 pub const DebugHostCompareCase = enum {
     int32_array,
@@ -4655,8 +4525,8 @@ pub const DebugHostCompareDispatch = enum {
 pub fn debugHostCompareDispatchPolicy(case: DebugHostCompareCase) DebugHostCompareDispatch {
     if (comptime enable_host_compare_zig_vectorized) return .zig_source;
     return switch (case) {
-        .int64_array, .int64_scalar, .float64_array, .float64_scalar => if (comptime host_compare_native_auto_selective) .zig_source else if (comptime enable_host_compare_vectorized) .c else .generic_fallback,
-        .float32_array, .promoted_float32_float64 => if (comptime host_compare_mode == .c) .generic_fallback else .zig_source,
+        .int64_array, .int64_scalar, .float64_array, .float64_scalar => if (comptime enable_host_compare_vectorized) .zig_source else .generic_fallback,
+        .float32_array, .promoted_float32_float64 => .zig_source,
         .int32_array, .int32_scalar, .int32_float64_array => if (comptime enable_host_compare_vectorized) .c else .generic_fallback,
     };
 }
@@ -5035,23 +4905,23 @@ fn fillZigHostCompareIntArraysOp(comptime op: BuiltinId, out: *HostBitAlloc, lef
 fn fillZigHostCompareIntScalarOp(comptime op: BuiltinId, comptime scalar_left: bool, out: *HostBitAlloc, items: HostIntArrayView, scalar: i64) ?HostCompareSummary {
     return switch (items) {
         .int8 => |view| blk: {
-            const scalar_source = DenseIntResolvedSource(i8){ .scalar = std.math.cast(i8, scalar) orelse return null };
-            const item_source = DenseIntResolvedSource(i8){ .array = view };
+            const scalar_source = DenseResolvedSource(i8){ .scalar = std.math.cast(i8, scalar) orelse return null };
+            const item_source = DenseResolvedSource(i8){ .array = view };
             break :blk fillDenseIntCompareSources(i8, out, op, if (scalar_left) scalar_source else item_source, if (scalar_left) item_source else scalar_source, view.len);
         },
         .int16 => |view| blk: {
-            const scalar_source = DenseIntResolvedSource(i16){ .scalar = std.math.cast(i16, scalar) orelse return null };
-            const item_source = DenseIntResolvedSource(i16){ .array = view };
+            const scalar_source = DenseResolvedSource(i16){ .scalar = std.math.cast(i16, scalar) orelse return null };
+            const item_source = DenseResolvedSource(i16){ .array = view };
             break :blk fillDenseIntCompareSources(i16, out, op, if (scalar_left) scalar_source else item_source, if (scalar_left) item_source else scalar_source, view.len);
         },
         .int32 => |view| blk: {
-            const scalar_source = DenseIntResolvedSource(i32){ .scalar = std.math.cast(i32, scalar) orelse return null };
-            const item_source = DenseIntResolvedSource(i32){ .array = view };
+            const scalar_source = DenseResolvedSource(i32){ .scalar = std.math.cast(i32, scalar) orelse return null };
+            const item_source = DenseResolvedSource(i32){ .array = view };
             break :blk fillDenseIntCompareSources(i32, out, op, if (scalar_left) scalar_source else item_source, if (scalar_left) item_source else scalar_source, view.len);
         },
         .int64 => |view| blk: {
-            const scalar_source = DenseIntResolvedSource(i64){ .scalar = scalar };
-            const item_source = DenseIntResolvedSource(i64){ .array = view };
+            const scalar_source = DenseResolvedSource(i64){ .scalar = scalar };
+            const item_source = DenseResolvedSource(i64){ .array = view };
             break :blk fillDenseIntCompareSources(i64, out, op, if (scalar_left) scalar_source else item_source, if (scalar_left) item_source else scalar_source, view.len);
         },
         .bit => null,
@@ -5097,29 +4967,7 @@ fn initByteMaskSelectTable() [256]ByteMaskSelect {
 
 const byte_mask_select_table = initByteMaskSelectTable();
 
-fn shuffleStringMaskByte(comptime mask_byte: u8, src: StringMaskByteVec) StringMaskByteVec {
-    const entry = byte_mask_select_table[mask_byte];
-    const offsets = entry.offsets;
-    const shuffle: StringMaskByteShuffle = .{
-        @as(i32, offsets[0]),
-        @as(i32, offsets[1]),
-        @as(i32, offsets[2]),
-        @as(i32, offsets[3]),
-        @as(i32, offsets[4]),
-        @as(i32, offsets[5]),
-        @as(i32, offsets[6]),
-        @as(i32, offsets[7]),
-    };
-    return @shuffle(u8, src, @as(StringMaskByteVec, undefined), shuffle);
-}
-
-fn compressStringMaskByteShuffle(mask_byte: u8, src: StringMaskByteVec) StringMaskByteVec {
-    return switch (mask_byte) {
-        inline 0...255 => |case_mask| shuffleStringMaskByte(case_mask, src),
-    };
-}
-
-fn copyStringMaskByteInBoundsScalar(out: []u8, out_idx: *usize, bytes: []const u8, source_base: usize, mask_byte: u8) void {
+fn copyStringMaskByteInBounds(out: []u8, out_idx: *usize, bytes: []const u8, source_base: usize, mask_byte: u8) void {
     const entry = byte_mask_select_table[mask_byte];
     if (entry.count == 0) return;
 
@@ -5170,42 +5018,6 @@ fn copyStringMaskByteInBoundsScalar(out: []u8, out_idx: *usize, bytes: []const u
         },
         8 => @memcpy(out[dst_base..][0..8], bytes[source_base..][0..8]),
         else => unreachable,
-    }
-    out_idx.* = dst_base + @as(usize, entry.count);
-}
-
-fn copyStringMaskByteInBounds(out: []u8, out_idx: *usize, bytes: []const u8, source_base: usize, mask_byte: u8) void {
-    if (comptime !enable_string_mask_byte_shuffle) {
-        copyStringMaskByteInBoundsScalar(out, out_idx, bytes, source_base, mask_byte);
-        return;
-    }
-
-    const entry = byte_mask_select_table[mask_byte];
-    if (entry.count == 0) return;
-
-    if (entry.count == 8) {
-        const dst_base = out_idx.*;
-        @memcpy(out[dst_base..][0..8], bytes[source_base..][0..8]);
-        out_idx.* = dst_base + 8;
-        return;
-    }
-
-    if (source_base + 8 > bytes.len) {
-        copyStringMaskByteInBoundsScalar(out, out_idx, bytes, source_base, mask_byte);
-        return;
-    }
-
-    const dst_base = out_idx.*;
-    const src_arr: [8]u8 = bytes[source_base..][0..8].*;
-    const src_vec: StringMaskByteVec = @bitCast(src_arr);
-    const packed_vec = compressStringMaskByteShuffle(mask_byte, src_vec);
-    const packed_arr: [8]u8 = @bitCast(packed_vec);
-
-    if (dst_base + 8 <= out.len) {
-        @memcpy(out[dst_base..][0..8], packed_arr[0..]);
-    } else {
-        const count: usize = entry.count;
-        @memcpy(out[dst_base..][0..count], packed_arr[0..count]);
     }
     out_idx.* = dst_base + @as(usize, entry.count);
 }
@@ -5436,10 +5248,22 @@ fn hostIntDyadResultKindForRange(op: BuiltinId, left_kind: HostIntStorageKind, r
     return hostIntStorageKindForRange(range.min, range.max);
 }
 
-fn HostDenseAlloc(comptime T: type) type {
+fn HostDenseAttachmentAlloc(comptime T: type) type {
     return struct {
         array: *HostDenseArray,
         items: []T,
+    };
+}
+
+fn HostDenseAlloc(comptime T: type) type {
+    return struct {
+        result_value: Value,
+        array: *HostDenseArray,
+        items: []T,
+
+        fn value(self: @This()) Value {
+            return self.result_value;
+        }
     };
 }
 
@@ -5448,20 +5272,24 @@ const HostBitSlice = struct {
     len: usize,
 };
 
-const HostBitAlloc = struct {
+const HostBitAttachmentAlloc = struct {
     array: *HostDenseArray,
     words: []u64,
     len: usize,
 };
 
+const HostBitAlloc = struct {
+    result_value: Value,
+    array: *HostDenseArray,
+    words: []u64,
+    len: usize,
+
+    fn value(self: HostBitAlloc) Value {
+        return self.result_value;
+    }
+};
+
 const BackendArray = struct {
-    header: HeapHeader align(8),
-    logical_handle: ?*NumericArray = null,
-    backend_kind: mlx.BackendKind = switch (mlx.backend_kind) {
-        .mlx => .mlx,
-        .webgpu => .webgpu,
-        .host_only => .host_only,
-    },
     array: mlx.Array,
 };
 
@@ -5500,6 +5328,12 @@ const NumericArrayPreferred = enum(u8) {
     mlx,
 };
 
+const NumericArrayAttachment = enum(u8) {
+    none,
+    host,
+    mlx,
+};
+
 const NumericArrayStructuralTag = enum(u8) {
     materialized,
     range_iota,
@@ -5514,7 +5348,7 @@ const NumericArrayStructuralTag = enum(u8) {
 };
 
 pub const DebugNumericStructuralTag = NumericArrayStructuralTag;
-const debug_numeric_structural_tag_count = @typeInfo(DebugNumericStructuralTag).@"enum".fields.len;
+const debug_numeric_structural_tag_count = @typeInfo(DebugNumericStructuralTag).@"enum".field_names.len;
 
 pub const DebugHostFoldScanMiss = enum {
     unsupported_builtin,
@@ -5524,14 +5358,14 @@ pub const DebugHostFoldScanMiss = enum {
     preserve_generic_semantics,
     unsupported_input,
 };
-const debug_host_fold_scan_miss_count = @typeInfo(DebugHostFoldScanMiss).@"enum".fields.len;
+const debug_host_fold_scan_miss_count = @typeInfo(DebugHostFoldScanMiss).@"enum".field_names.len;
 
 pub const DebugHostDenseDyadMiss = enum {
     planner_backend,
     mode,
     view,
 };
-const debug_host_dense_dyad_miss_count = @typeInfo(DebugHostDenseDyadMiss).@"enum".fields.len;
+const debug_host_dense_dyad_miss_count = @typeInfo(DebugHostDenseDyadMiss).@"enum".field_names.len;
 
 pub const DebugHostDenseDyadOp = enum {
     add,
@@ -5542,14 +5376,14 @@ pub const DebugHostDenseDyadOp = enum {
     more,
     equal,
 };
-const debug_host_dense_dyad_op_count = @typeInfo(DebugHostDenseDyadOp).@"enum".fields.len;
+const debug_host_dense_dyad_op_count = @typeInfo(DebugHostDenseDyadOp).@"enum".field_names.len;
 
 pub const DebugCodeGlobalCallFallbackReason = enum {
     no_code,
     arity,
     other,
 };
-const debug_code_global_call_fallback_reason_count = @typeInfo(DebugCodeGlobalCallFallbackReason).@"enum".fields.len;
+const debug_code_global_call_fallback_reason_count = @typeInfo(DebugCodeGlobalCallFallbackReason).@"enum".field_names.len;
 
 pub const DebugCodeGlobalCallFallbackKind = enum {
     builtin,
@@ -5557,7 +5391,7 @@ pub const DebugCodeGlobalCallFallbackKind = enum {
     array,
     other,
 };
-const debug_code_global_call_fallback_kind_count = @typeInfo(DebugCodeGlobalCallFallbackKind).@"enum".fields.len;
+const debug_code_global_call_fallback_kind_count = @typeInfo(DebugCodeGlobalCallFallbackKind).@"enum".field_names.len;
 
 pub const DebugCodeCompileMiss = enum {
     arity_or_local_limit,
@@ -5568,26 +5402,26 @@ pub const DebugCodeCompileMiss = enum {
     code_body_size,
     stack_size,
 };
-const debug_code_compile_miss_count = @typeInfo(DebugCodeCompileMiss).@"enum".fields.len;
+const debug_code_compile_miss_count = @typeInfo(DebugCodeCompileMiss).@"enum".field_names.len;
 
 pub const DebugDenseEachMiss = enum {
     unsupported_base,
     non_dense_args_or_shape,
 };
-const debug_dense_each_miss_count = @typeInfo(DebugDenseEachMiss).@"enum".fields.len;
+const debug_dense_each_miss_count = @typeInfo(DebugDenseEachMiss).@"enum".field_names.len;
 
 pub const DebugDenseEachRightMiss = enum {
     unsupported_base,
     non_vector_right,
 };
-const debug_dense_each_right_miss_count = @typeInfo(DebugDenseEachRightMiss).@"enum".fields.len;
+const debug_dense_each_right_miss_count = @typeInfo(DebugDenseEachRightMiss).@"enum".field_names.len;
 
 pub const DebugFastDenseAssignCloneReason = enum {
     non_unique,
     frozen,
     other,
 };
-const debug_fast_dense_assign_clone_reason_count = @typeInfo(DebugFastDenseAssignCloneReason).@"enum".fields.len;
+const debug_fast_dense_assign_clone_reason_count = @typeInfo(DebugFastDenseAssignCloneReason).@"enum".field_names.len;
 
 const NumericRangeIota = struct {
     start: i64 = 0,
@@ -5659,20 +5493,20 @@ const NumericArray = struct {
     last_host_touch: usize = 0,
     last_mlx_touch: usize = 0,
 
-    fn activeKind(self: *const NumericArray) HeapKind {
+    fn activeAttachment(self: *const NumericArray) NumericArrayAttachment {
         return switch (self.preferred) {
             .host => if (self.host != null)
-                .host_dense_array
+                .host
             else if (self.mlx != null)
-                .backend_array
+                .mlx
             else
-                .numeric_array,
+                .none,
             .mlx => if (self.mlx != null)
-                .backend_array
+                .mlx
             else if (self.host != null)
-                .host_dense_array
+                .host
             else
-                .numeric_array,
+                .none,
         };
     }
 
@@ -5733,7 +5567,6 @@ comptime {
     if (facts.host_string_list_align != 8) @compileError("HostStringList should use natural 8-byte heap object alignment.");
     if (facts.host_dense_array_align != 8) @compileError("HostDenseArray should use natural 8-byte heap object alignment.");
     if (facts.host_boxed_array_align != 8) @compileError("HostBoxedArray should use natural 8-byte heap object alignment.");
-    if (facts.backend_array_align != 8) @compileError("BackendArray should use natural 8-byte heap object alignment.");
     if (facts.numeric_array_align != 8) @compileError("NumericArray should use natural 8-byte heap object alignment.");
 }
 
@@ -5780,7 +5613,7 @@ pub const DebugSimdKernel = enum(u8) {
     packed_bool,
 };
 
-pub const debug_simd_kernel_count = @typeInfo(DebugSimdKernel).@"enum".fields.len;
+pub const debug_simd_kernel_count = @typeInfo(DebugSimdKernel).@"enum".field_names.len;
 
 pub fn debugSimdKernelName(kernel: DebugSimdKernel) []const u8 {
     return switch (kernel) {
@@ -5812,7 +5645,7 @@ pub const DebugOpcodeFamily = enum(u8) {
     other,
 };
 
-pub const debug_opcode_family_count = std.meta.fields(DebugOpcodeFamily).len;
+pub const debug_opcode_family_count = @typeInfo(DebugOpcodeFamily).@"enum".field_names.len;
 
 pub const DebugOpcodeFamilyCount = struct {
     name: []const u8,
@@ -5933,7 +5766,7 @@ const GlobalCallArgKind = enum(u7) {
 const global_call_arg_consume_bit: u8 = 0x80;
 
 fn global_call_arg_kind_byte(kind: GlobalCallArgKind, consume: bool) u8 {
-    return @intFromEnum(kind) | if (consume) global_call_arg_consume_bit else 0;
+    return @backingInt(kind) | if (consume) global_call_arg_consume_bit else 0;
 }
 
 pub const SamplingProfileCodeKind = enum(u8) {
@@ -5978,7 +5811,7 @@ pub const SamplingProfileLabel = enum(u8) {
     mlx_realization,
 };
 
-pub const sampling_profile_label_count = std.meta.fields(SamplingProfileLabel).len;
+pub const sampling_profile_label_count = @typeInfo(SamplingProfileLabel).@"enum".field_names.len;
 pub const sampling_profile_op_count: usize = 256;
 const sampling_profile_no_op = std.math.maxInt(u16);
 const sampling_profile_no_code: u16 = 0;
@@ -6075,10 +5908,7 @@ const AmendMode = enum(u8) {
 pub const Code = struct {
     arity: u8,
     required_arity: u8 = 0,
-    frame_slot_count: u8 = 0,
-    local_count: u8 = 0,
-    operand_stack_slot_count: u8 = 0,
-    max_stack: u8 = 0,
+    slot_count: u8 = 0,
     bytes: []const u8,
     constants: []const Value,
     references_globals: bool = false,
@@ -6103,26 +5933,11 @@ const composition_code_bytes = &[_]u8{253};
 const inner_product_code_bytes = &[_]u8{254};
 const projection_code_bytes = &[_]u8{255};
 
-inline fn staticFrameSlotCount(code: *const Code) usize {
-    const slot_count: u8 = if (code.frame_slot_count == 0 and code.arity != 0) code.arity else code.frame_slot_count;
-    return slot_count;
-}
-
-inline fn staticActivationSlotCount(code: *const Code) usize {
-    return staticFrameSlotCount(code) + @as(usize, code.operand_stack_slot_count);
-}
-
 fn readByteFromCode(bytes: []const u8, ip: *usize) ?u8 {
     if (ip.* >= bytes.len) return null;
     const value = bytes[ip.*];
     ip.* += 1;
     return value;
-}
-
-fn readU16FromCode(bytes: []const u8, ip: *usize) ?usize {
-    const lo = readByteFromCode(bytes, ip) orelse return null;
-    const hi = readByteFromCode(bytes, ip) orelse return null;
-    return @as(usize, lo) | (@as(usize, hi) << 8);
 }
 
 fn readI64FromCode(bytes: []const u8, ip: *usize) ?i64 {
@@ -6836,15 +6651,14 @@ fn directCodeFromEmitter(arity: u8, required_arity: u8, frame_slot_count: u8, in
     if (frame_slot_count > max_code_frame_slots or arity > max_explicit_params or required_arity > arity) return null;
     const bytes = instructions.directCompactSlice() orelse return null;
     if (bytes.len > std.math.maxInt(u16)) return null;
-    const max_stack = instructions.directCompactMaxStack() orelse return null;
-    const local_count: u8 = if (frame_slot_count == 0 and arity != 0) arity else frame_slot_count;
+    const stack_state = compactStackState(bytes) orelse return null;
+    if (stack_state.max_depth > max_code_stack_slots) return null;
+    const slot_count: u8 = if (frame_slot_count == 0) arity else frame_slot_count;
+    if (slot_count < arity) return null;
     return .{
         .arity = arity,
         .required_arity = required_arity,
-        .frame_slot_count = frame_slot_count,
-        .local_count = local_count,
-        .operand_stack_slot_count = max_stack,
-        .max_stack = max_stack,
+        .slot_count = slot_count,
         .bytes = bytes,
         .constants = constants,
         .references_globals = instructions.references_globals,
@@ -7208,7 +7022,6 @@ fn compactStackState(bytes: []const u8) ?CompactStackState {
 
 const derived_each_code = Code{
     .arity = 0,
-    .frame_slot_count = 0,
     .bytes = derived_each_bytes,
     .constants = empty_code_constants,
     .profile_id = sampling_profile_code_id_derived_each,
@@ -7217,7 +7030,6 @@ const derived_each_code = Code{
 };
 const derived_fold_code = Code{
     .arity = 0,
-    .frame_slot_count = 0,
     .bytes = derived_fold_bytes,
     .constants = empty_code_constants,
     .profile_id = sampling_profile_code_id_derived_fold,
@@ -7226,7 +7038,6 @@ const derived_fold_code = Code{
 };
 const derived_scan_code = Code{
     .arity = 0,
-    .frame_slot_count = 0,
     .bytes = derived_scan_bytes,
     .constants = empty_code_constants,
     .profile_id = sampling_profile_code_id_derived_scan,
@@ -7235,7 +7046,6 @@ const derived_scan_code = Code{
 };
 const derived_each_right_code = Code{
     .arity = 0,
-    .frame_slot_count = 0,
     .bytes = derived_each_right_bytes,
     .constants = empty_code_constants,
     .profile_id = sampling_profile_code_id_derived_each_right,
@@ -7244,7 +7054,6 @@ const derived_each_right_code = Code{
 };
 const derived_each_left_code = Code{
     .arity = 0,
-    .frame_slot_count = 0,
     .bytes = derived_each_left_bytes,
     .constants = empty_code_constants,
     .profile_id = sampling_profile_code_id_derived_each_left,
@@ -7253,7 +7062,6 @@ const derived_each_left_code = Code{
 };
 const derived_each_prior_code = Code{
     .arity = 0,
-    .frame_slot_count = 0,
     .bytes = derived_each_prior_bytes,
     .constants = empty_code_constants,
     .profile_id = sampling_profile_code_id_derived_each_prior,
@@ -7262,7 +7070,6 @@ const derived_each_prior_code = Code{
 };
 const derived_grad_code = Code{
     .arity = 0,
-    .frame_slot_count = 0,
     .bytes = derived_grad_bytes,
     .constants = empty_code_constants,
     .profile_id = sampling_profile_code_id_derived_grad,
@@ -7271,7 +7078,6 @@ const derived_grad_code = Code{
 };
 const derived_valuegrad_code = Code{
     .arity = 0,
-    .frame_slot_count = 0,
     .bytes = derived_valuegrad_bytes,
     .constants = empty_code_constants,
     .profile_id = sampling_profile_code_id_derived_valuegrad,
@@ -7280,7 +7086,6 @@ const derived_valuegrad_code = Code{
 };
 const monadic_builtin_code = Code{
     .arity = 0,
-    .frame_slot_count = 0,
     .bytes = monadic_builtin_code_bytes,
     .constants = empty_code_constants,
     .profile_id = sampling_profile_code_id_monadic_builtin,
@@ -7289,7 +7094,6 @@ const monadic_builtin_code = Code{
 };
 const projection_code = Code{
     .arity = 0,
-    .frame_slot_count = 0,
     .bytes = projection_code_bytes,
     .constants = empty_code_constants,
     .profile_id = sampling_profile_code_id_projection,
@@ -7298,7 +7102,6 @@ const projection_code = Code{
 };
 const inner_product_code = Code{
     .arity = 0,
-    .frame_slot_count = 0,
     .bytes = inner_product_code_bytes,
     .constants = empty_code_constants,
     .profile_id = sampling_profile_code_id_inner_product,
@@ -7307,7 +7110,6 @@ const inner_product_code = Code{
 };
 const composition_code = Code{
     .arity = 0,
-    .frame_slot_count = 0,
     .bytes = composition_code_bytes,
     .constants = empty_code_constants,
     .profile_id = sampling_profile_code_id_composition,
@@ -7376,12 +7178,6 @@ fn codeAcceptsArgs(compact: *const Code, args: []const Value) bool {
     return compact.arity == args.len;
 }
 
-fn codeForPlainClosureArgs(closure: *const Closure, args: []const Value) ?*const Code {
-    const compact = codeForPlainClosure(closure, args.len) orelse return null;
-    if (!codeAcceptsArgs(compact, args)) return null;
-    return compact;
-}
-
 fn codeForRunnablePlainClosureArgs(closure: *const Closure, args: []const Value) ?*const Code {
     if (!closureIsCompactPlainGlobal(closure)) return null;
     const compact = closure.code;
@@ -7406,7 +7202,6 @@ const ScratchCode = struct {
     instructions: CodeEmitter = .{},
     code: Code = .{
         .arity = 0,
-        .frame_slot_count = 0,
         .bytes = &[_]u8{},
         .constants = &[_]Value{},
     },
@@ -7415,7 +7210,6 @@ const ScratchCode = struct {
         self.instructions.reset(allocator);
         self.code = .{
             .arity = 0,
-            .frame_slot_count = 0,
             .bytes = &[_]u8{},
             .constants = &[_]Value{},
         };
@@ -7446,6 +7240,20 @@ fn duplicateCodeFromEmitter(allocator: std.mem.Allocator, arity: u8, required_ar
 fn finishCodeEmitter(out: *CodeEmitter, mode: PostCompileMode) KError!void {
     out.applyPostCompile(mode);
     try out.appendReturn();
+}
+
+test "direct code stores one normalized slot count" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var out = CodeEmitter.init(arena.allocator());
+    try out.emitConstInt(1);
+    try finishCodeEmitter(&out, .tail_position);
+
+    const code = directCodeFromEmitter(1, 1, 0, &out, out.constantSlice());
+    try std.testing.expect(code != null);
+    try std.testing.expectEqual(@as(u8, 1), code.?.slot_count);
+    try std.testing.expect(directCodeFromEmitter(2, 2, 1, &out, out.constantSlice()) == null);
 }
 
 test "compact branch patch supports u16 targets" {
@@ -7528,7 +7336,7 @@ pub const DebugMakeArrayBoxedReason = enum {
     non_numeric_item,
 };
 
-const debug_make_array_boxed_reason_count = std.meta.fields(DebugMakeArrayBoxedReason).len;
+const debug_make_array_boxed_reason_count = @typeInfo(DebugMakeArrayBoxedReason).@"enum".field_names.len;
 
 pub const DebugProbeLenBucket = enum {
     len_0,
@@ -7544,7 +7352,7 @@ pub const DebugProbeLenBucket = enum {
     len_257_plus,
 };
 
-const debug_probe_len_bucket_count = std.meta.fields(DebugProbeLenBucket).len;
+const debug_probe_len_bucket_count = @typeInfo(DebugProbeLenBucket).@"enum".field_names.len;
 
 fn debugProbeLenBucket(len: usize) DebugProbeLenBucket {
     if (len == 0) return .len_0;
@@ -7566,7 +7374,7 @@ pub const DebugHostStringViewReason = enum {
     string_list_split_scalar,
 };
 
-const debug_host_string_view_reason_count = std.meta.fields(DebugHostStringViewReason).len;
+const debug_host_string_view_reason_count = @typeInfo(DebugHostStringViewReason).@"enum".field_names.len;
 
 pub const SamplingProfileState = struct {
     label: SamplingProfileLabel,
@@ -7649,6 +7457,158 @@ pub const DebugDenseFusionStats = struct {
     compact_add_fold_map_candidates: usize = 0,
     compact_add_fold_map_hits: usize = 0,
     compact_add_fold_map_disabled: usize = 0,
+};
+
+pub const DebugRuntimeStats = struct {
+    scratch_host_array_alloc_count: usize = 0,
+    host_dense_storage_alloc_count: usize = 0,
+    host_dense_storage_reuse_count: usize = 0,
+    host_dense_storage_free_count: usize = 0,
+    host_dense_storage_recycle_count: usize = 0,
+    host_dense_storage_alloc_bytes: usize = 0,
+    host_dense_storage_reuse_bytes: usize = 0,
+    host_dense_storage_free_bytes: usize = 0,
+    host_dense_storage_recycle_bytes: usize = 0,
+    host_dense_active_bytes: usize = 0,
+    host_dense_scratch_active_bytes: usize = 0,
+    host_dense_baseline_active_bytes: usize = 0,
+    host_dense_peak_active_bytes: usize = 0,
+    morsel_executor: MorselExecutorKind = .none,
+    morsel_workers_requested: usize = 0,
+    morsel_workers_used: usize = 0,
+    morsel_count: usize = 0,
+    morsel_grain_size: usize = 0,
+    morsel_phase_count: usize = 0,
+    morsel_parallel_phase_count: usize = 0,
+    morsel_element_count: usize = 0,
+    disable_dense_fusion: bool = false,
+    dense_fusion_compact_add_fold_map_candidate_count: usize = 0,
+    dense_fusion_compact_add_fold_map_hit_count: usize = 0,
+    dense_fusion_compact_add_fold_map_disabled_count: usize = 0,
+    host_realization_count: usize = 0,
+    structural_host_realization_count: usize = 0,
+    mlx_realization_count: usize = 0,
+    structural_mlx_realization_count: usize = 0,
+    host_realization_reuse_count: usize = 0,
+    host_readback_count: usize = 0,
+    mlx_realization_reuse_count: usize = 0,
+    mlx_promotion_count: usize = 0,
+    host_eviction_count: usize = 0,
+    mlx_eviction_count: usize = 0,
+    dual_resident_peak_count: usize = 0,
+    flat_concat_dense_view_count: usize = 0,
+    first_axis_slice_dense_view_count: usize = 0,
+    first_axis_index_dense_view_count: usize = 0,
+    first_axis_concat_dense_view_count: usize = 0,
+    make_array_int_result_count: usize = 0,
+    make_array_float_result_count: usize = 0,
+    make_array_boxed_fallback_count: usize = 0,
+    make_array_boxed_reason_counts: [debug_make_array_boxed_reason_count]usize = @as([debug_make_array_boxed_reason_count]usize, @splat(0)),
+    make_array_boxed_len_bucket_counts: [debug_probe_len_bucket_count]usize = @as([debug_probe_len_bucket_count]usize, @splat(0)),
+    host_matrix_row_copy_count: usize = 0,
+    host_matrix_index_copy_count: usize = 0,
+    host_matrix_mask_copy_count: usize = 0,
+    host_index_in_bounds_fast_count: usize = 0,
+    host_index_in_bounds_fallback_count: usize = 0,
+    host_index_copy_count: usize = 0,
+    host_mask_copy_count: usize = 0,
+    projection_closure_alloc_count: usize = 0,
+    projection_closure_release_count: usize = 0,
+    apply_each_generic_count: usize = 0,
+    apply_fold_generic_count: usize = 0,
+    apply_scan_generic_count: usize = 0,
+    apply_each_right_generic_count: usize = 0,
+    apply_each_left_generic_count: usize = 0,
+    apply_each_prior_fast_bit_count: usize = 0,
+    apply_each_prior_fast_bit_element_count: usize = 0,
+    apply_each_prior_generic_count: usize = 0,
+    apply_each_prior_generic_element_count: usize = 0,
+    apply_each_right_fast_string_contains_count: usize = 0,
+    apply_each_fast_numeric_unary_count: usize = 0,
+    apply_each_fast_numeric_vector_code_count: usize = 0,
+    apply_each_fast_numeric_closure_count: usize = 0,
+    apply_each_fast_unary_lifted_count: usize = 0,
+    apply_each_fast_dense_count: usize = 0,
+    apply_each_fast_dense_miss_counts: [debug_dense_each_miss_count]usize = @as([debug_dense_each_miss_count]usize, @splat(0)),
+    apply_each_right_fast_dense_count: usize = 0,
+    apply_each_right_fast_dense_miss_counts: [debug_dense_each_right_miss_count]usize = @as([debug_dense_each_right_miss_count]usize, @splat(0)),
+    each_right_fast_string_contains_miss_non_string_left_count: usize = 0,
+    each_right_fast_string_contains_miss_non_string_right_count: usize = 0,
+    grade_structural_numeric_fast_count: usize = 0,
+    fast_dense_assign_attempt_count: usize = 0,
+    fast_dense_assign_hit_count: usize = 0,
+    fast_dense_assign_miss_count: usize = 0,
+    fast_dense_assign_reuse_count: usize = 0,
+    fast_dense_assign_clone_count: usize = 0,
+    fast_dense_assign_clone_reason_counts: [debug_fast_dense_assign_clone_reason_count]usize = @as([debug_fast_dense_assign_clone_reason_count]usize, @splat(0)),
+    fast_dense_assign_target_element_count: usize = 0,
+    fast_dense_assign_scalar_target_count: usize = 0,
+    fast_dense_assign_vector_target_count: usize = 0,
+    fast_dense_assign_scalar_rhs_count: usize = 0,
+    fast_dense_assign_vector_rhs_count: usize = 0,
+    indexed_assign_count: usize = 0,
+    indexed_assign_global_count: usize = 0,
+    indexed_assign_local_count: usize = 0,
+    owned_amend_count: usize = 0,
+    local_release_skip_count: usize = 0,
+    local_release_taken_count: usize = 0,
+    code_op_total_count: usize = 0,
+    code_op_counts: [256]usize = @as([256]usize, @splat(0)),
+    code_op_family_counts: [debug_opcode_family_count]usize = @as([debug_opcode_family_count]usize, @splat(0)),
+    jump_if_false_count: usize = 0,
+    jump_if_false_scalar_count: usize = 0,
+    inline_scalar_dyad_attempt_count: usize = 0,
+    inline_scalar_dyad_hit_count: usize = 0,
+    inline_scalar_dyad_fallback_count: usize = 0,
+    shaped_scalar_dyad_count: usize = 0,
+    code_run_count: usize = 0,
+    code_tail_continue_count: usize = 0,
+    code_global_call_count: usize = 0,
+    code_global_call_direct_count: usize = 0,
+    code_global_call_fallback_count: usize = 0,
+    code_global_call_fallback_reason_counts: [debug_code_global_call_fallback_reason_count]usize = @as([debug_code_global_call_fallback_reason_count]usize, @splat(0)),
+    code_global_call_fallback_kind_counts: [debug_code_global_call_fallback_kind_count]usize = @as([debug_code_global_call_fallback_kind_count]usize, @splat(0)),
+    code_compile_count: usize = 0,
+    code_compile_success_count: usize = 0,
+    code_compile_miss_counts: [debug_code_compile_miss_count]usize = @as([debug_code_compile_miss_count]usize, @splat(0)),
+    code_indexed_assign_sources_count: usize = 0,
+    code_indexed_assign_stack_count: usize = 0,
+    host_fold_fast_count: usize = 0,
+    host_scan_fast_count: usize = 0,
+    host_fold_scan_miss_counts: [debug_host_fold_scan_miss_count]usize = @as([debug_host_fold_scan_miss_count]usize, @splat(0)),
+    host_dense_dyad_host_count: usize = 0,
+    host_dense_dyad_host_element_count: usize = 0,
+    host_dense_dyad_host_op_counts: [debug_host_dense_dyad_op_count]usize = @as([debug_host_dense_dyad_op_count]usize, @splat(0)),
+    host_dense_dyad_host_rowwise_count: usize = 0,
+    host_dense_dyad_host_with_backend_input_count: usize = 0,
+    host_dense_dyad_miss_counts: [debug_host_dense_dyad_miss_count]usize = @as([debug_host_dense_dyad_miss_count]usize, @splat(0)),
+    host_string_view_alloc_count: usize = 0,
+    host_string_view_release_count: usize = 0,
+    host_string_view_reason_counts: [debug_host_string_view_reason_count]usize = @as([debug_host_string_view_reason_count]usize, @splat(0)),
+    host_string_view_len_bucket_counts: [debug_probe_len_bucket_count]usize = @as([debug_probe_len_bucket_count]usize, @splat(0)),
+    host_string_list_item_value_count: usize = 0,
+    host_string_list_item_eager_owned_count: usize = 0,
+    host_string_list_item_eager_view_count: usize = 0,
+    host_string_list_item_split_scalar_count: usize = 0,
+    host_string_list_item_split_scalar_scan_byte_count: usize = 0,
+    host_string_list_item_split_scalar_scan_sep_count: usize = 0,
+    numeric_structural_alloc_counts: [debug_numeric_structural_tag_count]usize = @as([debug_numeric_structural_tag_count]usize, @splat(0)),
+    numeric_structural_release_counts: [debug_numeric_structural_tag_count]usize = @as([debug_numeric_structural_tag_count]usize, @splat(0)),
+    numeric_structural_mlx_realization_counts: [debug_numeric_structural_tag_count]usize = @as([debug_numeric_structural_tag_count]usize, @splat(0)),
+    structured_derived2_hit_count: usize = 0,
+    apply_derived_closure_count: usize = 0,
+    apply_projection_count: usize = 0,
+    autograd_builtin_grad_count: usize = 0,
+    autograd_builtin_valuegrad_count: usize = 0,
+    autograd_slow_finite_difference_count: usize = 0,
+    dense_autodiff_cache_hit_count: usize = 0,
+    dense_autodiff_cache_miss_count: usize = 0,
+    dense_autodiff_lower_success_count: usize = 0,
+    dense_plan_counts: [dense_region_kind_count][dense_exec_backend_count]usize = @as([dense_region_kind_count][dense_exec_backend_count]usize, @splat(@as([dense_exec_backend_count]usize, @splat(0)))),
+    dense_exec_counts: [dense_region_kind_count][dense_exec_backend_count]usize = @as([dense_region_kind_count][dense_exec_backend_count]usize, @splat(@as([dense_exec_backend_count]usize, @splat(0)))),
+    probe_active: bool = false,
+    kernel_trace_active: bool = false,
+    simd_kernel_counts: [debug_simd_kernel_count]usize = @as([debug_simd_kernel_count]usize, @splat(0)),
 };
 
 fn normalizeMorselGrain(len: usize, requested_grain: usize) usize {
@@ -7819,7 +7779,7 @@ fn morselPoolWorkerMain(ctx: *MorselWorkerContext) void {
 
 const SamplingProfileScope = struct {
     session: ?*Session = null,
-    previous_label: u8 = @intFromEnum(SamplingProfileLabel.idle),
+    previous_label: u8 = @backingInt(SamplingProfileLabel.idle),
 
     fn end(self: SamplingProfileScope) void {
         if (self.session) |session| {
@@ -7839,7 +7799,6 @@ pub const Session = struct {
     duckdb_kiwi_scan_registered: RuntimeDuckDbRegisteredFlag = if (runtime_has_duckdb) false else {},
     global_slots: std.StringHashMap(u16),
     global_names: std.ArrayListUnmanaged([]const u8) = .empty,
-    debug_global_call_counts: std.ArrayListUnmanaged(usize) = .empty,
     interned_strings: std.StringHashMap(*HostText),
     interned_symbols: std.StringHashMap(*HostText),
     loaded_safetensors: RuntimeLoadedSafetensorsCache = if (runtime_has_mlx) undefined else {},
@@ -7848,8 +7807,6 @@ pub const Session = struct {
     global_cells: std.ArrayListUnmanaged(GlobalCell) = .empty,
     code_cache: std.StringHashMap(*const Code),
     dense_autodiff_cache: std.AutoHashMap(DenseAutodiffCacheKey, DenseAutodiffLowerResult),
-    stack: [max_runtime_stack]Value = undefined,
-    stack_len: usize = 0,
     free_boxed_ints: [max_pooled_objects]?*BoxedInt = @as([max_pooled_objects]?*BoxedInt, @splat(null)),
     free_boxed_int_len: usize = 0,
     free_closures: [max_pooled_objects]?*Closure = @as([max_pooled_objects]?*Closure, @splat(null)),
@@ -7877,156 +7834,8 @@ pub const Session = struct {
     morsel_f32_partials: std.ArrayListUnmanaged(f32) = .empty,
     morsel_int_range_partials: std.ArrayListUnmanaged(HostIntRange) = .empty,
     morsel_float_bounds_partials: std.ArrayListUnmanaged(HostFloatBounds) = .empty,
-    debug_scratch_host_array_alloc_count: usize = 0,
-    debug_host_dense_storage_alloc_count: usize = 0,
-    debug_host_dense_storage_reuse_count: usize = 0,
-    debug_host_dense_storage_free_count: usize = 0,
-    debug_host_dense_storage_recycle_count: usize = 0,
-    debug_host_dense_storage_alloc_bytes: usize = 0,
-    debug_host_dense_storage_reuse_bytes: usize = 0,
-    debug_host_dense_storage_free_bytes: usize = 0,
-    debug_host_dense_storage_recycle_bytes: usize = 0,
-    debug_host_dense_active_bytes: usize = 0,
-    debug_host_dense_scratch_active_bytes: usize = 0,
-    debug_host_dense_baseline_active_bytes: usize = 0,
-    debug_host_dense_peak_active_bytes: usize = 0,
-    debug_morsel_executor: MorselExecutorKind = .none,
-    debug_morsel_workers_requested: usize = 0,
-    debug_morsel_workers_used: usize = 0,
-    debug_morsel_count: usize = 0,
-    debug_morsel_grain_size: usize = 0,
-    debug_morsel_phase_count: usize = 0,
-    debug_morsel_parallel_phase_count: usize = 0,
-    debug_morsel_element_count: usize = 0,
-    debug_disable_dense_fusion: bool = false,
-    debug_dense_fusion_compact_add_fold_map_candidate_count: usize = 0,
-    debug_dense_fusion_compact_add_fold_map_hit_count: usize = 0,
-    debug_dense_fusion_compact_add_fold_map_disabled_count: usize = 0,
-    debug_host_realization_count: usize = 0,
-    debug_structural_host_realization_count: usize = 0,
-    debug_mlx_realization_count: usize = 0,
-    debug_structural_mlx_realization_count: usize = 0,
-    debug_host_realization_reuse_count: usize = 0,
-    debug_host_readback_count: usize = 0,
-    debug_mlx_realization_reuse_count: usize = 0,
-    debug_mlx_promotion_count: usize = 0,
-    debug_host_eviction_count: usize = 0,
-    debug_mlx_eviction_count: usize = 0,
-    debug_dual_resident_peak_count: usize = 0,
-    debug_flat_concat_dense_view_count: usize = 0,
-    debug_first_axis_slice_dense_view_count: usize = 0,
-    debug_first_axis_index_dense_view_count: usize = 0,
-    debug_first_axis_concat_dense_view_count: usize = 0,
-    debug_make_array_int_result_count: usize = 0,
-    debug_make_array_float_result_count: usize = 0,
-    debug_make_array_boxed_fallback_count: usize = 0,
-    debug_make_array_boxed_reason_counts: [debug_make_array_boxed_reason_count]usize = @as([debug_make_array_boxed_reason_count]usize, @splat(0)),
-    debug_make_array_boxed_len_bucket_counts: [debug_probe_len_bucket_count]usize = @as([debug_probe_len_bucket_count]usize, @splat(0)),
-    debug_host_matrix_row_copy_count: usize = 0,
-    debug_host_matrix_index_copy_count: usize = 0,
-    debug_host_matrix_mask_copy_count: usize = 0,
-    debug_host_index_in_bounds_fast_count: usize = 0,
-    debug_host_index_in_bounds_fallback_count: usize = 0,
-    debug_host_index_copy_count: usize = 0,
-    debug_host_mask_copy_count: usize = 0,
-    debug_projection_closure_alloc_count: usize = 0,
-    debug_projection_closure_release_count: usize = 0,
-    debug_apply_each_generic_count: usize = 0,
-    debug_apply_fold_generic_count: usize = 0,
-    debug_apply_scan_generic_count: usize = 0,
-    debug_apply_each_right_generic_count: usize = 0,
-    debug_apply_each_left_generic_count: usize = 0,
-    debug_apply_each_prior_fast_bit_count: usize = 0,
-    debug_apply_each_prior_fast_bit_element_count: usize = 0,
-    debug_apply_each_prior_generic_count: usize = 0,
-    debug_apply_each_prior_generic_element_count: usize = 0,
-    debug_apply_each_right_fast_string_contains_count: usize = 0,
-    debug_apply_each_fast_numeric_unary_count: usize = 0,
-    debug_apply_each_fast_numeric_vector_code_count: usize = 0,
-    debug_apply_each_fast_numeric_closure_count: usize = 0,
-    debug_apply_each_fast_unary_lifted_count: usize = 0,
-    debug_apply_each_fast_dense_count: usize = 0,
-    debug_apply_each_fast_dense_miss_counts: [debug_dense_each_miss_count]usize = @as([debug_dense_each_miss_count]usize, @splat(0)),
-    debug_apply_each_right_fast_dense_count: usize = 0,
-    debug_apply_each_right_fast_dense_miss_counts: [debug_dense_each_right_miss_count]usize = @as([debug_dense_each_right_miss_count]usize, @splat(0)),
-    debug_each_right_fast_string_contains_miss_non_string_left_count: usize = 0,
-    debug_each_right_fast_string_contains_miss_non_string_right_count: usize = 0,
-    debug_grade_structural_numeric_fast_count: usize = 0,
-    debug_fast_dense_assign_attempt_count: usize = 0,
-    debug_fast_dense_assign_hit_count: usize = 0,
-    debug_fast_dense_assign_miss_count: usize = 0,
-    debug_fast_dense_assign_reuse_count: usize = 0,
-    debug_fast_dense_assign_clone_count: usize = 0,
-    debug_fast_dense_assign_clone_reason_counts: [debug_fast_dense_assign_clone_reason_count]usize = @as([debug_fast_dense_assign_clone_reason_count]usize, @splat(0)),
-    debug_fast_dense_assign_target_element_count: usize = 0,
-    debug_fast_dense_assign_scalar_target_count: usize = 0,
-    debug_fast_dense_assign_vector_target_count: usize = 0,
-    debug_fast_dense_assign_scalar_rhs_count: usize = 0,
-    debug_fast_dense_assign_vector_rhs_count: usize = 0,
-    debug_indexed_assign_count: usize = 0,
-    debug_indexed_assign_global_count: usize = 0,
-    debug_indexed_assign_local_count: usize = 0,
-    debug_owned_amend_count: usize = 0,
-    debug_local_release_skip_count: usize = 0,
-    debug_local_release_taken_count: usize = 0,
-    debug_code_op_total_count: usize = 0,
-    debug_code_op_counts: [256]usize = @as([256]usize, @splat(0)),
-    debug_code_op_family_counts: [debug_opcode_family_count]usize = @as([debug_opcode_family_count]usize, @splat(0)),
-    debug_jump_if_false_count: usize = 0,
-    debug_jump_if_false_scalar_count: usize = 0,
-    debug_inline_scalar_dyad_attempt_count: usize = 0,
-    debug_inline_scalar_dyad_hit_count: usize = 0,
-    debug_inline_scalar_dyad_fallback_count: usize = 0,
-    debug_shaped_scalar_dyad_count: usize = 0,
-    debug_code_run_count: usize = 0,
-    debug_code_tail_continue_count: usize = 0,
-    debug_code_global_call_count: usize = 0,
-    debug_code_global_call_direct_count: usize = 0,
-    debug_code_global_call_fallback_count: usize = 0,
-    debug_code_global_call_fallback_reason_counts: [debug_code_global_call_fallback_reason_count]usize = @as([debug_code_global_call_fallback_reason_count]usize, @splat(0)),
-    debug_code_global_call_fallback_kind_counts: [debug_code_global_call_fallback_kind_count]usize = @as([debug_code_global_call_fallback_kind_count]usize, @splat(0)),
-    debug_code_compile_count: usize = 0,
-    debug_code_compile_success_count: usize = 0,
-    debug_code_compile_miss_counts: [debug_code_compile_miss_count]usize = @as([debug_code_compile_miss_count]usize, @splat(0)),
-    debug_code_indexed_assign_sources_count: usize = 0,
-    debug_code_indexed_assign_stack_count: usize = 0,
-    debug_host_fold_fast_count: usize = 0,
-    debug_host_scan_fast_count: usize = 0,
-    debug_host_fold_scan_miss_counts: [debug_host_fold_scan_miss_count]usize = @as([debug_host_fold_scan_miss_count]usize, @splat(0)),
-    debug_host_dense_dyad_host_count: usize = 0,
-    debug_host_dense_dyad_host_element_count: usize = 0,
-    debug_host_dense_dyad_host_op_counts: [debug_host_dense_dyad_op_count]usize = @as([debug_host_dense_dyad_op_count]usize, @splat(0)),
-    debug_host_dense_dyad_host_rowwise_count: usize = 0,
-    debug_host_dense_dyad_host_with_backend_input_count: usize = 0,
-    debug_host_dense_dyad_miss_counts: [debug_host_dense_dyad_miss_count]usize = @as([debug_host_dense_dyad_miss_count]usize, @splat(0)),
-    debug_backend_argmax_fast_count: usize = 0,
-    debug_backend_argmax_materialize_ns: u64 = 0,
-    debug_backend_argmax_kernel_ns: u64 = 0,
-    debug_host_string_view_alloc_count: usize = 0,
-    debug_host_string_view_release_count: usize = 0,
-    debug_host_string_view_reason_counts: [debug_host_string_view_reason_count]usize = @as([debug_host_string_view_reason_count]usize, @splat(0)),
-    debug_host_string_view_len_bucket_counts: [debug_probe_len_bucket_count]usize = @as([debug_probe_len_bucket_count]usize, @splat(0)),
-    debug_host_string_list_item_value_count: usize = 0,
-    debug_host_string_list_item_eager_owned_count: usize = 0,
-    debug_host_string_list_item_eager_view_count: usize = 0,
-    debug_host_string_list_item_split_scalar_count: usize = 0,
-    debug_host_string_list_item_split_scalar_scan_byte_count: usize = 0,
-    debug_host_string_list_item_split_scalar_scan_sep_count: usize = 0,
-    debug_numeric_structural_alloc_counts: [debug_numeric_structural_tag_count]usize = @as([debug_numeric_structural_tag_count]usize, @splat(0)),
-    debug_numeric_structural_release_counts: [debug_numeric_structural_tag_count]usize = @as([debug_numeric_structural_tag_count]usize, @splat(0)),
-    debug_numeric_structural_mlx_realization_counts: [debug_numeric_structural_tag_count]usize = @as([debug_numeric_structural_tag_count]usize, @splat(0)),
-    debug_structured_derived2_hit_count: usize = 0,
-    debug_apply_derived_closure_count: usize = 0,
-    debug_apply_projection_count: usize = 0,
-    debug_autograd_builtin_grad_count: usize = 0,
-    debug_autograd_builtin_valuegrad_count: usize = 0,
-    debug_autograd_slow_finite_difference_count: usize = 0,
-    debug_dense_autodiff_cache_hit_count: usize = 0,
-    debug_dense_autodiff_cache_miss_count: usize = 0,
-    debug_dense_autodiff_lower_success_count: usize = 0,
+    debug: DebugRuntimeStats = .{},
     debug_dense_autodiff_reject_counts: [debug_dense_autodiff_lowering_count]usize = @as([debug_dense_autodiff_lowering_count]usize, @splat(0)),
-    debug_dense_plan_counts: [dense_region_kind_count][dense_exec_backend_count]usize = @as([dense_region_kind_count][dense_exec_backend_count]usize, @splat(@as([dense_exec_backend_count]usize, @splat(0)))),
-    debug_dense_exec_counts: [dense_region_kind_count][dense_exec_backend_count]usize = @as([dense_region_kind_count][dense_exec_backend_count]usize, @splat(@as([dense_exec_backend_count]usize, @splat(0)))),
     last_dense_plan_region: ?DenseRegionKind = null,
     last_dense_plan_backend: ?DenseExecBackend = null,
     last_dense_exec_backend: ?DenseExecBackend = null,
@@ -8036,12 +7845,8 @@ pub const Session = struct {
     managed_numeric_registry_head: ?*NumericArray = null,
     attachment_touch_clock: usize = 1,
     dense_backend_override: DenseBackendOverride = .auto,
-    string_perf: StringPerfCounters = .{},
-    debug_probe_active: bool = false,
-    debug_kernel_trace_active: bool = false,
-    debug_simd_kernel_counts: [debug_simd_kernel_count]usize = @as([debug_simd_kernel_count]usize, @splat(0)),
     profile_sampling_enabled: std.atomic.Value(u8) = std.atomic.Value(u8).init(0),
-    profile_current_label: std.atomic.Value(u8) = std.atomic.Value(u8).init(@intFromEnum(SamplingProfileLabel.idle)),
+    profile_current_label: std.atomic.Value(u8) = std.atomic.Value(u8).init(@backingInt(SamplingProfileLabel.idle)),
     profile_current_op: std.atomic.Value(u16) = std.atomic.Value(u16).init(sampling_profile_no_op),
     profile_current_code_id: std.atomic.Value(u16) = std.atomic.Value(u16).init(sampling_profile_no_code),
     profile_current_callable_slot: std.atomic.Value(u16) = std.atomic.Value(u16).init(sampling_profile_no_callable_slot),
@@ -8083,7 +7888,7 @@ pub const Session = struct {
         self.attachment_touch_clock = 1;
         self.dense_backend_override = .auto;
         self.profile_sampling_enabled = std.atomic.Value(u8).init(0);
-        self.profile_current_label = std.atomic.Value(u8).init(@intFromEnum(SamplingProfileLabel.idle));
+        self.profile_current_label = std.atomic.Value(u8).init(@backingInt(SamplingProfileLabel.idle));
         self.profile_current_op = std.atomic.Value(u16).init(sampling_profile_no_op);
         self.profile_current_code_id = std.atomic.Value(u16).init(sampling_profile_no_code);
         self.profile_current_callable_slot = std.atomic.Value(u16).init(sampling_profile_no_callable_slot);
@@ -8130,7 +7935,6 @@ pub const Session = struct {
         self.global_cells.deinit(self.allocator);
         self.global_slots.deinit();
         self.global_names.deinit(self.allocator);
-        self.debug_global_call_counts.deinit(self.allocator);
         self.interned_strings.deinit();
         self.interned_symbols.deinit();
         self.code_cache.deinit();
@@ -8170,7 +7974,7 @@ pub const Session = struct {
                 self.free_host_dense_buffer_len[pool_idx] -= 1;
                 const entry = self.free_host_dense_buffers[pool_idx][self.free_host_dense_buffer_len[pool_idx]].?;
                 self.free_host_dense_buffers[pool_idx][self.free_host_dense_buffer_len[pool_idx]] = null;
-                self.freeManagedHostDenseBuffer(@enumFromInt(pool_idx), entry);
+                self.freeManagedHostDenseBuffer(@fromBackingInt(@intCast(pool_idx)), entry);
             }
         }
         while (self.free_host_text_buffer_len > 0) {
@@ -8220,38 +8024,13 @@ pub const Session = struct {
         self.setOwnedLastErrorText(prefixed);
     }
 
-    pub fn resetStringPerf(self: *Session) void {
-        if (comptime enable_string_instrumentation) self.string_perf = .{};
-    }
-
-    pub fn stringPerfSnapshot(self: *const Session) StringPerfSnapshot {
-        if (comptime enable_string_instrumentation) {
-            return .{
-                .contains_calls = self.string_perf.contains_calls,
-                .split_calls = self.string_perf.split_calls,
-                .join_calls = self.string_perf.join_calls,
-                .contains_opcode_ns = self.string_perf.contains_opcode_ns,
-                .split_opcode_ns = self.string_perf.split_opcode_ns,
-                .join_opcode_ns = self.string_perf.join_opcode_ns,
-                .contains_helper_ns = self.string_perf.contains_helper_ns,
-                .split_helper_ns = self.string_perf.split_helper_ns,
-                .join_helper_ns = self.string_perf.join_helper_ns,
-                .split_search_ns = self.string_perf.split_search_ns,
-                .split_append_ns = self.string_perf.split_append_ns,
-                .split_result_ns = self.string_perf.split_result_ns,
-                .join_result_ns = self.string_perf.join_result_ns,
-            };
-        }
-        return .{};
-    }
-
     pub fn setSamplingProfileEnabled(self: *Session, enabled: bool) void {
         if (comptime !enable_sampling_profile) {
             return;
         }
         self.profile_sampling_enabled.store(@intFromBool(enabled), .unordered);
         if (!enabled) {
-            self.profile_current_label.store(@intFromEnum(SamplingProfileLabel.idle), .unordered);
+            self.profile_current_label.store(@backingInt(SamplingProfileLabel.idle), .unordered);
             self.profile_current_op.store(sampling_profile_no_op, .unordered);
             self.profile_current_code_id.store(sampling_profile_no_code, .unordered);
             self.profile_current_callable_slot.store(sampling_profile_no_callable_slot, .unordered);
@@ -8275,10 +8054,6 @@ pub const Session = struct {
             .code_id = self.profile_current_code_id.load(.unordered),
             .callable_slot = self.profile_current_callable_slot.load(.unordered),
         };
-    }
-
-    pub fn samplingProfileLabelName(label: SamplingProfileLabel) []const u8 {
-        return @tagName(label);
     }
 
     pub fn samplingProfileCodeKindName(kind: SamplingProfileCodeKind) []const u8 {
@@ -8311,15 +8086,6 @@ pub const Session = struct {
         self.clearLastErrorText();
         const code = try self.compileCached(source);
         return try self.runCode(code, &[_]Value{});
-    }
-
-    pub fn evalSourceFresh(self: *Session, source: []const u8) KError!Value {
-        self.clearLastErrorText();
-        var temp_arena = std.heap.ArenaAllocator.init(self.allocator);
-        defer temp_arena.deinit();
-
-        const code = try self.compileScratch(&temp_arena, source);
-        return try self.runScratchCodeMode(code, &[_]Value{}, true);
     }
 
     pub fn evalSourceWarm(self: *Session, compile_arena: *std.heap.ArenaAllocator, source: []const u8) KError!Value {
@@ -8392,11 +8158,6 @@ pub const Session = struct {
         switch (value.tag()) {
             .float32 => {},
             .array => switch (value.arrayKind()) {
-                .backend_array => {
-                    var owned = value.asBackendArray().array.clone() catch |err| return mapMlxError(err);
-                    defer owned.deinit();
-                    owned.eval() catch |err| return mapMlxError(err);
-                },
                 .numeric_array => {
                     if (value.asNumericArray().mlx) |array| {
                         var owned = array.array.clone() catch |err| return mapMlxError(err);
@@ -8404,7 +8165,7 @@ pub const Session = struct {
                         owned.eval() catch |err| return mapMlxError(err);
                     }
                 },
-                .host_dense_array, .host_boxed_array, .host_string, .host_symbol, .host_string_list, .host_symbol_list, .host_string_view, .host_handle, .host_relation, .host_keyed_store, .host_table_scalar => {},
+                .host_boxed_array, .host_string, .host_symbol, .host_string_list, .host_symbol_list, .host_string_view, .host_handle, .host_relation, .host_keyed_store, .host_table_scalar => {},
                 else => return error.Internal,
             },
             .int, .float, .bool, .builtin, .closure => {},
@@ -8413,42 +8174,42 @@ pub const Session = struct {
 
     pub fn debugScratchHostDenseAllocCount(self: *Session) usize {
         if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_scratch_host_array_alloc_count;
+        return self.debug.scratch_host_array_alloc_count;
     }
 
     pub fn resetDebugHostDenseMemoryStats(self: *Session) void {
         if (comptime !enable_probe_instrumentation) return;
         self.noteDebugHostDenseScratchArenaReset();
-        self.debug_host_dense_storage_alloc_count = 0;
-        self.debug_host_dense_storage_reuse_count = 0;
-        self.debug_host_dense_storage_free_count = 0;
-        self.debug_host_dense_storage_recycle_count = 0;
-        self.debug_host_dense_storage_alloc_bytes = 0;
-        self.debug_host_dense_storage_reuse_bytes = 0;
-        self.debug_host_dense_storage_free_bytes = 0;
-        self.debug_host_dense_storage_recycle_bytes = 0;
-        self.debug_host_dense_baseline_active_bytes = self.debug_host_dense_active_bytes;
-        self.debug_host_dense_peak_active_bytes = self.debug_host_dense_active_bytes;
+        self.debug.host_dense_storage_alloc_count = 0;
+        self.debug.host_dense_storage_reuse_count = 0;
+        self.debug.host_dense_storage_free_count = 0;
+        self.debug.host_dense_storage_recycle_count = 0;
+        self.debug.host_dense_storage_alloc_bytes = 0;
+        self.debug.host_dense_storage_reuse_bytes = 0;
+        self.debug.host_dense_storage_free_bytes = 0;
+        self.debug.host_dense_storage_recycle_bytes = 0;
+        self.debug.host_dense_baseline_active_bytes = self.debug.host_dense_active_bytes;
+        self.debug.host_dense_peak_active_bytes = self.debug.host_dense_active_bytes;
     }
 
     pub fn debugHostDenseMemoryStats(self: *const Session) DebugHostDenseMemoryStats {
         if (comptime !enable_probe_instrumentation) return .{};
-        const peak_extra = if (self.debug_host_dense_peak_active_bytes > self.debug_host_dense_baseline_active_bytes)
-            self.debug_host_dense_peak_active_bytes - self.debug_host_dense_baseline_active_bytes
+        const peak_extra = if (self.debug.host_dense_peak_active_bytes > self.debug.host_dense_baseline_active_bytes)
+            self.debug.host_dense_peak_active_bytes - self.debug.host_dense_baseline_active_bytes
         else
             0;
         return .{
-            .storage_alloc_count = self.debug_host_dense_storage_alloc_count,
-            .storage_reuse_count = self.debug_host_dense_storage_reuse_count,
-            .storage_free_count = self.debug_host_dense_storage_free_count,
-            .storage_recycle_count = self.debug_host_dense_storage_recycle_count,
-            .storage_alloc_bytes = self.debug_host_dense_storage_alloc_bytes,
-            .storage_reuse_bytes = self.debug_host_dense_storage_reuse_bytes,
-            .storage_free_bytes = self.debug_host_dense_storage_free_bytes,
-            .storage_recycle_bytes = self.debug_host_dense_storage_recycle_bytes,
-            .baseline_active_bytes = self.debug_host_dense_baseline_active_bytes,
-            .active_bytes = self.debug_host_dense_active_bytes,
-            .peak_active_bytes = self.debug_host_dense_peak_active_bytes,
+            .storage_alloc_count = self.debug.host_dense_storage_alloc_count,
+            .storage_reuse_count = self.debug.host_dense_storage_reuse_count,
+            .storage_free_count = self.debug.host_dense_storage_free_count,
+            .storage_recycle_count = self.debug.host_dense_storage_recycle_count,
+            .storage_alloc_bytes = self.debug.host_dense_storage_alloc_bytes,
+            .storage_reuse_bytes = self.debug.host_dense_storage_reuse_bytes,
+            .storage_free_bytes = self.debug.host_dense_storage_free_bytes,
+            .storage_recycle_bytes = self.debug.host_dense_storage_recycle_bytes,
+            .baseline_active_bytes = self.debug.host_dense_baseline_active_bytes,
+            .active_bytes = self.debug.host_dense_active_bytes,
+            .peak_active_bytes = self.debug.host_dense_peak_active_bytes,
             .peak_extra_bytes = peak_extra,
             .pool_bytes = self.debugManagedHostDensePoolBytes(),
         };
@@ -8456,55 +8217,54 @@ pub const Session = struct {
 
     pub fn resetDebugMorselStats(self: *Session) void {
         if (comptime !enable_probe_instrumentation) return;
-        self.debug_morsel_executor = .none;
-        self.debug_morsel_workers_requested = 0;
-        self.debug_morsel_workers_used = 0;
-        self.debug_morsel_count = 0;
-        self.debug_morsel_grain_size = 0;
-        self.debug_morsel_phase_count = 0;
-        self.debug_morsel_parallel_phase_count = 0;
-        self.debug_morsel_element_count = 0;
+        self.debug.morsel_executor = .none;
+        self.debug.morsel_workers_requested = 0;
+        self.debug.morsel_workers_used = 0;
+        self.debug.morsel_count = 0;
+        self.debug.morsel_grain_size = 0;
+        self.debug.morsel_phase_count = 0;
+        self.debug.morsel_parallel_phase_count = 0;
+        self.debug.morsel_element_count = 0;
     }
 
     pub fn debugMorselStats(self: *const Session) DebugMorselStats {
         if (comptime !enable_probe_instrumentation) return .{};
         return .{
-            .executor = self.debug_morsel_executor,
-            .workers_requested = self.debug_morsel_workers_requested,
-            .workers_used = self.debug_morsel_workers_used,
-            .morsel_count = self.debug_morsel_count,
-            .grain_size = self.debug_morsel_grain_size,
-            .phases = self.debug_morsel_phase_count,
-            .parallel_phases = self.debug_morsel_parallel_phase_count,
-            .element_count = self.debug_morsel_element_count,
+            .executor = self.debug.morsel_executor,
+            .workers_requested = self.debug.morsel_workers_requested,
+            .workers_used = self.debug.morsel_workers_used,
+            .morsel_count = self.debug.morsel_count,
+            .grain_size = self.debug.morsel_grain_size,
+            .phases = self.debug.morsel_phase_count,
+            .parallel_phases = self.debug.morsel_parallel_phase_count,
+            .element_count = self.debug.morsel_element_count,
         };
     }
 
     pub fn setDebugDenseFusionEnabled(self: *Session, enabled: bool) void {
         if (comptime !enable_probe_instrumentation) return;
-        self.debug_disable_dense_fusion = !enabled;
-    }
-
-    pub fn debugDenseFusionEnabled(self: *const Session) bool {
-        if (comptime !enable_probe_instrumentation) return true;
-        return !self.debug_disable_dense_fusion;
+        self.debug.disable_dense_fusion = !enabled;
     }
 
     pub fn resetDebugDenseFusionStats(self: *Session) void {
         if (comptime !enable_probe_instrumentation) return;
-        self.debug_dense_fusion_compact_add_fold_map_candidate_count = 0;
-        self.debug_dense_fusion_compact_add_fold_map_hit_count = 0;
-        self.debug_dense_fusion_compact_add_fold_map_disabled_count = 0;
+        self.debug.dense_fusion_compact_add_fold_map_candidate_count = 0;
+        self.debug.dense_fusion_compact_add_fold_map_hit_count = 0;
+        self.debug.dense_fusion_compact_add_fold_map_disabled_count = 0;
     }
 
     pub fn debugDenseFusionStats(self: *const Session) DebugDenseFusionStats {
         if (comptime !enable_probe_instrumentation) return .{};
         return .{
-            .enabled = !self.debug_disable_dense_fusion,
-            .compact_add_fold_map_candidates = self.debug_dense_fusion_compact_add_fold_map_candidate_count,
-            .compact_add_fold_map_hits = self.debug_dense_fusion_compact_add_fold_map_hit_count,
-            .compact_add_fold_map_disabled = self.debug_dense_fusion_compact_add_fold_map_disabled_count,
+            .enabled = !self.debug.disable_dense_fusion,
+            .compact_add_fold_map_candidates = self.debug.dense_fusion_compact_add_fold_map_candidate_count,
+            .compact_add_fold_map_hits = self.debug.dense_fusion_compact_add_fold_map_hit_count,
+            .compact_add_fold_map_disabled = self.debug.dense_fusion_compact_add_fold_map_disabled_count,
         };
+    }
+
+    pub fn debugRuntimeStats(self: *const Session) *const DebugRuntimeStats {
+        return &self.debug;
     }
 
     pub fn debugManagedHostArrayPoolCount(self: *const Session) usize {
@@ -8514,7 +8274,7 @@ pub const Session = struct {
 
     pub fn resetDebugScratchHostDenseAllocCount(self: *Session) void {
         if (comptime !enable_probe_instrumentation) return;
-        self.debug_scratch_host_array_alloc_count = 0;
+        self.debug.scratch_host_array_alloc_count = 0;
     }
 
     pub fn setMorselWorkerRequest(self: *Session, workers: usize) void {
@@ -8643,386 +8403,10 @@ pub const Session = struct {
         return count;
     }
 
-    pub fn debugDumpManagedNumericHandles(self: *const Session) void {
-        if (comptime zig_builtin.target.cpu.arch == .wasm32) return;
-        var current = self.managed_numeric_registry_head;
-        while (current) |handle| : (current = handle.registry_next) {
-            if (handle.header.owner != .managed or !handle.tracked_in_session) continue;
-            var sample0: i64 = 0;
-            var sample1: i64 = 0;
-            if (handle.host) |host| {
-                if (hostDenseNumericMode(host) == .int and host.len() > 0) sample0 = hostDenseIntAt(host, 0) catch 0;
-                if (hostDenseNumericMode(host) == .int and host.len() > 1) sample1 = hostDenseIntAt(host, 1) catch 0;
-            }
-            std.debug.print(
-                "handle {*}: structural={s} ref={d} rank={d} host={} mlx={} sample={d},{d} last={}\n",
-                .{
-                    handle,
-                    @tagName(numericArrayStructuralTag(handle)),
-                    handle.header.ref_count,
-                    handle.rank,
-                    handle.host != null,
-                    handle.mlx != null,
-                    sample0,
-                    sample1,
-                    if (self.last_result) |value|
-                        (value.tag() == .array and value.arraySubkind() == .numeric_array and value.asNumericArray() == handle)
-                    else
-                        false,
-                },
-            );
-        }
-    }
-
-    pub fn debugHostRealizationCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_host_realization_count;
-    }
-
-    pub fn debugStructuralHostRealizationCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_structural_host_realization_count;
-    }
-
-    pub fn debugBackendRealizationCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_mlx_realization_count;
-    }
-
-    pub fn debugStructuralBackendRealizationCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_structural_mlx_realization_count;
-    }
-
-    pub fn debugHostRealizationReuseCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_host_realization_reuse_count;
-    }
-
-    pub fn debugHostReadbackCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_host_readback_count;
-    }
-
-    pub fn debugBackendRealizationReuseCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_mlx_realization_reuse_count;
-    }
-
-    pub fn debugBackendPromotionCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_mlx_promotion_count;
-    }
-
-    pub fn debugHostEvictionCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_host_eviction_count;
-    }
-
-    pub fn debugBackendEvictionCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_mlx_eviction_count;
-    }
-
-    pub fn debugDualResidentPeakCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_dual_resident_peak_count;
-    }
-
-    pub fn debugFlatConcatDenseViewCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_flat_concat_dense_view_count;
-    }
-
-    pub fn debugFirstAxisSliceDenseViewCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_first_axis_slice_dense_view_count;
-    }
-
-    pub fn debugFirstAxisIndexDenseViewCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_first_axis_index_dense_view_count;
-    }
-
-    pub fn debugFirstAxisConcatDenseViewCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_first_axis_concat_dense_view_count;
-    }
-
-    pub fn debugMakeArrayIntResultCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_make_array_int_result_count;
-    }
-
-    pub fn debugMakeArrayFloatResultCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_make_array_float_result_count;
-    }
-
-    pub fn debugMakeArrayBoxedFallbackCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_make_array_boxed_fallback_count;
-    }
-
-    pub fn debugMakeArrayBoxedReasonCount(self: *const Session, reason: DebugMakeArrayBoxedReason) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_make_array_boxed_reason_counts[@intFromEnum(reason)];
-    }
-
-    pub fn debugMakeArrayBoxedLenBucketCount(self: *const Session, bucket: DebugProbeLenBucket) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_make_array_boxed_len_bucket_counts[@intFromEnum(bucket)];
-    }
-
-    pub fn debugHostMatrixRowCopyCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_host_matrix_row_copy_count;
-    }
-
-    pub fn debugHostMatrixIndexCopyCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_host_matrix_index_copy_count;
-    }
-
-    pub fn debugHostMatrixMaskCopyCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_host_matrix_mask_copy_count;
-    }
-
-    pub fn debugHostIndexInBoundsFastCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_host_index_in_bounds_fast_count;
-    }
-
-    pub fn debugHostIndexInBoundsFallbackCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_host_index_in_bounds_fallback_count;
-    }
-
-    pub fn debugHostIndexCopyCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_host_index_copy_count;
-    }
-
-    pub fn debugHostMaskCopyCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_host_mask_copy_count;
-    }
-
-    pub fn debugProjectionClosureAllocCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_projection_closure_alloc_count;
-    }
-
-    pub fn debugProjectionClosureReleaseCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_projection_closure_release_count;
-    }
-
-    pub fn debugApplyEachGenericCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_apply_each_generic_count;
-    }
-
-    pub fn debugApplyFoldGenericCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_apply_fold_generic_count;
-    }
-
-    pub fn debugApplyScanGenericCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_apply_scan_generic_count;
-    }
-
-    pub fn debugApplyEachRightGenericCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_apply_each_right_generic_count;
-    }
-
-    pub fn debugApplyEachLeftGenericCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_apply_each_left_generic_count;
-    }
-
-    pub fn debugApplyEachPriorFastBitCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_apply_each_prior_fast_bit_count;
-    }
-
-    pub fn debugApplyEachPriorFastBitElementCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_apply_each_prior_fast_bit_element_count;
-    }
-
-    pub fn debugApplyEachPriorGenericCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_apply_each_prior_generic_count;
-    }
-
-    pub fn debugApplyEachPriorGenericElementCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_apply_each_prior_generic_element_count;
-    }
-
-    pub fn debugApplyEachRightFastStringContainsCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_apply_each_right_fast_string_contains_count;
-    }
-
-    pub fn debugApplyEachFastNumericUnaryCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_apply_each_fast_numeric_unary_count;
-    }
-
-    pub fn debugApplyEachFastNumericVectorCodeCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_apply_each_fast_numeric_vector_code_count;
-    }
-
-    pub fn debugApplyEachFastNumericClosureCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_apply_each_fast_numeric_closure_count;
-    }
-
-    pub fn debugApplyEachFastUnaryLiftedCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_apply_each_fast_unary_lifted_count;
-    }
-
-    pub fn debugApplyEachFastDenseCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_apply_each_fast_dense_count;
-    }
-
-    pub fn debugApplyEachFastDenseMissCount(self: *const Session, reason: DebugDenseEachMiss) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_apply_each_fast_dense_miss_counts[@intFromEnum(reason)];
-    }
-
-    pub fn debugApplyEachRightFastDenseCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_apply_each_right_fast_dense_count;
-    }
-
-    pub fn debugApplyEachRightFastDenseMissCount(self: *const Session, reason: DebugDenseEachRightMiss) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_apply_each_right_fast_dense_miss_counts[@intFromEnum(reason)];
-    }
-
-    pub fn debugEachRightFastStringContainsMissNonStringLeftCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_each_right_fast_string_contains_miss_non_string_left_count;
-    }
-
-    pub fn debugEachRightFastStringContainsMissNonStringRightCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_each_right_fast_string_contains_miss_non_string_right_count;
-    }
-
-    pub fn debugHostFoldFastCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_host_fold_fast_count;
-    }
-
-    pub fn debugGradeStructuralNumericFastCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_grade_structural_numeric_fast_count;
-    }
-
-    pub fn debugFastDenseAssignAttemptCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_fast_dense_assign_attempt_count;
-    }
-
-    pub fn debugFastDenseAssignHitCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_fast_dense_assign_hit_count;
-    }
-
-    pub fn debugFastDenseAssignMissCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_fast_dense_assign_miss_count;
-    }
-
-    pub fn debugFastDenseAssignReuseCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_fast_dense_assign_reuse_count;
-    }
-
-    pub fn debugFastDenseAssignCloneCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_fast_dense_assign_clone_count;
-    }
-
-    pub fn debugFastDenseAssignCloneReasonCount(self: *const Session, reason: DebugFastDenseAssignCloneReason) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_fast_dense_assign_clone_reason_counts[@intFromEnum(reason)];
-    }
-
-    pub fn debugFastDenseAssignTargetElementCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_fast_dense_assign_target_element_count;
-    }
-
-    pub fn debugFastDenseAssignScalarTargetCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_fast_dense_assign_scalar_target_count;
-    }
-
-    pub fn debugFastDenseAssignVectorTargetCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_fast_dense_assign_vector_target_count;
-    }
-
-    pub fn debugFastDenseAssignScalarRhsCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_fast_dense_assign_scalar_rhs_count;
-    }
-
-    pub fn debugFastDenseAssignVectorRhsCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_fast_dense_assign_vector_rhs_count;
-    }
-
-    pub fn debugIndexedAssignCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_indexed_assign_count;
-    }
-
-    pub fn debugIndexedAssignGlobalCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_indexed_assign_global_count;
-    }
-
-    pub fn debugIndexedAssignLocalCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_indexed_assign_local_count;
-    }
-
-    pub fn debugOwnedAmendCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_owned_amend_count;
-    }
-
-    pub fn debugLocalReleaseSkipCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_local_release_skip_count;
-    }
-
-    pub fn debugLocalReleaseTakenCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_local_release_taken_count;
-    }
-
-    pub fn debugCodeOpcodeTotalCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_code_op_total_count;
-    }
-
     pub fn debugCodeOpcodeTopCounts(self: *const Session) [debug_top_opcode_count]DebugCodeOpCount {
         var top = @as([debug_top_opcode_count]DebugCodeOpCount, @splat(.{ .name = "", .opcode = 0, .count = 0 }));
         if (comptime !enable_probe_instrumentation) return top;
-        for (self.debug_code_op_counts, 0..) |count, idx| {
+        for (self.debug.code_op_counts, 0..) |count, idx| {
             if (count == 0) continue;
             var insert_at: usize = 0;
             while (insert_at < top.len and top[insert_at].count >= count) : (insert_at += 1) {}
@@ -9037,106 +8421,11 @@ pub const Session = struct {
 
     pub fn debugCodeOpcodeFamilyCounts(self: *const Session) [debug_opcode_family_count]DebugOpcodeFamilyCount {
         var out: [debug_opcode_family_count]DebugOpcodeFamilyCount = undefined;
-        inline for (std.meta.fields(DebugOpcodeFamily), 0..) |field, idx| {
-            const count = if (comptime enable_probe_instrumentation) self.debug_code_op_family_counts[idx] else 0;
-            out[idx] = .{ .name = field.name, .count = count };
+        inline for (@typeInfo(DebugOpcodeFamily).@"enum".field_names, 0..) |field_name, idx| {
+            const count = if (comptime enable_probe_instrumentation) self.debug.code_op_family_counts[idx] else 0;
+            out[idx] = .{ .name = field_name, .count = count };
         }
         return out;
-    }
-
-    pub fn debugJumpIfFalseCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_jump_if_false_count;
-    }
-
-    pub fn debugJumpIfFalseScalarCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_jump_if_false_scalar_count;
-    }
-
-    pub fn debugInlineScalarDyadAttemptCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_inline_scalar_dyad_attempt_count;
-    }
-
-    pub fn debugInlineScalarDyadHitCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_inline_scalar_dyad_hit_count;
-    }
-
-    pub fn debugInlineScalarDyadFallbackCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_inline_scalar_dyad_fallback_count;
-    }
-
-    pub fn debugShapedScalarDyadCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_shaped_scalar_dyad_count;
-    }
-
-    pub fn debugGlobalCallSlotsCount(self: *const Session) usize {
-        _ = self;
-        return 0;
-    }
-
-    pub fn debugGlobalCallSlotsFastCount(self: *const Session) usize {
-        _ = self;
-        return 0;
-    }
-
-    pub fn debugGlobalCallSlotsFallbackCount(self: *const Session) usize {
-        _ = self;
-        return 0;
-    }
-
-    pub fn debugCodeRunCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_code_run_count;
-    }
-
-    pub fn debugCodeTailContinueCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_code_tail_continue_count;
-    }
-
-    pub fn debugCodeGlobalCallCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_code_global_call_count;
-    }
-
-    pub fn debugCodeGlobalCallDirectCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_code_global_call_direct_count;
-    }
-
-    pub fn debugCodeGlobalCallFallbackCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_code_global_call_fallback_count;
-    }
-
-    pub fn debugCodeGlobalCallFallbackReasonCount(self: *const Session, reason: DebugCodeGlobalCallFallbackReason) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_code_global_call_fallback_reason_counts[@intFromEnum(reason)];
-    }
-
-    pub fn debugCodeGlobalCallFallbackKindCount(self: *const Session, kind: DebugCodeGlobalCallFallbackKind) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_code_global_call_fallback_kind_counts[@intFromEnum(kind)];
-    }
-
-    pub fn debugCodeCompileCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_code_compile_count;
-    }
-
-    pub fn debugCodeCompileSuccessCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_code_compile_success_count;
-    }
-
-    pub fn debugCodeCompileMissCount(self: *const Session, reason: DebugCodeCompileMiss) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_code_compile_miss_counts[@intFromEnum(reason)];
     }
 
     pub fn debugCodeCompileUnsupportedOpcodeTopCounts(self: *const Session) [debug_top_opcode_count]DebugNameCount {
@@ -9144,203 +8433,9 @@ pub const Session = struct {
         return @as([debug_top_opcode_count]DebugNameCount, @splat(.{ .name = "", .count = 0 }));
     }
 
-    pub fn debugCodeIndexedAssignSourcesCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_code_indexed_assign_sources_count;
-    }
-
-    pub fn debugCodeIndexedAssignStackCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_code_indexed_assign_stack_count;
-    }
-
-    pub fn debugHostScanFastCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_host_scan_fast_count;
-    }
-
-    pub fn debugHostFoldScanMissCount(self: *const Session, reason: DebugHostFoldScanMiss) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_host_fold_scan_miss_counts[@intFromEnum(reason)];
-    }
-
-    pub fn debugHostDenseDyadHostCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_host_dense_dyad_host_count;
-    }
-
-    pub fn debugHostDenseDyadHostElementCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_host_dense_dyad_host_element_count;
-    }
-
-    pub fn debugHostDenseDyadHostOpCount(self: *const Session, op: DebugHostDenseDyadOp) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_host_dense_dyad_host_op_counts[@intFromEnum(op)];
-    }
-
-    pub fn debugHostDenseDyadHostRowwiseCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_host_dense_dyad_host_rowwise_count;
-    }
-
-    pub fn debugHostDenseDyadHostWithBackendInputCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_host_dense_dyad_host_with_backend_input_count;
-    }
-
-    pub fn debugHostDenseDyadMissCount(self: *const Session, reason: DebugHostDenseDyadMiss) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_host_dense_dyad_miss_counts[@intFromEnum(reason)];
-    }
-
-    pub fn debugBackendArgmaxFastCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_backend_argmax_fast_count;
-    }
-
-    pub fn debugBackendArgmaxMaterializeNs(self: *const Session) u64 {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_backend_argmax_materialize_ns;
-    }
-
-    pub fn debugBackendArgmaxKernelNs(self: *const Session) u64 {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_backend_argmax_kernel_ns;
-    }
-
-    pub fn debugHostStringViewAllocCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_host_string_view_alloc_count;
-    }
-
-    pub fn debugHostStringViewReleaseCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_host_string_view_release_count;
-    }
-
-    pub fn debugHostStringViewReasonCount(self: *const Session, reason: DebugHostStringViewReason) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_host_string_view_reason_counts[@intFromEnum(reason)];
-    }
-
-    pub fn debugHostStringViewLenBucketCount(self: *const Session, bucket: DebugProbeLenBucket) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_host_string_view_len_bucket_counts[@intFromEnum(bucket)];
-    }
-
-    pub fn debugHostStringListItemValueCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_host_string_list_item_value_count;
-    }
-
-    pub fn debugHostStringListItemEagerOwnedCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_host_string_list_item_eager_owned_count;
-    }
-
-    pub fn debugHostStringListItemEagerViewCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_host_string_list_item_eager_view_count;
-    }
-
-    pub fn debugHostStringListItemSplitScalarCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_host_string_list_item_split_scalar_count;
-    }
-
-    pub fn debugHostStringListItemSplitScalarScanByteCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_host_string_list_item_split_scalar_scan_byte_count;
-    }
-
-    pub fn debugHostStringListItemSplitScalarScanSepCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_host_string_list_item_split_scalar_scan_sep_count;
-    }
-
-    pub fn debugNumericStructuralAllocCount(self: *const Session, tag: DebugNumericStructuralTag) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_numeric_structural_alloc_counts[@intFromEnum(tag)];
-    }
-
-    pub fn debugNumericStructuralReleaseCount(self: *const Session, tag: DebugNumericStructuralTag) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_numeric_structural_release_counts[@intFromEnum(tag)];
-    }
-
-    pub fn debugNumericStructuralBackendRealizationCount(self: *const Session, tag: DebugNumericStructuralTag) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_numeric_structural_mlx_realization_counts[@intFromEnum(tag)];
-    }
-
-    pub fn debugStructuredDerived2HitCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_structured_derived2_hit_count;
-    }
-
-    pub fn debugApplyDerivedClosureCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_apply_derived_closure_count;
-    }
-
-    pub fn debugApplyProjectionCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_apply_projection_count;
-    }
-
-    pub fn debugAutogradBuiltinGradCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_autograd_builtin_grad_count;
-    }
-
-    pub fn debugAutogradBuiltinValuegradCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_autograd_builtin_valuegrad_count;
-    }
-
-    pub fn debugAutogradSlowFiniteDifferenceCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_autograd_slow_finite_difference_count;
-    }
-
-    pub fn debugDenseAutodiffCacheHitCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_dense_autodiff_cache_hit_count;
-    }
-
-    pub fn debugDenseAutodiffCacheMissCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_dense_autodiff_cache_miss_count;
-    }
-
-    pub fn debugDenseAutodiffLowerSuccessCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_dense_autodiff_lower_success_count;
-    }
-
     pub fn debugDenseAutodiffRejectCount(self: *const Session, reason: DebugDenseAutodiffLowering) usize {
         if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_dense_autodiff_reject_counts[@intFromEnum(reason)];
-    }
-
-    pub fn debugStackLen(self: *const Session) usize {
-        return self.stack_len;
-    }
-
-    pub fn debugFrameLen(self: *const Session) usize {
-        _ = self;
-        return 0;
-    }
-
-    pub fn debugDensePlanCount(self: *const Session, kind: DenseRegionKind, backend: DenseExecBackend) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_dense_plan_counts[@intFromEnum(kind)][@intFromEnum(backend)];
-    }
-
-    pub fn debugDenseExecCount(self: *const Session, kind: DenseRegionKind, backend: DenseExecBackend) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.debug_dense_exec_counts[@intFromEnum(kind)][@intFromEnum(backend)];
+        return self.debug_dense_autodiff_reject_counts[@backingInt(reason)];
     }
 
     pub fn lastDensePlanRegion(self: *const Session) ?[]const u8 {
@@ -9378,178 +8473,77 @@ pub const Session = struct {
 
     pub fn resetDebugStructuralExecutionCounters(self: *Session) void {
         if (comptime !enable_probe_instrumentation) return;
-        self.resetKernelTrace();
-        self.debug_host_realization_count = 0;
-        self.debug_structural_host_realization_count = 0;
-        self.debug_mlx_realization_count = 0;
-        self.debug_structural_mlx_realization_count = 0;
-        self.debug_host_realization_reuse_count = 0;
-        self.debug_host_readback_count = 0;
-        self.debug_mlx_realization_reuse_count = 0;
-        self.debug_mlx_promotion_count = 0;
-        self.debug_host_eviction_count = 0;
-        self.debug_mlx_eviction_count = 0;
-        self.debug_dual_resident_peak_count = 0;
-        self.debug_flat_concat_dense_view_count = 0;
-        self.debug_first_axis_slice_dense_view_count = 0;
-        self.debug_first_axis_index_dense_view_count = 0;
-        self.debug_first_axis_concat_dense_view_count = 0;
-        self.debug_make_array_int_result_count = 0;
-        self.debug_make_array_float_result_count = 0;
-        self.debug_make_array_boxed_fallback_count = 0;
-        self.debug_make_array_boxed_reason_counts = @as([debug_make_array_boxed_reason_count]usize, @splat(0));
-        self.debug_make_array_boxed_len_bucket_counts = @as([debug_probe_len_bucket_count]usize, @splat(0));
-        self.debug_host_matrix_row_copy_count = 0;
-        self.debug_host_matrix_index_copy_count = 0;
-        self.debug_host_matrix_mask_copy_count = 0;
-        self.debug_host_index_in_bounds_fast_count = 0;
-        self.debug_host_index_in_bounds_fallback_count = 0;
-        self.debug_host_index_copy_count = 0;
-        self.debug_host_mask_copy_count = 0;
-        self.debug_projection_closure_alloc_count = 0;
-        self.debug_projection_closure_release_count = 0;
-        self.debug_apply_each_generic_count = 0;
-        self.debug_apply_fold_generic_count = 0;
-        self.debug_apply_scan_generic_count = 0;
-        self.debug_apply_each_right_generic_count = 0;
-        self.debug_apply_each_left_generic_count = 0;
-        self.debug_apply_each_prior_fast_bit_count = 0;
-        self.debug_apply_each_prior_fast_bit_element_count = 0;
-        self.debug_apply_each_prior_generic_count = 0;
-        self.debug_apply_each_prior_generic_element_count = 0;
-        self.debug_apply_each_right_fast_string_contains_count = 0;
-        self.debug_apply_each_fast_numeric_unary_count = 0;
-        self.debug_apply_each_fast_numeric_vector_code_count = 0;
-        self.debug_apply_each_fast_numeric_closure_count = 0;
-        self.debug_apply_each_fast_unary_lifted_count = 0;
-        self.debug_apply_each_fast_dense_count = 0;
-        self.debug_apply_each_fast_dense_miss_counts = @as([debug_dense_each_miss_count]usize, @splat(0));
-        self.debug_apply_each_right_fast_dense_count = 0;
-        self.debug_apply_each_right_fast_dense_miss_counts = @as([debug_dense_each_right_miss_count]usize, @splat(0));
-        self.debug_each_right_fast_string_contains_miss_non_string_left_count = 0;
-        self.debug_each_right_fast_string_contains_miss_non_string_right_count = 0;
-        self.debug_grade_structural_numeric_fast_count = 0;
-        self.debug_fast_dense_assign_attempt_count = 0;
-        self.debug_fast_dense_assign_hit_count = 0;
-        self.debug_fast_dense_assign_miss_count = 0;
-        self.debug_fast_dense_assign_reuse_count = 0;
-        self.debug_fast_dense_assign_clone_count = 0;
-        self.debug_fast_dense_assign_clone_reason_counts = @as([debug_fast_dense_assign_clone_reason_count]usize, @splat(0));
-        self.debug_fast_dense_assign_target_element_count = 0;
-        self.debug_fast_dense_assign_scalar_target_count = 0;
-        self.debug_fast_dense_assign_vector_target_count = 0;
-        self.debug_fast_dense_assign_scalar_rhs_count = 0;
-        self.debug_fast_dense_assign_vector_rhs_count = 0;
-        self.debug_indexed_assign_count = 0;
-        self.debug_indexed_assign_global_count = 0;
-        self.debug_indexed_assign_local_count = 0;
-        self.debug_owned_amend_count = 0;
-        self.debug_local_release_skip_count = 0;
-        self.debug_local_release_taken_count = 0;
-        self.debug_code_op_total_count = 0;
-        self.debug_code_op_counts = @as([256]usize, @splat(0));
-        self.debug_code_op_family_counts = @as([debug_opcode_family_count]usize, @splat(0));
-        self.debug_jump_if_false_count = 0;
-        self.debug_jump_if_false_scalar_count = 0;
-        self.debug_inline_scalar_dyad_attempt_count = 0;
-        self.debug_inline_scalar_dyad_hit_count = 0;
-        self.debug_inline_scalar_dyad_fallback_count = 0;
-        self.debug_shaped_scalar_dyad_count = 0;
-        self.debug_code_run_count = 0;
-        self.debug_code_tail_continue_count = 0;
-        self.debug_code_global_call_count = 0;
-        self.debug_code_global_call_direct_count = 0;
-        self.debug_code_global_call_fallback_count = 0;
-        self.debug_code_global_call_fallback_reason_counts = @as([debug_code_global_call_fallback_reason_count]usize, @splat(0));
-        self.debug_code_global_call_fallback_kind_counts = @as([debug_code_global_call_fallback_kind_count]usize, @splat(0));
-        self.debug_code_compile_count = 0;
-        self.debug_code_compile_success_count = 0;
-        self.debug_code_compile_miss_counts = @as([debug_code_compile_miss_count]usize, @splat(0));
-        self.debug_code_indexed_assign_sources_count = 0;
-        self.debug_code_indexed_assign_stack_count = 0;
-        self.debug_host_fold_fast_count = 0;
-        self.debug_host_scan_fast_count = 0;
-        self.debug_host_fold_scan_miss_counts = @as([debug_host_fold_scan_miss_count]usize, @splat(0));
-        self.debug_host_dense_dyad_host_count = 0;
-        self.debug_host_dense_dyad_host_element_count = 0;
-        self.debug_host_dense_dyad_host_op_counts = @as([debug_host_dense_dyad_op_count]usize, @splat(0));
-        self.debug_host_dense_dyad_host_rowwise_count = 0;
-        self.debug_host_dense_dyad_host_with_backend_input_count = 0;
-        self.debug_host_dense_dyad_miss_counts = @as([debug_host_dense_dyad_miss_count]usize, @splat(0));
-        self.debug_backend_argmax_fast_count = 0;
-        self.debug_backend_argmax_materialize_ns = 0;
-        self.debug_backend_argmax_kernel_ns = 0;
-        self.debug_host_string_view_alloc_count = 0;
-        self.debug_host_string_view_release_count = 0;
-        self.debug_host_string_view_reason_counts = @as([debug_host_string_view_reason_count]usize, @splat(0));
-        self.debug_host_string_view_len_bucket_counts = @as([debug_probe_len_bucket_count]usize, @splat(0));
-        self.debug_host_string_list_item_value_count = 0;
-        self.debug_host_string_list_item_eager_owned_count = 0;
-        self.debug_host_string_list_item_eager_view_count = 0;
-        self.debug_host_string_list_item_split_scalar_count = 0;
-        self.debug_host_string_list_item_split_scalar_scan_byte_count = 0;
-        self.debug_host_string_list_item_split_scalar_scan_sep_count = 0;
-        self.debug_numeric_structural_alloc_counts = @as([debug_numeric_structural_tag_count]usize, @splat(0));
-        self.debug_numeric_structural_release_counts = @as([debug_numeric_structural_tag_count]usize, @splat(0));
-        self.debug_numeric_structural_mlx_realization_counts = @as([debug_numeric_structural_tag_count]usize, @splat(0));
-        self.debug_structured_derived2_hit_count = 0;
-        self.debug_apply_derived_closure_count = 0;
-        self.debug_apply_projection_count = 0;
-        self.debug_autograd_builtin_grad_count = 0;
-        self.debug_autograd_builtin_valuegrad_count = 0;
-        self.debug_autograd_slow_finite_difference_count = 0;
-        self.debug_dense_autodiff_cache_hit_count = 0;
-        self.debug_dense_autodiff_cache_miss_count = 0;
-        self.debug_dense_autodiff_lower_success_count = 0;
+        const retained = self.debug;
+        self.debug = .{
+            .scratch_host_array_alloc_count = retained.scratch_host_array_alloc_count,
+            .host_dense_active_bytes = retained.host_dense_active_bytes,
+            .host_dense_scratch_active_bytes = retained.host_dense_scratch_active_bytes,
+            .host_dense_baseline_active_bytes = retained.host_dense_baseline_active_bytes,
+            .host_dense_peak_active_bytes = retained.host_dense_peak_active_bytes,
+            .host_dense_storage_alloc_count = retained.host_dense_storage_alloc_count,
+            .host_dense_storage_reuse_count = retained.host_dense_storage_reuse_count,
+            .host_dense_storage_free_count = retained.host_dense_storage_free_count,
+            .host_dense_storage_recycle_count = retained.host_dense_storage_recycle_count,
+            .host_dense_storage_alloc_bytes = retained.host_dense_storage_alloc_bytes,
+            .host_dense_storage_reuse_bytes = retained.host_dense_storage_reuse_bytes,
+            .host_dense_storage_free_bytes = retained.host_dense_storage_free_bytes,
+            .host_dense_storage_recycle_bytes = retained.host_dense_storage_recycle_bytes,
+            .morsel_executor = retained.morsel_executor,
+            .morsel_workers_requested = retained.morsel_workers_requested,
+            .morsel_workers_used = retained.morsel_workers_used,
+            .morsel_count = retained.morsel_count,
+            .morsel_grain_size = retained.morsel_grain_size,
+            .morsel_phase_count = retained.morsel_phase_count,
+            .morsel_parallel_phase_count = retained.morsel_parallel_phase_count,
+            .morsel_element_count = retained.morsel_element_count,
+            .disable_dense_fusion = retained.disable_dense_fusion,
+            .dense_fusion_compact_add_fold_map_candidate_count = retained.dense_fusion_compact_add_fold_map_candidate_count,
+            .dense_fusion_compact_add_fold_map_hit_count = retained.dense_fusion_compact_add_fold_map_hit_count,
+            .dense_fusion_compact_add_fold_map_disabled_count = retained.dense_fusion_compact_add_fold_map_disabled_count,
+            .probe_active = retained.probe_active,
+            .kernel_trace_active = retained.kernel_trace_active,
+        };
         self.debug_dense_autodiff_reject_counts = @as([debug_dense_autodiff_lowering_count]usize, @splat(0));
-        self.debug_dense_plan_counts = @as([dense_region_kind_count][dense_exec_backend_count]usize, @splat(@as([dense_exec_backend_count]usize, @splat(0))));
-        self.debug_dense_exec_counts = @as([dense_region_kind_count][dense_exec_backend_count]usize, @splat(@as([dense_exec_backend_count]usize, @splat(0))));
         self.last_dense_plan_region = null;
         self.last_dense_plan_backend = null;
         self.last_dense_exec_backend = null;
         self.last_dense_plan_reason = null;
         self.last_dense_plan_overridden = false;
-        if (comptime enable_probe_instrumentation) self.last_dense_autodiff_exec_backend = null;
-        for (self.debug_global_call_counts.items) |*count| count.* = 0;
+        self.last_dense_autodiff_exec_backend = null;
     }
 
     pub fn setDebugProbeActive(self: *Session, active: bool) void {
         if (comptime !enable_probe_instrumentation) return;
-        self.debug_probe_active = active;
+        self.debug.probe_active = active;
     }
 
     fn debugDetailedProbeActive(self: *const Session) bool {
         if (comptime !enable_probe_instrumentation) return false;
-        return self.debug_probe_active;
+        return self.debug.probe_active;
     }
 
     pub fn resetKernelTrace(self: *Session) void {
         if (comptime !enable_kernel_trace) return;
-        self.debug_simd_kernel_counts = @as([debug_simd_kernel_count]usize, @splat(0));
+        self.debug.simd_kernel_counts = @as([debug_simd_kernel_count]usize, @splat(0));
     }
 
     pub fn setKernelTraceActive(self: *Session, active: bool) void {
         if (comptime !enable_kernel_trace) return;
-        self.debug_kernel_trace_active = active;
+        self.debug.kernel_trace_active = active;
     }
 
     fn kernelTraceActive(self: *const Session) bool {
         if (comptime !enable_kernel_trace) return false;
-        return self.debug_kernel_trace_active or self.debugDetailedProbeActive();
-    }
-
-    pub fn debugSimdKernelCount(self: *const Session, kernel: DebugSimdKernel) usize {
-        if (comptime !enable_kernel_trace) return 0;
-        return self.debug_simd_kernel_counts[@intFromEnum(kernel)];
+        return self.debug.kernel_trace_active or self.debugDetailedProbeActive();
     }
 
     pub fn debugSimdKernelCounts(self: *const Session) [debug_simd_kernel_count]DebugNameCount {
         var counts: [debug_simd_kernel_count]DebugNameCount = undefined;
         for (&counts, 0..) |*entry, idx| {
-            const kernel: DebugSimdKernel = @enumFromInt(idx);
+            const kernel: DebugSimdKernel = @fromBackingInt(@intCast(idx));
             entry.* = .{
                 .name = debugSimdKernelName(kernel),
-                .count = self.debugSimdKernelCount(kernel),
+                .count = self.debug.simd_kernel_counts[idx],
             };
         }
         return counts;
@@ -9558,21 +8552,21 @@ pub const Session = struct {
     inline fn noteSimdKernel(self: *Session, kernel: DebugSimdKernel) void {
         if (!self.kernelTraceActive()) return;
         if (comptime !host_kernel_trace_has_simd) return;
-        self.debug_simd_kernel_counts[@intFromEnum(kernel)] += 1;
+        self.debug.simd_kernel_counts[@backingInt(kernel)] += 1;
     }
 
     inline fn noteCodeOpcode(self: *Session, raw: u8) void {
         if (!self.debugDetailedProbeActive()) return;
-        self.debug_code_op_total_count += 1;
-        self.debug_code_op_counts[raw] += 1;
-        self.debug_code_op_family_counts[@intFromEnum(debugCodeOpcodeFamily(raw))] += 1;
+        self.debug.code_op_total_count += 1;
+        self.debug.code_op_counts[raw] += 1;
+        self.debug.code_op_family_counts[@backingInt(debugCodeOpcodeFamily(raw))] += 1;
     }
 
     fn noteCodeCompile(self: *Session, code: *const Code) void {
         _ = code;
         if (!self.debugDetailedProbeActive()) return;
-        self.debug_code_compile_count += 1;
-        self.debug_code_compile_success_count += 1;
+        self.debug.code_compile_count += 1;
+        self.debug.code_compile_success_count += 1;
     }
 
     fn noteNumericStructuralAlloc(self: *Session, tag: NumericArrayStructuralTag) void {
@@ -9586,7 +8580,7 @@ pub const Session = struct {
             .first_axis_concat,
             .reshape_view,
             .transpose_view,
-            => self.debug_numeric_structural_alloc_counts[@intFromEnum(tag)] += 1,
+            => self.debug.numeric_structural_alloc_counts[@backingInt(tag)] += 1,
             else => {},
         }
     }
@@ -9602,28 +8596,28 @@ pub const Session = struct {
             .first_axis_concat,
             .reshape_view,
             .transpose_view,
-            => self.debug_numeric_structural_release_counts[@intFromEnum(tag)] += 1,
+            => self.debug.numeric_structural_release_counts[@backingInt(tag)] += 1,
             else => {},
         }
     }
 
     fn noteDenseAutodiffReject(self: *Session, reason: DebugDenseAutodiffLowering) void {
         if (!self.debugDetailedProbeActive()) return;
-        self.debug_dense_autodiff_reject_counts[@intFromEnum(reason)] += 1;
+        self.debug_dense_autodiff_reject_counts[@backingInt(reason)] += 1;
     }
 
     fn noteHostFoldScanFast(self: *Session, collect: bool) void {
         if (!self.debugDetailedProbeActive()) return;
         if (collect) {
-            self.debug_host_scan_fast_count += 1;
+            self.debug.host_scan_fast_count += 1;
         } else {
-            self.debug_host_fold_fast_count += 1;
+            self.debug.host_fold_fast_count += 1;
         }
     }
 
     fn noteHostFoldScanMiss(self: *Session, reason: DebugHostFoldScanMiss) void {
         if (!self.debugDetailedProbeActive()) return;
-        self.debug_host_fold_scan_miss_counts[@intFromEnum(reason)] += 1;
+        self.debug.host_fold_scan_miss_counts[@backingInt(reason)] += 1;
     }
 
     fn noteHostDenseDyadOp(self: *Session, op: BuiltinId) void {
@@ -9638,23 +8632,23 @@ pub const Session = struct {
             .equal => .equal,
             else => return,
         };
-        self.debug_host_dense_dyad_host_op_counts[@intFromEnum(tag)] += 1;
+        self.debug.host_dense_dyad_host_op_counts[@backingInt(tag)] += 1;
     }
 
     fn noteHostDenseDyadHost(self: *Session, op: BuiltinId, left: Value, right: Value, result_len: usize, rowwise: bool) void {
         if (!self.debugDetailedProbeActive()) return;
-        self.debug_host_dense_dyad_host_count += 1;
-        self.debug_host_dense_dyad_host_element_count += result_len;
+        self.debug.host_dense_dyad_host_count += 1;
+        self.debug.host_dense_dyad_host_element_count += result_len;
         self.noteHostDenseDyadOp(op);
-        if (rowwise) self.debug_host_dense_dyad_host_rowwise_count += 1;
+        if (rowwise) self.debug.host_dense_dyad_host_rowwise_count += 1;
         if (hasBackendRealization(left) or hasBackendRealization(right)) {
-            self.debug_host_dense_dyad_host_with_backend_input_count += 1;
+            self.debug.host_dense_dyad_host_with_backend_input_count += 1;
         }
     }
 
     fn noteHostDenseDyadMiss(self: *Session, reason: DebugHostDenseDyadMiss) void {
         if (!self.debugDetailedProbeActive()) return;
-        self.debug_host_dense_dyad_miss_counts[@intFromEnum(reason)] += 1;
+        self.debug.host_dense_dyad_miss_counts[@backingInt(reason)] += 1;
     }
 
     fn noteCodeGlobalCallFallback(self: *Session, cell: *const GlobalCell, argc: u8) void {
@@ -9667,7 +8661,7 @@ pub const Session = struct {
                 .other
         else
             .no_code;
-        self.debug_code_global_call_fallback_reason_counts[@intFromEnum(reason)] += 1;
+        self.debug.code_global_call_fallback_reason_counts[@backingInt(reason)] += 1;
 
         const kind: DebugCodeGlobalCallFallbackKind = switch (cell.value.tag()) {
             .builtin => .builtin,
@@ -9675,21 +8669,21 @@ pub const Session = struct {
             .array => .array,
             else => .other,
         };
-        self.debug_code_global_call_fallback_kind_counts[@intFromEnum(kind)] += 1;
+        self.debug.code_global_call_fallback_kind_counts[@backingInt(kind)] += 1;
     }
 
     fn noteDenseEachMiss(self: *Session, reason: DebugDenseEachMiss) void {
         if (!self.debugDetailedProbeActive()) return;
-        self.debug_apply_each_fast_dense_miss_counts[@intFromEnum(reason)] += 1;
+        self.debug.apply_each_fast_dense_miss_counts[@backingInt(reason)] += 1;
     }
 
     fn noteDenseEachRightMiss(self: *Session, reason: DebugDenseEachRightMiss) void {
         if (!self.debugDetailedProbeActive()) return;
-        self.debug_apply_each_right_fast_dense_miss_counts[@intFromEnum(reason)] += 1;
+        self.debug.apply_each_right_fast_dense_miss_counts[@backingInt(reason)] += 1;
     }
 
     pub fn discardValue(self: *Session, value: Value) void {
-        self.releaseCanonicalManagedNumericValue(value);
+        self.releaseValue(value);
     }
 
     fn beginSamplingProfileScope(self: *Session, label: SamplingProfileLabel) SamplingProfileScope {
@@ -9698,7 +8692,7 @@ pub const Session = struct {
         }
         if (self.profile_sampling_enabled.load(.unordered) == 0) return .{};
         const previous_label = self.profile_current_label.load(.unordered);
-        self.profile_current_label.store(@intFromEnum(label), .unordered);
+        self.profile_current_label.store(@backingInt(label), .unordered);
         return .{
             .session = self,
             .previous_label = previous_label,
@@ -9706,14 +8700,7 @@ pub const Session = struct {
     }
 
     pub fn wasmAcceleratorArrayInfo(self: *Session, value: Value) KError!?WasmArrayInfo {
-        return runtime_backend_wasm.wasmAcceleratorArrayInfo(.{
-            .Session = Session,
-            .Value = Value,
-            .WasmArrayInfo = WasmArrayInfo,
-            .KError = KError,
-            .mlx = mlx,
-            .wasmAcceleratorPayload = wasmAcceleratorPayload,
-        }, self, value);
+        return runtime_backend_wasm.wasmAcceleratorArrayInfo(backend_wasm_api, self, value);
     }
 
     pub fn renderValue(self: *Session, value: Value) anyerror![]u8 {
@@ -9755,7 +8742,6 @@ pub const Session = struct {
         if (valueNumericHandle(value)) |handle| return self.renderNumericArray(handle, mode);
         const kind = value.arrayKind();
         return switch (kind) {
-            .host_dense_array => self.renderHostArray(value.asHostDenseArray()),
             .host_boxed_array => self.renderHostBoxedArray(value.asHostBoxedArray(), mode),
             .host_string => self.renderHostString(value.asHostString()),
             .host_symbol => self.renderHostSymbol(value.asHostSymbol()),
@@ -9766,7 +8752,6 @@ pub const Session = struct {
             .host_relation => self.renderHostRelation(value.asHostRelation()),
             .host_keyed_store => self.renderHostKeyedStore(value.asHostKeyedStore()),
             .host_table_scalar => self.renderHostTableScalar(valueAsHostTableScalar(value)),
-            .backend_array => self.renderBackendArray(value.asBackendArray(), mode),
             else => error.Internal,
         };
     }
@@ -9918,27 +8903,26 @@ pub const Session = struct {
     }
 
     fn renderNumericArray(self: *Session, handle: *const NumericArray, render_mode: RenderMode) anyerror![]u8 {
-        return switch (handle.activeKind()) {
-            .host_dense_array => self.renderHostNumericArray(handle, numericHostAttachment(handle) orelse return error.Internal, render_mode),
-            .backend_array => self.renderBackendArray(numericBackendAttachment(handle) orelse return error.Internal, render_mode),
-            .numeric_array => blk: {
-                const value = Value.array(@constCast(handle));
+        return switch (handle.activeAttachment()) {
+            .host => self.renderHostNumericArray(handle, numericHostAttachment(handle) orelse return error.Internal, render_mode),
+            .mlx => self.renderBackendArray(numericBackendAttachment(handle) orelse return error.Internal, render_mode),
+            .none => blk: {
+                const value = Value.numericArray(handle);
                 if (!numericHasHostAttachment(handle) and hasBackendRealization(value)) {
                     _ = try tryEnsureHostRealizationForHandle(self, @constCast(handle)) orelse return error.Type;
                     break :blk try self.renderNumericArray(handle, render_mode);
                 }
-                const mode = valueNumericMode(Value.array(@constCast(handle))) orelse return error.Type;
+                const mode = valueNumericMode(Value.numericArray(handle)) orelse return error.Type;
                 const len = numericFlatLen(value) orelse return error.Type;
                 if (handle.rank == 0) return error.Internal;
                 if (try numericShapeDimsElementCount(handle.shapeSlice()) != len) return error.Internal;
                 break :blk try self.renderNumericArrayShape(value, handle.shapeSlice(), mode, render_mode);
             },
-            else => error.Internal,
         };
     }
 
     fn renderHostNumericArray(self: *Session, handle: *const NumericArray, array: *const HostDenseArray, render_mode: RenderMode) anyerror![]u8 {
-        const value = Value.array(@constCast(handle));
+        const value = Value.numericArray(handle);
         const mode = valueNumericMode(value) orelse return error.Type;
         if (handle.rank <= 1) {
             if (array.storage == .bit) {
@@ -10142,21 +9126,8 @@ pub const Session = struct {
         return keyedStoreValues(store).items[column_idx];
     }
 
-    fn tableColumnKind(store: *const HostKeyedStore, column_idx: usize) HostTableColumnKind {
-        return keyedStoreTableMetadata(store)[column_idx].kind;
-    }
-
     fn keyedStoreTableCellIsValid(store: *const HostKeyedStore, column_idx: usize, row: usize) bool {
         const validity = keyedStoreTableMetadata(store)[column_idx].validity orelse return true;
-        return (numericIntAt(validity, @intCast(row)) catch 0) != 0;
-    }
-
-    fn tableColumnNameBytes(column: *const HostTableColumn) []const u8 {
-        return symbolBytes(column.name) orelse stringBytes(column.name) orelse "";
-    }
-
-    fn tableCellIsValid(column: *const HostTableColumn, row: usize) bool {
-        const validity = column.validity orelse return true;
         return (numericIntAt(validity, @intCast(row)) catch 0) != 0;
     }
 
@@ -10460,7 +9431,6 @@ pub const Session = struct {
             .host_boxed_array, .host_string => len == 1,
             .host_string_list => names.asHostStringList().display != .list and len < 2,
             .host_symbol_list => len < 2,
-            .host_dense_array, .backend_array => len < 2,
             else => if (valueNumericHandle(names) != null) len < 2 else false,
         };
     }
@@ -10673,22 +9643,12 @@ pub const Session = struct {
     }
 
     fn renderBackendArray(self: *Session, array: *const BackendArray, render_mode: RenderMode) anyerror![]u8 {
-        return runtime_backend_render.renderBackendArray(.{
-            .Session = Session,
-            .BackendArray = BackendArray,
-            .c = c,
-            .formatFloat = formatFloat,
-        }, self, array, render_mode == .top);
+        return runtime_backend_render.renderBackendArray(backend_render_api, self, array, render_mode == .top);
     }
 
     fn managedFloat(self: *Session, value: f64) !Value {
         _ = self;
         return Value.float(value);
-    }
-
-    fn managedFloat32(self: *Session, value: f32) !Value {
-        _ = self;
-        return Value.float32(value);
     }
 
     fn scratchFloat(self: *Session, value: f64) !Value {
@@ -10775,7 +9735,7 @@ pub const Session = struct {
             initialized += 1;
         }
 
-        if (comptime enable_probe_instrumentation) self.debug_projection_closure_alloc_count += 1;
+        if (comptime enable_probe_instrumentation) self.debug.projection_closure_alloc_count += 1;
         return Value.closure(try self.allocManagedClosure(.projection, &projection_code, captures));
     }
 
@@ -10956,9 +9916,9 @@ pub const Session = struct {
     fn debugManagedHostDensePoolBytes(self: *const Session) usize {
         if (comptime !enable_probe_instrumentation) return 0;
         var total: usize = 0;
-        inline for (std.meta.fields(HostDenseStorageKind)) |field| {
-            const kind: HostDenseStorageKind = @enumFromInt(field.value);
-            const pool_idx = @intFromEnum(kind);
+        inline for (@typeInfo(HostDenseStorageKind).@"enum".field_values) |field_value| {
+            const kind: HostDenseStorageKind = @fromBackingInt(@intCast(field_value));
+            const pool_idx = @backingInt(kind);
             const elem_bytes = hostDenseStorageElemBytes(kind);
             for (self.free_host_dense_buffers[pool_idx][0..self.free_host_dense_buffer_len[pool_idx]]) |maybe_entry| {
                 const entry = maybe_entry orelse continue;
@@ -10970,74 +9930,74 @@ pub const Session = struct {
 
     fn noteDebugMorselPhase(self: *Session, executor: MorselExecutorKind, workers_requested: usize, workers_used: usize, len: usize, grain: usize, morsels: usize) void {
         if (comptime !enable_probe_instrumentation) return;
-        if (self.debug_morsel_phase_count == 0) {
-            self.debug_morsel_executor = executor;
-        } else if (self.debug_morsel_executor != executor) {
-            self.debug_morsel_executor = .mixed;
+        if (self.debug.morsel_phase_count == 0) {
+            self.debug.morsel_executor = executor;
+        } else if (self.debug.morsel_executor != executor) {
+            self.debug.morsel_executor = .mixed;
         }
-        self.debug_morsel_workers_requested = @max(self.debug_morsel_workers_requested, workers_requested);
-        self.debug_morsel_workers_used = @max(self.debug_morsel_workers_used, workers_used);
-        self.debug_morsel_count += morsels;
-        self.debug_morsel_grain_size = @max(self.debug_morsel_grain_size, grain);
-        self.debug_morsel_phase_count += 1;
-        if (workers_used > 1) self.debug_morsel_parallel_phase_count += 1;
-        self.debug_morsel_element_count += len;
+        self.debug.morsel_workers_requested = @max(self.debug.morsel_workers_requested, workers_requested);
+        self.debug.morsel_workers_used = @max(self.debug.morsel_workers_used, workers_used);
+        self.debug.morsel_count += morsels;
+        self.debug.morsel_grain_size = @max(self.debug.morsel_grain_size, grain);
+        self.debug.morsel_phase_count += 1;
+        if (workers_used > 1) self.debug.morsel_parallel_phase_count += 1;
+        self.debug.morsel_element_count += len;
     }
 
     fn noteDebugManagedHostDenseAcquire(self: *Session, comptime T: type, len: usize, reused: bool) void {
         if (comptime !enable_probe_instrumentation) return;
         const bytes = managedHostDenseBufferByteLen(T, len);
         if (reused) {
-            self.debug_host_dense_storage_reuse_count += 1;
-            self.debug_host_dense_storage_reuse_bytes += bytes;
+            self.debug.host_dense_storage_reuse_count += 1;
+            self.debug.host_dense_storage_reuse_bytes += bytes;
         } else {
-            self.debug_host_dense_storage_alloc_count += 1;
-            self.debug_host_dense_storage_alloc_bytes += bytes;
+            self.debug.host_dense_storage_alloc_count += 1;
+            self.debug.host_dense_storage_alloc_bytes += bytes;
         }
-        self.debug_host_dense_active_bytes += bytes;
-        self.debug_host_dense_peak_active_bytes = @max(self.debug_host_dense_peak_active_bytes, self.debug_host_dense_active_bytes);
+        self.debug.host_dense_active_bytes += bytes;
+        self.debug.host_dense_peak_active_bytes = @max(self.debug.host_dense_peak_active_bytes, self.debug.host_dense_active_bytes);
     }
 
     fn noteDebugScratchHostDenseAcquire(self: *Session, comptime T: type, len: usize) void {
         if (comptime !enable_probe_instrumentation) return;
         const bytes = managedHostDenseBufferByteLen(T, len);
-        self.debug_host_dense_storage_alloc_count += 1;
-        self.debug_host_dense_storage_alloc_bytes += bytes;
-        self.debug_host_dense_active_bytes += bytes;
-        self.debug_host_dense_scratch_active_bytes += bytes;
-        self.debug_host_dense_peak_active_bytes = @max(self.debug_host_dense_peak_active_bytes, self.debug_host_dense_active_bytes);
+        self.debug.host_dense_storage_alloc_count += 1;
+        self.debug.host_dense_storage_alloc_bytes += bytes;
+        self.debug.host_dense_active_bytes += bytes;
+        self.debug.host_dense_scratch_active_bytes += bytes;
+        self.debug.host_dense_peak_active_bytes = @max(self.debug.host_dense_peak_active_bytes, self.debug.host_dense_active_bytes);
     }
 
     fn noteDebugManagedHostDenseRelease(self: *Session, comptime T: type, len: usize, pooled: bool) void {
         if (comptime !enable_probe_instrumentation) return;
         const bytes = managedHostDenseBufferByteLen(T, len);
         if (pooled) {
-            self.debug_host_dense_storage_recycle_count += 1;
-            self.debug_host_dense_storage_recycle_bytes += bytes;
+            self.debug.host_dense_storage_recycle_count += 1;
+            self.debug.host_dense_storage_recycle_bytes += bytes;
         } else {
-            self.debug_host_dense_storage_free_count += 1;
-            self.debug_host_dense_storage_free_bytes += bytes;
+            self.debug.host_dense_storage_free_count += 1;
+            self.debug.host_dense_storage_free_bytes += bytes;
         }
-        std.debug.assert(self.debug_host_dense_active_bytes >= bytes);
-        self.debug_host_dense_active_bytes -= bytes;
+        std.debug.assert(self.debug.host_dense_active_bytes >= bytes);
+        self.debug.host_dense_active_bytes -= bytes;
     }
 
     fn noteDebugManagedHostDenseFreeInactive(self: *Session, comptime T: type, len: usize) void {
         if (comptime !enable_probe_instrumentation) return;
         const bytes = managedHostDenseBufferByteLen(T, len);
-        self.debug_host_dense_storage_free_count += 1;
-        self.debug_host_dense_storage_free_bytes += bytes;
+        self.debug.host_dense_storage_free_count += 1;
+        self.debug.host_dense_storage_free_bytes += bytes;
     }
 
     fn noteDebugHostDenseScratchArenaReset(self: *Session) void {
         if (comptime !enable_probe_instrumentation) return;
-        const bytes = self.debug_host_dense_scratch_active_bytes;
+        const bytes = self.debug.host_dense_scratch_active_bytes;
         if (bytes == 0) return;
-        std.debug.assert(self.debug_host_dense_active_bytes >= bytes);
-        self.debug_host_dense_storage_free_count += 1;
-        self.debug_host_dense_storage_free_bytes += bytes;
-        self.debug_host_dense_active_bytes -= bytes;
-        self.debug_host_dense_scratch_active_bytes = 0;
+        std.debug.assert(self.debug.host_dense_active_bytes >= bytes);
+        self.debug.host_dense_storage_free_count += 1;
+        self.debug.host_dense_storage_free_bytes += bytes;
+        self.debug.host_dense_active_bytes -= bytes;
+        self.debug.host_dense_scratch_active_bytes = 0;
     }
 
     fn resetScratchArenaRetainCapacity(self: *Session) void {
@@ -11097,7 +10057,7 @@ pub const Session = struct {
 
     fn takeManagedHostDenseBuffer(self: *Session, comptime T: type, comptime kind: HostDenseStorageKind, len: usize) ?[]T {
         if (len == 0) return null;
-        const pool_idx = @intFromEnum(kind);
+        const pool_idx = @backingInt(kind);
         const count = self.free_host_dense_buffer_len[pool_idx];
         if (count == 0) return null;
 
@@ -11124,7 +10084,7 @@ pub const Session = struct {
             self.allocator.free(items);
             return;
         }
-        const pool_idx = @intFromEnum(kind);
+        const pool_idx = @backingInt(kind);
         const count = self.free_host_dense_buffer_len[pool_idx];
         if (count >= max_pooled_objects) {
             self.noteDebugManagedHostDenseRelease(T, items.len, false);
@@ -11210,7 +10170,7 @@ pub const Session = struct {
         self.recycleManagedHostDenseStorage(old_storage);
     }
 
-    fn allocHostArrayTypedCapacity(self: *Session, comptime T: type, comptime kind: HostDenseStorageKind, owner: HeapOwner, len: usize, capacity_len: usize) !HostDenseAlloc(T) {
+    fn allocHostArrayAttachmentTypedCapacity(self: *Session, comptime T: type, comptime kind: HostDenseStorageKind, owner: HeapOwner, len: usize, capacity_len: usize) !HostDenseAttachmentAlloc(T) {
         std.debug.assert(capacity_len >= len);
         const allocator = switch (owner) {
             .managed => self.allocator,
@@ -11218,7 +10178,7 @@ pub const Session = struct {
             .frozen => self.arena.allocator(),
         };
         if (comptime enable_probe_instrumentation) {
-            if (owner == .scratch) self.debug_scratch_host_array_alloc_count += 1;
+            if (owner == .scratch) self.debug.scratch_host_array_alloc_count += 1;
         }
         const array = if (owner == .managed and self.free_host_array_len != 0) blk: {
             self.free_host_array_len -= 1;
@@ -11233,8 +10193,6 @@ pub const Session = struct {
             },
             .frozen => try allocator.alloc(T, capacity_len),
         };
-        array.header = HeapHeader.init(.host_dense_array, owner);
-        array.logical_handle = null;
         array.logical_len = len;
         array.flags = 0;
         hostDenseClearCachedIntRange(array);
@@ -11251,11 +10209,23 @@ pub const Session = struct {
         return .{ .array = array, .items = storage_items[0..len] };
     }
 
-    fn allocHostArrayTyped(self: *Session, comptime T: type, comptime kind: HostDenseStorageKind, owner: HeapOwner, len: usize) !HostDenseAlloc(T) {
-        return self.allocHostArrayTypedCapacity(T, kind, owner, len, len);
+    fn allocHostArrayAttachmentTyped(self: *Session, comptime T: type, comptime kind: HostDenseStorageKind, owner: HeapOwner, len: usize) !HostDenseAttachmentAlloc(T) {
+        return self.allocHostArrayAttachmentTypedCapacity(T, kind, owner, len, len);
     }
 
-    fn allocHostBitArrayWithInitCapacity(self: *Session, owner: HeapOwner, len: usize, capacity_len: usize, zero: bool) !HostBitAlloc {
+    fn allocHostArrayTyped(self: *Session, comptime T: type, comptime kind: HostDenseStorageKind, owner: HeapOwner, len: usize) !HostDenseAlloc(T) {
+        const out = try self.allocHostArrayAttachmentTyped(T, kind, owner, len);
+        errdefer if (owner == .managed) self.recycleManagedHostArray(out.array);
+        const value = try newNumericArrayValue(self, owner, .host, out.array, null);
+        return .{ .result_value = value, .array = out.array, .items = out.items };
+    }
+
+    fn allocHostArrayTypedForHandle(self: *Session, comptime T: type, comptime kind: HostDenseStorageKind, owner: HeapOwner, handle: *const NumericArray, len: usize) !HostDenseAlloc(T) {
+        const out = try self.allocHostArrayAttachmentTyped(T, kind, owner, len);
+        return .{ .result_value = Value.numericArray(handle), .array = out.array, .items = out.items };
+    }
+
+    fn allocHostBitAttachmentWithInitCapacity(self: *Session, owner: HeapOwner, len: usize, capacity_len: usize, zero: bool) !HostBitAttachmentAlloc {
         std.debug.assert(capacity_len >= len);
         const allocator = switch (owner) {
             .managed => self.allocator,
@@ -11263,7 +10233,7 @@ pub const Session = struct {
             .frozen => self.arena.allocator(),
         };
         if (comptime enable_probe_instrumentation) {
-            if (owner == .scratch) self.debug_scratch_host_array_alloc_count += 1;
+            if (owner == .scratch) self.debug.scratch_host_array_alloc_count += 1;
         }
         const array = if (owner == .managed and self.free_host_array_len != 0) blk: {
             self.free_host_array_len -= 1;
@@ -11281,8 +10251,6 @@ pub const Session = struct {
             .frozen => try allocator.alloc(u64, storage_word_count),
         };
         if (zero) @memset(words, 0);
-        array.header = HeapHeader.init(.host_dense_array, owner);
-        array.logical_handle = null;
         array.logical_len = len;
         array.flags = 0;
         hostDenseClearCachedIntRange(array);
@@ -11291,8 +10259,20 @@ pub const Session = struct {
         return .{ .array = array, .words = words[0..word_count], .len = len };
     }
 
+    fn allocHostBitAttachmentWithInit(self: *Session, owner: HeapOwner, len: usize, zero: bool) !HostBitAttachmentAlloc {
+        return self.allocHostBitAttachmentWithInitCapacity(owner, len, len, zero);
+    }
+
     fn allocHostBitArrayWithInit(self: *Session, owner: HeapOwner, len: usize, zero: bool) !HostBitAlloc {
-        return self.allocHostBitArrayWithInitCapacity(owner, len, len, zero);
+        const out = try self.allocHostBitAttachmentWithInit(owner, len, zero);
+        errdefer if (owner == .managed) self.recycleManagedHostArray(out.array);
+        const value = try newNumericArrayValue(self, owner, .host, out.array, null);
+        return .{ .result_value = value, .array = out.array, .words = out.words, .len = out.len };
+    }
+
+    fn allocHostBitArrayForHandleWithInit(self: *Session, owner: HeapOwner, handle: *const NumericArray, len: usize, zero: bool) !HostBitAlloc {
+        const out = try self.allocHostBitAttachmentWithInit(owner, len, zero);
+        return .{ .result_value = Value.numericArray(handle), .array = out.array, .words = out.words, .len = out.len };
     }
 
     fn allocHostBitArray(self: *Session, owner: HeapOwner, len: usize) !HostBitAlloc {
@@ -11301,6 +10281,14 @@ pub const Session = struct {
 
     fn allocHostBitArrayUninitialized(self: *Session, owner: HeapOwner, len: usize) !HostBitAlloc {
         return try self.allocHostBitArrayWithInit(owner, len, false);
+    }
+
+    fn allocHostBitArrayForHandle(self: *Session, owner: HeapOwner, handle: *const NumericArray, len: usize) !HostBitAlloc {
+        return try self.allocHostBitArrayForHandleWithInit(owner, handle, len, true);
+    }
+
+    fn allocHostBitArrayForHandleUninitialized(self: *Session, owner: HeapOwner, handle: *const NumericArray, len: usize) !HostBitAlloc {
+        return try self.allocHostBitArrayForHandleWithInit(owner, handle, len, false);
     }
 
     fn allocManagedHostIntResult(self: *Session, kind: HostIntStorageKind, len: usize) !HostIntResult {
@@ -11334,33 +10322,27 @@ pub const Session = struct {
     }
 
     fn allocManagedHostFloatResult(self: *Session, len: usize) !HostFloatResult {
-        const out = try self.allocHostArrayTyped(f64, .float64, .managed, len);
-        return .{ .array = out.array, .items = out.items };
+        return try self.allocHostArrayTyped(f64, .float64, .managed, len);
     }
 
     fn allocManagedHostFloat32Result(self: *Session, len: usize) !HostFloat32Result {
-        const out = try self.allocHostArrayTyped(f32, .float32, .managed, len);
-        return .{ .array = out.array, .items = out.items };
+        return try self.allocHostArrayTyped(f32, .float32, .managed, len);
     }
 
     fn allocScratchHostFloatResult(self: *Session, len: usize) !HostFloatResult {
-        const out = try self.allocHostArrayTyped(f64, .float64, .scratch, len);
-        return .{ .array = out.array, .items = out.items };
+        return try self.allocHostArrayTyped(f64, .float64, .scratch, len);
     }
 
     fn allocScratchHostFloat32Result(self: *Session, len: usize) !HostFloat32Result {
-        const out = try self.allocHostArrayTyped(f32, .float32, .scratch, len);
-        return .{ .array = out.array, .items = out.items };
+        return try self.allocHostArrayTyped(f32, .float32, .scratch, len);
     }
 
     fn allocFrozenHostFloatResult(self: *Session, len: usize) !HostFloatResult {
-        const out = try self.allocHostArrayTyped(f64, .float64, .frozen, len);
-        return .{ .array = out.array, .items = out.items };
+        return try self.allocHostArrayTyped(f64, .float64, .frozen, len);
     }
 
     fn allocFrozenHostFloat32Result(self: *Session, len: usize) !HostFloat32Result {
-        const out = try self.allocHostArrayTyped(f32, .float32, .frozen, len);
-        return .{ .array = out.array, .items = out.items };
+        return try self.allocHostArrayTyped(f32, .float32, .frozen, len);
     }
 
     fn allocOwnedHostIntResult(self: *Session, owner: HeapOwner, kind: HostIntStorageKind, len: usize) !HostIntResult {
@@ -11390,6 +10372,24 @@ pub const Session = struct {
             .scratch => try self.allocScratchHostFloat32Result(len),
             .frozen => try self.allocFrozenHostFloat32Result(len),
         };
+    }
+
+    fn allocHostIntResultForHandle(self: *Session, owner: HeapOwner, handle: *const NumericArray, kind: HostIntStorageKind, len: usize) !HostIntResult {
+        return switch (kind) {
+            .bit => .{ .bit = try self.allocHostBitArrayForHandle(owner, handle, len) },
+            .int8 => .{ .int8 = try self.allocHostArrayTypedForHandle(i8, .int8, owner, handle, len) },
+            .int16 => .{ .int16 = try self.allocHostArrayTypedForHandle(i16, .int16, owner, handle, len) },
+            .int32 => .{ .int32 = try self.allocHostArrayTypedForHandle(i32, .int32, owner, handle, len) },
+            .int64 => .{ .int64 = try self.allocHostArrayTypedForHandle(i64, .int64, owner, handle, len) },
+        };
+    }
+
+    fn allocHostFloatResultForHandle(self: *Session, owner: HeapOwner, handle: *const NumericArray, len: usize) !HostFloatResult {
+        return try self.allocHostArrayTypedForHandle(f64, .float64, owner, handle, len);
+    }
+
+    fn allocHostFloat32ResultForHandle(self: *Session, owner: HeapOwner, handle: *const NumericArray, len: usize) !HostFloat32Result {
+        return try self.allocHostArrayTypedForHandle(f32, .float32, owner, handle, len);
     }
 
     fn planHostIntUnaryOutput(
@@ -11439,37 +10439,36 @@ pub const Session = struct {
     }
 
     fn finishHostIntOutput(self: *Session, plan: HostIntOutputPlan, flags: u8) KError!Value {
-        const result_value = try plan.output.value(self);
+        const result_value = plan.output.value();
         const host = plan.output.arrayPtr();
         if (plan.kind == .bit) {
             bitClearUnusedTail(host.storage.bit, host.logical_len);
         }
         hostDenseSetFlags(host, flags);
-        self.invalidateHostDenseCachesForMutation(host);
+        self.invalidateHostDenseCachesForMutation(result_value, host);
         const result = try applyNonVectorNumericShapeToValue(self, result_value, plan.shape);
         return if (plan.reused) self.shareValue(result) else result;
     }
 
     fn finishHostIntOutputWithRange(self: *Session, plan: HostIntOutputPlan, flags: u8, range: HostIntRange) KError!Value {
-        const result_value = try plan.output.value(self);
+        const result_value = plan.output.value();
         const host = plan.output.arrayPtr();
         if (plan.kind == .bit) {
             bitClearUnusedTail(host.storage.bit, host.logical_len);
         }
         hostDenseSetFlags(host, flags);
-        self.invalidateHostDenseCachesForMutation(host);
+        self.invalidateHostDenseCachesForMutation(result_value, host);
         hostDenseSetCachedIntRange(host, range);
         const result = try applyNonVectorNumericShapeToValue(self, result_value, plan.shape);
         return if (plan.reused) self.shareValue(result) else result;
     }
 
     fn finishManagedHostBitAlloc(self: *Session, out: HostBitAlloc, flags: u8, range: HostIntRange) KError!Value {
+        _ = self;
         bitClearUnusedTail(out.words, out.len);
-        const value = try wrapOwnedHostArrayValue(self, out.array);
-        const host = try mutableNumericHostArrayValue(self, value);
-        hostDenseSetFlags(host, flags);
-        hostDenseSetCachedIntRange(host, range);
-        return value;
+        hostDenseSetFlags(out.array, flags);
+        hostDenseSetCachedIntRange(out.array, range);
+        return out.value();
     }
 
     fn planHostFloatUnaryOutput(self: *Session, source_value: Value, len: usize, allow_reuse: bool) !HostFloatOutputPlan {
@@ -11509,51 +10508,53 @@ pub const Session = struct {
     }
 
     fn finishHostFloatOutput(self: *Session, plan: HostFloatOutputPlan, flags: u8) KError!Value {
-        const result_value = try plan.output.value(self);
+        const result_value = plan.output.value();
         hostDenseSetFlags(plan.output.array, flags);
-        self.invalidateHostDenseCachesForMutation(plan.output.array);
+        self.invalidateHostDenseCachesForMutation(result_value, plan.output.array);
         const result = try applyNonVectorNumericShapeToValue(self, result_value, plan.shape);
         return if (plan.reused) self.shareValue(result) else result;
     }
 
     fn finishHostFloat32Output(self: *Session, plan: HostFloat32OutputPlan, flags: u8) KError!Value {
-        const result_value = try plan.output.value(self);
+        const result_value = plan.output.value();
         hostDenseSetFlags(plan.output.array, flags);
-        self.invalidateHostDenseCachesForMutation(plan.output.array);
+        self.invalidateHostDenseCachesForMutation(result_value, plan.output.array);
         const result = try applyNonVectorNumericShapeToValue(self, result_value, plan.shape);
         return if (plan.reused) self.shareValue(result) else result;
     }
 
     fn tryReuseHostIntArrayResult(self: *Session, value: Value, kind: HostIntStorageKind) ?HostIntResult {
         _ = self;
+        const handle = mutableNumericHandle(value) orelse return null;
         const array = if (hostDenseIfPresent(value)) |host|
             @constCast(host)
         else
             return null;
-        switch (numericPayloadOwner(array)) {
+        if (handle.host != array) return null;
+        switch (handle.header.owner) {
             .scratch => {},
-            .managed => if (numericPayloadManagedRefCount(array) != 1) return null,
+            .managed => if (handle.header.ref_count != 1) return null,
             .frozen => return null,
         }
         return switch (kind) {
             .bit => switch (array.storage) {
-                .bit => |words| .{ .bit = .{ .array = array, .words = words, .len = array.logical_len } },
+                .bit => |words| .{ .bit = .{ .result_value = value, .array = array, .words = words, .len = array.logical_len } },
                 else => null,
             },
             .int8 => switch (array.storage) {
-                .int8 => |items| .{ .int8 = .{ .array = array, .items = hostDenseMutableLogicalItems(i8, array, items) } },
+                .int8 => |items| .{ .int8 = .{ .result_value = value, .array = array, .items = hostDenseMutableLogicalItems(i8, array, items) } },
                 else => null,
             },
             .int16 => switch (array.storage) {
-                .int16 => |items| .{ .int16 = .{ .array = array, .items = hostDenseMutableLogicalItems(i16, array, items) } },
+                .int16 => |items| .{ .int16 = .{ .result_value = value, .array = array, .items = hostDenseMutableLogicalItems(i16, array, items) } },
                 else => null,
             },
             .int32 => switch (array.storage) {
-                .int32 => |items| .{ .int32 = .{ .array = array, .items = hostDenseMutableLogicalItems(i32, array, items) } },
+                .int32 => |items| .{ .int32 = .{ .result_value = value, .array = array, .items = hostDenseMutableLogicalItems(i32, array, items) } },
                 else => null,
             },
             .int64 => switch (array.storage) {
-                .int64 => |items| .{ .int64 = .{ .array = array, .items = hostDenseMutableLogicalItems(i64, array, items) } },
+                .int64 => |items| .{ .int64 = .{ .result_value = value, .array = array, .items = hostDenseMutableLogicalItems(i64, array, items) } },
                 else => null,
             },
         };
@@ -11561,36 +10562,40 @@ pub const Session = struct {
 
     fn tryReuseHostFloatArrayResult(self: *Session, value: Value) ?HostFloatResult {
         _ = self;
+        const handle = mutableNumericHandle(value) orelse return null;
         const array = if (hostDenseIfPresent(value)) |host|
             @constCast(host)
         else
             return null;
+        if (handle.host != array) return null;
         if (hostDenseNumericMode(array) != .float) return null;
-        switch (numericPayloadOwner(array)) {
+        switch (handle.header.owner) {
             .scratch => {},
-            .managed => if (numericPayloadManagedRefCount(array) != 1) return null,
+            .managed => if (handle.header.ref_count != 1) return null,
             .frozen => return null,
         }
         return switch (array.storage) {
-            .float64 => |items| .{ .array = array, .items = hostDenseMutableLogicalItems(f64, array, items) },
+            .float64 => |items| .{ .result_value = value, .array = array, .items = hostDenseMutableLogicalItems(f64, array, items) },
             else => null,
         };
     }
 
     fn tryReuseHostFloat32ArrayResult(self: *Session, value: Value) ?HostFloat32Result {
         _ = self;
+        const handle = mutableNumericHandle(value) orelse return null;
         const array = if (hostDenseIfPresent(value)) |host|
             @constCast(host)
         else
             return null;
+        if (handle.host != array) return null;
         if (hostDenseNumericMode(array) != .float) return null;
-        switch (numericPayloadOwner(array)) {
+        switch (handle.header.owner) {
             .scratch => {},
-            .managed => if (numericPayloadManagedRefCount(array) != 1) return null,
+            .managed => if (handle.header.ref_count != 1) return null,
             .frozen => return null,
         }
         return switch (array.storage) {
-            .float32 => |items| .{ .array = array, .items = hostDenseMutableLogicalItems(f32, array, items) },
+            .float32 => |items| .{ .result_value = value, .array = array, .items = hostDenseMutableLogicalItems(f32, array, items) },
             else => null,
         };
     }
@@ -11600,7 +10605,7 @@ pub const Session = struct {
         const right = self.tryReuseHostIntArrayResult(right_value, kind);
         if (left) |left_out| {
             if (right) |right_out| {
-                return if (hostDenseReusePriority(right_out.arrayPtr()) > hostDenseReusePriority(left_out.arrayPtr())) right_out else left_out;
+                return if (numericValueReusePriority(right_out.value()) > numericValueReusePriority(left_out.value())) right_out else left_out;
             }
             return left_out;
         }
@@ -11612,7 +10617,7 @@ pub const Session = struct {
         const right = self.tryReuseHostFloatArrayResult(right_value);
         if (left) |left_out| {
             if (right) |right_out| {
-                return if (hostDenseReusePriority(right_out.array) > hostDenseReusePriority(left_out.array)) right_out else left_out;
+                return if (numericValueReusePriority(right_out.value()) > numericValueReusePriority(left_out.value())) right_out else left_out;
             }
             return left_out;
         }
@@ -11624,7 +10629,7 @@ pub const Session = struct {
         const right = self.tryReuseHostFloat32ArrayResult(right_value);
         if (left) |left_out| {
             if (right) |right_out| {
-                return if (hostDenseReusePriority(right_out.array) > hostDenseReusePriority(left_out.array)) right_out else left_out;
+                return if (numericValueReusePriority(right_out.value()) > numericValueReusePriority(left_out.value())) right_out else left_out;
             }
             return left_out;
         }
@@ -11777,10 +10782,6 @@ pub const Session = struct {
         };
     }
 
-    fn managedHostStringView(self: *Session, base: *HostText, span: HostTextSpan) !Value {
-        return try self.managedHostStringViewWithReason(base, span, .generic);
-    }
-
     fn managedHostStringViewWithReason(self: *Session, base: *HostText, span: HostTextSpan, reason: DebugHostStringViewReason) !Value {
         if (span.start == 0 and span.len == base.len and base.header.kind == .host_string) {
             return try self.retainEscapedValue(Value.array(base));
@@ -11795,89 +10796,58 @@ pub const Session = struct {
             .span = span,
         };
         if (comptime enable_probe_instrumentation) {
-            self.debug_host_string_view_alloc_count += 1;
-            self.debug_host_string_view_reason_counts[@intFromEnum(reason)] += 1;
-            self.debug_host_string_view_len_bucket_counts[@intFromEnum(debugProbeLenBucket(span.len))] += 1;
+            self.debug.host_string_view_alloc_count += 1;
+            self.debug.host_string_view_reason_counts[@backingInt(reason)] += 1;
+            self.debug.host_string_view_len_bucket_counts[@backingInt(debugProbeLenBucket(span.len))] += 1;
         }
         return Value.array(view);
     }
 
-    fn canonicalizeEscapedNumericValue(self: *Session, value: Value) !Value {
-        if (value.tag() != .array) return value;
-        return switch (value.arraySubkind()) {
-            .numeric_array => value,
-            .host_dense_array => (try ensureLogicalNumericValue(self, value)).value,
-            .backend_array => (try ensureLogicalNumericValue(self, value)).value,
+    fn retainEscapedValue(self: *Session, value: Value) !Value {
+        return switch (value.raw & Value.tag_mask) {
+            Value.boxed_int_tag => switch (value.asBoxedInt().header.owner) {
+                .managed => self.retainValue(value),
+                .frozen => value,
+                .scratch => self.managedInt(value.asInt()),
+            },
+            Value.closure_tag => switch (value.asClosure().header.owner) {
+                .managed => self.retainValue(value),
+                .frozen => value,
+                .scratch => self.promoteScratchClosure(value.asClosure()),
+            },
+            Value.array_tag => switch (value.arrayOwner()) {
+                .managed => self.retainValue(value),
+                .frozen => value,
+                .scratch => switch (value.arraySubkind()) {
+                    .host_string, .host_symbol, .host_string_view => error.Internal,
+                    else => self.promoteScratchArray(value),
+                },
+            },
             else => value,
         };
     }
 
-    fn retainEscapedValue(self: *Session, value: Value) !Value {
-        const canonical = try self.canonicalizeEscapedNumericValue(value);
-        return switch (canonical.raw & Value.tag_mask) {
-            Value.boxed_int_tag => switch (canonical.asBoxedInt().header.owner) {
-                .managed => self.retainValue(canonical),
-                .frozen => canonical,
-                .scratch => self.managedInt(canonical.asInt()),
-            },
-            Value.closure_tag => switch (canonical.asClosure().header.owner) {
-                .managed => self.retainValue(canonical),
-                .frozen => canonical,
-                .scratch => self.promoteScratchClosure(canonical.asClosure()),
-            },
-            Value.array_tag => switch (canonical.arrayOwner()) {
-                .managed => self.retainValue(canonical),
-                .frozen => canonical,
-                .scratch => switch (canonical.arraySubkind()) {
-                    .host_string, .host_symbol, .host_string_view => error.Internal,
-                    else => self.promoteScratchArray(canonical),
-                },
-            },
-            else => canonical,
-        };
-    }
-
-    fn moveEscapedValue(self: *Session, value: Value) !Value {
-        const canonical = try self.canonicalizeEscapedNumericValue(value);
-        return switch (canonical.raw & Value.tag_mask) {
-            Value.boxed_int_tag => switch (canonical.asBoxedInt().header.owner) {
-                .managed, .frozen => canonical,
-                .scratch => self.managedInt(canonical.asInt()),
-            },
-            Value.closure_tag => switch (canonical.asClosure().header.owner) {
-                .managed, .frozen => canonical,
-                .scratch => self.promoteScratchClosure(canonical.asClosure()),
-            },
-            Value.array_tag => switch (canonical.arrayOwner()) {
-                .managed, .frozen => canonical,
-                .scratch => self.promoteScratchArray(canonical),
-            },
-            else => canonical,
-        };
-    }
-
     fn finishResult(self: *Session, value: Value) !Value {
-        const canonical = try self.canonicalizeEscapedNumericValue(value);
         if (self.last_result) |rooted| self.releaseValue(rooted);
         self.last_result = null;
 
-        const rooted = switch (canonical.raw & Value.tag_mask) {
-            Value.boxed_int_tag => switch (canonical.asBoxedInt().header.owner) {
-                .managed => canonical,
-                .frozen => canonical,
-                .scratch => try self.managedInt(canonical.asInt()),
+        const rooted = switch (value.raw & Value.tag_mask) {
+            Value.boxed_int_tag => switch (value.asBoxedInt().header.owner) {
+                .managed => value,
+                .frozen => value,
+                .scratch => try self.managedInt(value.asInt()),
             },
-            Value.closure_tag => switch (canonical.asClosure().header.owner) {
-                .managed => canonical,
-                .frozen => canonical,
-                .scratch => try self.promoteScratchClosure(canonical.asClosure()),
+            Value.closure_tag => switch (value.asClosure().header.owner) {
+                .managed => value,
+                .frozen => value,
+                .scratch => try self.promoteScratchClosure(value.asClosure()),
             },
-            Value.array_tag => switch (canonical.arrayOwner()) {
-                .managed => canonical,
-                .frozen => canonical,
-                .scratch => try self.promoteScratchArray(canonical),
+            Value.array_tag => switch (value.arrayOwner()) {
+                .managed => value,
+                .frozen => value,
+                .scratch => try self.promoteScratchArray(value),
             },
-            else => canonical,
+            else => value,
         };
 
         if (isManagedValue(rooted)) self.last_result = rooted;
@@ -11923,10 +10893,7 @@ pub const Session = struct {
         stable.* = .{
             .arity = code.arity,
             .required_arity = code.required_arity,
-            .frame_slot_count = code.frame_slot_count,
-            .local_count = code.local_count,
-            .operand_stack_slot_count = code.operand_stack_slot_count,
-            .max_stack = code.max_stack,
+            .slot_count = code.slot_count,
             .bytes = try arena_allocator.dupe(u8, code.bytes),
             .constants = constants,
             .references_globals = code.references_globals,
@@ -11946,7 +10913,7 @@ pub const Session = struct {
                 const view = hostIntArrayView(array) orelse return error.Type;
                 var out = try self.allocFrozenHostIntResult(hostIntArrayViewKind(view), hostIntArrayViewLen(view));
                 try copyHostIntViewToResult(&out, view);
-                const result = try out.value(self);
+                const result = out.value();
                 const frozen_host = try mutableNumericHostArrayValue(self, result);
                 hostDenseSetFlags(frozen_host, array.flags);
                 if (array.int_range_known) {
@@ -11962,14 +10929,14 @@ pub const Session = struct {
             .float64 => |items| blk: {
                 const out = try self.allocFrozenHostFloatResult(items.len);
                 @memcpy(out.items, items);
-                const result = try out.value(self);
+                const result = out.value();
                 hostDenseSetFlags(try mutableNumericHostArrayValue(self, result), array.flags);
                 break :blk result;
             },
             .float32 => |items| blk: {
                 const out = try self.allocFrozenHostFloat32Result(items.len);
                 @memcpy(out.items, items);
-                const result = try out.value(self);
+                const result = out.value();
                 hostDenseSetFlags(try mutableNumericHostArrayValue(self, result), array.flags);
                 break :blk result;
             },
@@ -12033,21 +11000,11 @@ pub const Session = struct {
             },
             .host_string_list => try self.freezeHostStringListConstant(value.asHostStringList()),
             .host_symbol_list => try self.freezeHostSymbolListConstant(value.asHostStringList()),
-            .host_dense_array => blk: {
-                const frozen = try self.freezeHostArrayConstant(value.asHostDenseArray());
-                const shaped = try applyNonVectorNumericShapeToValue(self, frozen, valueNonVectorNumericShape(value));
-                break :blk shaped;
-            },
             .host_boxed_array => switch (value.asHostBoxedArray().header.owner) {
                 .frozen => value,
                 .scratch, .managed => try self.freezeHostBoxedArrayConstant(value.asHostBoxedArray()),
             },
             .host_handle, .host_relation, .host_keyed_store, .host_table_scalar => error.Unsupported,
-            .backend_array => blk: {
-                const frozen_host = Value.array(try createHostDenseArrayFromBackendArray(self, .frozen, value.asBackendArray().array));
-                const shaped = try applyNonVectorNumericShapeToValue(self, frozen_host, valueNonVectorNumericShape(value));
-                break :blk shaped;
-            },
             .numeric_array => blk: {
                 const handle = value.asNumericArray();
                 if (handle.header.owner == .frozen) break :blk value;
@@ -12170,21 +11127,21 @@ pub const Session = struct {
             .int => |int_plan| blk: {
                 var out = try self.allocManagedHostIntResult(int_plan.kind, hostIntArrayViewLen(int_plan.view));
                 try copyHostIntViewToResult(&out, int_plan.view);
-                const result = try out.value(self);
+                const result = out.value();
                 hostDenseSetFlags(try mutableNumericHostArrayValue(self, result), int_plan.flags);
                 break :blk result;
             },
             .float => |float_plan| blk: {
                 const out = try self.allocManagedHostFloatResult(float_plan.items.len);
                 @memcpy(out.items, float_plan.items);
-                const result = try out.value(self);
+                const result = out.value();
                 hostDenseSetFlags(try mutableNumericHostArrayValue(self, result), float_plan.flags);
                 break :blk result;
             },
             .float32 => |float_plan| blk: {
                 const out = try self.allocManagedHostFloat32Result(float_plan.items.len);
                 @memcpy(out.items, float_plan.items);
-                const result = try out.value(self);
+                const result = out.value();
                 hostDenseSetFlags(try mutableNumericHostArrayValue(self, result), float_plan.flags);
                 break :blk result;
             },
@@ -12192,15 +11149,15 @@ pub const Session = struct {
     }
 
     fn promoteScratchArray(self: *Session, value: Value) !Value {
-        return switch (value.activeArrayKind()) {
-            .host_dense_array => blk: {
+        const handle = mutableNumericHandle(value) orelse return error.Internal;
+        return switch (handle.activeAttachment()) {
+            .host => blk: {
                 const shape = valueNonVectorNumericShape(value);
                 const promoted = try self.normalizeHostArrayForPromotion(hostDenseIfPresent(value) orelse return error.Type);
                 break :blk try applyNonVectorNumericShapeToValue(self, promoted, shape);
             },
-            .backend_array => try self.cloneManagedBackendArray(value.asBackendArray().array),
-            .numeric_array => {
-                const handle = value.asNumericArray();
+            .mlx => try self.cloneManagedBackendArray((numericBackendAttachment(handle) orelse return error.Internal).array),
+            .none => {
                 if (numericArrayIsRangeIota(handle)) {
                     return try newRangeIotaValueWithShape(
                         self,
@@ -12223,7 +11180,6 @@ pub const Session = struct {
                 }
                 return error.Internal;
             },
-            else => error.Internal,
         };
     }
 
@@ -12324,8 +11280,8 @@ pub const Session = struct {
 
         if (saw_numeric_array and !saw_non_numeric_item and !saw_irregular_numeric_array) {
             if (comptime enable_probe_instrumentation) switch (first_numeric_mode.?) {
-                .int => self.debug_make_array_int_result_count += 1,
-                .float => self.debug_make_array_float_result_count += 1,
+                .int => self.debug.make_array_int_result_count += 1,
+                .float => self.debug.make_array_float_result_count += 1,
             };
             return try createManagedStackedNumericArray(self, normalized, first_numeric_mode.?, first_numeric_shape.?);
         }
@@ -12338,19 +11294,19 @@ pub const Session = struct {
             else
                 .uniform_numeric_array_unstacked;
             if (comptime enable_probe_instrumentation) {
-                self.debug_make_array_boxed_fallback_count += 1;
-                self.debug_make_array_boxed_reason_counts[@intFromEnum(reason)] += 1;
-                self.debug_make_array_boxed_len_bucket_counts[@intFromEnum(debugProbeLenBucket(normalized.len))] += 1;
+                self.debug.make_array_boxed_fallback_count += 1;
+                self.debug.make_array_boxed_reason_counts[@backingInt(reason)] += 1;
+                self.debug.make_array_boxed_len_bucket_counts[@backingInt(debugProbeLenBucket(normalized.len))] += 1;
             }
             return try self.createManagedHostBoxedArray(normalized);
         }
 
         if (!saw_float32 and !saw_float64) {
-            if (comptime enable_probe_instrumentation) self.debug_make_array_int_result_count += 1;
+            if (comptime enable_probe_instrumentation) self.debug.make_array_int_result_count += 1;
             return try self.createManagedHostIntArrayFromValues(normalized);
         }
 
-        if (comptime enable_probe_instrumentation) self.debug_make_array_float_result_count += 1;
+        if (comptime enable_probe_instrumentation) self.debug.make_array_float_result_count += 1;
         if (!saw_float64) return try self.createManagedHostFloat32ArrayFromValues(normalized);
         return try self.createManagedHostFloatArrayFromValues(normalized);
     }
@@ -12481,7 +11437,6 @@ pub const Session = struct {
     }
 
     fn ensureManagedHostDenseFindCache(self: *Session, array: *HostDenseArray) !*HostDenseFindCache {
-        std.debug.assert(array.header.owner == .managed);
         if (array.find_cache) |cache| return cache;
         const cache = try self.allocator.create(HostDenseFindCache);
         cache.* = .{};
@@ -12503,14 +11458,14 @@ pub const Session = struct {
         array.find_cache = null;
     }
 
-    fn invalidateHostDenseCachesForMutation(self: *Session, array: *HostDenseArray) void {
+    fn invalidateHostDenseCachesForMutation(self: *Session, value: Value, array: *HostDenseArray) void {
         hostDenseClearCachedIntRange(array);
-        if (numericPayloadOwner(array) == .managed) self.clearManagedHostDenseFindCache(array);
+        const handle = valueNumericHandle(value) orelse return;
+        if (handle.header.owner == .managed) self.clearManagedHostDenseFindCache(array);
     }
 
     fn recycleManagedHostArray(self: *Session, array: *HostDenseArray) void {
         self.destroyManagedHostDenseFindCache(array);
-        array.logical_handle = null;
         self.recycleManagedHostDenseStorage(array.storage);
         if (self.free_host_array_len < self.free_host_arrays.len) {
             self.free_host_arrays[self.free_host_array_len] = array;
@@ -12547,7 +11502,6 @@ pub const Session = struct {
     }
 
     fn recycleManagedBackendArray(self: *Session, array: *BackendArray) void {
-        array.logical_handle = null;
         array.array.deinit();
         if (comptime runtime_has_mlx) {
             if (self.free_mlx_array_len < self.free_mlx_arrays.len) {
@@ -12626,23 +11580,21 @@ pub const Session = struct {
     fn noteDualResidentPeak(self: *Session) void {
         if (comptime !enable_probe_instrumentation) return;
         const count = self.dualResidentHandleCount();
-        if (count > self.debug_dual_resident_peak_count) self.debug_dual_resident_peak_count = count;
+        if (count > self.debug.dual_resident_peak_count) self.debug.dual_resident_peak_count = count;
     }
 
     fn evictHostAttachment(self: *Session, handle: *NumericArray) void {
         const host = handle.host orelse return;
         self.recycleManagedHostArray(host);
         handle.host = null;
-        if (comptime enable_probe_instrumentation) self.debug_host_eviction_count += 1;
-        syncNumericArrayChildren(handle);
+        if (comptime enable_probe_instrumentation) self.debug.host_eviction_count += 1;
     }
 
     fn evictBackendAttachment(self: *Session, handle: *NumericArray) void {
         const array = handle.mlx orelse return;
         self.recycleManagedBackendArray(array);
         handle.mlx = null;
-        if (comptime enable_probe_instrumentation) self.debug_mlx_eviction_count += 1;
-        syncNumericArrayChildren(handle);
+        if (comptime enable_probe_instrumentation) self.debug.mlx_eviction_count += 1;
     }
 
     fn evictLeastRecentAttachment(self: *Session, handle: *NumericArray) void {
@@ -12757,16 +11709,6 @@ pub const Session = struct {
         freeHostHandleBuffers(self.allocator, handle);
     }
 
-    fn releaseCanonicalManagedNumericValue(self: *Session, value: Value) void {
-        if (valueNumericHandle(value)) |handle| {
-            if (handle.header.owner == .managed) {
-                self.releaseManagedNumericHandle(@constCast(handle));
-                return;
-            }
-        }
-        self.releaseValue(value);
-    }
-
     fn releaseValue(self: *Session, value: Value) void {
         switch (value.raw & Value.tag_mask) {
             Value.int_tag,
@@ -12795,7 +11737,7 @@ pub const Session = struct {
                 closure.header.ref_count -= 1;
                 if (closure.header.ref_count == 0) {
                     if (comptime enable_probe_instrumentation) {
-                        if (closureIsProjection(closure)) self.debug_projection_closure_release_count += 1;
+                        if (closureIsProjection(closure)) self.debug.projection_closure_release_count += 1;
                     }
                     for (closure.captures) |capture| self.releaseValue(capture);
                     self.allocator.free(closure.captures);
@@ -12812,18 +11754,6 @@ pub const Session = struct {
                     const handle = @constCast(value.asNumericArray());
                     if (handle.header.owner != .managed) return;
                     self.releaseManagedNumericHandle(handle);
-                },
-                .host_dense_array => {
-                    if (logicalHandleForNumericPayloadValue(value)) |handle| {
-                        if (handle.header.owner != .managed) return;
-                        self.releaseManagedNumericHandle(handle);
-                    } else {
-                        const array = @constCast(value.asHostDenseArray());
-                        if (array.header.owner != .managed) return;
-                        std.debug.assert(array.header.ref_count != 0);
-                        array.header.ref_count -= 1;
-                        if (array.header.ref_count == 0) self.recycleManagedHostArray(array);
-                    }
                 },
                 .host_boxed_array => {
                     const array = @constCast(value.asHostBoxedArray());
@@ -12859,7 +11789,7 @@ pub const Session = struct {
                     std.debug.assert(view.header.ref_count != 0);
                     view.header.ref_count -= 1;
                     if (view.header.ref_count == 0) {
-                        if (comptime enable_probe_instrumentation) self.debug_host_string_view_release_count += 1;
+                        if (comptime enable_probe_instrumentation) self.debug.host_string_view_release_count += 1;
                         self.releaseValue(Value.array(view.base));
                         self.allocator.destroy(view);
                     }
@@ -12908,18 +11838,6 @@ pub const Session = struct {
                         }
                     }
                 },
-                .backend_array => {
-                    if (logicalHandleForNumericPayloadValue(value)) |handle| {
-                        if (handle.header.owner != .managed) return;
-                        self.releaseManagedNumericHandle(handle);
-                    } else {
-                        const array = @constCast(value.asBackendArray());
-                        if (array.header.owner != .managed) return;
-                        std.debug.assert(array.header.ref_count != 0);
-                        array.header.ref_count -= 1;
-                        if (array.header.ref_count == 0) self.recycleManagedBackendArray(array);
-                    }
-                },
             },
             else => {},
         }
@@ -12949,17 +11867,14 @@ pub const Session = struct {
             } else try self.allocator.create(BackendArray)
         else
             try self.allocator.create(BackendArray);
-        owned.* = .{
-            .header = HeapHeader.init(.backend_array, .managed),
-            .logical_handle = null,
-            .array = array,
-        };
+        owned.* = .{ .array = array };
         return owned;
     }
 
     fn wrapManagedBackendArray(self: *Session, array: mlx.Array) KError!Value {
         const owned = try self.allocManagedBackendPayload(array);
-        return try wrapOwnedBackendArrayValue(self, owned);
+        errdefer self.recycleManagedBackendArray(owned);
+        return try newNumericArrayValue(self, .managed, .mlx, null, owned);
     }
 
     fn castOwnedBackendArrayToDtype(self: *Session, array: *mlx.Array, target_dtype: c.mlx_dtype) KError!void {
@@ -13339,13 +12254,6 @@ pub const Session = struct {
         return try applyNonVectorNumericShapeToValue(self, value, try numericShapeSnapshotFromDims(dims));
     }
 
-    fn dropStackFrom(self: *Session, start: usize) void {
-        while (self.stack_len > start) {
-            self.stack_len -= 1;
-            self.releaseCanonicalManagedNumericValue(self.stack[self.stack_len]);
-        }
-    }
-
     const CodeState = struct {
         locals: [max_code_frame_slots]Value = undefined,
         local_live: u16 = 0,
@@ -13379,7 +12287,7 @@ pub const Session = struct {
     }
 
     fn compactInitOwnedArgs(state: *CodeState, code: *const Code, args: []const Value) KError!void {
-        if (!codeCanRunWithArgLen(code, args.len) or args.len > max_explicit_params or code.local_count > max_code_frame_slots) return error.Arity;
+        if (!codeCanRunWithArgLen(code, args.len) or args.len > max_explicit_params or code.slot_count > max_code_frame_slots) return error.Arity;
         state.local_live = 0;
         state.stack_len = 0;
         for (args, 0..) |arg, idx| {
@@ -13389,7 +12297,7 @@ pub const Session = struct {
     }
 
     fn compactInitBorrowedArgs(self: *Session, state: *CodeState, code: *const Code, args: []const Value) KError!void {
-        if (!codeCanRunWithArgLen(code, args.len) or args.len > max_explicit_params or code.local_count > max_code_frame_slots) return error.Arity;
+        if (!codeCanRunWithArgLen(code, args.len) or args.len > max_explicit_params or code.slot_count > max_code_frame_slots) return error.Arity;
         state.local_live = 0;
         state.stack_len = 0;
         var initialized: usize = 0;
@@ -13513,7 +12421,7 @@ pub const Session = struct {
             },
             .local_local_op => blk: {
                 if (consume) return error.Internal;
-                const op: BuiltinId = @enumFromInt(try compactReadByte(code, ip));
+                const op: BuiltinId = @fromBackingInt(@intCast(try compactReadByte(code, ip)));
                 const left_slot = try compactReadByte(code, ip);
                 const right_slot = try compactReadByte(code, ip);
                 break :blk try self.intValue(try checkedSelectorDyad(
@@ -13524,10 +12432,10 @@ pub const Session = struct {
             },
             .local_local_const_op => blk: {
                 if (consume) return error.Internal;
-                const op: BuiltinId = @enumFromInt(try compactReadByte(code, ip));
+                const op: BuiltinId = @fromBackingInt(@intCast(try compactReadByte(code, ip)));
                 const left_slot = try compactReadByte(code, ip);
                 const right_slot = try compactReadByte(code, ip);
-                const const_op: BuiltinId = @enumFromInt(try compactReadByte(code, ip));
+                const const_op: BuiltinId = @fromBackingInt(@intCast(try compactReadByte(code, ip)));
                 const const_value = try compactReadI64(code, ip);
                 const base = try checkedSelectorDyad(
                     op,
@@ -13539,7 +12447,7 @@ pub const Session = struct {
             .scalar_dyad_op => blk: {
                 if (consume) return error.Internal;
                 const shape = try compactReadByte(code, ip);
-                const op: BuiltinId = @enumFromInt(try compactReadByte(code, ip));
+                const op: BuiltinId = @fromBackingInt(@intCast(try compactReadByte(code, ip)));
                 switch (op) {
                     .add, .sub, .mul, .iota, .minimum, .maximum => {},
                     else => return error.Internal,
@@ -13569,8 +12477,8 @@ pub const Session = struct {
     fn compactReadOwnedArgs(self: *Session, code: *const Code, state: *CodeState, ip: *usize, argc: u8, out: *[max_direct_apply_args]Value) KError![]const Value {
         if (argc == 0 or argc > max_direct_apply_args) return error.Internal;
         var loaded: usize = 0;
-        errdefer self.releaseOwnedValues(out[0..loaded]);
-        while (loaded < argc) : (loaded += 1) out[loaded] = try self.compactEvalArgSourceOwned(code, state, ip);
+        errdefer self.releaseOwnedValues(out[argc - loaded .. argc]);
+        while (loaded < argc) : (loaded += 1) out[argc - 1 - loaded] = try self.compactEvalArgSourceOwned(code, state, ip);
         return out[0..argc];
     }
 
@@ -13578,38 +12486,38 @@ pub const Session = struct {
         if (argc > max_direct_apply_args or state.stack_len < argc) return error.Internal;
         const start = state.stack_len - argc;
         var idx: usize = 0;
-        while (idx < argc) : (idx += 1) out[idx] = state.stack[start + idx];
+        while (idx < argc) : (idx += 1) out[idx] = state.stack[state.stack_len - 1 - idx];
         state.stack_len = start;
         return out[0..argc];
     }
 
     fn compactInitOwnedStackArgs(target: *CodeState, target_code: *const Code, state: *CodeState, argc: u8) KError!void {
-        if (argc != target_code.arity or argc > max_direct_apply_args or target_code.local_count > max_code_frame_slots or state.stack_len < argc) return error.Arity;
+        if (argc != target_code.arity or argc > max_direct_apply_args or target_code.slot_count > max_code_frame_slots or state.stack_len < argc) return error.Arity;
         target.local_live = 0;
         target.stack_len = 0;
         const start = state.stack_len - argc;
         var idx: usize = 0;
         while (idx < argc) : (idx += 1) {
-            target.locals[idx] = state.stack[start + idx];
+            target.locals[idx] = state.stack[state.stack_len - 1 - idx];
         }
         target.local_live = compactLocalPrefixMask(argc);
         state.stack_len = start;
     }
 
     fn compactInitOwnedArgSources(self: *Session, target: *CodeState, target_code: *const Code, caller_code: *const Code, caller_state: *CodeState, ip: *usize, argc: u8) KError!void {
-        if (argc != target_code.arity or argc == 0 or argc > max_direct_apply_args or target_code.local_count > max_code_frame_slots) return error.Arity;
+        if (argc != target_code.arity or argc == 0 or argc > max_direct_apply_args or target_code.slot_count > max_code_frame_slots) return error.Arity;
         target.local_live = 0;
         target.stack_len = 0;
         var loaded: usize = 0;
         errdefer {
             while (loaded > 0) {
                 loaded -= 1;
-                self.releaseValue(target.locals[loaded]);
+                self.releaseValue(target.locals[argc - 1 - loaded]);
             }
             target.local_live = 0;
         }
         while (loaded < argc) : (loaded += 1) {
-            target.locals[loaded] = try self.compactEvalArgSourceOwned(caller_code, caller_state, ip);
+            target.locals[argc - 1 - loaded] = try self.compactEvalArgSourceOwned(caller_code, caller_state, ip);
         }
         target.local_live = compactLocalPrefixMask(argc);
     }
@@ -13707,22 +12615,21 @@ pub const Session = struct {
     }
 
     fn compactApplyGlobalCallOwned(self: *Session, slot: u16, args: []const Value) KError!Value {
-        if (comptime enable_probe_instrumentation) self.debug_code_global_call_count += 1;
+        if (comptime enable_probe_instrumentation) self.debug.code_global_call_count += 1;
         const cell = try self.loadGlobalCell(slot);
         if (!argsContainAllAxisSelector(args)) {
             if (codeForGlobalCellCallArgs(cell, args)) |compact| {
-                if (comptime enable_probe_instrumentation) self.debug_code_global_call_direct_count += 1;
+                if (comptime enable_probe_instrumentation) self.debug.code_global_call_direct_count += 1;
                 return try self.runCodeOwned(compact, args);
             }
         }
-        if (comptime enable_probe_instrumentation) self.debug_code_global_call_fallback_count += 1;
+        if (comptime enable_probe_instrumentation) self.debug.code_global_call_fallback_count += 1;
         self.noteCodeGlobalCallFallback(cell, @intCast(args.len));
         return try self.applyBorrowedValueOwnedArgs(cell.value, args, slot);
     }
 
     fn compactApplyGlobalDerivedCallOwned(self: *Session, slot: u16, kind: DerivedVerbKind, args: []const Value) KError!Value {
-        if (comptime enable_probe_instrumentation) self.debug_code_global_call_count += 1;
-        self.noteGlobalCall(slot);
+        if (comptime enable_probe_instrumentation) self.debug.code_global_call_count += 1;
         const base = self.retainValue(try self.loadGlobalSlot(slot));
         defer self.releaseValue(base);
         defer self.releaseOwnedValues(args);
@@ -13739,8 +12646,8 @@ pub const Session = struct {
         const cell = try self.loadGlobalCell(slot);
         const compact = codeForGlobalCellCall(cell, argc) orelse return null;
         if (comptime enable_probe_instrumentation) {
-            self.debug_code_global_call_count += 1;
-            self.debug_code_global_call_direct_count += 1;
+            self.debug.code_global_call_count += 1;
+            self.debug.code_global_call_direct_count += 1;
         }
         var callee_state = CodeState{};
         try self.compactInitOwnedArgSources(&callee_state, compact, caller_code, caller_state, ip, argc);
@@ -13754,9 +12661,9 @@ pub const Session = struct {
         var next_state = CodeState{};
         try self.compactInitOwnedArgSources(&next_state, next_code, code, state, ip, argc);
         if (comptime enable_probe_instrumentation) {
-            self.debug_code_global_call_count += 1;
-            self.debug_code_global_call_direct_count += 1;
-            self.debug_code_tail_continue_count += 1;
+            self.debug.code_global_call_count += 1;
+            self.debug.code_global_call_direct_count += 1;
+            self.debug.code_tail_continue_count += 1;
         }
         self.compactReleaseState(state);
         compactMoveState(state, &next_state);
@@ -13801,9 +12708,6 @@ pub const Session = struct {
         const raw_index = scalarIntLikeValue(selector) orelse return null;
         if (base.tag() != .array or valueNonVectorNumericShape(base) != null) return null;
         const array = hostDenseIfPresent(base) orelse return null;
-        if (hostDenseShapeHandle(array)) |handle| {
-            if (handle.rank > 1) return null;
-        }
         const idx = try normalizeIndex(raw_index, array.len());
         return switch (array.storage) {
             .bit => |words| Value.fromBool(bitGet(words, idx)),
@@ -13817,25 +12721,25 @@ pub const Session = struct {
         const left = try self.loadGlobalSlot(slot);
         const result = try self.applyLocalConstDyadValue(left, builtin, rhs);
         var stored = false;
-        errdefer if (!stored) self.releaseCanonicalManagedNumericValue(result);
+        errdefer if (!stored) self.releaseValue(result);
         try self.storeGlobalSlot(slot, result);
         stored = true;
         if (want_result) return result;
-        self.releaseCanonicalManagedNumericValue(result);
+        self.releaseValue(result);
         return null;
     }
 
     fn compactModifyGlobalStack(self: *Session, state: *CodeState, slot: u16, builtin: BuiltinId, want_result: bool) KError!?Value {
         const rhs = try compactPop(state);
-        defer self.releaseCanonicalManagedNumericValue(rhs);
+        defer self.releaseValue(rhs);
         const left = try self.loadGlobalSlot(slot);
         const result = try self.applyShapedBorrowedDyadValue(builtin, left, rhs);
         var stored = false;
-        errdefer if (!stored) self.releaseCanonicalManagedNumericValue(result);
+        errdefer if (!stored) self.releaseValue(result);
         try self.storeGlobalSlot(slot, result);
         stored = true;
         if (want_result) return result;
-        self.releaseCanonicalManagedNumericValue(result);
+        self.releaseValue(result);
         return null;
     }
 
@@ -13843,7 +12747,7 @@ pub const Session = struct {
         const left = try compactBorrowLocal(state, slot);
         const result = try self.applyLocalConstDyadValue(left, builtin, rhs);
         var stored = false;
-        errdefer if (!stored) self.releaseCanonicalManagedNumericValue(result);
+        errdefer if (!stored) self.releaseValue(result);
         const returned = if (want_result) self.retainValue(result) else Value.fromBool(false);
         var returned_owned = want_result;
         errdefer if (returned_owned) self.releaseValue(returned);
@@ -13858,11 +12762,11 @@ pub const Session = struct {
 
     fn compactModifyLocalStack(self: *Session, state: *CodeState, slot: u8, builtin: BuiltinId, want_result: bool) KError!?Value {
         const rhs = try compactPop(state);
-        defer self.releaseCanonicalManagedNumericValue(rhs);
+        defer self.releaseValue(rhs);
         const left = try compactBorrowLocal(state, slot);
         const result = try self.applyShapedBorrowedDyadValue(builtin, left, rhs);
         var stored = false;
-        errdefer if (!stored) self.releaseCanonicalManagedNumericValue(result);
+        errdefer if (!stored) self.releaseValue(result);
         const returned = if (want_result) self.retainValue(result) else Value.fromBool(false);
         var returned_owned = want_result;
         errdefer if (returned_owned) self.releaseValue(returned);
@@ -13876,12 +12780,12 @@ pub const Session = struct {
     }
 
     fn compactIndexedAssignGlobalSources(self: *Session, code: *const Code, state: *CodeState, ip: *usize, slot: u16, mode: AmendMode, builtin: BuiltinId, want_result: bool) KError!?Value {
-        if (comptime enable_probe_instrumentation) self.debug_code_indexed_assign_sources_count += 1;
+        if (comptime enable_probe_instrumentation) self.debug.code_indexed_assign_sources_count += 1;
         if (mode == .unary) return error.Internal;
-        const selector = try self.compactEvalArgSourceOwned(code, state, ip);
-        defer self.releaseValue(selector);
         const rhs = try self.compactEvalArgSourceOwned(code, state, ip);
         defer self.releaseValue(rhs);
+        const selector = try self.compactEvalArgSourceOwned(code, state, ip);
+        defer self.releaseValue(selector);
         return try self.compactIndexedAssignGlobalValues(slot, mode, builtin, want_result, selector, rhs);
     }
 
@@ -13890,12 +12794,12 @@ pub const Session = struct {
     }
 
     fn compactIndexedAssignLocalSources(self: *Session, code: *const Code, state: *CodeState, ip: *usize, slot: u8, mode: AmendMode, builtin: BuiltinId, want_result: bool) KError!?Value {
-        if (comptime enable_probe_instrumentation) self.debug_code_indexed_assign_sources_count += 1;
+        if (comptime enable_probe_instrumentation) self.debug.code_indexed_assign_sources_count += 1;
         if (mode == .unary) return error.Internal;
-        const selector = try self.compactEvalArgSourceOwned(code, state, ip);
-        defer self.releaseValue(selector);
         const rhs = try self.compactEvalArgSourceOwned(code, state, ip);
         defer self.releaseValue(rhs);
+        const selector = try self.compactEvalArgSourceOwned(code, state, ip);
+        defer self.releaseValue(selector);
         return try self.compactIndexedAssignLocalValues(state, slot, mode, builtin, want_result, selector, rhs);
     }
 
@@ -13945,7 +12849,7 @@ pub const Session = struct {
             .unary => unreachable,
         };
         var amended_stored = false;
-        errdefer if (!amended_stored) self.releaseCanonicalManagedNumericValue(amended);
+        errdefer if (!amended_stored) self.releaseValue(amended);
 
         const result: ?Value = if (want_result) blk: {
             if (try self.materializeIndexedSelectorPath(selector)) |selectors| {
@@ -13959,7 +12863,7 @@ pub const Session = struct {
         switch (target) {
             .global => |slot| {
                 try self.storeGlobalSlot(slot, amended);
-                self.releaseCanonicalManagedNumericValue(amended);
+                self.releaseValue(amended);
             },
             .local => |slot| try self.compactStoreLocal(state orelse return error.Internal, slot, amended),
         }
@@ -14023,7 +12927,7 @@ pub const Session = struct {
         const kind = hostIntArrayViewKind(view);
         if (!hostIntKindCanRepresent(kind, rhs_int)) return null;
         var out = self.tryReuseHostIntArrayResult(base, kind) orelse return null;
-        if (comptime enable_probe_instrumentation) self.debug_fast_dense_assign_attempt_count += 1;
+        if (comptime enable_probe_instrumentation) self.debug.fast_dense_assign_attempt_count += 1;
         if (!self.prepareReusableHostDenseForMutation(base)) {
             self.recordFastDenseAssignMiss();
             return null;
@@ -14054,10 +12958,10 @@ pub const Session = struct {
         try out.set(target_idx, stored_int);
         const host = out.arrayPtr();
         hostDenseSetFlags(host, host_dense_flag_normalized);
-        self.invalidateHostDenseCachesForMutation(host);
+        self.invalidateHostDenseCachesForMutation(out.value(), host);
         if (comptime enable_probe_instrumentation) {
             self.recordFastDenseAssignHit(.{ .scalar = target_idx }, .{ .int_scalar = stored_int }, true);
-            self.debug_owned_amend_count += 1;
+            self.debug.owned_amend_count += 1;
         }
         return .{
             .target_idx = target_idx,
@@ -14106,8 +13010,8 @@ pub const Session = struct {
 
     noinline fn compactJumpIfFalseCompareLocalLocal(self: *Session, state: *const CodeState, condition_op: BuiltinId, left_slot: u8, right_slot: u8) KError!bool {
         if (comptime enable_probe_instrumentation) {
-            self.debug_jump_if_false_count += 1;
-            self.debug_shaped_scalar_dyad_count += 1;
+            self.debug.jump_if_false_count += 1;
+            self.debug.shaped_scalar_dyad_count += 1;
         }
         const left = try compactBorrowLocal(state, left_slot);
         const right = try compactBorrowLocal(state, right_slot);
@@ -14119,7 +13023,7 @@ pub const Session = struct {
                     .more => lhs > rhs,
                     else => return error.Internal,
                 };
-                if (comptime enable_probe_instrumentation) self.debug_jump_if_false_scalar_count += 1;
+                if (comptime enable_probe_instrumentation) self.debug.jump_if_false_scalar_count += 1;
                 return !condition;
             }
         }
@@ -14129,7 +13033,7 @@ pub const Session = struct {
         const truthy = branchTruthValue(condition_value) orelse return error.Type;
         if (comptime enable_probe_instrumentation) {
             switch (condition_value.tag()) {
-                .bool, .int, .float => self.debug_jump_if_false_scalar_count += 1,
+                .bool, .int, .float => self.debug.jump_if_false_scalar_count += 1,
                 else => {},
             }
         }
@@ -14148,8 +13052,8 @@ pub const Session = struct {
         compare_value: i64,
     ) KError!bool {
         if (comptime enable_probe_instrumentation) {
-            self.debug_jump_if_false_count += 1;
-            self.debug_shaped_scalar_dyad_count += 2;
+            self.debug.jump_if_false_count += 1;
+            self.debug.shaped_scalar_dyad_count += 2;
         }
         switch (transform_op) {
             .add, .sub, .mul, .iota, .minimum, .maximum => {},
@@ -14192,7 +13096,7 @@ pub const Session = struct {
                 .more => lhs > compare_value,
                 else => unreachable,
             };
-            if (comptime enable_probe_instrumentation) self.debug_jump_if_false_scalar_count += 1;
+            if (comptime enable_probe_instrumentation) self.debug.jump_if_false_scalar_count += 1;
             return !condition;
         }
 
@@ -14208,7 +13112,7 @@ pub const Session = struct {
         const truthy = branchTruthValue(compared) orelse return error.Type;
         if (comptime enable_probe_instrumentation) {
             switch (compared.tag()) {
-                .bool, .int, .float => self.debug_jump_if_false_scalar_count += 1,
+                .bool, .int, .float => self.debug.jump_if_false_scalar_count += 1,
                 else => {},
             }
         }
@@ -14216,7 +13120,7 @@ pub const Session = struct {
     }
 
     noinline fn compactScalarDyadI64(self: *Session, state: *const CodeState, code: *const Code, ip: *usize) KError!Value {
-        const op: BuiltinId = @enumFromInt(try compactReadByte(code, ip));
+        const op: BuiltinId = @fromBackingInt(@intCast(try compactReadByte(code, ip)));
         switch (op) {
             .add, .sub, .mul, .iota, .minimum, .maximum => {},
             else => return error.Internal,
@@ -14243,7 +13147,7 @@ pub const Session = struct {
     }
 
     fn compactInlineIntDyadResult(self: *Session, op: BuiltinId, lhs: i64, rhs: i64, both_bool: bool) KError!?Value {
-        if (comptime enable_probe_instrumentation) self.debug_inline_scalar_dyad_attempt_count += 1;
+        if (comptime enable_probe_instrumentation) self.debug.inline_scalar_dyad_attempt_count += 1;
         const result: ?Value = switch (op) {
             .add => blk: {
                 const added = @addWithOverflow(lhs, rhs);
@@ -14269,7 +13173,7 @@ pub const Session = struct {
             else => null,
         };
         if (comptime enable_probe_instrumentation) {
-            if (result != null) self.debug_inline_scalar_dyad_hit_count += 1 else self.debug_inline_scalar_dyad_fallback_count += 1;
+            if (result != null) self.debug.inline_scalar_dyad_hit_count += 1 else self.debug.inline_scalar_dyad_fallback_count += 1;
         }
         return result;
     }
@@ -14284,8 +13188,8 @@ pub const Session = struct {
         if (state.stack_len < bound_count + 1) return error.Internal;
 
         const callee_index = state.stack_len - (bound_count + 1);
-        const callee = state.stack[callee_index];
-        const bound_values = state.stack[callee_index + 1 .. state.stack_len];
+        const callee = state.stack[state.stack_len - 1];
+        const bound_values = state.stack[callee_index .. state.stack_len - 1];
 
         const slot_values = try self.scratch_arena.allocator().alloc(Value, total_slots);
         var bound_idx: usize = 0;
@@ -14294,7 +13198,7 @@ pub const Session = struct {
                 slot_value.* = Value.fromBool(false);
             } else {
                 if (bound_idx >= bound_values.len) return error.Internal;
-                slot_value.* = bound_values[bound_idx];
+                slot_value.* = bound_values[bound_count - 1 - bound_idx];
                 bound_idx += 1;
             }
         }
@@ -14317,12 +13221,12 @@ pub const Session = struct {
         if (state.stack_len < argc) return error.Internal;
 
         const base_index = state.stack_len - argc;
-        const base = state.stack[base_index];
-        const selector = state.stack[base_index + 1];
+        const base = state.stack[state.stack_len - 1];
+        const selector = state.stack[state.stack_len - 2];
         const result = switch (mode) {
-            .unary => try self.applyAmend(base, selector, if (deep) .deep_unary else .unary, state.stack[base_index + 2], Value.fromBool(false)),
-            .assign => try self.applyAmend(base, selector, if (deep) .deep_assign else .assign, state.stack[base_index + 2], Value.fromBool(false)),
-            .binary => try self.applyAmend(base, selector, if (deep) .deep_binary else .binary, state.stack[base_index + 2], state.stack[base_index + 3]),
+            .unary => try self.applyAmend(base, selector, if (deep) .deep_unary else .unary, state.stack[state.stack_len - 3], Value.fromBool(false)),
+            .assign => try self.applyAmend(base, selector, if (deep) .deep_assign else .assign, state.stack[state.stack_len - 3], Value.fromBool(false)),
+            .binary => try self.applyAmend(base, selector, if (deep) .deep_binary else .binary, state.stack[state.stack_len - 3], state.stack[state.stack_len - 4]),
         };
         errdefer self.releaseValue(result);
         while (state.stack_len > base_index) {
@@ -14355,7 +13259,7 @@ pub const Session = struct {
     }
 
     fn runCodeWithState(self: *Session, initial_code: *const Code, state: *CodeState) KError!Value {
-        if (comptime enable_probe_instrumentation) self.debug_code_run_count += 1;
+        if (comptime enable_probe_instrumentation) self.debug.code_run_count += 1;
         var code = initial_code;
         var ip: usize = 0;
         errdefer self.compactReleaseState(state);
@@ -14368,7 +13272,7 @@ pub const Session = struct {
 
             if (comptime enable_sampling_profile) {
                 if (self.profile_sampling_enabled.load(.unordered) != 0) {
-                    self.profile_current_label.store(@intFromEnum(SamplingProfileLabel.vm_dispatch), .unordered);
+                    self.profile_current_label.store(@backingInt(SamplingProfileLabel.vm_dispatch), .unordered);
                     self.profile_current_op.store(raw, .unordered);
                     self.profile_current_code_id.store(code.profile_id, .unordered);
                     self.profile_current_callable_slot.store(sampling_profile_no_callable_slot, .unordered);
@@ -14388,11 +13292,11 @@ pub const Session = struct {
                     try compactPush(state, try self.compactMonadBorrowed(raw - ck_monad_base, value));
                 } else {
                     const id = raw - ck_dyad_base;
-                    const right = try compactPop(state);
                     const left = try compactPop(state);
+                    const right = try compactPop(state);
                     const result = if (id == ckd_dot) blk: {
-                        defer self.releaseCanonicalManagedNumericValue(left);
-                        defer self.releaseCanonicalManagedNumericValue(right);
+                        defer self.releaseValue(left);
+                        defer self.releaseValue(right);
                         break :blk try self.dotValues(left, right);
                     } else blk: {
                         defer self.releaseValue(left);
@@ -14430,7 +13334,7 @@ pub const Session = struct {
                     if (slot >= code.constants.len) return error.Internal;
                     try compactPush(state, self.shareValue(code.constants[slot]));
                 },
-                ck_const_builtin_u8 => try compactPush(state, Value.builtin(@enumFromInt(try compactReadByte(code, &ip)))),
+                ck_const_builtin_u8 => try compactPush(state, Value.builtin(@fromBackingInt(@intCast(try compactReadByte(code, &ip))))),
                 ck_const_false => try compactPush(state, Value.fromBool(false)),
                 ck_const_true => try compactPush(state, Value.fromBool(true)),
                 ck_discard => self.releaseValue(try compactPop(state)),
@@ -14444,9 +13348,9 @@ pub const Session = struct {
                     const target = try compactReadMaybeU16(code, &ip, wide_payload);
                     const condition = try compactPop(state);
                     if (comptime enable_probe_instrumentation) {
-                        self.debug_jump_if_false_count += 1;
+                        self.debug.jump_if_false_count += 1;
                         switch (condition.tag()) {
-                            .bool, .int, .float => self.debug_jump_if_false_scalar_count += 1,
+                            .bool, .int, .float => self.debug.jump_if_false_scalar_count += 1,
                             else => {},
                         }
                     }
@@ -14459,8 +13363,8 @@ pub const Session = struct {
                     const rhs = try compactReadI64(code, &ip);
                     const target = try compactReadMaybeU16(code, &ip, wide_payload);
                     if (comptime enable_probe_instrumentation) {
-                        self.debug_jump_if_false_count += 1;
-                        self.debug_shaped_scalar_dyad_count += 1;
+                        self.debug.jump_if_false_count += 1;
+                        self.debug.shaped_scalar_dyad_count += 1;
                     }
                     const left = try compactBorrowLocal(state, slot);
                     const condition_op: BuiltinId = switch (raw) {
@@ -14476,7 +13380,7 @@ pub const Session = struct {
                             ck_jump_if_false_more_local_const_i64 => lhs > rhs,
                             else => unreachable,
                         };
-                        if (comptime enable_probe_instrumentation) self.debug_jump_if_false_scalar_count += 1;
+                        if (comptime enable_probe_instrumentation) self.debug.jump_if_false_scalar_count += 1;
                         if (!condition) ip = target;
                     } else {
                         const right = try self.intValue(rhs);
@@ -14486,7 +13390,7 @@ pub const Session = struct {
                         const truthy = branchTruthValue(condition_value) orelse return error.Type;
                         if (comptime enable_probe_instrumentation) {
                             switch (condition_value.tag()) {
-                                .bool, .int, .float => self.debug_jump_if_false_scalar_count += 1,
+                                .bool, .int, .float => self.debug.jump_if_false_scalar_count += 1,
                                 else => {},
                             }
                         }
@@ -14494,7 +13398,7 @@ pub const Session = struct {
                     }
                 },
                 ck_jump_if_false_compare_local_local_i64 => {
-                    const condition_op: BuiltinId = @enumFromInt(try compactReadByte(code, &ip));
+                    const condition_op: BuiltinId = @fromBackingInt(@intCast(try compactReadByte(code, &ip)));
                     const left_slot = try compactReadByte(code, &ip);
                     const right_slot = try compactReadByte(code, &ip);
                     const target = try compactReadMaybeU16(code, &ip, wide_payload);
@@ -14502,8 +13406,8 @@ pub const Session = struct {
                 },
                 ck_jump_if_false_scalar_dyad_const_i64 => {
                     const shape = try compactReadByte(code, &ip);
-                    const transform_op: BuiltinId = @enumFromInt(try compactReadByte(code, &ip));
-                    const compare_op: BuiltinId = @enumFromInt(try compactReadByte(code, &ip));
+                    const transform_op: BuiltinId = @fromBackingInt(@intCast(try compactReadByte(code, &ip)));
+                    const compare_op: BuiltinId = @fromBackingInt(@intCast(try compactReadByte(code, &ip)));
                     var left_slot: u8 = 0;
                     var right_slot: u8 = 0;
                     var const_value: i64 = 0;
@@ -14531,66 +13435,66 @@ pub const Session = struct {
                 ck_store_global_u8 => try self.storeGlobalSlot(try compactReadMaybeU16(code, &ip, wide_payload), try compactPeek(state)),
                 ck_modify_global_stack_u8 => {
                     const slot = try compactReadMaybeU16(code, &ip, wide_payload);
-                    const builtin: BuiltinId = @enumFromInt(try compactReadByte(code, &ip));
+                    const builtin: BuiltinId = @fromBackingInt(@intCast(try compactReadByte(code, &ip)));
                     const want_result = (try compactReadByte(code, &ip)) != 0;
                     if (try self.compactModifyGlobalStack(state, slot, builtin, want_result)) |result| try compactPush(state, result);
                 },
                 ck_modify_global_const_i64 => {
                     const slot = try compactReadMaybeU16(code, &ip, wide_payload);
-                    const builtin: BuiltinId = @enumFromInt(try compactReadByte(code, &ip));
+                    const builtin: BuiltinId = @fromBackingInt(@intCast(try compactReadByte(code, &ip)));
                     const want_result = (try compactReadByte(code, &ip)) != 0;
                     const rhs = try compactReadI64(code, &ip);
                     if (try self.compactModifyGlobalConst(slot, builtin, want_result, rhs)) |result| try compactPush(state, result);
                 },
                 ck_modify_local_stack_u8 => {
                     const slot = try compactReadByte(code, &ip);
-                    const builtin: BuiltinId = @enumFromInt(try compactReadByte(code, &ip));
+                    const builtin: BuiltinId = @fromBackingInt(@intCast(try compactReadByte(code, &ip)));
                     const want_result = (try compactReadByte(code, &ip)) != 0;
                     if (try self.compactModifyLocalStack(state, slot, builtin, want_result)) |result| try compactPush(state, result);
                 },
                 ck_modify_local_const_i64 => {
                     const slot = try compactReadByte(code, &ip);
-                    const builtin: BuiltinId = @enumFromInt(try compactReadByte(code, &ip));
+                    const builtin: BuiltinId = @fromBackingInt(@intCast(try compactReadByte(code, &ip)));
                     const want_result = (try compactReadByte(code, &ip)) != 0;
                     const rhs = try compactReadI64(code, &ip);
                     if (try self.compactModifyLocalConst(state, slot, builtin, want_result, rhs)) |result| try compactPush(state, result);
                 },
                 ck_assign_index_global_sources_u8 => {
                     const slot = try compactReadMaybeU16(code, &ip, wide_payload);
-                    const mode: AmendMode = @enumFromInt(try compactReadByte(code, &ip));
-                    const builtin: BuiltinId = @enumFromInt(try compactReadByte(code, &ip));
+                    const mode: AmendMode = @fromBackingInt(@intCast(try compactReadByte(code, &ip)));
+                    const builtin: BuiltinId = @fromBackingInt(@intCast(try compactReadByte(code, &ip)));
                     const want_result = (try compactReadByte(code, &ip)) != 0;
                     if (try self.compactIndexedAssignGlobalSources(code, state, &ip, slot, mode, builtin, want_result)) |result| try compactPush(state, result);
                 },
                 ck_assign_index_local_sources_u8 => {
                     const slot = try compactReadByte(code, &ip);
-                    const mode: AmendMode = @enumFromInt(try compactReadByte(code, &ip));
-                    const builtin: BuiltinId = @enumFromInt(try compactReadByte(code, &ip));
+                    const mode: AmendMode = @fromBackingInt(@intCast(try compactReadByte(code, &ip)));
+                    const builtin: BuiltinId = @fromBackingInt(@intCast(try compactReadByte(code, &ip)));
                     const want_result = (try compactReadByte(code, &ip)) != 0;
                     if (try self.compactIndexedAssignLocalSources(code, state, &ip, slot, mode, builtin, want_result)) |result| try compactPush(state, result);
                 },
                 ck_assign_index_global_stack_u8 => {
-                    if (comptime enable_probe_instrumentation) self.debug_code_indexed_assign_stack_count += 1;
+                    if (comptime enable_probe_instrumentation) self.debug.code_indexed_assign_stack_count += 1;
                     const slot = try compactReadMaybeU16(code, &ip, wide_payload);
-                    const mode: AmendMode = @enumFromInt(try compactReadByte(code, &ip));
-                    const builtin: BuiltinId = @enumFromInt(try compactReadByte(code, &ip));
+                    const mode: AmendMode = @fromBackingInt(@intCast(try compactReadByte(code, &ip)));
+                    const builtin: BuiltinId = @fromBackingInt(@intCast(try compactReadByte(code, &ip)));
                     const want_result = (try compactReadByte(code, &ip)) != 0;
-                    const rhs = try compactPop(state);
-                    defer self.releaseValue(rhs);
                     const selector = try compactPop(state);
                     defer self.releaseValue(selector);
+                    const rhs = try compactPop(state);
+                    defer self.releaseValue(rhs);
                     if (try self.compactIndexedAssignGlobalValues(slot, mode, builtin, want_result, selector, rhs)) |result| try compactPush(state, result);
                 },
                 ck_assign_index_local_stack_u8 => {
-                    if (comptime enable_probe_instrumentation) self.debug_code_indexed_assign_stack_count += 1;
+                    if (comptime enable_probe_instrumentation) self.debug.code_indexed_assign_stack_count += 1;
                     const slot = try compactReadByte(code, &ip);
-                    const mode: AmendMode = @enumFromInt(try compactReadByte(code, &ip));
-                    const builtin: BuiltinId = @enumFromInt(try compactReadByte(code, &ip));
+                    const mode: AmendMode = @fromBackingInt(@intCast(try compactReadByte(code, &ip)));
+                    const builtin: BuiltinId = @fromBackingInt(@intCast(try compactReadByte(code, &ip)));
                     const want_result = (try compactReadByte(code, &ip)) != 0;
-                    const rhs = try compactPop(state);
-                    defer self.releaseValue(rhs);
                     const selector = try compactPop(state);
                     defer self.releaseValue(selector);
+                    const rhs = try compactPop(state);
+                    defer self.releaseValue(rhs);
                     if (try self.compactIndexedAssignLocalValues(state, slot, mode, builtin, want_result, selector, rhs)) |result| try compactPush(state, result);
                 },
                 ck_index_global_source_u8, ck_tail_index_global_source_u8 => {
@@ -14620,8 +13524,8 @@ pub const Session = struct {
                     try compactPush(state, result);
                 },
                 ck_index_where_mask_stack_u8 => {
-                    const mask = try compactPop(state);
                     const callee = try compactPop(state);
+                    const mask = try compactPop(state);
                     defer self.releaseValue(mask);
                     defer self.releaseValue(callee);
                     const result = try self.applyWhereMaskCall(callee, mask);
@@ -14688,9 +13592,9 @@ pub const Session = struct {
                             var next_state = CodeState{};
                             try compactInitOwnedStackArgs(&next_state, next_code, state, argc);
                             if (comptime enable_probe_instrumentation) {
-                                self.debug_code_global_call_count += 1;
-                                self.debug_code_global_call_direct_count += 1;
-                                self.debug_code_tail_continue_count += 1;
+                                self.debug.code_global_call_count += 1;
+                                self.debug.code_global_call_direct_count += 1;
+                                self.debug.code_tail_continue_count += 1;
                             }
                             self.compactReleaseState(state);
                             compactMoveState(state, &next_state);
@@ -14710,7 +13614,7 @@ pub const Session = struct {
                 },
                 ck_call_global_derived_slots_u8 => {
                     const slot = try compactReadMaybeU16(code, &ip, wide_payload);
-                    const kind: DerivedVerbKind = @enumFromInt(try compactReadByte(code, &ip));
+                    const kind: DerivedVerbKind = @fromBackingInt(@intCast(try compactReadByte(code, &ip)));
                     const argc = try compactReadByte(code, &ip);
                     var args_buf: [max_direct_apply_args]Value = undefined;
                     const args = try self.compactReadOwnedArgs(code, state, &ip, argc, &args_buf);
@@ -14718,7 +13622,7 @@ pub const Session = struct {
                 },
                 ck_call_global_derived_stack_u8 => {
                     const slot = try compactReadMaybeU16(code, &ip, wide_payload);
-                    const kind: DerivedVerbKind = @enumFromInt(try compactReadByte(code, &ip));
+                    const kind: DerivedVerbKind = @fromBackingInt(@intCast(try compactReadByte(code, &ip)));
                     const argc = try compactReadByte(code, &ip);
                     var args_buf: [max_direct_apply_args]Value = undefined;
                     const args = try compactPopOwnedStackArgs(state, argc, &args_buf);
@@ -14807,6 +13711,7 @@ pub const Session = struct {
                     const total: usize = count;
                     if (state.stack_len < total) return error.Internal;
                     const start = state.stack_len - total;
+                    std.mem.reverse(Value, state.stack[start..state.stack_len]);
                     const vector = try self.makeArrayFromValues(state.stack[start..state.stack_len]);
                     errdefer self.releaseValue(vector);
                     while (state.stack_len > start) {
@@ -14829,8 +13734,8 @@ pub const Session = struct {
                     const argc = compactCallArgc(flags);
                     if (compactCallStoresLocal(flags)) return error.Internal;
                     var args_buf: [max_direct_apply_args]Value = undefined;
-                    const args = try compactPopOwnedStackArgs(state, argc, &args_buf);
                     const callee = try compactPop(state);
+                    const args = try compactPopOwnedStackArgs(state, argc, &args_buf);
                     const result = try self.compactApplyCallOwned(callee, args);
                     if (compactCallIsTail(flags)) {
                         self.compactReleaseState(state);
@@ -14839,13 +13744,13 @@ pub const Session = struct {
                     try compactPush(state, result);
                 },
                 ck_call_adverb_stack_u8 => {
-                    const kind: DerivedVerbKind = @enumFromInt(try compactReadByte(code, &ip));
+                    const kind: DerivedVerbKind = @fromBackingInt(@intCast(try compactReadByte(code, &ip)));
                     const argc = try compactReadByte(code, &ip);
                     var args_buf: [max_direct_apply_args]Value = undefined;
-                    const args = try compactPopOwnedStackArgs(state, argc, &args_buf);
-                    defer self.releaseOwnedValues(args);
                     const base = try compactPop(state);
                     defer self.releaseValue(base);
+                    const args = try compactPopOwnedStackArgs(state, argc, &args_buf);
+                    defer self.releaseOwnedValues(args);
                     const captures = [_]Value{base};
                     const result = if (try self.tryProjectDirectDerivedCallUnderApplication(base, kind, &captures, args)) |projection|
                         projection
@@ -14854,22 +13759,20 @@ pub const Session = struct {
                     try compactPush(state, result);
                 },
                 ck_call_builtin_derived2_u8 => {
-                    const builtin: BuiltinId = @enumFromInt(try compactReadByte(code, &ip));
-                    const kind: DerivedVerbKind = @enumFromInt(try compactReadByte(code, &ip));
-                    const right = try compactPop(state);
+                    const builtin: BuiltinId = @fromBackingInt(@intCast(try compactReadByte(code, &ip)));
+                    const kind: DerivedVerbKind = @fromBackingInt(@intCast(try compactReadByte(code, &ip)));
                     const left = try compactPop(state);
-                    const left_release = if (valueNumericHandle(left)) |handle| Value.array(@constCast(handle)) else left;
-                    const right_release = if (valueNumericHandle(right)) |handle| Value.array(@constCast(handle)) else right;
-                    errdefer self.releaseCanonicalManagedNumericValue(left_release);
-                    errdefer self.releaseCanonicalManagedNumericValue(right_release);
+                    const right = try compactPop(state);
+                    errdefer self.releaseValue(left);
+                    errdefer self.releaseValue(right);
                     const captures = [_]Value{Value.builtin(builtin)};
                     const result = try self.applyDerivedKind(kind, &captures, &[_]Value{ left, right });
-                    self.releaseCanonicalManagedNumericValue(left_release);
-                    self.releaseCanonicalManagedNumericValue(right_release);
+                    self.releaseValue(left);
+                    self.releaseValue(right);
                     try compactPush(state, result);
                 },
                 ck_make_adverb_u8 => {
-                    const kind: DerivedVerbKind = @enumFromInt(try compactReadByte(code, &ip));
+                    const kind: DerivedVerbKind = @fromBackingInt(@intCast(try compactReadByte(code, &ip)));
                     const base = try compactPop(state);
                     errdefer self.releaseValue(base);
                     const derived = switch (base.tag()) {
@@ -14899,8 +13802,6 @@ pub const Session = struct {
     }
 
     fn runCodeModePrepared(self: *Session, code: *const Code, args: []const Value, root_results: bool) KError!Value {
-        self.dropStackFrom(0);
-        self.stack_len = 0;
         const result = try self.runCodeBorrowed(code, args);
         if (!root_results) return result;
         const escaped = if (valueMayNeedRelease(result)) try self.retainEscapedValue(result) else result;
@@ -14918,7 +13819,7 @@ pub const Session = struct {
 
     fn tryFastLocalConstDyadValue(self: *Session, left: Value, op: BuiltinId, rhs_const: i64, const_first: bool) KError!?Value {
         if (inlineIntBoolValue(left)) |left_value| {
-            if (comptime enable_probe_instrumentation) self.debug_inline_scalar_dyad_attempt_count += 1;
+            if (comptime enable_probe_instrumentation) self.debug.inline_scalar_dyad_attempt_count += 1;
             const lhs = if (const_first) rhs_const else left_value;
             const rhs = if (const_first) left_value else rhs_const;
             const result: ?Value = switch (op) {
@@ -14947,13 +13848,13 @@ pub const Session = struct {
                 else => null,
             };
             if (comptime enable_probe_instrumentation) {
-                if (result != null) self.debug_inline_scalar_dyad_hit_count += 1 else self.debug_inline_scalar_dyad_fallback_count += 1;
+                if (result != null) self.debug.inline_scalar_dyad_hit_count += 1 else self.debug.inline_scalar_dyad_fallback_count += 1;
             }
             return result;
         }
 
         const left_float = inlineNumericFloatValue(left) orelse return null;
-        if (comptime enable_probe_instrumentation) self.debug_inline_scalar_dyad_attempt_count += 1;
+        if (comptime enable_probe_instrumentation) self.debug.inline_scalar_dyad_attempt_count += 1;
         const rhs_float: f64 = @floatFromInt(rhs_const);
         const lhs = if (const_first) rhs_float else left_float;
         const rhs = if (const_first) left_float else rhs_float;
@@ -14980,7 +13881,7 @@ pub const Session = struct {
             else => null,
         };
         if (comptime enable_probe_instrumentation) {
-            if (result != null) self.debug_inline_scalar_dyad_hit_count += 1 else self.debug_inline_scalar_dyad_fallback_count += 1;
+            if (result != null) self.debug.inline_scalar_dyad_hit_count += 1 else self.debug.inline_scalar_dyad_fallback_count += 1;
         }
         return result;
     }
@@ -15045,12 +13946,12 @@ pub const Session = struct {
     }
 
     fn applyShapedBorrowedDyadValue(self: *Session, op: BuiltinId, left: Value, right: Value) KError!Value {
-        if (comptime enable_probe_instrumentation) self.debug_shaped_scalar_dyad_count += 1;
+        if (comptime enable_probe_instrumentation) self.debug.shaped_scalar_dyad_count += 1;
         return try self.applyBorrowedDyadValue(op, left, right);
     }
 
     fn applyLocalConstDyadValue(self: *Session, left: Value, op: BuiltinId, rhs: i64) KError!Value {
-        if (comptime enable_probe_instrumentation) self.debug_shaped_scalar_dyad_count += 1;
+        if (comptime enable_probe_instrumentation) self.debug.shaped_scalar_dyad_count += 1;
         if (try self.tryFastLocalConstDyadValue(left, op, rhs, false)) |result| return result;
         const right = try self.intValue(rhs);
         defer self.releaseValue(right);
@@ -15058,7 +13959,7 @@ pub const Session = struct {
     }
 
     fn applyConstLocalDyadValue(self: *Session, lhs: i64, op: BuiltinId, right: Value) KError!Value {
-        if (comptime enable_probe_instrumentation) self.debug_shaped_scalar_dyad_count += 1;
+        if (comptime enable_probe_instrumentation) self.debug.shaped_scalar_dyad_count += 1;
         if (try self.tryFastLocalConstDyadValue(right, op, lhs, true)) |result| return result;
         const left = try self.intValue(lhs);
         defer self.releaseValue(left);
@@ -15082,27 +13983,13 @@ pub const Session = struct {
         return @as(u16, bytes[start]) | (@as(u16, bytes[start + 1]) << 8);
     }
 
-    fn valueIsMaximumFoldCallable(value: Value) bool {
-        return switch (value.tag()) {
-            .closure => blk: {
-                const closure = value.asClosure();
-                if (closureDerivedKind(closure) != .fold) break :blk false;
-                if (closure.captures.len != 1) break :blk false;
-                if (closure.captures[0].tag() != .builtin) break :blk false;
-                break :blk closure.captures[0].asBuiltin() == .maximum;
-            },
-            .builtin => value.asBuiltin() == .maximum,
-            else => false,
-        };
-    }
-
     fn valueIsBuiltin(value: Value, builtin: BuiltinId) bool {
         return value.tag() == .builtin and value.asBuiltin() == builtin;
     }
 
     fn compactBuiltinValueLen(bytes: []const u8, constants: []const Value, builtin: BuiltinId) ?usize {
         if (bytes.len >= 2 and bytes[0] == ck_const_builtin_u8) {
-            const found: BuiltinId = @enumFromInt(bytes[1]);
+            const found: BuiltinId = @fromBackingInt(@intCast(bytes[1]));
             if (found == builtin) return 2;
         }
         if (bytes.len >= 1 and compactIsConstValueOpcode(bytes[0])) {
@@ -15113,77 +14000,6 @@ pub const Session = struct {
             const slot = bytes[1];
             if (slot < constants.len and valueIsBuiltin(constants[slot], builtin)) return 2;
         }
-        return null;
-    }
-
-    fn compactMaximumFoldCallableLen(bytes: []const u8, constants: []const Value) ?usize {
-        if (bytes.len >= 4 and
-            bytes[0] == ck_const_builtin_u8 and
-            bytes[1] == @intFromEnum(BuiltinId.maximum) and
-            bytes[2] == ck_make_adverb_u8 and
-            bytes[3] == @intFromEnum(DerivedVerbKind.fold))
-        {
-            return 4;
-        }
-        if (bytes.len >= 1 and compactIsConstValueOpcode(bytes[0])) {
-            const slot = bytes[0] - ck_const_value_base;
-            if (slot < constants.len and valueIsMaximumFoldCallable(constants[slot])) return 1;
-        }
-        if (bytes.len >= 2 and bytes[0] == ck_const_value_u8) {
-            const slot = bytes[1];
-            if (slot < constants.len and valueIsMaximumFoldCallable(constants[slot])) return 2;
-        }
-        return null;
-    }
-
-    fn compactZeroConstLen(bytes: []const u8) ?usize {
-        if (bytes.len >= 2 and bytes[0] == ck_const_i8 and bytes[1] == 0) return 2;
-        if (bytes.len >= 9 and bytes[0] == ck_const_i64) {
-            const zero = directReadI64(bytes, 1) orelse return null;
-            if (zero == 0) return 9;
-        }
-        return null;
-    }
-
-    fn compactArgmaxBytecodeOperandLen(bytes: []const u8, constants: []const Value) ?usize {
-        const call1_flags = compactCallFlags(1, false, false);
-        const find_op = ckDyad(ckd_find);
-        var operand_len: usize = 1;
-        while (operand_len < bytes.len) : (operand_len += 1) {
-            const middle_len = compactBuiltinValueLen(bytes[operand_len..], constants, .maximum) orelse continue;
-            const right_start = operand_len + middle_len;
-            const right_end = right_start + operand_len;
-            const call_start = right_end;
-            if (call_start + 4 != bytes.len) continue;
-            if (bytes[call_start] != ck_call_adverb_stack_u8 or
-                bytes[call_start + 1] != @intFromEnum(DerivedVerbKind.fold) or
-                bytes[call_start + 2] != 1 or
-                bytes[call_start + 3] != find_op) continue;
-            if (std.mem.eql(u8, bytes[0..operand_len], bytes[right_start..right_end])) return operand_len;
-        }
-
-        operand_len = 1;
-        while (operand_len < bytes.len) : (operand_len += 1) {
-            const middle_len = compactMaximumFoldCallableLen(bytes[operand_len..], constants) orelse continue;
-            const right_start = operand_len + middle_len;
-            const right_end = right_start + operand_len;
-            const call_start = right_end;
-            if (call_start + 3 != bytes.len) continue;
-            if (bytes[call_start] != ck_call_stack_u8 or bytes[call_start + 1] != call1_flags or bytes[call_start + 2] != find_op) continue;
-            if (std.mem.eql(u8, bytes[0..operand_len], bytes[right_start..right_end])) return operand_len;
-        }
-
-        const grade_down = ckMonad(ckm_grade_down);
-        operand_len = 1;
-        while (operand_len < bytes.len) : (operand_len += 1) {
-            if (bytes[operand_len] != grade_down) continue;
-            const zero_start = operand_len + 1;
-            const zero_len = compactZeroConstLen(bytes[zero_start..]) orelse continue;
-            const call_start = zero_start + zero_len;
-            if (call_start + 2 != bytes.len) continue;
-            if (bytes[call_start] == ck_call_stack_u8 and bytes[call_start + 1] == call1_flags) return operand_len;
-        }
-
         return null;
     }
 
@@ -15339,7 +14155,7 @@ pub const Session = struct {
         if (compactBuiltinValueLen(bytes, constants, .add)) |base_len| {
             if (bytes.len >= base_len + 2 and
                 bytes[base_len] == ck_make_adverb_u8 and
-                bytes[base_len + 1] == @intFromEnum(DerivedVerbKind.fold))
+                bytes[base_len + 1] == @backingInt(DerivedVerbKind.fold))
             {
                 return base_len + 2;
             }
@@ -15380,7 +14196,7 @@ pub const Session = struct {
         }
         if (raw == ck_const_builtin_u8) {
             if (idx.* >= bytes.len) return null;
-            const builtin: BuiltinId = @enumFromInt(bytes[idx.*]);
+            const builtin: BuiltinId = @fromBackingInt(@intCast(bytes[idx.*]));
             idx.* += 1;
             return Value.builtin(builtin);
         }
@@ -15550,8 +14366,8 @@ pub const Session = struct {
             }
 
             if (compactDenseDyadRange(raw)) |op| {
-                const right = stack.popNode() orelse return null;
                 const left = stack.popNode() orelse return null;
+                const right = stack.popNode() orelse return null;
                 if (!stack.pushNode(&program, .{ .binary = .{
                     .op = op,
                     .left = left,
@@ -15564,8 +14380,8 @@ pub const Session = struct {
             if (raw == ck_call_stack_u8) {
                 var call_idx = idx;
                 if ((compactReadCallStackArgc(bytes, &call_idx) orelse return null) != 1) return null;
-                const arg = stack.popNode() orelse return null;
                 const callee = stack.popValue() orelse return null;
+                const arg = stack.popNode() orelse return null;
                 const op = compactDenseUnaryReverseCompositionOp(callee) orelse return null;
                 var source = compactDenseProducerSourceNode(&program, arg) orelse return null;
                 source.reverse = !source.reverse;
@@ -15655,28 +14471,21 @@ pub const Session = struct {
         if (code.arity == 0 or code.arity > 2) return null;
         const bytes = code.bytes;
         if (bytes.len < 7 or bytes[bytes.len - 1] != ck_return) return null;
-
-        if (compactBuiltinValueLen(bytes, code.constants, .add)) |base_len| {
-            const call_start = bytes.len - 4;
-            if (call_start >= base_len and
-                bytes[call_start] == ck_call_adverb_stack_u8 and
-                bytes[call_start + 1] == @intFromEnum(DerivedVerbKind.fold) and
-                bytes[call_start + 2] == 1)
-            {
-                if (compactDenseAddFoldProducerInfo(bytes[base_len..call_start], code.constants)) |info| return info;
+        var base_start: usize = 0;
+        while (base_start < bytes.len - 1) {
+            if (compactBuiltinValueLen(bytes[base_start..], code.constants, .add)) |base_len| {
+                const call_start = base_start + base_len;
+                if (call_start + 4 == bytes.len and bytes[call_start] == ck_call_adverb_stack_u8 and
+                    bytes[call_start + 1] == @backingInt(DerivedVerbKind.fold) and bytes[call_start + 2] == 1)
+                    return compactDenseAddFoldProducerInfo(bytes[0..base_start], code.constants);
             }
-        }
-
-        if (compactAddFoldCallableLen(bytes, code.constants)) |callable_len| {
-            const call_start = bytes.len - 3;
-            if (call_start >= callable_len and bytes[call_start] == ck_call_stack_u8) {
-                var call_idx = call_start;
-                if ((compactReadCallStackArgc(bytes, &call_idx) orelse return null) == 1 and call_idx == bytes.len - 1) {
-                    if (compactDenseAddFoldProducerInfo(bytes[callable_len..call_start], code.constants)) |info| return info;
-                }
+            if (compactAddFoldCallableLen(bytes[base_start..], code.constants)) |callable_len| {
+                var call_idx = base_start + callable_len;
+                if ((compactReadCallStackArgc(bytes, &call_idx) orelse 0) == 1 and call_idx == bytes.len - 1)
+                    return compactDenseAddFoldProducerInfo(bytes[0..base_start], code.constants);
             }
+            base_start += compactInstructionLen(bytes, base_start) orelse return null;
         }
-
         return null;
     }
 
@@ -15817,7 +14626,7 @@ pub const Session = struct {
         const input = args[0];
         if (numericVectorLen(input) == null or valueNumericMode(input) == null) return null;
         const plan = (try self.classifyNumericUnaryEachPlan(base)) orelse return null;
-        if (comptime enable_probe_instrumentation) self.debug_apply_each_fast_numeric_unary_count += 1;
+        if (comptime enable_probe_instrumentation) self.debug.apply_each_fast_numeric_unary_count += 1;
         return try self.applyNumericUnaryEachPlan(plan, input);
     }
 
@@ -15935,8 +14744,8 @@ pub const Session = struct {
 
     fn numericVectorCodeAppendDyad(program: *NumericVectorCodeProgram, classes: *[max_code_frame_slots]NumericVectorCodeResultClass, depth: *usize, op: BuiltinId) ?void {
         if (depth.* < 2) return null;
-        const right = classes[depth.* - 1];
-        const left = classes[depth.* - 2];
+        const left = classes[depth.* - 1];
+        const right = classes[depth.* - 2];
         const result_class = numericVectorCodeDyadResultClass(op, left, right) orelse return null;
         if (!program.append(.{ .dyad = op })) return null;
         depth.* -= 1;
@@ -16015,8 +14824,8 @@ pub const Session = struct {
                 const scalar = directReadI64(bytes, idx + 1) orelse return null;
                 idx += 9;
                 if (slot != 0) return null;
-                numericVectorCodeAppendInput(&program, &classes, &depth) orelse return null;
                 numericVectorCodeAppendScalar(&program, &classes, &depth, scalar) orelse return null;
+                numericVectorCodeAppendInput(&program, &classes, &depth) orelse return null;
                 numericVectorCodeAppendDyad(&program, &classes, &depth, op) orelse return null;
                 continue;
             }
@@ -16027,8 +14836,8 @@ pub const Session = struct {
                 const slot = bytes[idx + 8];
                 idx += 9;
                 if (slot != 0) return null;
-                numericVectorCodeAppendScalar(&program, &classes, &depth, scalar) orelse return null;
                 numericVectorCodeAppendInput(&program, &classes, &depth) orelse return null;
+                numericVectorCodeAppendScalar(&program, &classes, &depth, scalar) orelse return null;
                 numericVectorCodeAppendDyad(&program, &classes, &depth, op) orelse return null;
                 continue;
             }
@@ -16085,8 +14894,8 @@ pub const Session = struct {
                 },
                 .dyad => |op| {
                     if (depth < 2) return error.Internal;
-                    const right = stack[depth - 1];
-                    const left = stack[depth - 2];
+                    const left = stack[depth - 1];
+                    const right = stack[depth - 2];
                     depth -= 1;
                     stack[depth - 1] = try evalNumericVectorCodeDyad(op, left, right);
                 },
@@ -16173,7 +14982,7 @@ pub const Session = struct {
         if ((valueNumericMode(input) orelse return null) != .int) return null;
 
         const code = codeForPlainClosure(base.asClosure(), 1) orelse return null;
-        if (code.local_count > max_code_frame_slots) return null;
+        if (code.slot_count > max_code_frame_slots) return null;
 
         const dense = hostDenseView(self, input) catch |err| switch (err) {
             error.Type => return null,
@@ -16185,11 +14994,11 @@ pub const Session = struct {
         };
 
         if (classifyNumericVectorCodeProgram(code)) |program| {
-            if (comptime enable_probe_instrumentation) self.debug_apply_each_fast_numeric_vector_code_count += 1;
+            if (comptime enable_probe_instrumentation) self.debug.apply_each_fast_numeric_vector_code_count += 1;
             return try self.applyNumericVectorCodeEach(&program, input_view, out_len);
         }
 
-        if (comptime enable_probe_instrumentation) self.debug_apply_each_fast_numeric_closure_count += 1;
+        if (comptime enable_probe_instrumentation) self.debug.apply_each_fast_numeric_closure_count += 1;
         return try self.applyFastNumericClosureEach(code, input_view, out_len);
     }
 
@@ -16292,8 +15101,8 @@ pub const Session = struct {
                 };
             },
             else => {
-                const lhs = compactReadConditionalAtom(bytes, idx) orelse return null;
                 const rhs = compactReadConditionalAtom(bytes, idx) orelse return null;
+                const lhs = compactReadConditionalAtom(bytes, idx) orelse return null;
                 if (idx.* >= bytes.len or !compactIsDyadOpcode(bytes[idx.*])) return null;
                 const cmp = switch (bytes[idx.*] - ck_dyad_base) {
                     ckd_more => BuiltinId.more,
@@ -16327,7 +15136,7 @@ pub const Session = struct {
             const lhs = directConditionalAtomFromSlot(bytes[idx.* + 3]) orelse return null;
             const rhs = directConditionalAtomFromSlot(bytes[idx.* + 4]) orelse return null;
             const target = directReadU16(bytes, idx.* + 5) orelse return null;
-            const cmp: BuiltinId = @enumFromInt(bytes[idx.* + 2]);
+            const cmp: BuiltinId = @fromBackingInt(@intCast(bytes[idx.* + 2]));
             switch (cmp) {
                 .less, .more, .equal => {},
                 else => return null,
@@ -16342,7 +15151,7 @@ pub const Session = struct {
             if (idx.* + 5 > bytes.len) return null;
             const lhs = directConditionalAtomFromSlot(bytes[idx.* + 2]) orelse return null;
             const rhs = directConditionalAtomFromSlot(bytes[idx.* + 3]) orelse return null;
-            const cmp: BuiltinId = @enumFromInt(bytes[idx.* + 1]);
+            const cmp: BuiltinId = @fromBackingInt(@intCast(bytes[idx.* + 1]));
             switch (cmp) {
                 .less, .more, .equal => {},
                 else => return null,
@@ -16450,7 +15259,7 @@ pub const Session = struct {
         return switch (raw) {
             ck_const_builtin_u8 => blk: {
                 if (idx.* + 2 > bytes.len) return null;
-                const builtin: BuiltinId = @enumFromInt(bytes[idx.* + 1]);
+                const builtin: BuiltinId = @fromBackingInt(@intCast(bytes[idx.* + 1]));
                 idx.* += 2;
                 break :blk Value.builtin(builtin);
             },
@@ -16473,31 +15282,19 @@ pub const Session = struct {
 
     fn classifyCompactDenseElementwiseWrapperClosure(self: *Session, closure: *const Closure) KError!?DenseElementwiseKind {
         if (closure.header.owner != .frozen or closure.captures.len != 0) return null;
-        const compact = closure.code;
-        const bytes = compact.bytes;
+        const bytes = closure.code.bytes;
         if (bytes.len < 6 or bytes[bytes.len - 1] != ck_return) return null;
-
-        var idx: usize = 0;
+        if ((compactLocalReadSlot(bytes[0]) orelse 255) != 1 or
+            (compactLocalReadSlot(bytes[1]) orelse 255) != 0) return null;
+        var idx: usize = 2;
         const base_value = (try self.compactReadClosureBaseValue(closure, bytes, &idx)) orelse return null;
-        if (idx + 6 == bytes.len and
-            (compactLocalReadSlot(bytes[idx]) orelse 255) == 0 and
-            (compactLocalReadSlot(bytes[idx + 1]) orelse 255) == 1 and
-            bytes[idx + 2] == ck_call_adverb_stack_u8 and
-            bytes[idx + 3] == @intFromEnum(DerivedVerbKind.each) and
-            bytes[idx + 4] == 2 and
-            bytes[idx + 5] == ck_return)
-        {
+        if (idx + 4 == bytes.len and bytes[idx] == ck_call_adverb_stack_u8 and
+            bytes[idx + 1] == @backingInt(DerivedVerbKind.each) and bytes[idx + 2] == 2)
             return try self.classifyDenseElementwiseBaseRuntime(base_value);
-        }
-        if (idx + 7 != bytes.len or
-            bytes[idx] != ck_make_adverb_u8 or
-            bytes[idx + 1] != @intFromEnum(DerivedVerbKind.each) or
-            (compactLocalReadSlot(bytes[idx + 2]) orelse 255) != 0 or
-            (compactLocalReadSlot(bytes[idx + 3]) orelse 255) != 1) return null;
-        idx += 4;
+        if (idx + 5 != bytes.len or bytes[idx] != ck_make_adverb_u8 or
+            bytes[idx + 1] != @backingInt(DerivedVerbKind.each)) return null;
+        idx += 2;
         if ((compactReadCallStackArgc(bytes, &idx) orelse return null) != 2) return null;
-        if (idx >= bytes.len or bytes[idx] != ck_return or idx + 1 != bytes.len) return null;
-
         return try self.classifyDenseElementwiseBaseRuntime(base_value);
     }
 
@@ -16537,38 +15334,23 @@ pub const Session = struct {
 
     fn classifyCompactUnaryLiftedClosure(self: *Session, closure: *const Closure) KError!?CompactUnaryLiftedKind {
         if (closure.header.owner != .frozen or closure.captures.len != 0) return null;
-        const compact = closure.code;
-        const bytes = compact.bytes;
+        const bytes = closure.code.bytes;
         if (bytes.len < 8 or bytes[bytes.len - 1] != ck_return) return null;
-
         var idx: usize = 0;
-        const base_value = (try self.compactReadClosureBaseValue(closure, bytes, &idx)) orelse return null;
-        if (idx + 8 == bytes.len) {
-            const transform = compactReadUnarySelfTransform(bytes, &idx) orelse return null;
-            const second = compactReadUnarySelfTransform(bytes, &idx) orelse return null;
-            if (transform != second) return null;
-            if (idx + 4 != bytes.len or
-                bytes[idx] != ck_call_adverb_stack_u8 or
-                bytes[idx + 1] != @intFromEnum(DerivedVerbKind.each_right) or
-                bytes[idx + 2] != 2 or
-                bytes[idx + 3] != ck_return) return null;
-
-            _ = try self.classifyDenseElementwiseBaseRuntime(base_value) orelse return null;
-            return .{ .base = base_value, .transform = transform };
-        }
-        if (idx + 2 > bytes.len or bytes[idx] != ck_make_adverb_u8) return null;
-        const kind: DerivedVerbKind = @enumFromInt(bytes[idx + 1]);
-        if (kind != .each_right) return null;
-        idx += 2;
-
         const transform = compactReadUnarySelfTransform(bytes, &idx) orelse return null;
         const second = compactReadUnarySelfTransform(bytes, &idx) orelse return null;
         if (transform != second) return null;
-
-        if (idx + 3 != bytes.len) return null;
+        const base_value = (try self.compactReadClosureBaseValue(closure, bytes, &idx)) orelse return null;
+        if (idx + 4 == bytes.len and bytes[idx] == ck_call_adverb_stack_u8 and
+            bytes[idx + 1] == @backingInt(DerivedVerbKind.each_right) and bytes[idx + 2] == 2)
+        {
+            _ = try self.classifyDenseElementwiseBaseRuntime(base_value) orelse return null;
+            return .{ .base = base_value, .transform = transform };
+        }
+        if (idx + 5 != bytes.len or bytes[idx] != ck_make_adverb_u8 or
+            bytes[idx + 1] != @backingInt(DerivedVerbKind.each_right)) return null;
+        idx += 2;
         if ((compactReadCallStackArgc(bytes, &idx) orelse return null) != 2) return null;
-        if (bytes[idx] != ck_return) return null;
-
         _ = try self.classifyDenseElementwiseBaseRuntime(base_value) orelse return null;
         return .{ .base = base_value, .transform = transform };
     }
@@ -16584,21 +15366,21 @@ pub const Session = struct {
 
     fn hostStringListItemValue(self: *Session, list: *const HostStringList, idx: usize) KError!Value {
         if (idx >= list.len) return error.Type;
-        if (comptime enable_probe_instrumentation) self.debug_host_string_list_item_value_count += 1;
+        if (comptime enable_probe_instrumentation) self.debug.host_string_list_item_value_count += 1;
         const item = switch (list.storage) {
             .eager => |items| switch (items[idx]) {
                 .owned => |text| blk: {
-                    if (comptime enable_probe_instrumentation) self.debug_host_string_list_item_eager_owned_count += 1;
+                    if (comptime enable_probe_instrumentation) self.debug.host_string_list_item_eager_owned_count += 1;
                     break :blk try self.retainEscapedValue(Value.array(text));
                 },
                 .view => |view| blk: {
-                    if (comptime enable_probe_instrumentation) self.debug_host_string_list_item_eager_view_count += 1;
+                    if (comptime enable_probe_instrumentation) self.debug.host_string_list_item_eager_view_count += 1;
                     const base = list.base orelse return error.Internal;
                     break :blk try self.managedHostStringViewWithReason(base, view, .string_list_eager_view);
                 },
             },
             .split_scalar => |lazy| blk: {
-                if (comptime enable_probe_instrumentation) self.debug_host_string_list_item_split_scalar_count += 1;
+                if (comptime enable_probe_instrumentation) self.debug.host_string_list_item_split_scalar_count += 1;
                 const base = list.base orelse return error.Internal;
                 const src = hostTextBytes(base);
                 var piece_idx: usize = 0;
@@ -16610,8 +15392,8 @@ pub const Session = struct {
                     scanned_seps += 1;
                     if (piece_idx == idx) {
                         if (comptime enable_probe_instrumentation) {
-                            self.debug_host_string_list_item_split_scalar_scan_byte_count += scanned_bytes;
-                            self.debug_host_string_list_item_split_scalar_scan_sep_count += scanned_seps;
+                            self.debug.host_string_list_item_split_scalar_scan_byte_count += scanned_bytes;
+                            self.debug.host_string_list_item_split_scalar_scan_sep_count += scanned_seps;
                         }
                         break :blk try self.managedHostStringViewWithReason(base, .{
                             .start = start,
@@ -16624,8 +15406,8 @@ pub const Session = struct {
                 if (piece_idx != idx) return error.Type;
                 scanned_bytes += src.len - start;
                 if (comptime enable_probe_instrumentation) {
-                    self.debug_host_string_list_item_split_scalar_scan_byte_count += scanned_bytes;
-                    self.debug_host_string_list_item_split_scalar_scan_sep_count += scanned_seps;
+                    self.debug.host_string_list_item_split_scalar_scan_byte_count += scanned_bytes;
+                    self.debug.host_string_list_item_split_scalar_scan_sep_count += scanned_seps;
                 }
                 break :blk try self.managedHostStringViewWithReason(base, .{
                     .start = start,
@@ -16807,13 +15589,6 @@ pub const Session = struct {
         self.profile_dynamic_code_used[id] = true;
     }
 
-    fn invokeValueInCurrentRun(self: *Session, callee: Value, args: []const Value) KError!Value {
-        _ = self;
-        _ = callee;
-        _ = args;
-        return error.Unsupported;
-    }
-
     fn invokeClosureInCurrentRun(self: *Session, callee: Value, closure: *const Closure, args: []const Value) KError!Value {
         _ = self;
         _ = callee;
@@ -16893,12 +15668,12 @@ pub const Session = struct {
             if (info.map == .mul) {
                 if (numericVectorLen(arg0) == null or numericVectorLen(arg1) == null) return null;
             } else if (try self.tryFastDenseFloatInnerAddMap(info, &.{ arg0, arg1 })) |value| {
-                if (self.debugDetailedProbeActive()) self.debug_structured_derived2_hit_count += 1;
+                if (self.debugDetailedProbeActive()) self.debug.structured_derived2_hit_count += 1;
                 return value;
             } else {
                 return null;
             }
-            if (self.debugDetailedProbeActive()) self.debug_structured_derived2_hit_count += 1;
+            if (self.debugDetailedProbeActive()) self.debug.structured_derived2_hit_count += 1;
             return try self.applyMatmulValues(arg0, arg1);
         }
 
@@ -16909,7 +15684,7 @@ pub const Session = struct {
         const base_info = (try self.innerProductInfoFromClosure(base.asClosure())) orelse return null;
         if (base_info.reduce != .add or base_info.map != .mul) return null;
         if (!valueIsRenderableMatrixLike(arg0)) return null;
-        if (self.debugDetailedProbeActive()) self.debug_structured_derived2_hit_count += 1;
+        if (self.debugDetailedProbeActive()) self.debug.structured_derived2_hit_count += 1;
         return try self.applyMatmulValues(arg0, arg1);
     }
 
@@ -17112,10 +15887,10 @@ pub const Session = struct {
     }
 
     fn applyAmendOwned(self: *Session, base: Value, selector: Value, kind: AmendKind, func_or_value: Value, arg: Value) KError!Value {
-        if (comptime enable_probe_instrumentation) self.debug_owned_amend_count += 1;
-        errdefer self.releaseCanonicalManagedNumericValue(base);
+        if (comptime enable_probe_instrumentation) self.debug.owned_amend_count += 1;
+        errdefer self.releaseValue(base);
         const result = try self.applyAmend(base, selector, kind, func_or_value, arg);
-        self.releaseCanonicalManagedNumericValue(base);
+        self.releaseValue(base);
         return result;
     }
 
@@ -17166,7 +15941,7 @@ pub const Session = struct {
             .array => if (boxedArrayItems(selector)) |boxed| {
                 for (boxed) |value| try items.append(self.allocator, try self.retainEscapedValue(value));
             } else switch (selector.arrayKind()) {
-                .host_dense_array, .backend_array, .numeric_array => {
+                .numeric_array => {
                     if (valueNonVectorNumericShape(selector) != null) {
                         const rows = try self.materializeTopLevelItems(selector);
                         defer self.releaseArgs(rows);
@@ -17175,7 +15950,7 @@ pub const Session = struct {
                         const array = try numericHostArrayValue(self, selector);
                         const len = array.len();
                         for (0..len) |idx| {
-                            try items.append(self.allocator, try self.hostDenseIndexScalar(array, @intCast(idx)));
+                            try items.append(self.allocator, try self.hostDenseIndexScalar(selector, array, @intCast(idx)));
                         }
                     }
                 },
@@ -17332,16 +16107,16 @@ pub const Session = struct {
 
     fn recordFastDenseAssignHit(self: *Session, targets: DenseAssignTargets, rhs: DenseAssignRhs, reused: bool) void {
         if (comptime !enable_probe_instrumentation) return;
-        self.debug_fast_dense_assign_hit_count += 1;
-        if (reused) self.debug_fast_dense_assign_reuse_count += 1;
-        self.debug_fast_dense_assign_target_element_count += denseAssignTargetsLen(targets);
+        self.debug.fast_dense_assign_hit_count += 1;
+        if (reused) self.debug.fast_dense_assign_reuse_count += 1;
+        self.debug.fast_dense_assign_target_element_count += denseAssignTargetsLen(targets);
         switch (targets) {
-            .scalar => self.debug_fast_dense_assign_scalar_target_count += 1,
-            .slice, .arithmetic => self.debug_fast_dense_assign_vector_target_count += 1,
+            .scalar => self.debug.fast_dense_assign_scalar_target_count += 1,
+            .slice, .arithmetic => self.debug.fast_dense_assign_vector_target_count += 1,
         }
         switch (rhs) {
-            .int_scalar, .float_scalar => self.debug_fast_dense_assign_scalar_rhs_count += 1,
-            .int_vector, .float_vector => self.debug_fast_dense_assign_vector_rhs_count += 1,
+            .int_scalar, .float_scalar => self.debug.fast_dense_assign_scalar_rhs_count += 1,
+            .int_vector, .float_vector => self.debug.fast_dense_assign_vector_rhs_count += 1,
         }
     }
 
@@ -17514,64 +16289,49 @@ pub const Session = struct {
             self.evictBackendAttachment(mutable_handle);
         }
         mutable_handle.preferred = .host;
-        syncNumericArrayChildren(mutable_handle);
         return true;
     }
 
     fn recordFastDenseAssignMiss(self: *Session) void {
-        if (comptime enable_probe_instrumentation) self.debug_fast_dense_assign_miss_count += 1;
+        if (comptime enable_probe_instrumentation) self.debug.fast_dense_assign_miss_count += 1;
     }
 
     fn recordFastDenseAssignClone(self: *Session, base: Value) void {
         if (comptime !enable_probe_instrumentation) return;
-        self.debug_fast_dense_assign_clone_count += 1;
+        self.debug.fast_dense_assign_clone_count += 1;
 
         if (mutableNumericHandle(base)) |handle| {
             switch (handle.header.owner) {
                 .managed => {
                     if (handle.header.ref_count != 1) {
-                        self.debug_fast_dense_assign_clone_reason_counts[@intFromEnum(DebugFastDenseAssignCloneReason.non_unique)] += 1;
+                        self.debug.fast_dense_assign_clone_reason_counts[@backingInt(DebugFastDenseAssignCloneReason.non_unique)] += 1;
                         return;
                     }
                 },
                 .frozen => {
-                    self.debug_fast_dense_assign_clone_reason_counts[@intFromEnum(DebugFastDenseAssignCloneReason.frozen)] += 1;
-                    return;
-                },
-                .scratch => {},
-            }
-        } else if (hostDenseIfPresent(base)) |host| {
-            switch (host.header.owner) {
-                .managed => {
-                    if (host.header.ref_count != 1) {
-                        self.debug_fast_dense_assign_clone_reason_counts[@intFromEnum(DebugFastDenseAssignCloneReason.non_unique)] += 1;
-                        return;
-                    }
-                },
-                .frozen => {
-                    self.debug_fast_dense_assign_clone_reason_counts[@intFromEnum(DebugFastDenseAssignCloneReason.frozen)] += 1;
+                    self.debug.fast_dense_assign_clone_reason_counts[@backingInt(DebugFastDenseAssignCloneReason.frozen)] += 1;
                     return;
                 },
                 .scratch => {},
             }
         }
 
-        self.debug_fast_dense_assign_clone_reason_counts[@intFromEnum(DebugFastDenseAssignCloneReason.other)] += 1;
+        self.debug.fast_dense_assign_clone_reason_counts[@backingInt(DebugFastDenseAssignCloneReason.other)] += 1;
     }
 
     fn finishFastDenseScalarIntAssign(self: *Session, target_idx: usize, rhs: DenseAssignRhs, out: *HostIntResult, reused: bool) KError!Value {
         const host = out.arrayPtr();
         hostDenseSetFlags(host, host_dense_flag_normalized);
-        self.invalidateHostDenseCachesForMutation(host);
-        const value = try out.value(self);
+        self.invalidateHostDenseCachesForMutation(out.value(), host);
+        const value = out.value();
         self.recordFastDenseAssignHit(.{ .scalar = target_idx }, rhs, reused);
         return if (reused) self.shareValue(value) else value;
     }
 
     fn finishFastDenseScalarFloatAssign(self: *Session, target_idx: usize, rhs: DenseAssignRhs, out: HostFloatResult, reused: bool) KError!Value {
         hostDenseSetFlags(out.array, host_dense_flag_normalized);
-        self.invalidateHostDenseCachesForMutation(out.array);
-        const value = try out.value(self);
+        self.invalidateHostDenseCachesForMutation(out.value(), out.array);
+        const value = out.value();
         self.recordFastDenseAssignHit(.{ .scalar = target_idx }, rhs, reused);
         return if (reused) self.shareValue(value) else value;
     }
@@ -17585,7 +16345,7 @@ pub const Session = struct {
             .bit => {
                 const rhs_int = denseAssignScalarIntLike(rhs_source) orelse return null;
                 if (rhs_int != 0 and rhs_int != 1) return null;
-                if (comptime enable_probe_instrumentation) self.debug_fast_dense_assign_attempt_count += 1;
+                if (comptime enable_probe_instrumentation) self.debug.fast_dense_assign_attempt_count += 1;
 
                 var reused = false;
                 var out = if (self.tryReuseHostIntArrayResult(base, .bit)) |existing| blk: {
@@ -17598,7 +16358,7 @@ pub const Session = struct {
                 } else blk: {
                     self.recordFastDenseAssignClone(base);
                     var allocated = try self.allocOwnedHostIntCloneResult(amendCloneOwner(base), .bit, base_array.len());
-                    errdefer self.releaseValue(Value.array(allocated.arrayPtr()));
+                    errdefer self.releaseValue(allocated.value());
                     @memcpy(allocated.bit.words, hostDenseLogicalBitWords(base_array, base_array.storage.bit));
                     break :blk allocated;
                 };
@@ -17610,7 +16370,7 @@ pub const Session = struct {
                 const view = hostIntArrayView(base_array) orelse return null;
                 const kind = hostIntArrayViewKind(view);
                 if (!hostIntKindCanRepresent(kind, rhs_int)) return null;
-                if (comptime enable_probe_instrumentation) self.debug_fast_dense_assign_attempt_count += 1;
+                if (comptime enable_probe_instrumentation) self.debug.fast_dense_assign_attempt_count += 1;
 
                 var reused = false;
                 var out = if (self.tryReuseHostIntArrayResult(base, kind)) |existing| blk: {
@@ -17623,7 +16383,7 @@ pub const Session = struct {
                 } else blk: {
                     self.recordFastDenseAssignClone(base);
                     var allocated = try self.allocOwnedHostIntCloneResult(amendCloneOwner(base), kind, base_array.len());
-                    errdefer self.releaseValue(Value.array(allocated.arrayPtr()));
+                    errdefer self.releaseValue(allocated.value());
                     try copyHostIntViewToResult(&allocated, view);
                     break :blk allocated;
                 };
@@ -17637,7 +16397,7 @@ pub const Session = struct {
                     .{ .int_scalar = rhs_int }
                 else
                     .{ .float_scalar = rhs_float };
-                if (comptime enable_probe_instrumentation) self.debug_fast_dense_assign_attempt_count += 1;
+                if (comptime enable_probe_instrumentation) self.debug.fast_dense_assign_attempt_count += 1;
 
                 var reused = false;
                 const out = if (self.tryReuseHostFloatArrayResult(base)) |existing| blk: {
@@ -17650,7 +16410,7 @@ pub const Session = struct {
                 } else blk: {
                     self.recordFastDenseAssignClone(base);
                     const allocated = try self.allocOwnedHostFloatResult(amendCloneOwner(base), base_array.len());
-                    errdefer self.releaseValue(Value.array(allocated.array));
+                    errdefer self.releaseValue(allocated.value());
                     @memcpy(allocated.items, base_items);
                     break :blk allocated;
                 };
@@ -17704,15 +16464,15 @@ pub const Session = struct {
                 } else blk_out: {
                     self.recordFastDenseAssignClone(base);
                     var allocated = try self.allocOwnedHostIntCloneResult(amendCloneOwner(base), kind, base_array.len());
-                    errdefer self.releaseValue(Value.array(allocated.arrayPtr()));
+                    errdefer self.releaseValue(allocated.value());
                     try copyHostIntViewToResult(&allocated, view);
                     break :blk_out allocated;
                 };
                 try applyDenseAssignIntRhs(&out, targets, rhs);
                 const host = out.arrayPtr();
                 hostDenseSetFlags(host, host_dense_flag_normalized);
-                self.invalidateHostDenseCachesForMutation(host);
-                const value = try out.value(self);
+                self.invalidateHostDenseCachesForMutation(out.value(), host);
+                const value = out.value();
                 self.recordFastDenseAssignHit(targets, rhs, reused);
                 break :blk if (reused) self.shareValue(value) else value;
             },
@@ -17729,14 +16489,14 @@ pub const Session = struct {
                 } else blk_out: {
                     self.recordFastDenseAssignClone(base);
                     const allocated = try self.allocOwnedHostFloatResult(amendCloneOwner(base), base_array.len());
-                    errdefer self.releaseValue(Value.array(allocated.array));
+                    errdefer self.releaseValue(allocated.value());
                     @memcpy(allocated.items, base_items);
                     break :blk_out allocated;
                 };
                 applyDenseAssignFloatRhs(out.items, targets, rhs);
                 hostDenseSetFlags(out.array, host_dense_flag_normalized);
-                self.invalidateHostDenseCachesForMutation(out.array);
-                const value = try out.value(self);
+                self.invalidateHostDenseCachesForMutation(out.value(), out.array);
+                const value = out.value();
                 self.recordFastDenseAssignHit(targets, rhs, reused);
                 break :blk if (reused) self.shareValue(value) else value;
             },
@@ -17744,23 +16504,23 @@ pub const Session = struct {
     }
 
     fn tryFastDenseAssignScalarAmend(self: *Session, base: Value, target_idx: usize, rhs_source: Value) KError!?Value {
-        if (comptime enable_probe_instrumentation) self.debug_fast_dense_assign_attempt_count += 1;
+        if (comptime enable_probe_instrumentation) self.debug.fast_dense_assign_attempt_count += 1;
         return try self.tryFastDenseAssignAmendImpl(base, .{ .scalar = target_idx }, rhs_source);
     }
 
     fn tryFastIndexedDenseScalarAssignOwned(self: *Session, base: Value, selector: Value, rhs_source: Value) KError!?Value {
         if (base.tag() != .array) return null;
         const raw_index = scalarIntLikeValue(selector) orelse return null;
-        errdefer self.releaseCanonicalManagedNumericValue(base);
+        errdefer self.releaseValue(base);
         const target_idx = try normalizeIndex(raw_index, try self.topLevelLen(base));
         if (try self.tryFastDenseScalarAssignDirect(base, target_idx, rhs_source)) |amended| {
-            if (comptime enable_probe_instrumentation) self.debug_owned_amend_count += 1;
-            self.releaseCanonicalManagedNumericValue(base);
+            if (comptime enable_probe_instrumentation) self.debug.owned_amend_count += 1;
+            self.releaseValue(base);
             return amended;
         }
         const amended = (try self.tryFastDenseAssignScalarAmend(base, target_idx, rhs_source)) orelse return null;
-        if (comptime enable_probe_instrumentation) self.debug_owned_amend_count += 1;
-        self.releaseCanonicalManagedNumericValue(base);
+        if (comptime enable_probe_instrumentation) self.debug.owned_amend_count += 1;
+        self.releaseValue(base);
         return amended;
     }
 
@@ -17779,7 +16539,7 @@ pub const Session = struct {
         const base = cell.value;
         if (!cell.class.isArray()) return null;
         const raw_index = scalarIntLikeValue(selector) orelse return null;
-        if (comptime enable_probe_instrumentation) self.debug_fast_dense_assign_attempt_count += 1;
+        if (comptime enable_probe_instrumentation) self.debug.fast_dense_assign_attempt_count += 1;
         if (valueNonVectorNumericShape(base) != null) {
             self.recordFastDenseAssignMiss();
             return null;
@@ -17816,7 +16576,7 @@ pub const Session = struct {
                 try applyDenseAssignIntRhs(&out, .{ .scalar = target_idx }, rhs);
                 const host = out.arrayPtr();
                 hostDenseSetFlags(host, host_dense_flag_normalized);
-                self.invalidateHostDenseCachesForMutation(host);
+                self.invalidateHostDenseCachesForMutation(base, host);
             },
             .float => {
                 const out = self.tryReuseHostFloatArrayResult(base) orelse {
@@ -17829,14 +16589,14 @@ pub const Session = struct {
                 }
                 applyDenseAssignFloatRhs(out.items, .{ .scalar = target_idx }, rhs);
                 hostDenseSetFlags(out.array, host_dense_flag_normalized);
-                self.invalidateHostDenseCachesForMutation(out.array);
+                self.invalidateHostDenseCachesForMutation(base, out.array);
             },
         }
 
         cell.class = classifyGlobalValue(base);
         if (comptime enable_probe_instrumentation) {
             self.recordFastDenseAssignHit(.{ .scalar = target_idx }, rhs, true);
-            self.debug_owned_amend_count += 1;
+            self.debug.owned_amend_count += 1;
         }
         return .{
             .result = if (want_result) try self.applyArrayCall1Scalar(base, raw_index) else null,
@@ -17844,12 +16604,12 @@ pub const Session = struct {
     }
 
     fn tryFastDenseAssignAmend(self: *Session, base: Value, selectors: []const usize, rhs_source: Value) KError!?Value {
-        if (comptime enable_probe_instrumentation) self.debug_fast_dense_assign_attempt_count += 1;
+        if (comptime enable_probe_instrumentation) self.debug.fast_dense_assign_attempt_count += 1;
         return try self.tryFastDenseAssignAmendImpl(base, .{ .slice = selectors }, rhs_source);
     }
 
     fn tryFastDenseAssignArithmeticAmend(self: *Session, base: Value, slice: ArithmeticIndexSlice, rhs_source: Value) KError!?Value {
-        if (comptime enable_probe_instrumentation) self.debug_fast_dense_assign_attempt_count += 1;
+        if (comptime enable_probe_instrumentation) self.debug.fast_dense_assign_attempt_count += 1;
         return try self.tryFastDenseAssignAmendImpl(base, .{ .arithmetic = slice }, rhs_source);
     }
 
@@ -18515,7 +17275,7 @@ pub const Session = struct {
     fn applyProjectionClosure(self: *Session, info: ProjectionInfo, args: []const Value) KError!Value {
         var profile_scope = self.beginSamplingProfileScope(.apply_projection);
         defer profile_scope.end();
-        if (self.debugDetailedProbeActive()) self.debug_apply_projection_count += 1;
+        if (self.debugDetailedProbeActive()) self.debug.apply_projection_count += 1;
         if (try self.tryApplyDirectBuiltinProjection(info, args)) |value| return value;
         const full_slot_values = try self.scratch_arena.allocator().alloc(Value, info.slot_count);
         var next_hole_mask: u64 = 0;
@@ -18595,7 +17355,7 @@ pub const Session = struct {
 
     fn applyDerivedClosure(self: *Session, closure: *const Closure, args: []const Value) KError!?Value {
         if (!closureMayUseDerivedApply(closure)) return null;
-        if (self.debugDetailedProbeActive()) self.debug_apply_derived_closure_count += 1;
+        if (self.debugDetailedProbeActive()) self.debug.apply_derived_closure_count += 1;
         if (try self.monadicBuiltinFromClosure(closure)) |op| {
             return try self.applyMonadicBuiltinClosure(op, args);
         }
@@ -18976,7 +17736,7 @@ pub const Session = struct {
         if (base.tag() != .closure) return null;
         const closure = base.asClosure();
         const code = codeForPlainClosure(closure, 1) orelse return null;
-        if (code.local_count > max_code_frame_slots) return null;
+        if (code.slot_count > max_code_frame_slots) return null;
 
         var current = self.shareValue(seed);
         var current_live = true;
@@ -19154,7 +17914,7 @@ pub const Session = struct {
             }
         }
         if (!saw_array) return try self.applyDerivedBase(base, args);
-        if (comptime enable_probe_instrumentation) self.debug_apply_each_generic_count += 1;
+        if (comptime enable_probe_instrumentation) self.debug.apply_each_generic_count += 1;
 
         var results = std.ArrayList(Value).empty;
         defer {
@@ -19261,44 +18021,7 @@ pub const Session = struct {
     }
 
     fn tryFastBackendMatrixRowFoldEachDerived(self: *Session, base: Value, args: []const Value) KError!?Value {
-        return runtime_backend_exec.tryFastBackendMatrixRowFoldEachDerived(.{
-            .Session = Session,
-            .Value = Value,
-            .NumericArray = NumericArray,
-            .BuiltinId = BuiltinId,
-            .DenseExecBackend = DenseExecBackend,
-            .KError = KError,
-            .c = c,
-            .mlx = mlx,
-            .runtime_has_mlx = runtime_has_mlx,
-            .isDerivedBuiltinClosure = isDerivedBuiltinClosure,
-            .valueNumericMatrixShape = valueNumericMatrixShape,
-            .valueNumericHandle = valueNumericHandle,
-            .numericIntAt = numericIntAt,
-            .numericArrayIsFirstAxisSlice = numericArrayIsFirstAxisSlice,
-            .numericArrayFirstAxisSliceSource = numericArrayFirstAxisSliceSource,
-            .numericArrayFirstAxisSliceRowStart = numericArrayFirstAxisSliceRowStart,
-            .numericArrayFirstAxisSliceRowStep = numericArrayFirstAxisSliceRowStep,
-            .numericArrayIsFirstAxisIndex = numericArrayIsFirstAxisIndex,
-            .numericArrayFirstAxisIndexSource = numericArrayFirstAxisIndexSource,
-            .numericArrayFirstAxisIndexRows = numericArrayFirstAxisIndexRows,
-            .numericArrayIsFirstAxisConcat = numericArrayIsFirstAxisConcat,
-            .numericArrayFirstAxisConcatLeft = numericArrayFirstAxisConcatLeft,
-            .numericArrayFirstAxisConcatRight = numericArrayFirstAxisConcatRight,
-            .numericArrayIsReshapeView = numericArrayIsReshapeView,
-            .numericArrayReshapeSource = numericArrayReshapeSource,
-            .numericArrayIsTransposeView = numericArrayIsTransposeView,
-            .numericArrayTransposeSource = numericArrayTransposeSource,
-            .isBackendArrayValue = isBackendArrayValue,
-            .hasBackendRealization = hasBackendRealization,
-            .actualDenseBackend = actualDenseBackend,
-            .materializeBackendArray = Session.materializeBackendArray,
-            .backendContext = Session.backendContext,
-            .mapMlxError = mapMlxError,
-            .noteDensePlanDecision = noteDensePlanDecision,
-            .wrapManagedBackendArray = Session.wrapManagedBackendArray,
-            .numeric_array_max_rank = numeric_array_max_rank,
-        }, self, base, args);
+        return runtime_backend_exec.tryFastBackendMatrixRowFoldEachDerived(backend_exec_api, self, base, args);
     }
 
     fn eachScanMinMaxBuiltin(base: Value) ?BuiltinId {
@@ -19345,7 +18068,7 @@ pub const Session = struct {
             error.Type => return null,
             else => return err,
         };
-        if (self.debugDetailedProbeActive()) self.debug_apply_each_fast_dense_count += 1;
+        if (self.debugDetailedProbeActive()) self.debug.apply_each_fast_dense_count += 1;
         return try self.fastHostMatrixRowAddScan(matrix, shape, view);
     }
 
@@ -19392,7 +18115,7 @@ pub const Session = struct {
             error.Type => return null,
             else => return err,
         };
-        if (self.debugDetailedProbeActive()) self.debug_apply_each_fast_dense_count += 1;
+        if (self.debugDetailedProbeActive()) self.debug.apply_each_fast_dense_count += 1;
         return switch (view) {
             .int_array => |items| blk: {
                 if (hostIntDenseViewBitSlice(items)) |bits| break :blk try self.fastHostMatrixRowBitMinMaxScan(matrix, shape, bits, op);
@@ -19415,43 +18138,7 @@ pub const Session = struct {
     }
 
     fn tryFastBackendMatrixRowFoldBuiltin(self: *Session, op: BuiltinId, matrix: Value) KError!?Value {
-        return runtime_backend_exec.tryFastBackendMatrixRowFoldBuiltin(.{
-            .Session = Session,
-            .Value = Value,
-            .NumericArray = NumericArray,
-            .BuiltinId = BuiltinId,
-            .DenseExecBackend = DenseExecBackend,
-            .KError = KError,
-            .c = c,
-            .mlx = mlx,
-            .runtime_has_mlx = runtime_has_mlx,
-            .valueNumericMatrixShape = valueNumericMatrixShape,
-            .valueNumericHandle = valueNumericHandle,
-            .numericIntAt = numericIntAt,
-            .numericArrayIsFirstAxisSlice = numericArrayIsFirstAxisSlice,
-            .numericArrayFirstAxisSliceSource = numericArrayFirstAxisSliceSource,
-            .numericArrayFirstAxisSliceRowStart = numericArrayFirstAxisSliceRowStart,
-            .numericArrayFirstAxisSliceRowStep = numericArrayFirstAxisSliceRowStep,
-            .numericArrayIsFirstAxisIndex = numericArrayIsFirstAxisIndex,
-            .numericArrayFirstAxisIndexSource = numericArrayFirstAxisIndexSource,
-            .numericArrayFirstAxisIndexRows = numericArrayFirstAxisIndexRows,
-            .numericArrayIsFirstAxisConcat = numericArrayIsFirstAxisConcat,
-            .numericArrayFirstAxisConcatLeft = numericArrayFirstAxisConcatLeft,
-            .numericArrayFirstAxisConcatRight = numericArrayFirstAxisConcatRight,
-            .numericArrayIsReshapeView = numericArrayIsReshapeView,
-            .numericArrayReshapeSource = numericArrayReshapeSource,
-            .numericArrayIsTransposeView = numericArrayIsTransposeView,
-            .numericArrayTransposeSource = numericArrayTransposeSource,
-            .isBackendArrayValue = isBackendArrayValue,
-            .hasBackendRealization = hasBackendRealization,
-            .actualDenseBackend = actualDenseBackend,
-            .materializeBackendArray = Session.materializeBackendArray,
-            .backendContext = Session.backendContext,
-            .mapMlxError = mapMlxError,
-            .noteDensePlanDecision = noteDensePlanDecision,
-            .wrapManagedBackendArray = Session.wrapManagedBackendArray,
-            .numeric_array_max_rank = numeric_array_max_rank,
-        }, self, op, matrix);
+        return runtime_backend_exec.tryFastBackendMatrixRowFoldBuiltin(backend_exec_api, self, op, matrix);
     }
 
     fn tryFastUnaryLiftedEachDerived(self: *Session, base: Value, args: []const Value) KError!?Value {
@@ -19459,7 +18146,7 @@ pub const Session = struct {
         const closure = base.asClosure();
         const kind = (try self.classifyCompactUnaryLiftedClosure(closure)) orelse return null;
         const len = derivedSequenceLen(args[0]) orelse return null;
-        if (self.debugDetailedProbeActive()) self.debug_apply_each_fast_unary_lifted_count += 1;
+        if (self.debugDetailedProbeActive()) self.debug.apply_each_fast_unary_lifted_count += 1;
 
         var results = std.ArrayList(Value).empty;
         defer {
@@ -19492,7 +18179,7 @@ pub const Session = struct {
             self.noteDenseEachMiss(.non_dense_args_or_shape);
             return null;
         }
-        if (self.debugDetailedProbeActive()) self.debug_apply_each_fast_dense_count += 1;
+        if (self.debugDetailedProbeActive()) self.debug.apply_each_fast_dense_count += 1;
         return try self.applyDenseElementwiseKind(kind, args[0], args[1]);
     }
 
@@ -19647,37 +18334,7 @@ pub const Session = struct {
     }
 
     fn tryFastBackendFoldDerived(self: *Session, base: Value, args: []const Value, collect: bool) KError!?Value {
-        return runtime_backend_exec.tryFastBackendFoldDerived(.{
-            .Session = Session,
-            .Value = Value,
-            .NumericArray = NumericArray,
-            .BuiltinId = BuiltinId,
-            .KError = KError,
-            .c = c,
-            .mlx = mlx,
-            .backendContext = Session.backendContext,
-            .mapMlxError = mapMlxError,
-            .planDenseReduceScanBackend = planDenseReduceScanBackend,
-            .valueNumericHandle = valueNumericHandle,
-            .numericIntAt = numericIntAt,
-            .numericArrayIsFirstAxisSlice = numericArrayIsFirstAxisSlice,
-            .numericArrayFirstAxisSliceSource = numericArrayFirstAxisSliceSource,
-            .numericArrayFirstAxisSliceRowStart = numericArrayFirstAxisSliceRowStart,
-            .numericArrayFirstAxisSliceRowStep = numericArrayFirstAxisSliceRowStep,
-            .numericArrayIsFirstAxisIndex = numericArrayIsFirstAxisIndex,
-            .numericArrayFirstAxisIndexSource = numericArrayFirstAxisIndexSource,
-            .numericArrayFirstAxisIndexRows = numericArrayFirstAxisIndexRows,
-            .numericArrayIsFirstAxisConcat = numericArrayIsFirstAxisConcat,
-            .numericArrayFirstAxisConcatLeft = numericArrayFirstAxisConcatLeft,
-            .numericArrayFirstAxisConcatRight = numericArrayFirstAxisConcatRight,
-            .numericArrayIsReshapeView = numericArrayIsReshapeView,
-            .numericArrayReshapeSource = numericArrayReshapeSource,
-            .numericArrayIsTransposeView = numericArrayIsTransposeView,
-            .numericArrayTransposeSource = numericArrayTransposeSource,
-            .materializeBackendArray = Session.materializeBackendArray,
-            .wrapManagedBackendArray = Session.wrapManagedBackendArray,
-            .numeric_array_max_rank = numeric_array_max_rank,
-        }, self, base, args, collect);
+        return runtime_backend_exec.tryFastBackendFoldDerived(backend_exec_api, self, base, args, collect);
     }
 
     fn fastRangeIotaAddFoldScan(self: *Session, handle: *const NumericArray, seed: ?i64, collect: bool) KError!Value {
@@ -21280,9 +19937,9 @@ pub const Session = struct {
         if (try self.tryApplyConcatScan(base, args, collect)) |value| return value;
         if (comptime enable_probe_instrumentation) {
             if (collect) {
-                self.debug_apply_scan_generic_count += 1;
+                self.debug.apply_scan_generic_count += 1;
             } else {
-                self.debug_apply_fold_generic_count += 1;
+                self.debug.apply_fold_generic_count += 1;
             }
         }
 
@@ -21411,11 +20068,11 @@ pub const Session = struct {
         defer profile_scope.end();
         if (args.len != 2) return error.Arity;
         if (try self.tryFastHostEachRightStringContains(base, args[0], args[1])) |value| {
-            if (comptime enable_probe_instrumentation) self.debug_apply_each_right_fast_string_contains_count += 1;
+            if (comptime enable_probe_instrumentation) self.debug.apply_each_right_fast_string_contains_count += 1;
             return value;
         }
         if (try self.tryFastDenseEachRightDerived(base, args)) |value| return value;
-        if (comptime enable_probe_instrumentation) self.debug_apply_each_right_generic_count += 1;
+        if (comptime enable_probe_instrumentation) self.debug.apply_each_right_generic_count += 1;
         const len = eachSequenceLen(args[1]) orelse return try self.applyDerivedBase(base, args);
         const preserved_left = try self.retainEscapedValue(args[0]);
         defer self.releaseValue(preserved_left);
@@ -21454,7 +20111,7 @@ pub const Session = struct {
         const len = derivedSequenceLen(args[1]) orelse return null;
         const preserved_left = try self.retainEscapedValue(args[0]);
         defer self.releaseValue(preserved_left);
-        if (self.debugDetailedProbeActive()) self.debug_apply_each_right_fast_dense_count += 1;
+        if (self.debugDetailedProbeActive()) self.debug.apply_each_right_fast_dense_count += 1;
 
         var results = std.ArrayList(Value).empty;
         defer {
@@ -21476,18 +20133,18 @@ pub const Session = struct {
     fn tryFastHostEachRightStringContains(self: *Session, base: Value, left: Value, right: Value) KError!?Value {
         if (base.tag() != .builtin or base.asBuiltin() != .contains) return null;
         const needle = stringBytes(left) orelse {
-            if (self.debugDetailedProbeActive()) self.debug_each_right_fast_string_contains_miss_non_string_left_count += 1;
+            if (self.debugDetailedProbeActive()) self.debug.each_right_fast_string_contains_miss_non_string_left_count += 1;
             return null;
         };
         if (right.tag() != .array) {
-            if (self.debugDetailedProbeActive()) self.debug_each_right_fast_string_contains_miss_non_string_right_count += 1;
+            if (self.debugDetailedProbeActive()) self.debug.each_right_fast_string_contains_miss_non_string_right_count += 1;
             return null;
         }
         return switch (right.arrayKind()) {
             .host_string_list => try self.fastHostStringListContainsEachRight(needle, right.asHostStringList()),
             .host_boxed_array => try self.fastHostBoxedStringContainsEachRight(needle, right.asHostBoxedArray().items),
             else => blk: {
-                if (self.debugDetailedProbeActive()) self.debug_each_right_fast_string_contains_miss_non_string_right_count += 1;
+                if (self.debugDetailedProbeActive()) self.debug.each_right_fast_string_contains_miss_non_string_right_count += 1;
                 break :blk null;
             },
         };
@@ -21563,7 +20220,7 @@ pub const Session = struct {
                 }
                 out.items[row_idx] = acc;
             }
-            return try out.value(self);
+            return out.value();
         }
 
         var out = try self.allocManagedHostIntResult(.int64, rows.len());
@@ -21576,7 +20233,7 @@ pub const Session = struct {
             }
             try out.set(row_idx, std.math.cast(i64, acc) orelse return error.Unsupported);
         }
-        return try out.value(self);
+        return out.value();
     }
 
     fn applyEachLeftDerived(self: *Session, base: Value, args: []const Value) KError!Value {
@@ -21593,7 +20250,7 @@ pub const Session = struct {
                 }
             }
         }
-        if (comptime enable_probe_instrumentation) self.debug_apply_each_left_generic_count += 1;
+        if (comptime enable_probe_instrumentation) self.debug.apply_each_left_generic_count += 1;
         const len = eachSequenceLen(args[0]) orelse return try self.applyDerivedBase(base, args);
         if (args.len > max_direct_apply_args) return error.Unsupported;
         const preserved_right = try self.retainArgs(args[1..]);
@@ -21631,8 +20288,8 @@ pub const Session = struct {
 
         const len = eachSequenceLen(vector) orelse return error.Type;
         if (comptime enable_probe_instrumentation) {
-            self.debug_apply_each_prior_generic_count += 1;
-            self.debug_apply_each_prior_generic_element_count += len;
+            self.debug.apply_each_prior_generic_count += 1;
+            self.debug.apply_each_prior_generic_element_count += len;
         }
         if (len == 0) return try self.createManagedHostIntArray(&.{});
 
@@ -21673,8 +20330,8 @@ pub const Session = struct {
     fn applyRollingEachPriorDictDerived(self: *Session, base: Value, seed: Value, store: *const HostKeyedStore) KError!Value {
         const len = keyedStoreValuesValueCount(store.values) orelse return error.Internal;
         if (comptime enable_probe_instrumentation) {
-            self.debug_apply_each_prior_generic_count += 1;
-            self.debug_apply_each_prior_generic_element_count += len;
+            self.debug.apply_each_prior_generic_count += 1;
+            self.debug.apply_each_prior_generic_element_count += len;
         }
         if (len == 0) {
             const values_value = try self.createManagedHostIntArray(&.{});
@@ -21735,8 +20392,8 @@ pub const Session = struct {
         };
 
         if (comptime enable_probe_instrumentation) {
-            self.debug_apply_each_prior_fast_bit_count += 1;
-            self.debug_apply_each_prior_fast_bit_element_count += len;
+            self.debug.apply_each_prior_fast_bit_count += 1;
+            self.debug.apply_each_prior_fast_bit_element_count += len;
         }
 
         const out = try self.allocHostBitArrayUninitialized(.managed, bits.len);
@@ -21905,10 +20562,10 @@ pub const Session = struct {
 
     fn recordIndexedAssign(self: *Session, target: IndexedAssignTarget) void {
         if (comptime enable_probe_instrumentation) {
-            self.debug_indexed_assign_count += 1;
+            self.debug.indexed_assign_count += 1;
             switch (target) {
-                .global => self.debug_indexed_assign_global_count += 1,
-                .local => self.debug_indexed_assign_local_count += 1,
+                .global => self.debug.indexed_assign_global_count += 1,
+                .local => self.debug.indexed_assign_local_count += 1,
             }
         }
     }
@@ -22025,372 +20682,6 @@ pub const Session = struct {
         }
         if (scalarIntLikeValue(selector)) |raw_index| return try self.applyArrayCall1Scalar(callee, raw_index);
         return try self.applyArrayCall1(callee, selector);
-    }
-
-    fn execDyad(self: *Session, op: BuiltinId) KError!void {
-        const op_start = stringPerfNow();
-        const right = self.pop();
-        const left = self.pop();
-        errdefer self.releaseCanonicalManagedNumericValue(left);
-        errdefer self.releaseCanonicalManagedNumericValue(right);
-        if (try self.tryFastInlineScalarDyad(op, left, right)) |fast| {
-            self.releaseCanonicalManagedNumericValue(left);
-            self.releaseCanonicalManagedNumericValue(right);
-            try self.push(fast);
-            return;
-        }
-        const value = try self.applyDyad(op, left, right);
-        self.releaseCanonicalManagedNumericValue(left);
-        self.releaseCanonicalManagedNumericValue(right);
-        try self.push(value);
-        if (comptime enable_string_instrumentation) switch (op) {
-            .contains => {
-                self.string_perf.contains_calls += 1;
-                stringPerfAdd(&self.string_perf.contains_opcode_ns, op_start);
-            },
-            .split => {
-                self.string_perf.split_calls += 1;
-                stringPerfAdd(&self.string_perf.split_opcode_ns, op_start);
-            },
-            .join => {
-                self.string_perf.join_calls += 1;
-                stringPerfAdd(&self.string_perf.join_opcode_ns, op_start);
-            },
-            else => {},
-        };
-    }
-
-    fn execContainsOpcode(self: *Session) KError!void {
-        const op_start = stringPerfNow();
-        const right = self.pop();
-        const left = self.pop();
-        errdefer self.releaseCanonicalManagedNumericValue(left);
-        errdefer self.releaseCanonicalManagedNumericValue(right);
-        const value = if (stringBytes(left) != null and stringBytes(right) != null)
-            try self.containsValues(left, right)
-        else
-            try self.applyDyad(.contains, left, right);
-        self.releaseCanonicalManagedNumericValue(left);
-        self.releaseCanonicalManagedNumericValue(right);
-        try self.push(value);
-        if (comptime enable_string_instrumentation) {
-            self.string_perf.contains_calls += 1;
-            stringPerfAdd(&self.string_perf.contains_opcode_ns, op_start);
-        }
-    }
-
-    fn execSplitOpcode(self: *Session) KError!void {
-        const op_start = stringPerfNow();
-        const right = self.pop();
-        const left = self.pop();
-        errdefer self.releaseCanonicalManagedNumericValue(left);
-        errdefer self.releaseCanonicalManagedNumericValue(right);
-        const value = if (stringBytes(left) != null and stringBytes(right) != null)
-            try self.splitValues(left, right)
-        else
-            try self.applyDyad(.split, left, right);
-        self.releaseCanonicalManagedNumericValue(left);
-        self.releaseCanonicalManagedNumericValue(right);
-        try self.push(value);
-        if (comptime enable_string_instrumentation) {
-            self.string_perf.split_calls += 1;
-            stringPerfAdd(&self.string_perf.split_opcode_ns, op_start);
-        }
-    }
-
-    fn execJoinOpcode(self: *Session) KError!void {
-        const op_start = stringPerfNow();
-        const right = self.pop();
-        const left = self.pop();
-        errdefer self.releaseCanonicalManagedNumericValue(left);
-        errdefer self.releaseCanonicalManagedNumericValue(right);
-        const direct = stringBytes(left) != null and right.tag() == .array and switch (right.arrayKind()) {
-            .host_string_list, .host_dense_array => true,
-            else => false,
-        };
-        const value = if (direct)
-            try self.joinValues(left, right)
-        else
-            try self.applyDyad(.join, left, right);
-        self.releaseCanonicalManagedNumericValue(left);
-        self.releaseCanonicalManagedNumericValue(right);
-        try self.push(value);
-        if (comptime enable_string_instrumentation) {
-            self.string_perf.join_calls += 1;
-            stringPerfAdd(&self.string_perf.join_opcode_ns, op_start);
-        }
-    }
-
-    fn execBuiltinDerivedDyad(self: *Session, builtin: BuiltinId, kind: DerivedVerbKind) KError!void {
-        const right = self.pop();
-        const left = self.pop();
-        const left_release = if (valueNumericHandle(left)) |handle| Value.array(@constCast(handle)) else left;
-        const right_release = if (valueNumericHandle(right)) |handle| Value.array(@constCast(handle)) else right;
-        errdefer self.releaseCanonicalManagedNumericValue(left_release);
-        errdefer self.releaseCanonicalManagedNumericValue(right_release);
-        const captures = [_]Value{Value.builtin(builtin)};
-        const value = try self.applyDerivedKind(kind, &captures, &[_]Value{ left, right });
-        self.releaseCanonicalManagedNumericValue(left_release);
-        self.releaseCanonicalManagedNumericValue(right_release);
-        try self.push(value);
-    }
-
-    fn execDot(self: *Session) KError!void {
-        const right = self.pop();
-        const left = self.pop();
-        errdefer self.releaseCanonicalManagedNumericValue(left);
-        errdefer self.releaseCanonicalManagedNumericValue(right);
-        const value = try self.dotValues(left, right);
-        self.releaseCanonicalManagedNumericValue(left);
-        self.releaseCanonicalManagedNumericValue(right);
-        try self.push(value);
-    }
-
-    fn execArrayDyad(self: *Session, op: BuiltinId) KError!void {
-        const right = self.pop();
-        const left = self.pop();
-        const value = try self.applyNumericDyad(op, left, right);
-        self.releaseValue(left);
-        self.releaseValue(right);
-        try self.push(value);
-    }
-
-    fn execTypedArrayDyad(self: *Session, op: BuiltinId, left_mode: HostDenseElem, right_mode: HostDenseElem) KError!void {
-        const right = self.pop();
-        const left = self.pop();
-        const planned_backend: ?DenseExecBackend = if (valueNumericMode(left) == left_mode and
-            valueNumericMode(right) == right_mode and
-            !isBackendArrayValue(left) and
-            !isBackendArrayValue(right))
-            planDenseNumericDyadBackend(self, op, left, right)
-        else
-            null;
-        const value = if (planned_backend == .host) try self.applyHostArrayDyad(op, left, right) else if (planned_backend == .mlx) blk: {
-            self.noteHostDenseDyadMiss(.planner_backend);
-            break :blk try self.applyBackendArrayDyad(op, left, right);
-        } else try self.applyNumericDyad(op, left, right);
-        self.releaseValue(left);
-        self.releaseValue(right);
-        try self.push(value);
-    }
-
-    fn execArrayMonad(self: *Session, op: BuiltinId) KError!void {
-        const value = self.pop();
-        const result = try self.applyNumericMonad(op, value);
-        self.releaseValue(value);
-        try self.push(result);
-    }
-
-    fn execTypedArrayMonad(self: *Session, op: BuiltinId, elem_mode: HostDenseElem) KError!void {
-        const value = self.pop();
-        const result = if (value.tag() == .array and
-            value.arrayKind() == .host_dense_array and
-            valueNumericMode(value) == elem_mode)
-            try self.applyHostArrayMonad(op, value.asHostDenseArray())
-        else
-            try self.applyNumericMonad(op, value);
-        self.releaseValue(value);
-        try self.push(result);
-    }
-
-    fn execNegate(self: *Session) KError!void {
-        const value = self.pop();
-        const out = try self.negateValue(value);
-        self.releaseValue(value);
-        try self.push(out);
-    }
-
-    fn execSqrt(self: *Session) KError!void {
-        const value = self.pop();
-        const out = try self.sqrtValue(value);
-        self.releaseValue(value);
-        try self.push(out);
-    }
-
-    fn execBuiltinMonad(self: *Session, op: BuiltinId) KError!void {
-        const value = self.pop();
-        const out = try self.applyMonad(op, value);
-        self.releaseValue(value);
-        try self.push(out);
-    }
-
-    fn execReverseOpcode(self: *Session) KError!void {
-        const value = self.pop();
-        const out = if (value.tag() == .array and (stringBytes(value) != null or value.arrayKind() == .host_string_list))
-            try self.reverseValue(value)
-        else
-            try self.applyMonad(.reverse, value);
-        self.releaseValue(value);
-        try self.push(out);
-    }
-
-    fn execMakeVector(self: *Session, count: u8) KError!void {
-        const total = @as(usize, count);
-        if (self.stack_len < total) return error.Internal;
-
-        const start = self.stack_len - total;
-        const vector = try self.makeArrayFromValues(self.stack[start..self.stack_len]);
-        self.dropStackFrom(start);
-        try self.push(vector);
-    }
-
-    fn execMakeAdverb(self: *Session, kind: DerivedVerbKind) KError!void {
-        if (self.stack_len == 0) return error.Internal;
-        const base = self.pop();
-        errdefer self.releaseValue(base);
-        const derived = switch (base.tag()) {
-            .builtin, .closure, .array => Value.closure(try self.allocDerivedClosure(kind, base)),
-            else => return error.Type,
-        };
-        self.releaseValue(base);
-        try self.push(derived);
-    }
-
-    fn execMakeProjection(self: *Session, slot_count: u8, hole_mask: u64) KError!void {
-        const total_slots: usize = slot_count;
-        if (total_slots > 63) return error.Unsupported;
-        if ((hole_mask >> @intCast(total_slots)) != 0) return error.Internal;
-        const hole_count = @popCount(hole_mask);
-        if (hole_count > total_slots) return error.Internal;
-        const bound_count = total_slots - hole_count;
-        if (self.stack_len < bound_count + 1) return error.Internal;
-
-        const callee_index = self.stack_len - (bound_count + 1);
-        const callee = self.stack[callee_index];
-        const bound_values = self.stack[callee_index + 1 .. self.stack_len];
-
-        const slot_values = try self.scratch_arena.allocator().alloc(Value, total_slots);
-        var bound_idx: usize = 0;
-        for (slot_values, 0..) |*slot_value, slot_idx| {
-            if (((hole_mask >> @intCast(slot_idx)) & 1) != 0) {
-                slot_value.* = Value.fromBool(false);
-            } else {
-                if (bound_idx >= bound_values.len) return error.Internal;
-                slot_value.* = bound_values[bound_idx];
-                bound_idx += 1;
-            }
-        }
-        if (bound_idx != bound_values.len) return error.Internal;
-
-        const projection = try self.allocManagedProjectionClosure(callee, slot_count, hole_mask, slot_values);
-        self.dropStackFrom(callee_index);
-        try self.push(projection);
-    }
-
-    fn execInlineCallBinary2(self: *Session, op: BuiltinId) KError!void {
-        if (self.stack_len < 2) return error.Internal;
-        const base = self.stack_len - 2;
-        const left = self.stack[base];
-        const right = self.stack[base + 1];
-        const result = switch (op) {
-            .add => try self.addValues(left, right),
-            .sub => try self.subValues(left, right),
-            .mul => try self.mulValues(left, right),
-            .div => return error.Unsupported,
-            else => return error.Unsupported,
-        };
-        self.dropStackFrom(base);
-        try self.push(result);
-    }
-
-    fn execInlineCallBinaryGlobal(self: *Session, op: BuiltinId, slot: u16, arg_first: bool) KError!void {
-        if (self.stack_len < 1) return error.Internal;
-        const base = self.stack_len - 1;
-        const global = try self.loadGlobalSlot(slot);
-        const arg = self.stack[base];
-        const result = switch (op) {
-            .add => if (arg_first) try self.addValues(arg, global) else try self.addValues(global, arg),
-            .sub => if (arg_first) try self.subValues(arg, global) else try self.subValues(global, arg),
-            .mul => if (arg_first) try self.mulValues(arg, global) else try self.mulValues(global, arg),
-            .div => return error.Unsupported,
-            else => return error.Unsupported,
-        };
-        self.dropStackFrom(base);
-        try self.push(result);
-    }
-
-    fn execInlineCallUnary(self: *Session, op: BuiltinId) KError!void {
-        if (self.stack_len < 1) return error.Internal;
-        const base = self.stack_len - 1;
-        const value = self.stack[base];
-        const result = switch (op) {
-            .sub => try self.negateValue(value),
-            .div => try self.sqrtValue(value),
-            else => return error.Internal,
-        };
-        self.dropStackFrom(base);
-        try self.push(result);
-    }
-
-    fn execInlineCallUnaryGlobal(self: *Session, op: BuiltinId, slot: u16) KError!void {
-        if (self.stack_len < 1) return error.Internal;
-        const base = self.stack_len - 1;
-        const value = try self.loadGlobalSlot(slot);
-        const result = switch (op) {
-            .sub => try self.negateValue(value),
-            .div => try self.sqrtValue(value),
-            else => return error.Internal,
-        };
-        self.dropStackFrom(base);
-        try self.push(result);
-    }
-
-    fn execInlineCallAdd2(self: *Session) KError!void {
-        try self.execInlineCallBinary2(.add);
-    }
-
-    fn execInlineCallAddGlobal(self: *Session, slot: u16) KError!void {
-        try self.execInlineCallBinaryGlobal(.add, slot, false);
-    }
-
-    fn execInlineCallAddArgGlobal(self: *Session, slot: u16) KError!void {
-        try self.execInlineCallBinaryGlobal(.add, slot, true);
-    }
-
-    fn execInlineCallSub2(self: *Session) KError!void {
-        try self.execInlineCallBinary2(.sub);
-    }
-
-    fn execInlineCallSubGlobal(self: *Session, slot: u16) KError!void {
-        try self.execInlineCallBinaryGlobal(.sub, slot, false);
-    }
-
-    fn execInlineCallSubArgGlobal(self: *Session, slot: u16) KError!void {
-        try self.execInlineCallBinaryGlobal(.sub, slot, true);
-    }
-
-    fn execInlineCallMul2(self: *Session) KError!void {
-        try self.execInlineCallBinary2(.mul);
-    }
-
-    fn execInlineCallMulGlobal(self: *Session, slot: u16) KError!void {
-        try self.execInlineCallBinaryGlobal(.mul, slot, false);
-    }
-
-    fn execInlineCallMulArgGlobal(self: *Session, slot: u16) KError!void {
-        try self.execInlineCallBinaryGlobal(.mul, slot, true);
-    }
-
-    fn execInlineCallNegate1(self: *Session) KError!void {
-        try self.execInlineCallUnary(.sub);
-    }
-
-    fn execInlineCallNegateGlobal(self: *Session, slot: u16) KError!void {
-        try self.execInlineCallUnaryGlobal(.sub, slot);
-    }
-
-    fn execInlineCallSqrt1(self: *Session) KError!void {
-        try self.execInlineCallUnary(.div);
-    }
-
-    fn execInlineCallSqrtGlobal(self: *Session, slot: u16) KError!void {
-        try self.execInlineCallUnaryGlobal(.div, slot);
-    }
-
-    fn execInlineCallArgmax1(self: *Session) KError!void {
-        const arg = self.pop();
-        defer self.releaseValue(arg);
-        try self.push(try self.argmaxValue(arg));
     }
 
     const InsertBounds = struct {
@@ -22872,13 +21163,12 @@ pub const Session = struct {
             return (try numericStructuralScalarIndexValue(self, .{ .handle = handle }, raw_index)).?;
         }
         if (valueNonVectorNumericShape(callee) == null) {
-            if (hostDenseIfPresent(callee)) |array| return try self.hostDenseIndexScalar(array, raw_index);
+            if (hostDenseIfPresent(callee)) |array| return try self.hostDenseIndexScalar(callee, array, raw_index);
         }
         if (valueNumericHandle(callee)) |handle| {
-            return try self.hostDenseIndexScalar(try hostStructuralArrayForHandle(self, @constCast(handle)), raw_index);
+            return try self.hostDenseIndexScalar(callee, try hostStructuralArrayForHandle(self, @constCast(handle)), raw_index);
         }
         return switch (callee.arrayKind()) {
-            .host_dense_array, .backend_array => try self.hostDenseIndexScalar(try numericHostArrayValue(self, callee), raw_index),
             .host_boxed_array => try self.hostBoxedArrayIndexScalar(callee.asHostBoxedArray(), raw_index),
             .host_string_list => try self.hostStringListIndexScalar(callee.asHostStringList(), raw_index),
             .host_symbol_list => if (normalizeIndexOrNull(raw_index, callee.asHostStringList().len)) |idx|
@@ -23063,13 +21353,6 @@ pub const Session = struct {
         return try self.stringIndexWhereBitMaskValue(source, .{ .words = inverted_words, .len = mask.len });
     }
 
-    fn invertedHostBitMaskValue(self: *Session, mask: HostBitSlice) KError!Value {
-        const out = try self.allocHostBitArrayUninitialized(.managed, mask.len);
-        fillBitNotWords(out.words, mask);
-        const metadata = analyzeBitSlice(.{ .words = out.words, .len = out.len });
-        return try self.finishManagedHostBitAlloc(out, metadata.flags, metadata.range);
-    }
-
     fn applyWhereMaskCall(self: *Session, callee: Value, mask_value: Value) KError!Value {
         if (valueNumericBitSlice(mask_value)) |bits| {
             if (callee.tag() == .array) {
@@ -23115,9 +21398,8 @@ pub const Session = struct {
             if (try tryApplyBackendBoolIndexVector(self, callee, selector)) |result| return result;
         }
         if (valueRangeIotaHandle(callee)) |handle| return try self.applyRangeIotaIndex(handle, selector);
-        if (valueNumericHandle(callee)) |handle| return try self.applyHostArrayIndex(try hostStructuralArrayForHandle(self, @constCast(handle)), selector);
+        if (valueNumericHandle(callee)) |handle| return try self.applyHostArrayIndex(callee, try hostStructuralArrayForHandle(self, @constCast(handle)), selector);
         return switch (callee.arrayKind()) {
-            .host_dense_array, .backend_array => try self.applyHostArrayIndex(try numericHostArrayValue(self, callee), selector),
             .host_boxed_array => try self.applyHostBoxedArrayIndex(callee.asHostBoxedArray(), selector),
             .host_symbol => error.Type,
             .host_string_list => switch (selector.tag()) {
@@ -23246,7 +21528,7 @@ pub const Session = struct {
         capture_or_global_dependency,
         non_dense_operand,
     };
-    const debug_dense_autodiff_lowering_count = @typeInfo(DebugDenseAutodiffLowering).@"enum".fields.len;
+    const debug_dense_autodiff_lowering_count = @typeInfo(DebugDenseAutodiffLowering).@"enum".field_names.len;
 
     const DenseAutodiffNode = union(enum) {
         input,
@@ -23347,8 +21629,8 @@ pub const Session = struct {
 
         const kind: DerivedVerbKind = if (op == .grad) .grad else .valuegrad;
         if (self.debugDetailedProbeActive()) switch (op) {
-            .grad => self.debug_autograd_builtin_grad_count += 1,
-            .valuegrad => self.debug_autograd_builtin_valuegrad_count += 1,
+            .grad => self.debug.autograd_builtin_grad_count += 1,
+            .valuegrad => self.debug.autograd_builtin_valuegrad_count += 1,
             else => {},
         };
         const closure = try self.allocFrozenDerivedClosureWithCaptures(kind, captures_buf[0..capture_len]);
@@ -23367,7 +21649,7 @@ pub const Session = struct {
         if (arg_index >= args.len) return error.Arity;
 
         if (try self.tryFastDenseAutograd(kind, base, args, arg_index)) |value| return value;
-        if (self.debugDetailedProbeActive()) self.debug_autograd_slow_finite_difference_count += 1;
+        if (self.debugDetailedProbeActive()) self.debug.autograd_slow_finite_difference_count += 1;
 
         var sibling = try self.initSiblingSession();
         defer sibling.deinit();
@@ -23444,26 +21726,7 @@ pub const Session = struct {
     }
 
     fn tryFastDenseAutogradBackend(self: *Session, kind: DerivedVerbKind, program: *const DenseAutodiffProgram, value: Value) KError!?Value {
-        return runtime_backend_autodiff.tryFastDenseAutogradBackend(.{
-            .Session = Session,
-            .Value = Value,
-            .BuiltinId = BuiltinId,
-            .DerivedVerbKind = DerivedVerbKind,
-            .DenseAutodiffProgram = DenseAutodiffProgram,
-            .DenseAutodiffNodeKind = DenseAutodiffNodeKind,
-            .KError = KError,
-            .c = c,
-            .mlx = mlx,
-            .dense_autodiff_max_nodes = dense_autodiff_max_nodes,
-            .enable_probe_instrumentation = enable_probe_instrumentation,
-            .mapMlxError = mapMlxError,
-            .backendContext = Session.backendContext,
-            .materializeBackendArray = Session.materializeBackendArray,
-            .wrapManagedBackendArray = Session.wrapManagedBackendArray,
-            .numericScalarValueFromF64 = Session.numericScalarValueFromF64,
-            .createManagedHostBoxedArray = Session.createManagedHostBoxedArray,
-            .releaseValue = Session.releaseValue,
-        }, self, kind, program, value);
+        return runtime_backend_autodiff.tryFastDenseAutogradBackend(backend_autodiff_api, self, kind, program, value);
     }
 
     fn chooseDenseAutodiffExecBackend(self: *Session, program: *const DenseAutodiffProgram, value: Value) DenseAutodiffExecBackend {
@@ -23598,20 +21861,18 @@ pub const Session = struct {
         _ = self;
         return switch (value.tag()) {
             .int, .bool, .float => try scalarNumericValue(value),
-            .array => switch (value.activeArrayKind()) {
-                .backend_array => blk: {
-                    var owned = value.asBackendArray().array.clone() catch |err| return mapMlxError(err);
-                    defer owned.deinit();
-                    owned.eval() catch |err| return mapMlxError(err);
-                    if (owned.ndim() != 0) return error.Type;
-                    break :blk switch (owned.dtype()) {
-                        c.MLX_BOOL => @floatFromInt(@intFromBool(owned.boolItem() catch |err| return mapMlxError(err))),
-                        c.MLX_INT32, c.MLX_INT64, c.MLX_UINT32 => @floatFromInt(owned.intItem() catch |err| return mapMlxError(err)),
-                        c.MLX_FLOAT16, c.MLX_FLOAT32, c.MLX_FLOAT64, c.MLX_BFLOAT16 => owned.floatItem() catch |err| return mapMlxError(err),
-                        else => return error.Type,
-                    };
-                },
-                else => error.Type,
+            .array => blk: {
+                const backend = backendArrayIfPresent(value) orelse return error.Type;
+                var owned = backend.array.clone() catch |err| return mapMlxError(err);
+                defer owned.deinit();
+                owned.eval() catch |err| return mapMlxError(err);
+                if (owned.ndim() != 0) return error.Type;
+                break :blk switch (owned.dtype()) {
+                    c.MLX_BOOL => @floatFromInt(@intFromBool(owned.boolItem() catch |err| return mapMlxError(err))),
+                    c.MLX_INT32, c.MLX_INT64, c.MLX_UINT32 => @floatFromInt(owned.intItem() catch |err| return mapMlxError(err)),
+                    c.MLX_FLOAT16, c.MLX_FLOAT32, c.MLX_FLOAT64, c.MLX_BFLOAT16 => owned.floatItem() catch |err| return mapMlxError(err),
+                    else => return error.Type,
+                };
             },
             else => error.Type,
         };
@@ -23624,14 +21885,10 @@ pub const Session = struct {
         };
     }
 
-    fn detectDenseAutodiffProgram(self: *Session, base: Value) ?DenseAutodiffProgram {
-        return self.detectDenseAutodiffProgramForInput(base, .vector);
-    }
-
     fn detectDenseAutodiffProgramForInput(self: *Session, base: Value, input_kind: DenseAutodiffNodeKind) ?DenseAutodiffProgram {
         return switch (self.detectDenseAutodiffProgramDetailedForInput(base, input_kind)) {
             .program => |program| blk: {
-                if (self.debugDetailedProbeActive()) self.debug_dense_autodiff_lower_success_count += 1;
+                if (self.debugDetailedProbeActive()) self.debug.dense_autodiff_lower_success_count += 1;
                 break :blk program;
             },
             .reject => |reason| blk: {
@@ -23639,10 +21896,6 @@ pub const Session = struct {
                 break :blk null;
             },
         };
-    }
-
-    fn detectDenseAutodiffProgramDetailed(self: *Session, base: Value) DenseAutodiffLowerResult {
-        return self.detectDenseAutodiffProgramDetailedForInput(base, .vector);
     }
 
     fn detectDenseAutodiffProgramDetailedForInput(self: *Session, base: Value, input_kind: DenseAutodiffNodeKind) DenseAutodiffLowerResult {
@@ -23655,10 +21908,10 @@ pub const Session = struct {
         };
         if (cacheable) {
             if (self.dense_autodiff_cache.get(cache_key)) |cached| {
-                if (self.debugDetailedProbeActive()) self.debug_dense_autodiff_cache_hit_count += 1;
+                if (self.debugDetailedProbeActive()) self.debug.dense_autodiff_cache_hit_count += 1;
                 return cached;
             }
-            if (self.debugDetailedProbeActive()) self.debug_dense_autodiff_cache_miss_count += 1;
+            if (self.debugDetailedProbeActive()) self.debug.dense_autodiff_cache_miss_count += 1;
         } else if (closure.header.owner != .scratch) {
             return .{ .reject = .capture_or_global_dependency };
         }
@@ -23724,8 +21977,8 @@ pub const Session = struct {
                     ckd_mul => .mul,
                     else => return .{ .reject = .unsupported_builtin },
                 };
-                const right_item = denseAutodiffPopStack(&stack, &stack_len) orelse return .{ .reject = .unsupported_shape_flow };
                 const left_item = denseAutodiffPopStack(&stack, &stack_len) orelse return .{ .reject = .unsupported_shape_flow };
+                const right_item = denseAutodiffPopStack(&stack, &stack_len) orelse return .{ .reject = .unsupported_shape_flow };
                 const left = denseAutodiffNodeFromStackItem(left_item) orelse return .{ .reject = .unsupported_builtin };
                 const right = denseAutodiffNodeFromStackItem(right_item) orelse return .{ .reject = .unsupported_builtin };
                 const node = denseAutodiffPushBinary(&program, tag, left, right);
@@ -23759,7 +22012,7 @@ pub const Session = struct {
                 },
                 ck_const_builtin_u8 => {
                     const raw_builtin = denseAutodiffReadByte(compact.bytes, &ip) orelse return .{ .reject = .unsupported_shape_flow };
-                    const builtin: BuiltinId = @enumFromInt(raw_builtin);
+                    const builtin: BuiltinId = @fromBackingInt(@intCast(raw_builtin));
                     switch (builtin) {
                         .add, .exp, .log, .sin, .cos, .tanh, .sigmoid => {
                             denseAutodiffPushStack(&stack, &stack_len, .{ .builtin = builtin }) orelse return .{ .reject = .unsupported_shape_flow };
@@ -23769,7 +22022,7 @@ pub const Session = struct {
                 },
                 ck_make_adverb_u8 => {
                     const raw_kind = denseAutodiffReadByte(compact.bytes, &ip) orelse return .{ .reject = .unsupported_shape_flow };
-                    const kind: DerivedVerbKind = @enumFromInt(raw_kind);
+                    const kind: DerivedVerbKind = @fromBackingInt(@intCast(raw_kind));
                     const base_item = denseAutodiffPopStack(&stack, &stack_len) orelse return .{ .reject = .unsupported_shape_flow };
                     switch (base_item) {
                         .builtin => |builtin| switch (builtin) {
@@ -23819,11 +22072,11 @@ pub const Session = struct {
                 ck_discard => _ = denseAutodiffPopStack(&stack, &stack_len) orelse return .{ .reject = .unsupported_shape_flow },
                 ck_call_adverb_stack_u8 => {
                     const raw_kind = denseAutodiffReadByte(compact.bytes, &ip) orelse return .{ .reject = .unsupported_shape_flow };
-                    const kind: DerivedVerbKind = @enumFromInt(raw_kind);
+                    const kind: DerivedVerbKind = @fromBackingInt(@intCast(raw_kind));
                     const argc = denseAutodiffReadByte(compact.bytes, &ip) orelse return .{ .reject = .unsupported_shape_flow };
                     if (argc != 1) return .{ .reject = .unsupported_opcode };
-                    const arg_item = denseAutodiffPopStack(&stack, &stack_len) orelse return .{ .reject = .unsupported_shape_flow };
                     const base_item = denseAutodiffPopStack(&stack, &stack_len) orelse return .{ .reject = .unsupported_shape_flow };
+                    const arg_item = denseAutodiffPopStack(&stack, &stack_len) orelse return .{ .reject = .unsupported_shape_flow };
                     const node_arg = denseAutodiffNodeFromStackItem(arg_item) orelse return .{ .reject = .unsupported_builtin };
                     const base_builtin = switch (base_item) {
                         .builtin => |builtin| builtin,
@@ -23846,16 +22099,9 @@ pub const Session = struct {
                 ck_call_stack_u8 => {
                     const flags = denseAutodiffReadByte(compact.bytes, &ip) orelse return .{ .reject = .unsupported_shape_flow };
                     if (compactCallArgc(flags) != 1 or compactCallStoresLocal(flags)) return .{ .reject = .unsupported_opcode };
-                    const first_item = denseAutodiffPopStack(&stack, &stack_len) orelse return .{ .reject = .unsupported_shape_flow };
-                    const second_item = denseAutodiffPopStack(&stack, &stack_len) orelse return .{ .reject = .unsupported_shape_flow };
-
-                    var arg = denseAutodiffNodeFromStackItem(first_item);
-                    var callee_item = second_item;
-                    if (arg == null and denseAutodiffNodeFromStackItem(second_item) != null) {
-                        arg = denseAutodiffNodeFromStackItem(second_item);
-                        callee_item = first_item;
-                    }
-                    const node_arg = arg orelse return .{ .reject = .unsupported_builtin };
+                    const callee_item = denseAutodiffPopStack(&stack, &stack_len) orelse return .{ .reject = .unsupported_shape_flow };
+                    const arg_item = denseAutodiffPopStack(&stack, &stack_len) orelse return .{ .reject = .unsupported_shape_flow };
+                    const node_arg = denseAutodiffNodeFromStackItem(arg_item) orelse return .{ .reject = .unsupported_builtin };
                     const node = switch (callee_item) {
                         .derived_add_fold => blk: {
                             if (program.kinds[node_arg] != .vector) return .{ .reject = .non_vector_target };
@@ -23948,13 +22194,6 @@ pub const Session = struct {
         };
     }
 
-    fn denseAutodiffLowerLocalNode(program: *DenseAutodiffProgram, bytes: []const u8, ip: *usize, input: DenseAutodiffNodeIndex) ?DenseAutodiffNodeIndex {
-        _ = program;
-        const slot = denseAutodiffReadByte(bytes, ip) orelse return null;
-        if (slot != 0) return null;
-        return input;
-    }
-
     fn denseAutodiffPushStack(stack: *[dense_autodiff_max_nodes * 2]DenseAutodiffLowerStackItem, len: *usize, item: DenseAutodiffLowerStackItem) ?void {
         if (len.* >= stack.len) return null;
         stack[len.*] = item;
@@ -24003,32 +22242,10 @@ pub const Session = struct {
     }
 
     fn setNumericMatrixShapeOnValue(self: *Session, value: Value, rows: usize, cols: usize) !Value {
-        const logical = try ensureLogicalNumericValue(self, value);
-        numericArraySetMatrixShape(logical.handle, rows, cols);
-        syncNumericArrayChildren(logical.handle);
-        return logical.value;
-    }
-
-    fn hostNumericMatrixRow(self: *Session, array: *const HostDenseArray, row_idx: usize, cols: usize) KError!Value {
-        if (comptime enable_probe_instrumentation) self.debug_host_matrix_row_copy_count += 1;
-        const start = row_idx * cols;
-        return switch (array.storage) {
-            .bit => blk: {
-                const out = try self.allocHostBitArray(.managed, cols);
-                bitCopyRange(out.words, 0, .{ .words = array.storage.bit, .len = array.logical_len }, start, cols);
-                break :blk try self.finishManagedHostBitAlloc(out, host_dense_flag_normalized, .{ .min = 0, .max = 1 });
-            },
-            .float64 => |items| try self.createManagedHostFloatArray(hostDenseLogicalItems(f64, array, items)[start .. start + cols]),
-            .float32 => |items| try self.createManagedHostFloat32Array(hostDenseLogicalItems(f32, array, items)[start .. start + cols]),
-            else => blk: {
-                const view = hostIntArrayView(array) orelse return error.Type;
-                var out = std.ArrayList(i64).empty;
-                defer out.deinit(self.allocator);
-                try out.ensureTotalCapacity(self.allocator, cols);
-                for (0..cols) |col| try out.append(self.allocator, hostIntViewItem(view, start + col));
-                break :blk try self.createManagedHostIntArray(out.items);
-            },
-        };
+        _ = self;
+        const handle = mutableNumericHandle(value) orelse return error.Type;
+        numericArraySetMatrixShape(handle, rows, cols);
+        return value;
     }
 
     fn createManagedHostNumericMatrixRows(self: *Session, array: *const HostDenseArray, row_indices: []const usize, cols: usize) KError!Value {
@@ -24097,24 +22314,9 @@ pub const Session = struct {
         }
     }
 
-    fn copyBitMatrixRowsByMask(dst_words: []u64, source: HostBitSlice, mask: HostBitSlice, cols: usize) void {
-        var out_row_idx: usize = 0;
-        for (mask.words, 0..) |_, word_idx| {
-            const row_base = word_idx * host_bit_word_bits;
-            var selected = bitWordMasked(mask.words, mask.len, word_idx);
-            while (selected != 0) {
-                const bit_idx: usize = @intCast(@ctz(selected));
-                const source_row = row_base + bit_idx;
-                bitCopyRange(dst_words, out_row_idx * cols, source, source_row * cols, cols);
-                out_row_idx += 1;
-                selected &= selected - 1;
-            }
-        }
-    }
-
     fn hostNumericMatrixIndexByIntVector(self: *Session, array: *const HostDenseArray, selector: HostIntArrayView, rows: usize, cols: usize) KError!Value {
         if (std.meta.activeTag(array.storage) == .bit) {
-            if (comptime enable_probe_instrumentation) self.debug_host_matrix_index_copy_count += 1;
+            if (comptime enable_probe_instrumentation) self.debug.host_matrix_index_copy_count += 1;
             const selected_rows = hostIntArrayViewLen(selector);
             const total = selected_rows * cols;
             const out = try self.allocHostBitArray(.managed, total);
@@ -24129,7 +22331,7 @@ pub const Session = struct {
             const value = try self.finishManagedHostBitAlloc(out, metadata.flags, metadata.range);
             return try applyNonVectorNumericShapeToValue(self, value, numericShapeSnapshotMatrix(selected_rows, cols));
         }
-        if (comptime enable_probe_instrumentation) self.debug_host_matrix_index_copy_count += 1;
+        if (comptime enable_probe_instrumentation) self.debug.host_matrix_index_copy_count += 1;
         var row_indices = std.ArrayList(usize).empty;
         defer row_indices.deinit(self.allocator);
         try row_indices.ensureTotalCapacity(self.allocator, hostIntArrayViewLen(selector));
@@ -24141,7 +22343,7 @@ pub const Session = struct {
 
     fn hostNumericMatrixIndexByIntDenseView(self: *Session, array: *const HostDenseArray, selector: HostIntDenseView, rows: usize, cols: usize) KError!Value {
         if (std.meta.activeTag(array.storage) == .bit) {
-            if (comptime enable_probe_instrumentation) self.debug_host_matrix_index_copy_count += 1;
+            if (comptime enable_probe_instrumentation) self.debug.host_matrix_index_copy_count += 1;
             const selected_rows = hostIntDenseViewLen(selector);
             const total = selected_rows * cols;
             const out = try self.allocHostBitArray(.managed, total);
@@ -24157,7 +22359,7 @@ pub const Session = struct {
             return try applyNonVectorNumericShapeToValue(self, value, numericShapeSnapshotMatrix(selected_rows, cols));
         }
         if (selector == .dense) return try self.hostNumericMatrixIndexByIntVector(array, selector.dense, rows, cols);
-        if (comptime enable_probe_instrumentation) self.debug_host_matrix_index_copy_count += 1;
+        if (comptime enable_probe_instrumentation) self.debug.host_matrix_index_copy_count += 1;
         var row_indices = std.ArrayList(usize).empty;
         defer row_indices.deinit(self.allocator);
         try row_indices.ensureTotalCapacity(self.allocator, hostIntDenseViewLen(selector));
@@ -24167,37 +22369,14 @@ pub const Session = struct {
         return try self.createManagedHostNumericMatrixRows(array, row_indices.items, cols);
     }
 
-    fn hostNumericMatrixIndexMask(self: *Session, array: *const HostDenseArray, mask: HostBitSlice, rows: usize, cols: usize) KError!Value {
-        if (mask.len != rows) return error.Type;
-        if (hostBitSliceContiguousTrueRun(mask)) |run| return try createManagedHostNumericMatrixRowRange(self, array, run.start, run.len, cols);
-        if (std.meta.activeTag(array.storage) == .bit) {
-            if (comptime enable_probe_instrumentation) self.debug_host_matrix_mask_copy_count += 1;
-            const selected_rows = bitCountTrue(mask);
-            const total = selected_rows * cols;
-            const out = try self.allocHostBitArray(.managed, total);
-            copyBitMatrixRowsByMask(out.words, .{ .words = array.storage.bit, .len = array.logical_len }, mask, cols);
-            const metadata = analyzeBitSlice(.{ .words = out.words, .len = out.len });
-            const value = try self.finishManagedHostBitAlloc(out, metadata.flags, metadata.range);
-            return try applyNonVectorNumericShapeToValue(self, value, numericShapeSnapshotMatrix(selected_rows, cols));
-        }
-        if (comptime enable_probe_instrumentation) self.debug_host_matrix_mask_copy_count += 1;
-        var row_indices = std.ArrayList(usize).empty;
-        defer row_indices.deinit(self.allocator);
-        for (0..rows) |row| {
-            if (!bitGet(mask.words, row)) continue;
-            try row_indices.append(self.allocator, row);
-        }
-        return try self.createManagedHostNumericMatrixRows(array, row_indices.items, cols);
-    }
-
-    fn applyHostArrayIndex(self: *Session, array: *const HostDenseArray, selector: Value) KError!Value {
+    fn applyHostArrayIndex(self: *Session, source_value: Value, array: *const HostDenseArray, selector: Value) KError!Value {
         return switch (selector.tag()) {
-            .int, .bool => try self.hostDenseIndexScalar(array, scalarIntLikeValue(selector).?),
+            .int, .bool => try self.hostDenseIndexScalar(source_value, array, scalarIntLikeValue(selector).?),
             .array => switch (selector.arrayKind()) {
-                .host_dense_array, .backend_array, .numeric_array => if (hostDenseIfPresent(selector)) |selector_array|
-                    try self.hostDenseIndexVector(array, selector_array)
+                .numeric_array => if (hostDenseIfPresent(selector)) |selector_array|
+                    try self.hostDenseIndexVector(source_value, array, selector_array)
                 else if (valueHostIntStructuralView(selector)) |view|
-                    try self.hostDenseIndexDenseSelector(array, view)
+                    try self.hostDenseIndexDenseSelector(source_value, array, view)
                 else
                     error.Type,
                 else => error.Internal,
@@ -24217,7 +22396,7 @@ pub const Session = struct {
                     break :blk try self.selectHostBoxedArrayBySourceIndices(array, indices);
                 }
                 break :blk switch (selector.arrayKind()) {
-                    .host_dense_array, .backend_array, .numeric_array => if (hostDenseIfPresent(selector)) |selector_array|
+                    .numeric_array => if (hostDenseIfPresent(selector)) |selector_array|
                         try self.hostBoxedArrayIndexVector(array, selector_array)
                     else if (valueHostIntStructuralView(selector)) |view|
                         try self.hostBoxedArrayIndexDenseSelector(array, view)
@@ -24230,10 +22409,8 @@ pub const Session = struct {
         };
     }
 
-    fn hostDenseIndexScalar(self: *Session, array: *const HostDenseArray, raw_index: i64) KError!Value {
-        if (hostDenseShapeHandle(array)) |handle| {
-            if (handle.rank > 1) return try numericValueScalarIndexValue(self, Value.array(@constCast(handle)), raw_index) orelse error.Type;
-        }
+    fn hostDenseIndexScalar(self: *Session, source_value: Value, array: *const HostDenseArray, raw_index: i64) KError!Value {
+        if (valueNonVectorNumericShape(source_value) != null) return try numericValueScalarIndexValue(self, source_value, raw_index) orelse error.Type;
         const idx = normalizeIndexOrNull(raw_index, array.len()) orelse return try self.hostDensePrototypeScalarValue(array);
         return switch (array.storage) {
             .bit => |words| Value.fromBool(bitGet(words, idx)),
@@ -24254,10 +22431,10 @@ pub const Session = struct {
         return self.shareValue(array.items[idx]);
     }
 
-    fn hostDenseIndexVector(self: *Session, array: *const HostDenseArray, selector: *const HostDenseArray) KError!Value {
+    fn hostDenseIndexVector(self: *Session, source_value: Value, array: *const HostDenseArray, selector: *const HostDenseArray) KError!Value {
         if (hostIntArrayView(selector)) |selector_view| {
             if (std.meta.activeTag(selector_view) != .bit and denseSelectorCachedRangeFitsSource(selector, array.logical_len)) {
-                if (comptime enable_probe_instrumentation) self.debug_host_index_in_bounds_fast_count += 1;
+                if (comptime enable_probe_instrumentation) self.debug.host_index_in_bounds_fast_count += 1;
                 return switch (array.storage) {
                     .bit => try self.gatherManagedHostBitArraySelectionInBounds(.{ .words = array.storage.bit, .len = array.logical_len }, selector_view),
                     .float32 => |items| try self.gatherManagedHostFloat32ArraySelectionInBounds(items, selector_view),
@@ -24265,8 +22442,8 @@ pub const Session = struct {
                     else => try self.gatherManagedHostIntArraySelectionInBounds(hostIntArrayView(array).?, selector_view),
                 };
             }
-            if (comptime enable_probe_instrumentation) self.debug_host_index_in_bounds_fallback_count += 1;
-            return try self.hostDenseIndexByIntVector(array, selector_view);
+            if (comptime enable_probe_instrumentation) self.debug.host_index_in_bounds_fallback_count += 1;
+            return try self.hostDenseIndexByIntVector(source_value, array, selector_view);
         }
         return error.Type;
     }
@@ -24278,289 +22455,12 @@ pub const Session = struct {
         return error.Type;
     }
 
-    fn hostDenseIndexDenseSelector(self: *Session, array: *const HostDenseArray, selector: HostIntDenseView) KError!Value {
-        return try self.hostDenseIndexByIntDenseView(array, selector);
+    fn hostDenseIndexDenseSelector(self: *Session, source_value: Value, array: *const HostDenseArray, selector: HostIntDenseView) KError!Value {
+        return try self.hostDenseIndexByIntDenseView(source_value, array, selector);
     }
 
     fn hostBoxedArrayIndexDenseSelector(self: *Session, array: *const HostBoxedArray, selector: HostIntDenseView) KError!Value {
         return try self.hostBoxedArrayIndexByIntDenseView(array, selector);
-    }
-
-    fn copyDenseItemsByMask(comptime T: type, out: []T, source: []const T, mask: HostBitSlice) void {
-        var out_idx: usize = 0;
-        for (mask.words, 0..) |_, word_idx| {
-            const word_base = word_idx * host_bit_word_bits;
-            const active = bitWordActiveLen(mask.len, word_idx, mask.words.len);
-            const active_mask = bitLowMask(active);
-            var selected = bitWordMasked(mask.words, mask.len, word_idx);
-            if (selected == 0) continue;
-            if (selected == active_mask) {
-                @memcpy(out[out_idx..][0..active], source[word_base..][0..active]);
-                out_idx += active;
-                continue;
-            }
-            while (selected != 0) {
-                const bit_idx: usize = @intCast(@ctz(selected));
-                out[out_idx] = source[word_base + bit_idx];
-                out_idx += 1;
-                selected &= selected - 1;
-            }
-        }
-        std.debug.assert(out_idx == out.len);
-    }
-
-    fn firstSelectedBitIndex(mask: HostBitSlice) ?usize {
-        for (mask.words, 0..) |_, word_idx| {
-            const selected = bitWordMasked(mask.words, mask.len, word_idx);
-            if (selected == 0) continue;
-            return word_idx * host_bit_word_bits + @as(usize, @intCast(@ctz(selected)));
-        }
-        return null;
-    }
-
-    fn lastSelectedBitIndex(mask: HostBitSlice) ?usize {
-        var word_idx = mask.words.len;
-        while (word_idx != 0) {
-            word_idx -= 1;
-            const selected = bitWordMasked(mask.words, mask.len, word_idx);
-            if (selected == 0) continue;
-            const bit_idx: usize = @intCast(63 - @clz(selected));
-            return word_idx * host_bit_word_bits + bit_idx;
-        }
-        return null;
-    }
-
-    fn maskSelectedIntPreservedStats(view: HostIntArrayView, mask: HostBitSlice, selected_len: usize, source_flags: u8) ?DenseIntGatherStats {
-        if (selected_len == 0) {
-            return .{
-                .flags = host_dense_flag_normalized | host_dense_flag_asc | host_dense_flag_dsc,
-                .range = .{ .min = 0, .max = 0 },
-            };
-        }
-        if ((source_flags & host_dense_flag_normalized) == 0) return null;
-        var mono = monotonicFlags(source_flags);
-        if (selected_len <= 1) mono = host_dense_flag_asc | host_dense_flag_dsc;
-        if (mono == 0) return null;
-
-        const first_idx = firstSelectedBitIndex(mask) orelse return null;
-        const last_idx = lastSelectedBitIndex(mask) orelse return null;
-        const first_value = hostIntViewItem(view, first_idx);
-        const last_value = hostIntViewItem(view, last_idx);
-        const range = if ((mono & host_dense_flag_asc) != 0 and (mono & host_dense_flag_dsc) == 0)
-            HostIntRange{ .min = first_value, .max = last_value }
-        else if ((mono & host_dense_flag_dsc) != 0 and (mono & host_dense_flag_asc) == 0)
-            HostIntRange{ .min = last_value, .max = first_value }
-        else
-            HostIntRange{ .min = @min(first_value, last_value), .max = @max(first_value, last_value) };
-        return .{
-            .flags = host_dense_flag_normalized | mono,
-            .range = range,
-        };
-    }
-
-    fn maskSelectedFloatPreservedFlags(mask: HostBitSlice, selected_len: usize, source_flags: u8) ?u8 {
-        _ = mask;
-        if ((source_flags & host_dense_flag_normalized) == 0) return null;
-        var mono = monotonicFlags(source_flags);
-        if (selected_len <= 1) mono = host_dense_flag_asc | host_dense_flag_dsc;
-        if (mono == 0) return null;
-        return host_dense_flag_normalized | mono;
-    }
-
-    fn copyI32ItemsByMaskNeon(out: []i32, source: []const i32, mask: HostBitSlice) bool {
-        if (comptime !enable_host_mask_compress_neon) return false;
-        if (mask.len < host_mask_compress_vector_min_len) return false;
-        if (out.len * 8 < mask.len) return false;
-        const written = kiwi_host_mask_compress_i32_neon(out.ptr, out.len, source.ptr, mask.words.ptr, mask.len);
-        std.debug.assert(written == out.len);
-        return true;
-    }
-
-    fn copyIntItemsByMask(comptime T: type, out: []T, source: []const T, mask: HostBitSlice) DenseIntGatherStats {
-        var asc = true;
-        var dsc = true;
-        var min_value: i64 = 0;
-        var max_value: i64 = 0;
-        var prev: i64 = 0;
-        var out_idx: usize = 0;
-
-        for (mask.words, 0..) |_, word_idx| {
-            const word_base = word_idx * host_bit_word_bits;
-            var selected = bitWordMasked(mask.words, mask.len, word_idx);
-            while (selected != 0) {
-                const bit_idx: usize = @intCast(@ctz(selected));
-                const item = source[word_base + bit_idx];
-                const item_i64: i64 = @intCast(item);
-                out[out_idx] = item;
-                if (out_idx == 0) {
-                    min_value = item_i64;
-                    max_value = item_i64;
-                } else {
-                    min_value = @min(min_value, item_i64);
-                    max_value = @max(max_value, item_i64);
-                    if (prev > item_i64) asc = false;
-                    if (prev < item_i64) dsc = false;
-                }
-                prev = item_i64;
-                out_idx += 1;
-                selected &= selected - 1;
-            }
-        }
-        std.debug.assert(out_idx == out.len);
-
-        return .{
-            .flags = host_dense_flag_normalized | orderFlagsFromMonotonic(asc, dsc),
-            .range = if (out.len == 0)
-                .{ .min = 0, .max = 0 }
-            else
-                .{ .min = min_value, .max = max_value },
-        };
-    }
-
-    fn hostDenseFullMaskCopy(self: *Session, array: *const HostDenseArray) KError!Value {
-        switch (array.storage) {
-            .bit => {
-                const out = try self.allocHostBitArrayUninitialized(.managed, array.logical_len);
-                @memcpy(out.words, array.storage.bit[0..out.words.len]);
-                const value = try self.finishManagedHostBitAlloc(out, array.flags, sourceHostIntRange(hostDenseSourceValue(array), array));
-                return value;
-            },
-            .float64 => |items| {
-                var out = try self.allocManagedHostFloatResult(array.logical_len);
-                @memcpy(out.items, items[0..array.logical_len]);
-                const value = try out.value(self);
-                hostDenseSetFlags(try mutableNumericHostArrayValue(self, value), array.flags);
-                return value;
-            },
-            .float32 => |items| {
-                var out = try self.allocManagedHostFloat32Result(array.logical_len);
-                @memcpy(out.items, items[0..array.logical_len]);
-                const value = try out.value(self);
-                hostDenseSetFlags(try mutableNumericHostArrayValue(self, value), array.flags);
-                return value;
-            },
-            else => {
-                const view = hostIntArrayView(array).?;
-                var out = try self.allocManagedHostIntResult(hostIntArrayViewKind(view), array.logical_len);
-                switch (view) {
-                    .bit => unreachable,
-                    .int8 => |source| switch (out) {
-                        .int8 => |*dest| @memcpy(dest.items, source[0..array.logical_len]),
-                        else => unreachable,
-                    },
-                    .int16 => |source| switch (out) {
-                        .int16 => |*dest| @memcpy(dest.items, source[0..array.logical_len]),
-                        else => unreachable,
-                    },
-                    .int32 => |source| switch (out) {
-                        .int32 => |*dest| @memcpy(dest.items, source[0..array.logical_len]),
-                        else => unreachable,
-                    },
-                    .int64 => |source| switch (out) {
-                        .int64 => |*dest| @memcpy(dest.items, source[0..array.logical_len]),
-                        else => unreachable,
-                    },
-                }
-                const value = try out.value(self);
-                const host = try mutableNumericHostArrayValue(self, value);
-                hostDenseSetFlags(host, array.flags);
-                hostDenseSetCachedIntRange(host, sourceHostIntRange(hostDenseSourceValue(array), array));
-                return value;
-            },
-        }
-    }
-
-    fn hostDenseIndexMask(self: *Session, array: *const HostDenseArray, mask: HostBitSlice) KError!Value {
-        if (hostDenseNonVectorShape(array)) |shape| {
-            if (shape.rank != 2) return error.Unsupported;
-            return try self.hostNumericMatrixIndexMask(array, mask, @intCast(shape.shape[0]), @intCast(shape.shape[1]));
-        }
-        if (mask.len != array.len()) return error.Type;
-        if (comptime enable_probe_instrumentation) self.debug_host_mask_copy_count += 1;
-        if (bitWordsAllTrue(mask)) return try self.hostDenseFullMaskCopy(array);
-        switch (array.storage) {
-            .bit => {
-                const selected_len = bitCountTrue(mask);
-                var out = try self.allocHostBitArray(.managed, selected_len);
-                const stats = compressBitSliceByMask(&out, .{ .words = array.storage.bit, .len = array.logical_len }, mask);
-                return try self.finishManagedHostBitAlloc(out, stats.flags, stats.range);
-            },
-            .float64 => |items| {
-                const selected_len = bitCountTrue(mask);
-                var out = try self.allocManagedHostFloatResult(selected_len);
-                copyDenseItemsByMask(f64, out.items, items, mask);
-                const value = try out.value(self);
-                const flags = maskSelectedFloatPreservedFlags(mask, selected_len, array.flags) orelse analyzeFloatSlice(out.items).flags;
-                hostDenseSetFlags(try mutableNumericHostArrayValue(self, value), flags);
-                return value;
-            },
-            .float32 => |items| {
-                const selected_len = bitCountTrue(mask);
-                var out = try self.allocManagedHostFloat32Result(selected_len);
-                copyDenseItemsByMask(f32, out.items, items, mask);
-                const value = try out.value(self);
-                const flags = maskSelectedFloatPreservedFlags(mask, selected_len, array.flags) orelse analyzeFloatSlice32(out.items).flags;
-                hostDenseSetFlags(try mutableNumericHostArrayValue(self, value), flags);
-                return value;
-            },
-            else => {
-                const view = hostIntArrayView(array).?;
-                const selected_len = bitCountTrue(mask);
-                var out = try self.allocManagedHostIntResult(hostIntArrayViewKind(view), selected_len);
-                const preserved_stats = maskSelectedIntPreservedStats(view, mask, selected_len, array.flags);
-                const stats = switch (view) {
-                    .bit => unreachable,
-                    .int8 => |source| switch (out) {
-                        .int8 => |*dest| blk: {
-                            copyDenseItemsByMask(i8, dest.items, source, mask);
-                            break :blk preserved_stats orelse denseIntGatherStatsFromAnalysis(analyzeIntSliceTyped(i8, dest.items));
-                        },
-                        else => unreachable,
-                    },
-                    .int16 => |source| switch (out) {
-                        .int16 => |*dest| blk: {
-                            copyDenseItemsByMask(i16, dest.items, source, mask);
-                            break :blk preserved_stats orelse denseIntGatherStatsFromAnalysis(analyzeIntSliceTyped(i16, dest.items));
-                        },
-                        else => unreachable,
-                    },
-                    .int32 => |source| switch (out) {
-                        .int32 => |*dest| blk: {
-                            if (copyI32ItemsByMaskNeon(dest.items, source, mask)) {
-                                self.noteSimdKernel(.mask_select);
-                            } else {
-                                copyDenseItemsByMask(i32, dest.items, source, mask);
-                            }
-                            break :blk preserved_stats orelse denseIntGatherStatsFromAnalysis(analyzeIntSliceTyped(i32, dest.items));
-                        },
-                        else => unreachable,
-                    },
-                    .int64 => |source| switch (out) {
-                        .int64 => |*dest| blk: {
-                            copyDenseItemsByMask(i64, dest.items, source, mask);
-                            break :blk preserved_stats orelse denseIntGatherStatsFromAnalysis(analyzeIntSliceTyped(i64, dest.items));
-                        },
-                        else => unreachable,
-                    },
-                };
-                const value = try out.value(self);
-                const host = try mutableNumericHostArrayValue(self, value);
-                hostDenseSetFlags(host, stats.flags);
-                hostDenseSetCachedIntRange(host, stats.range);
-                return value;
-            },
-        }
-    }
-
-    fn hostBoxedArrayIndexMask(self: *Session, array: *const HostBoxedArray, mask: HostBitSlice) KError!Value {
-        if (mask.len != array.len()) return error.Type;
-        var out = std.ArrayList(Value).empty;
-        defer out.deinit(self.allocator);
-        for (0..mask.len) |idx| {
-            if (!bitGet(mask.words, idx)) continue;
-            try out.append(self.allocator, array.items[idx]);
-        }
-        return try self.createManagedHostBoxedArray(out.items);
     }
 
     const DenseIntGatherStats = struct {
@@ -24643,59 +22543,6 @@ pub const Session = struct {
             };
         }
     };
-
-    fn denseIntGatherStatsFromAnalysis(analysis: HostIntAnalysis) DenseIntGatherStats {
-        return .{ .flags = analysis.flags, .range = analysis.range };
-    }
-
-    fn compressBitSliceByMask(out: *HostBitAlloc, source: HostBitSlice, mask: HostBitSlice) DenseIntGatherStats {
-        var asc = true;
-        var dsc = true;
-        var saw_zero = out.len == 0;
-        var saw_one = false;
-        var prev = false;
-        var out_count: usize = 0;
-        var out_word_idx: usize = 0;
-        var out_bit_idx: usize = 0;
-        var out_word: u64 = 0;
-
-        for (mask.words, 0..) |_, word_idx| {
-            const word_base = word_idx * host_bit_word_bits;
-            var selected = bitWordMasked(mask.words, mask.len, word_idx);
-            while (selected != 0) {
-                const bit_idx: usize = @intCast(@ctz(selected));
-                const item = bitGet(source.words, word_base + bit_idx);
-                if (item) out_word |= @as(u64, 1) << @intCast(out_bit_idx);
-                if (out_count == 0) {
-                    saw_zero = !item;
-                    saw_one = item;
-                } else {
-                    if (item) saw_one = true else saw_zero = true;
-                    if (@intFromBool(prev) > @intFromBool(item)) asc = false;
-                    if (@intFromBool(prev) < @intFromBool(item)) dsc = false;
-                }
-                prev = item;
-                out_count += 1;
-                out_bit_idx += 1;
-                if (out_bit_idx == host_bit_word_bits) {
-                    out.words[out_word_idx] = out_word;
-                    out_word_idx += 1;
-                    out_bit_idx = 0;
-                    out_word = 0;
-                }
-                selected &= selected - 1;
-            }
-        }
-        if (out_bit_idx != 0) out.words[out_word_idx] = out_word;
-
-        return .{
-            .flags = host_dense_flag_normalized | orderFlagsFromMonotonic(asc, dsc),
-            .range = .{
-                .min = if (saw_zero) 0 else 1,
-                .max = if (saw_one) 1 else 0,
-            },
-        };
-    }
 
     fn denseSelectorCachedRangeFitsSource(selector: *const HostDenseArray, source_len: usize) bool {
         const range = hostDenseCachedIntRange(selector) orelse return false;
@@ -24840,7 +22687,7 @@ pub const Session = struct {
             else => unreachable,
         };
 
-        const value = try out.value(self);
+        const value = out.value();
         const host = try mutableNumericHostArrayValue(self, value);
         hostDenseSetFlags(host, stats.flags);
         hostDenseSetCachedIntRange(host, stats.range);
@@ -24877,7 +22724,7 @@ pub const Session = struct {
             else => unreachable,
         }
 
-        const value = try out.value(self);
+        const value = out.value();
         const host = try mutableNumericHostArrayValue(self, value);
         hostDenseSetFlags(host, host_dense_flag_normalized | orderFlagsFromMonotonic(asc, dsc));
         hostDenseSetCachedIntRange(host, .{
@@ -24895,7 +22742,7 @@ pub const Session = struct {
             out.items[idx] = source[source_idx];
         }
 
-        const value = try out.value(self);
+        const value = out.value();
         const analysis = analyzeFloatSlice(out.items);
         hostDenseSetFlags(try mutableNumericHostArrayValue(self, value), analysis.flags);
         return value;
@@ -24909,7 +22756,7 @@ pub const Session = struct {
             out.items[idx] = source[source_idx];
         }
 
-        const value = try out.value(self);
+        const value = out.value();
         const analysis = analyzeFloatSlice32(out.items);
         hostDenseSetFlags(try mutableNumericHostArrayValue(self, value), analysis.flags);
         return value;
@@ -24920,7 +22767,7 @@ pub const Session = struct {
         var out = try self.allocManagedHostFloatResult(len);
         gatherFloatDenseSelectionUnchecked(f64, out.items, source, selector);
 
-        const value = try out.value(self);
+        const value = out.value();
         hostDenseSetFlags(try mutableNumericHostArrayValue(self, value), host_dense_flag_normalized | if (len <= 1) host_dense_flag_asc | host_dense_flag_dsc else 0);
         return value;
     }
@@ -24930,7 +22777,7 @@ pub const Session = struct {
         var out = try self.allocManagedHostFloat32Result(len);
         gatherFloatDenseSelectionUnchecked(f32, out.items, source, selector);
 
-        const value = try out.value(self);
+        const value = out.value();
         hostDenseSetFlags(try mutableNumericHostArrayValue(self, value), host_dense_flag_normalized | if (len <= 1) host_dense_flag_asc | host_dense_flag_dsc else 0);
         return value;
     }
@@ -24965,7 +22812,7 @@ pub const Session = struct {
             else => unreachable,
         }
 
-        const value = try out.value(self);
+        const value = out.value();
         const host = try mutableNumericHostArrayValue(self, value);
         hostDenseSetFlags(host, host_dense_flag_normalized | orderFlagsFromMonotonic(asc, dsc));
         hostDenseSetCachedIntRange(host, .{
@@ -24983,7 +22830,7 @@ pub const Session = struct {
             out.items[idx] = source[source_idx];
         }
 
-        const value = try out.value(self);
+        const value = out.value();
         const analysis = analyzeFloatSlice(out.items);
         hostDenseSetFlags(try mutableNumericHostArrayValue(self, value), analysis.flags);
         return value;
@@ -24997,7 +22844,7 @@ pub const Session = struct {
             out.items[idx] = source[source_idx];
         }
 
-        const value = try out.value(self);
+        const value = out.value();
         const analysis = analyzeFloatSlice32(out.items);
         hostDenseSetFlags(try mutableNumericHostArrayValue(self, value), analysis.flags);
         return value;
@@ -25029,7 +22876,7 @@ pub const Session = struct {
             prev = item;
         }
 
-        const value = try out.value(self);
+        const value = out.value();
         const host = try mutableNumericHostArrayValue(self, value);
         hostDenseSetFlags(host, host_dense_flag_normalized | orderFlagsFromMonotonic(asc, dsc));
         hostDenseSetCachedIntRange(host, if (len == 0)
@@ -25062,7 +22909,7 @@ pub const Session = struct {
             },
         }
 
-        const value = try out.value(self);
+        const value = out.value();
         const host = try mutableNumericHostArrayValue(self, value);
         hostDenseSetFlags(host, host_dense_flag_normalized | if (len <= 1) host_dense_flag_asc | host_dense_flag_dsc else 0);
         return value;
@@ -25094,7 +22941,7 @@ pub const Session = struct {
             prev = item;
         }
 
-        const value = try out.value(self);
+        const value = out.value();
         const host = try mutableNumericHostArrayValue(self, value);
         hostDenseSetFlags(host, host_dense_flag_normalized | orderFlagsFromMonotonic(asc, dsc));
         hostDenseSetCachedIntRange(host, if (len == 0)
@@ -25104,12 +22951,12 @@ pub const Session = struct {
         return value;
     }
 
-    fn hostDenseIndexByIntVector(self: *Session, array: *const HostDenseArray, selector: HostIntArrayView) KError!Value {
-        if (hostDenseNonVectorShape(array)) |shape| {
+    fn hostDenseIndexByIntVector(self: *Session, source_value: Value, array: *const HostDenseArray, selector: HostIntArrayView) KError!Value {
+        if (valueNonVectorNumericShape(source_value)) |shape| {
             if (shape.rank != 2) return error.Unsupported;
             return try self.hostNumericMatrixIndexByIntVector(array, selector, @intCast(shape.shape[0]), @intCast(shape.shape[1]));
         }
-        if (comptime enable_probe_instrumentation) self.debug_host_index_copy_count += 1;
+        if (comptime enable_probe_instrumentation) self.debug.host_index_copy_count += 1;
         switch (array.storage) {
             .bit => {
                 return try self.gatherManagedHostBitArraySelection(.{ .words = array.storage.bit, .len = array.logical_len }, selector);
@@ -25138,13 +22985,13 @@ pub const Session = struct {
         return try self.createManagedHostBoxedArray(out.items);
     }
 
-    fn hostDenseIndexByIntDenseView(self: *Session, array: *const HostDenseArray, selector: HostIntDenseView) KError!Value {
-        if (selector == .dense) return try self.hostDenseIndexByIntVector(array, selector.dense);
-        if (hostDenseNonVectorShape(array)) |shape| {
+    fn hostDenseIndexByIntDenseView(self: *Session, source_value: Value, array: *const HostDenseArray, selector: HostIntDenseView) KError!Value {
+        if (selector == .dense) return try self.hostDenseIndexByIntVector(source_value, array, selector.dense);
+        if (valueNonVectorNumericShape(source_value)) |shape| {
             if (shape.rank != 2) return error.Unsupported;
             return try self.hostNumericMatrixIndexByIntDenseView(array, selector, @intCast(shape.shape[0]), @intCast(shape.shape[1]));
         }
-        if (comptime enable_probe_instrumentation) self.debug_host_index_copy_count += 1;
+        if (comptime enable_probe_instrumentation) self.debug.host_index_copy_count += 1;
         switch (array.storage) {
             .bit => {
                 return try self.gatherManagedHostBitSelection(.{ .words = array.storage.bit, .len = array.logical_len }, selector);
@@ -25185,7 +23032,7 @@ pub const Session = struct {
                     if (try hostIntDenseViewArithmeticSlice(view, outer_len)) |slice| {
                         break :blk (try numericStructuralArithmeticSliceValue(self, structural, slice)).?;
                     }
-                    break :blk try self.applyHostArrayIndex(try hostStructuralArrayForHandle(self, @constCast(handle)), selector);
+                    break :blk try self.applyHostArrayIndex(Value.numericArray(handle), try hostStructuralArrayForHandle(self, @constCast(handle)), selector);
                 } else switch (view) {
                     .dense => |dense| blk: {
                         var out = std.ArrayList(i64).empty;
@@ -25237,7 +23084,7 @@ pub const Session = struct {
                 .host_keyed_store => if (value.asHostKeyedStore().layout == .table) "M" else "m",
                 .host_relation, .host_table_scalar => "M",
                 .host_handle => "h",
-                .numeric_array, .host_dense_array, .backend_array => switch (valueNumericMode(value) orelse return "A") {
+                .numeric_array => switch (valueNumericMode(value) orelse return "A") {
                     .int => "I",
                     .float => if (valueFloatStorageKind(value) == .float32) "E" else "F",
                 },
@@ -26261,28 +24108,6 @@ pub const Session = struct {
         };
     }
 
-    fn negateValue(self: *Session, value: Value) KError!Value {
-        if (try self.tryScalarIntBoolMonad(.sub, value)) |result| return result;
-        if (try self.textByteNumericMonadValue(.sub, value)) |result| return result;
-        return switch (value.tag()) {
-            .float32 => try self.float32Value(-value.asFloat32()),
-            .float => try self.floatValue(-value.asFloat()),
-            .array => try self.applyNumericMonad(.sub, value),
-            else => error.Type,
-        };
-    }
-
-    fn sqrtValue(self: *Session, value: Value) KError!Value {
-        if (try self.tryScalarIntBoolMonad(.div, value)) |result| return result;
-        if (try self.textByteNumericMonadValue(.div, value)) |result| return result;
-        return switch (value.tag()) {
-            .float32 => try self.float32Value(@floatCast(std.math.sqrt(@as(f64, @floatCast(value.asFloat32()))))),
-            .float => try self.floatValue(std.math.sqrt(value.asFloat())),
-            .array => try self.applyNumericMonad(.div, value),
-            else => error.Type,
-        };
-    }
-
     fn textByteNumericMonadValue(self: *Session, op: BuiltinId, value: Value) KError!?Value {
         switch (op) {
             .sub, .div => {},
@@ -26349,7 +24174,7 @@ pub const Session = struct {
         const left_int = inlineIntBoolValue(left);
         const right_int = inlineIntBoolValue(right);
         if (left_int != null and right_int != null) {
-            if (comptime enable_probe_instrumentation) self.debug_inline_scalar_dyad_attempt_count += 1;
+            if (comptime enable_probe_instrumentation) self.debug.inline_scalar_dyad_attempt_count += 1;
             const lhs = left_int.?;
             const rhs = right_int.?;
             const result: ?Value = switch (op) {
@@ -26373,14 +24198,14 @@ pub const Session = struct {
                 else => null,
             };
             if (comptime enable_probe_instrumentation) {
-                if (result != null) self.debug_inline_scalar_dyad_hit_count += 1 else self.debug_inline_scalar_dyad_fallback_count += 1;
+                if (result != null) self.debug.inline_scalar_dyad_hit_count += 1 else self.debug.inline_scalar_dyad_fallback_count += 1;
             }
             return result;
         }
 
         const left_float = inlineNumericFloatValue(left) orelse return null;
         const right_float = inlineNumericFloatValue(right) orelse return null;
-        if (comptime enable_probe_instrumentation) self.debug_inline_scalar_dyad_attempt_count += 1;
+        if (comptime enable_probe_instrumentation) self.debug.inline_scalar_dyad_attempt_count += 1;
         const result_kind = scalarNumericResultStorageKind(left, right);
         const float_result = struct {
             fn value(session: *Session, kind: HostFloatStorageKind, raw: f64) KError!Value {
@@ -26404,7 +24229,7 @@ pub const Session = struct {
             else => null,
         };
         if (comptime enable_probe_instrumentation) {
-            if (result != null) self.debug_inline_scalar_dyad_hit_count += 1 else self.debug_inline_scalar_dyad_fallback_count += 1;
+            if (result != null) self.debug.inline_scalar_dyad_hit_count += 1 else self.debug.inline_scalar_dyad_fallback_count += 1;
         }
         return result;
     }
@@ -26837,7 +24662,7 @@ pub const Session = struct {
     }
 
     fn applyEachDictValues(self: *Session, base: Value, store: *const HostKeyedStore) KError!Value {
-        if (comptime enable_probe_instrumentation) self.debug_apply_each_generic_count += 1;
+        if (comptime enable_probe_instrumentation) self.debug.apply_each_generic_count += 1;
         const len = keyedStoreValuesValueCount(store.values) orelse return error.Internal;
         var results = std.ArrayList(Value).empty;
         defer {
@@ -27462,6 +25287,17 @@ pub const Session = struct {
         return try self.duckdbConnectionForHandle(@constCast(value.asHostHandle()));
     }
 
+    fn validateWasmDuckDbHandleValue(self: *Session, value: Value) KError!void {
+        _ = self;
+        if (value.tag() != .array or value.arrayKind() != .host_handle) return error.Type;
+        const handle = value.asHostHandle();
+        if (handle.kind != .duckdb or handle.closed) return error.Type;
+    }
+
+    fn validateWasmDuckDbRelationHandle(self: *Session, relation: *const HostRelation) KError!void {
+        if (relation.duckdb_handle) |handle| try self.validateWasmDuckDbHandleValue(handle);
+    }
+
     fn duckdbConnectionForRelation(self: *Session, relation: *const HostRelation) KError!*duckdb_runtime.Connection {
         if (relation.duckdb_handle) |handle| return try self.duckdbConnectionFromHandleValue(handle);
         return try self.duckdbConnection();
@@ -27472,11 +25308,6 @@ pub const Session = struct {
         if (registered.*) return;
         try DuckDbKiwiTableScan.ensureRegistered(self, conn);
         registered.* = true;
-    }
-
-    fn ensureDuckDbKiwiTableScan(self: *Session, conn: *duckdb_runtime.Connection) KError!void {
-        if (comptime !runtime_has_duckdb) return error.Unsupported;
-        return try self.ensureDuckDbKiwiTableScanFlag(conn, &self.duckdb_kiwi_scan_registered);
     }
 
     fn prepareDuckDbStatement(self: *Session, conn: *duckdb_runtime.Connection, sql: []const u8) KError!duckdb_runtime.PreparedStatement {
@@ -27521,14 +25352,6 @@ pub const Session = struct {
             return mapDuckDbError(err);
         };
         return count;
-    }
-
-    fn closeDuckDbAppender(self: *Session, appender: *duckdb_runtime.Appender) KError!void {
-        var diagnostic: ?[]u8 = null;
-        appender.closeWithDiagnostic(&diagnostic) catch |err| {
-            self.setOwnedDuckDbErrorText(diagnostic);
-            return mapDuckDbError(err);
-        };
     }
 
     fn executeDuckDbSql(self: *Session, conn: *duckdb_runtime.Connection, sql: []const u8) KError!void {
@@ -27623,6 +25446,112 @@ pub const Session = struct {
         return params;
     }
 
+    fn appendSqlParamLiteral(self: *Session, out: *std.ArrayList(u8), value: Value) KError!void {
+        switch (value.tag()) {
+            .bool => try out.appendSlice(self.allocator, if (value.asBool()) "true" else "false"),
+            .int => try out.print(self.allocator, "{d}", .{value.asInt()}),
+            .float32 => {
+                const raw: f32 = value.asFloat32();
+                if (!std.math.isFinite(raw)) return error.Unsupported;
+                try out.print(self.allocator, "{d}", .{raw});
+            },
+            .float => {
+                const raw = value.asFloat();
+                if (!std.math.isFinite(raw)) return error.Unsupported;
+                try out.print(self.allocator, "{d}", .{raw});
+            },
+            .array => if (stringBytes(value)) |text| {
+                const quoted = duckdb_runtime.sqlStringLiteral(self.allocator, text) catch |err| return mapDuckDbError(err);
+                defer self.allocator.free(quoted);
+                try out.appendSlice(self.allocator, quoted);
+            } else if (symbolBytes(value)) |text| {
+                const quoted = duckdb_runtime.sqlStringLiteral(self.allocator, text) catch |err| return mapDuckDbError(err);
+                defer self.allocator.free(quoted);
+                try out.appendSlice(self.allocator, quoted);
+            } else {
+                return error.Type;
+            },
+            else => return error.Type,
+        }
+    }
+
+    fn sqlTextWithExplicitParams(self: *Session, sql_text: []const u8, params: []const HostRelationParam) KError![]u8 {
+        var out = std.ArrayList(u8).empty;
+        errdefer out.deinit(self.allocator);
+
+        var idx: usize = 0;
+        var param_idx: usize = 0;
+        var state: enum { normal, single_quote, double_quote, line_comment, block_comment } = .normal;
+        while (idx < sql_text.len) {
+            const ch = sql_text[idx];
+            switch (state) {
+                .normal => {
+                    if (ch == '?') {
+                        if (param_idx >= params.len) return error.Arity;
+                        try self.appendSqlParamLiteral(&out, params[param_idx].value);
+                        param_idx += 1;
+                        idx += 1;
+                        continue;
+                    }
+                    if (ch == '\'') {
+                        state = .single_quote;
+                    } else if (ch == '"') {
+                        state = .double_quote;
+                    } else if (ch == '-' and idx + 1 < sql_text.len and sql_text[idx + 1] == '-') {
+                        try out.appendSlice(self.allocator, sql_text[idx .. idx + 2]);
+                        idx += 2;
+                        state = .line_comment;
+                        continue;
+                    } else if (ch == '/' and idx + 1 < sql_text.len and sql_text[idx + 1] == '*') {
+                        try out.appendSlice(self.allocator, sql_text[idx .. idx + 2]);
+                        idx += 2;
+                        state = .block_comment;
+                        continue;
+                    }
+                    try out.append(self.allocator, ch);
+                    idx += 1;
+                },
+                .single_quote => {
+                    try out.append(self.allocator, ch);
+                    idx += 1;
+                    if (ch == '\'' and idx < sql_text.len and sql_text[idx] == '\'') {
+                        try out.append(self.allocator, sql_text[idx]);
+                        idx += 1;
+                    } else if (ch == '\'') {
+                        state = .normal;
+                    }
+                },
+                .double_quote => {
+                    try out.append(self.allocator, ch);
+                    idx += 1;
+                    if (ch == '"' and idx < sql_text.len and sql_text[idx] == '"') {
+                        try out.append(self.allocator, sql_text[idx]);
+                        idx += 1;
+                    } else if (ch == '"') {
+                        state = .normal;
+                    }
+                },
+                .line_comment => {
+                    try out.append(self.allocator, ch);
+                    idx += 1;
+                    if (ch == '\n') state = .normal;
+                },
+                .block_comment => {
+                    if (ch == '*' and idx + 1 < sql_text.len and sql_text[idx + 1] == '/') {
+                        try out.appendSlice(self.allocator, sql_text[idx .. idx + 2]);
+                        idx += 2;
+                        state = .normal;
+                    } else {
+                        try out.append(self.allocator, ch);
+                        idx += 1;
+                    }
+                },
+            }
+        }
+        if (param_idx != params.len) return error.Arity;
+        return try out.toOwnedSlice(self.allocator);
+    }
+
     fn bindPreparedSqlScalar(prepared: *duckdb_runtime.PreparedStatement, index: usize, value: Value) KError!void {
         switch (value.tag()) {
             .bool => prepared.bindBoolean(index, value.asBool()) catch |err| return mapDuckDbError(err),
@@ -27701,105 +25630,6 @@ pub const Session = struct {
         try self.executeDuckDbSql(conn, registration_sql);
         self.forgetRegisteredDuckDbTable(name);
         return self.shareValue(relation_value);
-    }
-
-    fn tableRegistrationTypeSql(kind: HostTableColumnKind) []const u8 {
-        return switch (kind) {
-            .boolean => "BOOLEAN",
-            .int => "BIGINT",
-            .float => "DOUBLE",
-            .string => "VARCHAR",
-            .date => "DATE",
-            .time => "TIME",
-            .time_ns => "TIME_NS",
-            .time_tz => "TIMETZ",
-            .timestamp => "TIMESTAMP",
-            .timestamp_s => "TIMESTAMP_S",
-            .timestamp_ms => "TIMESTAMP_MS",
-            .timestamp_ns => "TIMESTAMP_NS",
-            .timestamp_tz => "TIMESTAMPTZ",
-        };
-    }
-
-    fn tableRegistrationSql(self: *Session, name: []const u8, table: *const HostKeyedStore) KError![]u8 {
-        std.debug.assert(table.layout == .table);
-        const ident = duckdb_runtime.sqlIdentifier(self.allocator, name) catch |err| return mapDuckDbError(err);
-        defer self.allocator.free(ident);
-
-        var out = std.ArrayList(u8).empty;
-        errdefer out.deinit(self.allocator);
-
-        try out.print(self.allocator, "create temp table {s} (", .{ident});
-        const metadata = keyedStoreTableMetadata(table);
-        for (0..keyedStoreNameCount(table)) |idx| {
-            if (idx != 0) try out.appendSlice(self.allocator, ", ");
-            const column_ident = duckdb_runtime.sqlIdentifier(self.allocator, keyedStoreColumnNameBytes(table, idx)) catch |err| return mapDuckDbError(err);
-            defer self.allocator.free(column_ident);
-            try out.print(self.allocator, "{s} {s}", .{ column_ident, tableRegistrationTypeSql(metadata[idx].kind) });
-        }
-        try out.append(self.allocator, ')');
-        return try out.toOwnedSlice(self.allocator);
-    }
-
-    fn appendTableCellToDuckDbAppender(
-        self: *Session,
-        appender: *duckdb_runtime.Appender,
-        table: *const HostKeyedStore,
-        column_idx: usize,
-        row: usize,
-    ) KError!void {
-        std.debug.assert(table.layout == .table);
-        if (!keyedStoreTableCellIsValid(table, column_idx, row)) {
-            appender.appendNull() catch |err| return mapDuckDbError(err);
-            return;
-        }
-
-        const kind = keyedStoreTableMetadata(table)[column_idx].kind;
-        const data = tableColumnData(table, column_idx);
-        switch (kind) {
-            .boolean => appender.appendBool((try numericIntAt(data, @intCast(row))) != 0) catch |err| return mapDuckDbError(err),
-            .int => appender.appendInt64(try numericIntAt(data, @intCast(row))) catch |err| return mapDuckDbError(err),
-            .float => appender.appendDouble(try numericFloatAt(data, @intCast(row))) catch |err| return mapDuckDbError(err),
-            .string => {
-                const value = try self.hostStringListItemValue(data.asHostStringList(), row);
-                defer self.releaseValue(value);
-                const text = symbolBytes(value) orelse stringBytes(value) orelse return error.Internal;
-                appender.appendVarchar(text) catch |err| return mapDuckDbError(err);
-            },
-            .date => {
-                const days = std.math.cast(i32, try numericIntAt(data, @intCast(row))) orelse return error.Unsupported;
-                appender.appendDate(days) catch |err| return mapDuckDbError(err);
-            },
-            .time => appender.appendTime(try numericIntAt(data, @intCast(row))) catch |err| return mapDuckDbError(err),
-            .time_ns => appender.appendTimeNs(try numericIntAt(data, @intCast(row))) catch |err| return mapDuckDbError(err),
-            .time_tz => appender.appendTimeTz(try numericIntAt(data, @intCast(row))) catch |err| return mapDuckDbError(err),
-            .timestamp => appender.appendTimestamp(try numericIntAt(data, @intCast(row))) catch |err| return mapDuckDbError(err),
-            .timestamp_s => appender.appendTimestampS(try numericIntAt(data, @intCast(row))) catch |err| return mapDuckDbError(err),
-            .timestamp_ms => appender.appendTimestampMs(try numericIntAt(data, @intCast(row))) catch |err| return mapDuckDbError(err),
-            .timestamp_ns => appender.appendTimestampNs(try numericIntAt(data, @intCast(row))) catch |err| return mapDuckDbError(err),
-            .timestamp_tz => appender.appendTimestampTz(try numericIntAt(data, @intCast(row))) catch |err| return mapDuckDbError(err),
-        }
-    }
-
-    fn registerTableNamedEager(self: *Session, conn: *duckdb_runtime.Connection, name: []const u8, table_value: Value) KError!Value {
-        const table = table_value.asHostKeyedStore();
-        if (table.layout != .table) return error.Type;
-        try self.dropRegisteredObjectIfExists(conn, name);
-
-        const registration_sql = try self.tableRegistrationSql(name, table);
-        defer self.allocator.free(registration_sql);
-        try self.executeDuckDbSql(conn, registration_sql);
-
-        var appender = duckdb_runtime.Appender.init(conn, name) catch |err| return mapDuckDbError(err);
-        defer appender.deinit();
-
-        for (0..table.row_count) |row| {
-            for (0..keyedStoreNameCount(table)) |column_idx| try self.appendTableCellToDuckDbAppender(&appender, table, column_idx, row);
-            appender.endRow() catch |err| return mapDuckDbError(err);
-        }
-
-        try self.closeDuckDbAppender(&appender);
-        return self.shareValue(table_value);
     }
 
     fn forgetRegisteredDuckDbTable(self: *Session, name: []const u8) void {
@@ -28435,22 +26265,43 @@ pub const Session = struct {
         return Value.fromBool(true);
     }
 
+    fn execWasmValue(self: *Session, handle_value: ?Value, value: Value, params_value: ?Value) KError!Value {
+        if (handle_value) |handle| try self.validateWasmDuckDbHandleValue(handle);
+
+        const sql_text = sqlQueryBytes(value) orelse return error.Type;
+        const trimmed = trimSqlText(sql_text);
+        if (trimmed.len == 0) return error.Parse;
+
+        const params = try self.captureExplicitSqlParams(params_value);
+        defer self.freeCapturedRelationParams(params);
+
+        const substituted = try self.sqlTextWithExplicitParams(trimmed, params);
+        defer self.allocator.free(substituted);
+
+        try self.wasmDuckDbExec(substituted);
+        return Value.fromBool(true);
+    }
+
     fn execValue(self: *Session, value: Value) KError!Value {
+        if (comptime runtime_has_wasm_duckdb_bridge) return try self.execWasmValue(null, value, null);
         const conn = try self.duckdbConnection();
         return try self.execValueWithConnection(conn, value, null);
     }
 
     fn execValueWithParams(self: *Session, value: Value, params_value: Value) KError!Value {
+        if (comptime runtime_has_wasm_duckdb_bridge) return try self.execWasmValue(null, value, params_value);
         const conn = try self.duckdbConnection();
         return try self.execValueWithConnection(conn, value, params_value);
     }
 
     fn execValueWithHandle(self: *Session, handle_value: Value, value: Value) KError!Value {
+        if (comptime runtime_has_wasm_duckdb_bridge) return try self.execWasmValue(handle_value, value, null);
         const conn = try self.duckdbConnectionFromHandleValue(handle_value);
         return try self.execValueWithConnection(conn, value, null);
     }
 
     fn execValueWithHandleParams(self: *Session, handle_value: Value, value: Value, params_value: Value) KError!Value {
+        if (comptime runtime_has_wasm_duckdb_bridge) return try self.execWasmValue(handle_value, value, params_value);
         const conn = try self.duckdbConnectionFromHandleValue(handle_value);
         return try self.execValueWithConnection(conn, value, params_value);
     }
@@ -28461,16 +26312,22 @@ pub const Session = struct {
         if (trimmed.len == 0) return error.Parse;
 
         const params = try self.captureExplicitSqlParams(params_value);
-        errdefer self.freeCapturedRelationParams(params);
 
         if (comptime runtime_has_wasm_duckdb_bridge) {
-            if (params.len != 0) return error.Unsupported;
-        } else {
-            const actual_conn = conn orelse return error.Unsupported;
-            var prepared = try self.prepareDuckDbStatement(actual_conn, trimmed);
-            defer prepared.deinit();
-            try self.bindPreparedRelationParams(&prepared, params);
+            defer self.freeCapturedRelationParams(params);
+            if (handle_value) |handle| try self.validateWasmDuckDbHandleValue(handle);
+            const substituted = try self.sqlTextWithExplicitParams(trimmed, params);
+            defer self.allocator.free(substituted);
+            const stored_params = try self.allocator.alloc(HostRelationParam, 0);
+            errdefer self.allocator.free(stored_params);
+            return try self.createManagedSqlRelation(substituted, stored_params, handle_value);
         }
+
+        errdefer self.freeCapturedRelationParams(params);
+        const actual_conn = conn orelse return error.Unsupported;
+        var prepared = try self.prepareDuckDbStatement(actual_conn, trimmed);
+        defer prepared.deinit();
+        try self.bindPreparedRelationParams(&prepared, params);
         return try self.createManagedSqlRelation(trimmed, params, handle_value);
     }
 
@@ -28491,11 +26348,19 @@ pub const Session = struct {
     }
 
     fn sqlValueWithHandle(self: *Session, handle_value: Value, value: Value) KError!Value {
+        if (comptime runtime_has_wasm_duckdb_bridge) {
+            try self.validateWasmDuckDbHandleValue(handle_value);
+            return try self.sqlValueWithConnection(null, handle_value, value, null);
+        }
         const conn = try self.duckdbConnectionFromHandleValue(handle_value);
         return try self.sqlValueWithConnection(conn, handle_value, value, null);
     }
 
     fn sqlValueWithHandleParams(self: *Session, handle_value: Value, value: Value, params_value: Value) KError!Value {
+        if (comptime runtime_has_wasm_duckdb_bridge) {
+            try self.validateWasmDuckDbHandleValue(handle_value);
+            return try self.sqlValueWithConnection(null, handle_value, value, params_value);
+        }
         const conn = try self.duckdbConnectionFromHandleValue(handle_value);
         return try self.sqlValueWithConnection(conn, handle_value, value, params_value);
     }
@@ -28558,6 +26423,7 @@ pub const Session = struct {
     }
 
     fn wasmDuckDbRelationRowCount(self: *Session, relation: *HostRelation) KError!?usize {
+        try self.validateWasmDuckDbRelationHandle(relation);
         switch (relation.origin) {
             .file => {},
             .sql => |sql_info| if (sql_info.params.len != 0) return error.Unsupported,
@@ -28590,6 +26456,13 @@ pub const Session = struct {
         const copied: usize = @intCast(wasm_duckdb_bridge.copyLastResult(wasmBridgePtr(out), @intCast(out.len)));
         if (copied != out.len) return error.Internal;
         return out;
+    }
+
+    fn wasmDuckDbExec(self: *Session, sql: []const u8) KError!void {
+        if (wasm_duckdb_bridge.exec(wasmBridgePtr(sql), @intCast(sql.len)) != 0) {
+            self.setWasmDuckDbBridgeError();
+            return error.Internal;
+        }
     }
 
     fn wasmDuckDbJsonKind(text: []const u8) KError!HostTableColumnKind {
@@ -28820,7 +26693,7 @@ pub const Session = struct {
         };
     }
 
-    fn deinitTableColumnBuilder(self: *Session, builder: *TableColumnBuilder) void {
+    fn deinitTableColumnBuilder(self: *Session, builder: *BufferedTableColumnBuilder) void {
         switch (builder.kind) {
             .boolean => builder.bool_values.deinit(self.allocator),
             .int, .date, .time, .time_ns, .time_tz, .timestamp, .timestamp_s, .timestamp_ms, .timestamp_ns, .timestamp_tz => builder.int_values.deinit(self.allocator),
@@ -28836,7 +26709,7 @@ pub const Session = struct {
         builder.validity.deinit(self.allocator);
     }
 
-    fn tableColumnBuilderEnsureValueCapacity(self: *Session, builder: *TableColumnBuilder, additional: usize) KError!void {
+    fn tableColumnBuilderEnsureValueCapacity(self: *Session, builder: *BufferedTableColumnBuilder, additional: usize) KError!void {
         switch (builder.kind) {
             .boolean => try builder.bool_values.ensureUnusedCapacity(self.allocator, additional),
             .int, .date, .time, .time_ns, .time_tz, .timestamp, .timestamp_s, .timestamp_ms, .timestamp_ns, .timestamp_tz => try builder.int_values.ensureUnusedCapacity(self.allocator, additional),
@@ -28849,7 +26722,7 @@ pub const Session = struct {
         }
     }
 
-    fn tableColumnBuilderEnsureValidityLen(self: *Session, builder: *TableColumnBuilder, target_len: usize) KError!void {
+    fn tableColumnBuilderEnsureValidityLen(self: *Session, builder: *BufferedTableColumnBuilder, target_len: usize) KError!void {
         if (!builder.saw_null) builder.saw_null = true;
         if (builder.validity.items.len >= target_len) return;
         try builder.validity.ensureUnusedCapacity(self.allocator, target_len - builder.validity.items.len);
@@ -28858,7 +26731,7 @@ pub const Session = struct {
 
     fn tableColumnBuilderAppendValidity(
         self: *Session,
-        builder: *TableColumnBuilder,
+        builder: *BufferedTableColumnBuilder,
         row_offset: usize,
         valid: bool,
     ) KError!void {
@@ -28875,36 +26748,6 @@ pub const Session = struct {
         return (words[entry_idx] & (@as(u64, 1) << @intCast(idx_in_entry))) != 0;
     }
 
-    fn analyzeIntSliceTyped(comptime T: type, items: []const T) HostIntAnalysis {
-        if (items.len == 0) {
-            return .{
-                .range = .{ .min = 0, .max = 0 },
-                .kind = .int8,
-                .flags = host_dense_flag_normalized | host_dense_flag_asc | host_dense_flag_dsc,
-            };
-        }
-
-        var min_value: i64 = @intCast(items[0]);
-        var max_value: i64 = @intCast(items[0]);
-        var asc = true;
-        var dsc = true;
-        var prev: i64 = @intCast(items[0]);
-        for (items[1..]) |raw_item| {
-            const item: i64 = @intCast(raw_item);
-            min_value = @min(min_value, item);
-            max_value = @max(max_value, item);
-            if (prev > item) asc = false;
-            if (prev < item) dsc = false;
-            prev = item;
-        }
-
-        return .{
-            .range = .{ .min = min_value, .max = max_value },
-            .kind = hostIntStorageKindForRange(min_value, max_value),
-            .flags = host_dense_flag_normalized | orderFlagsFromMonotonic(asc, dsc),
-        };
-    }
-
     fn directTableColumnStorageArray(storage: *const DirectTableColumnStorage) *HostDenseArray {
         return switch (storage.*) {
             .boolean => |out| out.array,
@@ -28917,8 +26760,16 @@ pub const Session = struct {
         };
     }
 
-    fn recycleDirectTableColumnStorage(self: *Session, storage: DirectTableColumnStorage) void {
-        self.recycleManagedHostArray(directTableColumnStorageArray(&storage));
+    fn directTableColumnStorageValue(storage: *const DirectTableColumnStorage) Value {
+        return switch (storage.*) {
+            .boolean => |out| out.value(),
+            .int8 => |out| out.value(),
+            .int16 => |out| out.value(),
+            .int32 => |out| out.value(),
+            .int64 => |out| out.value(),
+            .float32 => |out| out.value(),
+            .float64 => |out| out.value(),
+        };
     }
 
     fn initDirectTableColumnBuilder(
@@ -28951,10 +26802,7 @@ pub const Session = struct {
             => .{ .int64 = try self.allocHostArrayTyped(i64, .int64, .managed, total_rows) },
             else => return null,
         };
-        var wrapped = false;
-        errdefer if (!wrapped) self.recycleDirectTableColumnStorage(storage);
-        const data = try wrapOwnedHostArrayValue(self, directTableColumnStorageArray(&storage));
-        wrapped = true;
+        const data = directTableColumnStorageValue(&storage);
         return .{
             .name = name,
             .source_type = source_type,
@@ -28975,13 +26823,9 @@ pub const Session = struct {
     fn ensureDirectTableColumnValidity(self: *Session, builder: *DirectTableColumnBuilder) KError!void {
         if (builder.validity != null) return;
         const storage = try self.allocHostBitArray(.managed, builder.total_rows);
-        var wrapped = false;
-        errdefer if (!wrapped) self.recycleManagedHostArray(storage.array);
         bitFill(storage.words, builder.total_rows, true);
-        const value = try wrapOwnedHostArrayValue(self, storage.array);
-        wrapped = true;
         builder.validity_storage = storage;
-        builder.validity = value;
+        builder.validity = storage.value();
     }
 
     fn markDirectTableColumnInvalid(self: *Session, builder: *DirectTableColumnBuilder, absolute_row: usize) KError!void {
@@ -29294,7 +27138,7 @@ pub const Session = struct {
 
     fn appendTableColumnBuilderRow(
         self: *Session,
-        builder: *TableColumnBuilder,
+        builder: *BufferedTableColumnBuilder,
         chunk: *const duckdb_runtime.DataChunk,
         column_idx: usize,
         row_idx: usize,
@@ -29355,7 +27199,7 @@ pub const Session = struct {
 
     fn appendTableColumnBuilderChunk(
         self: *Session,
-        builder: *TableColumnBuilder,
+        builder: *BufferedTableColumnBuilder,
         chunk: *const duckdb_runtime.DataChunk,
         column_idx: usize,
     ) KError!void {
@@ -29479,7 +27323,7 @@ pub const Session = struct {
         builder.row_count += rows;
     }
 
-    fn finalizeTableColumnBuilder(self: *Session, builder: *TableColumnBuilder) KError!HostTableColumn {
+    fn finalizeTableColumnBuilder(self: *Session, builder: *BufferedTableColumnBuilder) KError!HostTableColumn {
         const data = switch (builder.kind) {
             .boolean => try self.createManagedHostBitArray(builder.bool_values.items),
             .int, .date, .time, .time_ns, .time_tz, .timestamp, .timestamp_s, .timestamp_ms, .timestamp_ns, .timestamp_tz => try self.createManagedHostIntArray(builder.int_values.items),
@@ -29506,99 +27350,77 @@ pub const Session = struct {
         };
     }
 
-    fn tryMaterializeQueryResultTableDirect(self: *Session, result: *duckdb_runtime.QueryResult) KError!?Value {
-        const row_count_hint = result.rowCount();
-        if (row_count_hint == 0) return null;
-
-        const column_count = result.columnCount();
-        const builders = try self.allocator.alloc(DirectTableColumnBuilder, column_count);
-        defer self.allocator.free(builders);
-
-        var initialized_builders: usize = 0;
-        errdefer {
-            for (0..initialized_builders) |idx| self.deinitDirectTableColumnBuilder(&builders[idx]);
-        }
-
-        for (0..column_count) |idx| {
-            const name_bytes = result.columnName(idx) catch |err| return mapDuckDbError(err);
-            defer self.allocator.free(name_bytes);
-            const type_id = result.columnTypeId(idx) catch |err| return mapDuckDbError(err);
-            const kind = try tableColumnKindFromDuckDbType(type_id);
-            builders[idx] = (try self.initDirectTableColumnBuilder(
-                try self.frozenHostSymbol(name_bytes),
-                type_id,
-                kind,
-                row_count_hint,
-            )) orelse {
-                for (0..initialized_builders) |builder_idx| self.deinitDirectTableColumnBuilder(&builders[builder_idx]);
-                return null;
-            };
-            initialized_builders += 1;
-        }
-
-        var row_count: usize = 0;
-        while (true) {
-            var chunk = result.fetchChunk() orelse break;
-            defer chunk.deinit();
-
-            row_count += chunk.rowCount();
-            if (row_count > row_count_hint) return error.Internal;
-            for (0..column_count) |column_idx| {
-                try self.appendDirectTableColumnChunk(&builders[column_idx], &chunk, column_idx);
+    fn initQueryResultColumnBuilder(
+        self: *Session,
+        name: Value,
+        source_type: duckdb_runtime.TypeId,
+        kind: HostTableColumnKind,
+        row_count_hint: usize,
+    ) KError!QueryResultColumnBuilder {
+        if (row_count_hint != 0) {
+            if (try self.initDirectTableColumnBuilder(name, source_type, kind, row_count_hint)) |builder| {
+                return .{ .direct = builder };
             }
         }
-        if (row_count != row_count_hint) return error.Internal;
 
-        const columns = try self.allocator.alloc(HostTableColumn, column_count);
-        var built_columns: usize = 0;
-        errdefer {
-            for (0..built_columns) |idx| {
-                self.releaseValue(columns[idx].name);
-                self.releaseValue(columns[idx].data);
-                if (columns[idx].validity) |mask| self.releaseValue(mask);
-            }
-            self.allocator.free(columns);
+        var builder: BufferedTableColumnBuilder = .{
+            .name = name,
+            .source_type = source_type,
+            .kind = kind,
+        };
+        errdefer self.deinitTableColumnBuilder(&builder);
+        if (row_count_hint != 0) try self.tableColumnBuilderEnsureValueCapacity(&builder, row_count_hint);
+        return .{ .buffered = builder };
+    }
+
+    fn deinitQueryResultColumnBuilder(self: *Session, builder: *QueryResultColumnBuilder) void {
+        switch (builder.*) {
+            .direct => |*direct| self.deinitDirectTableColumnBuilder(direct),
+            .buffered => |*buffered| self.deinitTableColumnBuilder(buffered),
         }
+    }
 
-        for (0..column_count) |idx| {
-            columns[idx] = try self.finishDirectTableColumnBuilder(&builders[idx]);
-            built_columns += 1;
-            self.deinitDirectTableColumnBuilder(&builders[idx]);
+    fn appendQueryResultColumnChunk(
+        self: *Session,
+        builder: *QueryResultColumnBuilder,
+        chunk: *const duckdb_runtime.DataChunk,
+        column_idx: usize,
+    ) KError!void {
+        switch (builder.*) {
+            .direct => |*direct| try self.appendDirectTableColumnChunk(direct, chunk, column_idx),
+            .buffered => |*buffered| try self.appendTableColumnBuilderChunk(buffered, chunk, column_idx),
         }
-        initialized_builders = 0;
+    }
 
-        return try self.createManagedHostTable(row_count, columns);
+    fn finishQueryResultColumnBuilder(self: *Session, builder: *QueryResultColumnBuilder) KError!HostTableColumn {
+        return switch (builder.*) {
+            .direct => |*direct| try self.finishDirectTableColumnBuilder(direct),
+            .buffered => |*buffered| try self.finalizeTableColumnBuilder(buffered),
+        };
     }
 
     fn materializeQueryResultTable(self: *Session, result: *duckdb_runtime.QueryResult) KError!Value {
-        if (try self.tryMaterializeQueryResultTableDirect(result)) |table| return table;
-
         const column_count = result.columnCount();
-        const builders = try self.allocator.alloc(TableColumnBuilder, column_count);
+        const row_count_hint = result.rowCount();
+        const builders = try self.allocator.alloc(QueryResultColumnBuilder, column_count);
         defer self.allocator.free(builders);
 
         var initialized_builders: usize = 0;
-        errdefer {
-            for (0..initialized_builders) |idx| self.deinitTableColumnBuilder(&builders[idx]);
+        defer {
+            for (0..initialized_builders) |idx| self.deinitQueryResultColumnBuilder(&builders[idx]);
         }
 
         for (0..column_count) |idx| {
             const name_bytes = result.columnName(idx) catch |err| return mapDuckDbError(err);
             defer self.allocator.free(name_bytes);
             const type_id = result.columnTypeId(idx) catch |err| return mapDuckDbError(err);
-            builders[idx] = .{
-                .name = try self.frozenHostSymbol(name_bytes),
-                .source_type = type_id,
-                .kind = try tableColumnKindFromDuckDbType(type_id),
-            };
+            builders[idx] = try self.initQueryResultColumnBuilder(
+                try self.frozenHostSymbol(name_bytes),
+                type_id,
+                try tableColumnKindFromDuckDbType(type_id),
+                row_count_hint,
+            );
             initialized_builders += 1;
-        }
-
-        const row_count_hint = result.rowCount();
-        if (row_count_hint != 0) {
-            for (0..column_count) |idx| {
-                try self.tableColumnBuilderEnsureValueCapacity(&builders[idx], row_count_hint);
-            }
         }
 
         var row_count: usize = 0;
@@ -29607,93 +27429,59 @@ pub const Session = struct {
             defer chunk.deinit();
 
             row_count += chunk.rowCount();
+            if (row_count_hint != 0 and row_count > row_count_hint) return error.Internal;
             for (0..column_count) |column_idx| {
-                try self.appendTableColumnBuilderChunk(&builders[column_idx], &chunk, column_idx);
+                try self.appendQueryResultColumnChunk(&builders[column_idx], &chunk, column_idx);
             }
         }
+        if (row_count_hint != 0 and row_count != row_count_hint) return error.Internal;
 
         const columns = try self.allocator.alloc(HostTableColumn, column_count);
         var built_columns: usize = 0;
         errdefer {
-            for (0..built_columns) |idx| {
-                self.releaseValue(columns[idx].name);
-                self.releaseValue(columns[idx].data);
-                if (columns[idx].validity) |mask| self.releaseValue(mask);
+            for (columns[0..built_columns]) |column| {
+                self.releaseValue(column.name);
+                self.releaseValue(column.data);
+                if (column.validity) |mask| self.releaseValue(mask);
             }
             self.allocator.free(columns);
         }
 
         for (0..column_count) |idx| {
-            columns[idx] = try self.finalizeTableColumnBuilder(&builders[idx]);
+            columns[idx] = try self.finishQueryResultColumnBuilder(&builders[idx]);
             built_columns += 1;
-            self.deinitTableColumnBuilder(&builders[idx]);
         }
-        initialized_builders = 0;
 
         return try self.createManagedHostTable(row_count, columns);
-    }
-
-    fn tryMaterializeQueryResultColumnDirect(self: *Session, result: *duckdb_runtime.QueryResult) KError!?Value {
-        if (result.columnCount() != 1) return error.Internal;
-        const row_count_hint = result.rowCount();
-        if (row_count_hint == 0) return null;
-
-        const name_bytes = result.columnName(0) catch |err| return mapDuckDbError(err);
-        defer self.allocator.free(name_bytes);
-        const type_id = result.columnTypeId(0) catch |err| return mapDuckDbError(err);
-        const kind = try tableColumnKindFromDuckDbType(type_id);
-
-        var builder = (try self.initDirectTableColumnBuilder(
-            try self.frozenHostSymbol(name_bytes),
-            type_id,
-            kind,
-            row_count_hint,
-        )) orelse return null;
-        defer self.deinitDirectTableColumnBuilder(&builder);
-
-        var row_count: usize = 0;
-        while (true) {
-            var chunk = result.fetchChunk() orelse break;
-            defer chunk.deinit();
-
-            row_count += chunk.rowCount();
-            if (row_count > row_count_hint) return error.Internal;
-            try self.appendDirectTableColumnChunk(&builder, &chunk, 0);
-        }
-        if (row_count != row_count_hint) return error.Internal;
-
-        const column = try self.finishDirectTableColumnBuilder(&builder);
-        self.releaseValue(column.name);
-        if (column.validity) |mask| self.releaseValue(mask);
-        return column.data;
     }
 
     fn materializeQueryResultColumn(self: *Session, result: *duckdb_runtime.QueryResult) KError!Value {
         if (result.columnCount() != 1) return error.Internal;
-        if (try self.tryMaterializeQueryResultColumnDirect(result)) |column| return column;
-
+        const row_count_hint = result.rowCount();
         const name_bytes = result.columnName(0) catch |err| return mapDuckDbError(err);
         defer self.allocator.free(name_bytes);
         const type_id = result.columnTypeId(0) catch |err| return mapDuckDbError(err);
 
-        var builder: TableColumnBuilder = .{
-            .name = try self.frozenHostSymbol(name_bytes),
-            .source_type = type_id,
-            .kind = try tableColumnKindFromDuckDbType(type_id),
-        };
-        defer self.deinitTableColumnBuilder(&builder);
+        var builder = try self.initQueryResultColumnBuilder(
+            try self.frozenHostSymbol(name_bytes),
+            type_id,
+            try tableColumnKindFromDuckDbType(type_id),
+            row_count_hint,
+        );
+        defer self.deinitQueryResultColumnBuilder(&builder);
 
-        const row_count_hint = result.rowCount();
-        if (row_count_hint != 0) try self.tableColumnBuilderEnsureValueCapacity(&builder, row_count_hint);
-
+        var row_count: usize = 0;
         while (true) {
             var chunk = result.fetchChunk() orelse break;
             defer chunk.deinit();
 
-            try self.appendTableColumnBuilderChunk(&builder, &chunk, 0);
+            row_count += chunk.rowCount();
+            if (row_count_hint != 0 and row_count > row_count_hint) return error.Internal;
+            try self.appendQueryResultColumnChunk(&builder, &chunk, 0);
         }
+        if (row_count_hint != 0 and row_count != row_count_hint) return error.Internal;
 
-        const column = try self.finalizeTableColumnBuilder(&builder);
+        const column = try self.finishQueryResultColumnBuilder(&builder);
         self.releaseValue(column.name);
         if (column.validity) |mask| self.releaseValue(mask);
         return column.data;
@@ -29771,6 +27559,7 @@ pub const Session = struct {
         defer self.allocator.free(sql);
 
         if (comptime runtime_has_wasm_duckdb_bridge) {
+            try self.validateWasmDuckDbRelationHandle(relation);
             switch (relation.origin) {
                 .file => return try self.materializeWasmDuckDbRelationTable(sql),
                 .sql => |sql_info| if (sql_info.params.len == 0) return try self.materializeWasmDuckDbRelationTable(sql),
@@ -29796,6 +27585,7 @@ pub const Session = struct {
         defer self.allocator.free(sql);
 
         if (comptime runtime_has_wasm_duckdb_bridge) {
+            try self.validateWasmDuckDbRelationHandle(relation);
             switch (relation.origin) {
                 .file => return try self.materializeWasmDuckDbRelationColumn(sql),
                 .sql => |sql_info| if (sql_info.params.len == 0) return try self.materializeWasmDuckDbRelationColumn(sql),
@@ -29847,17 +27637,12 @@ pub const Session = struct {
     }
 
     fn containsValues(self: *Session, left: Value, right: Value) KError!Value {
-        const helper_start = stringPerfNow();
         const needle = stringBytes(left) orelse return try self.containsIdiomFallbackValues(left, right);
         const haystack = stringBytes(right) orelse return try self.containsIdiomFallbackValues(left, right);
-        const result = if (needle.len == 0)
+        return if (needle.len == 0)
             Value.fromBool(true)
         else
             Value.fromBool(containsHostStringSlice(haystack, needle));
-        if (comptime enable_string_instrumentation) {
-            stringPerfAdd(&self.string_perf.contains_helper_ns, helper_start);
-        }
-        return result;
     }
 
     fn bytesValue(self: *Session, value: Value) KError!Value {
@@ -30161,25 +27946,14 @@ pub const Session = struct {
     }
 
     fn splitValues(self: *Session, left: Value, right: Value) KError!Value {
-        const helper_start = stringPerfNow();
         const sep = stringDelimiterBytes(left) orelse return error.Type;
         const src_info = stringSourceInfo(right) orelse return error.Type;
         const src = src_info.bytes();
         if (sep.len == 0) return error.Type;
 
         if (sep.len == 1 and src_info.span.start == 0 and src_info.span.len == src_info.base.len) {
-            const search_start = stringPerfNow();
             const stats = countScalarSplits(src, sep[0]);
-            if (comptime enable_string_instrumentation) {
-                stringPerfAdd(&self.string_perf.split_search_ns, search_start);
-            }
-            const result_start = stringPerfNow();
-            const result = try self.createManagedHostStringListLazyScalarWithDisplay(src_info.base, sep[0], stats.parts, stats.bytes_len, .split_list);
-            if (comptime enable_string_instrumentation) {
-                stringPerfAdd(&self.string_perf.split_result_ns, result_start);
-                stringPerfAdd(&self.string_perf.split_helper_ns, helper_start);
-            }
-            return result;
+            return try self.createManagedHostStringListLazyScalarWithDisplay(src_info.base, sep[0], stats.parts, stats.bytes_len, .split_list);
         }
 
         var parts = std.ArrayList(HostStringPiece).empty;
@@ -30187,43 +27961,25 @@ pub const Session = struct {
 
         var start: usize = 0;
         while (true) {
-            const search_start = stringPerfNow();
             const maybe_idx = std.mem.indexOfPos(u8, src, start, sep);
-            if (comptime enable_string_instrumentation) {
-                stringPerfAdd(&self.string_perf.split_search_ns, search_start);
-            }
             const idx = maybe_idx orelse break;
-            const append_start = stringPerfNow();
             try parts.append(self.allocator, .{
                 .view = .{
                     .start = src_info.span.start + start,
                     .len = idx - start,
                 },
             });
-            if (comptime enable_string_instrumentation) {
-                stringPerfAdd(&self.string_perf.split_append_ns, append_start);
-            }
             start = idx + sep.len;
         }
         if (src.len != start or (!isGrowlerLineSeparatorBytes(sep) and parts.items.len != 0)) {
-            const tail_append_start = stringPerfNow();
             try parts.append(self.allocator, .{
                 .view = .{
                     .start = src_info.span.start + start,
                     .len = src.len - start,
                 },
             });
-            if (comptime enable_string_instrumentation) {
-                stringPerfAdd(&self.string_perf.split_append_ns, tail_append_start);
-            }
         }
-        const result_start = stringPerfNow();
-        const result = try self.createManagedHostStringListPiecesWithDisplay(src_info.base, parts.items, .split_list);
-        if (comptime enable_string_instrumentation) {
-            stringPerfAdd(&self.string_perf.split_result_ns, result_start);
-            stringPerfAdd(&self.string_perf.split_helper_ns, helper_start);
-        }
-        return result;
+        return try self.createManagedHostStringListPiecesWithDisplay(src_info.base, parts.items, .split_list);
     }
 
     fn valueIsTextSequence(value: Value) bool {
@@ -30286,18 +28042,11 @@ pub const Session = struct {
     }
 
     fn joinValues(self: *Session, left: Value, right: Value) KError!Value {
-        const helper_start = stringPerfNow();
         const sep = stringDelimiterBytes(left) orelse return error.Type;
         if (right.tag() != .array) return error.Type;
 
         switch (right.arrayKind()) {
-            .host_string_list => {
-                const result = try self.joinHostStringList(right.asHostStringList(), sep);
-                if (comptime enable_string_instrumentation) {
-                    stringPerfAdd(&self.string_perf.join_helper_ns, helper_start);
-                }
-                return result;
-            },
+            .host_string_list => return try self.joinHostStringList(right.asHostStringList(), sep),
             .host_boxed_array => {
                 const boxed = right.asHostBoxedArray().items;
                 var bytes_len: usize = 0;
@@ -30305,11 +28054,7 @@ pub const Session = struct {
                     const piece = stringBytes(item) orelse return error.Type;
                     bytes_len = std.math.add(usize, bytes_len, piece.len) catch return error.Unsupported;
                 }
-                const result = try self.joinBoxedStringValues(boxed, sep, bytes_len);
-                if (comptime enable_string_instrumentation) {
-                    stringPerfAdd(&self.string_perf.join_helper_ns, helper_start);
-                }
-                return result;
+                return try self.joinBoxedStringValues(boxed, sep, bytes_len);
             },
             else => return error.Type,
         }
@@ -30345,7 +28090,6 @@ pub const Session = struct {
         const total_len = std.math.add(usize, list.bytes_len, sep_count * join_sep.len) catch return error.Unsupported;
         if (join_sep.len == 1 and join_sep[0] == split_sep and total_len == base.len) return try self.retainEscapedValue(Value.array(base));
 
-        const result_start = stringPerfNow();
         const buf = try hostTextAllocSlice(self.allocator, total_len);
         errdefer self.allocator.free(buf);
         const text = hostTextFromAlloc(buf);
@@ -30372,19 +28116,7 @@ pub const Session = struct {
             .header = HeapHeader.init(.host_string, .managed),
             .len = total_len,
         };
-        if (comptime enable_string_instrumentation) {
-            stringPerfAdd(&self.string_perf.join_result_ns, result_start);
-        }
         return Value.array(text);
-    }
-
-    fn joinHostStringPieces(self: *Session, base: ?*const HostText, sep: []const u8, items: []const HostStringPiece) KError!Value {
-        var bytes_len: usize = 0;
-        for (items) |item| {
-            const piece = hostStringPieceBytes(base, item);
-            bytes_len = std.math.add(usize, bytes_len, piece.len) catch return error.Unsupported;
-        }
-        return self.joinHostStringPiecesKnownTotal(base, sep, items, bytes_len);
     }
 
     fn joinCopyHostStringPiecesSep0(payload: []u8, base: ?*const HostText, items: []const HostStringPiece) void {
@@ -30429,7 +28161,6 @@ pub const Session = struct {
     fn joinHostStringPiecesKnownTotal(self: *Session, base: ?*const HostText, sep: []const u8, items: []const HostStringPiece, bytes_len: usize) KError!Value {
         const total_len = std.math.add(usize, bytes_len, (items.len -| 1) * sep.len) catch return error.Unsupported;
 
-        const result_start = stringPerfNow();
         const buf = try hostTextAllocSlice(self.allocator, total_len);
         errdefer self.allocator.free(buf);
         const text = hostTextFromAlloc(buf);
@@ -30458,9 +28189,6 @@ pub const Session = struct {
             .header = HeapHeader.init(.host_string, .managed),
             .len = total_len,
         };
-        if (comptime enable_string_instrumentation) {
-            stringPerfAdd(&self.string_perf.join_result_ns, result_start);
-        }
         return Value.array(text);
     }
 
@@ -30506,7 +28234,6 @@ pub const Session = struct {
     fn joinBoxedStringValues(self: *Session, items: []const Value, sep: []const u8, bytes_len: usize) KError!Value {
         const total_len = std.math.add(usize, bytes_len, (items.len -| 1) * sep.len) catch return error.Unsupported;
 
-        const result_start = stringPerfNow();
         const buf = try hostTextAllocSlice(self.allocator, total_len);
         errdefer self.allocator.free(buf);
         const text = hostTextFromAlloc(buf);
@@ -30535,9 +28262,6 @@ pub const Session = struct {
             .header = HeapHeader.init(.host_string, .managed),
             .len = total_len,
         };
-        if (comptime enable_string_instrumentation) {
-            stringPerfAdd(&self.string_perf.join_result_ns, result_start);
-        }
         return Value.array(text);
     }
 
@@ -30631,21 +28355,6 @@ pub const Session = struct {
         }
         if (stringBytes(value)) |bytes| return bytes.len;
         return switch (value.arrayKind()) {
-            .host_dense_array => blk: {
-                const array = value.asHostDenseArray();
-                if (hostDenseShapeHandle(array)) |handle| {
-                    if (handle.rank == 0) break :blk null;
-                    break :blk @as(usize, @intCast(handle.shape[0]));
-                }
-                break :blk array.len();
-            },
-            .backend_array => blk: {
-                const array = value.asBackendArray().array;
-                if (array.ndim() == 0) break :blk null;
-                const shape = array.shape();
-                if (shape.len == 0) break :blk null;
-                break :blk @as(usize, @intCast(shape[0]));
-            },
             .host_boxed_array => value.asHostBoxedArray().len(),
             .host_symbol => hostTextBytes(value.asHostSymbol()).len,
             .host_string_list, .host_symbol_list => value.asHostStringList().len,
@@ -31431,10 +29140,7 @@ pub const Session = struct {
         if (left == right) return true;
         if (left.arity != right.arity or
             left.required_arity != right.required_arity or
-            left.frame_slot_count != right.frame_slot_count or
-            left.local_count != right.local_count or
-            left.operand_stack_slot_count != right.operand_stack_slot_count or
-            left.max_stack != right.max_stack or
+            left.slot_count != right.slot_count or
             left.references_globals != right.references_globals or
             !std.mem.eql(u8, left.bytes, right.bytes) or
             left.constants.len != right.constants.len)
@@ -31533,9 +29239,9 @@ pub const Session = struct {
                     }
                     break :blk true;
                 },
-                .host_dense_array, .backend_array, .numeric_array => blk: {
+                .numeric_array => blk: {
                     switch (right.arrayKind()) {
-                        .host_dense_array, .backend_array, .numeric_array => {},
+                        .numeric_array => {},
                         else => break :blk false,
                     }
                     const lhs = try numericHostArrayValue(self, left);
@@ -31543,10 +29249,10 @@ pub const Session = struct {
                     if (lhs.len() != rhs.len()) break :blk false;
                     var lhs_dims_buf: [numeric_array_max_rank]i32 = @as([numeric_array_max_rank]i32, @splat(0));
                     var rhs_dims_buf: [numeric_array_max_rank]i32 = @as([numeric_array_max_rank]i32, @splat(0));
-                    if (!std.mem.eql(i32, hostDenseShapeDims(lhs, &lhs_dims_buf), hostDenseShapeDims(rhs, &rhs_dims_buf))) break :blk false;
+                    if (!std.mem.eql(i32, numericValueShapeDims(left, lhs, &lhs_dims_buf), numericValueShapeDims(right, rhs, &rhs_dims_buf))) break :blk false;
                     for (0..lhs.len()) |idx| {
-                        const left_item = try self.hostDenseIndexScalar(lhs, @intCast(idx));
-                        const right_item = try self.hostDenseIndexScalar(rhs, @intCast(idx));
+                        const left_item = try self.hostDenseIndexScalar(left, lhs, @intCast(idx));
+                        const right_item = try self.hostDenseIndexScalar(right, rhs, @intCast(idx));
                         if (!try self.valueMatchEqual(left_item, right_item)) break :blk false;
                     }
                     break :blk true;
@@ -31645,9 +29351,9 @@ pub const Session = struct {
                     }
                     break :blk true;
                 },
-                .host_dense_array, .backend_array, .numeric_array => blk: {
+                .numeric_array => blk: {
                     switch (right.arrayKind()) {
-                        .host_dense_array, .backend_array, .numeric_array => {},
+                        .numeric_array => {},
                         else => break :blk false,
                     }
                     const lhs = try numericHostArrayValue(self, left);
@@ -31656,15 +29362,15 @@ pub const Session = struct {
                     if (left.arraySubkind() != .host_boxed_array and right.arraySubkind() != .host_boxed_array) {
                         var lhs_dims_buf: [numeric_array_max_rank]i32 = @as([numeric_array_max_rank]i32, @splat(0));
                         var rhs_dims_buf: [numeric_array_max_rank]i32 = @as([numeric_array_max_rank]i32, @splat(0));
-                        if (!std.mem.eql(i32, hostDenseShapeDims(lhs, &lhs_dims_buf), hostDenseShapeDims(rhs, &rhs_dims_buf))) break :blk false;
+                        if (!std.mem.eql(i32, numericValueShapeDims(left, lhs, &lhs_dims_buf), numericValueShapeDims(right, rhs, &rhs_dims_buf))) break :blk false;
                         for (0..lhs.len()) |idx| {
                             if (try numericFloatAt(left, idx) != try numericFloatAt(right, idx)) break :blk false;
                         }
                         break :blk true;
                     }
                     for (0..lhs.len()) |idx| {
-                        const left_item = try self.hostDenseIndexScalar(lhs, @intCast(idx));
-                        const right_item = try self.hostDenseIndexScalar(rhs, @intCast(idx));
+                        const left_item = try self.hostDenseIndexScalar(left, lhs, @intCast(idx));
+                        const right_item = try self.hostDenseIndexScalar(right, rhs, @intCast(idx));
                         if (!try self.valueStructuralEqual(left_item, right_item)) break :blk false;
                     }
                     break :blk true;
@@ -32082,7 +29788,7 @@ pub const Session = struct {
         var out = try self.allocManagedHostIntResult(.int8, text.len);
         const host = out.arrayPtr();
         if (text.len == 0) {
-            const value = try out.value(self);
+            const value = out.value();
             hostDenseSetFlags(host, host_dense_flag_normalized | host_dense_flag_asc | host_dense_flag_dsc);
             hostDenseSetCachedIntRange(host, .{ .min = 0, .max = 0 });
             return value;
@@ -32096,7 +29802,7 @@ pub const Session = struct {
             else => unreachable,
         }
 
-        const value = try out.value(self);
+        const value = out.value();
         hostDenseSetFlags(host, host_dense_flag_normalized);
         hostDenseSetCachedIntRange(host, .{ .min = std.math.minInt(i8), .max = std.math.maxInt(i8) });
         return value;
@@ -32972,7 +30678,7 @@ pub const Session = struct {
 
     fn rotcacheWantsBackend(value: Value) bool {
         if (!runtime_has_mlx or !mlx.supports_full_ops) return false;
-        if (isBackendArrayValue(value) or hasBackendRealization(value)) return true;
+        if (hasBackendRealization(value)) return true;
         const handle = valueNumericHandle(value) orelse return false;
         return handle.preferred == .mlx;
     }
@@ -33269,12 +30975,7 @@ pub const Session = struct {
         if (valueNumericHandle(value)) |handle| {
             if (handle.rank != 0) return @intCast(handle.shape[0]);
         }
-        return switch (value.arrayKind()) {
-            .host_dense_array => value.asHostDenseArray().len(),
-            .backend_array => @intCast(value.asBackendArray().array.shape()[0]),
-            .numeric_array => null,
-            else => null,
-        };
+        return null;
     }
 
     fn randomSelectAlphaCharValue(self: *Session, count_value: i64, base: u8) KError!Value {
@@ -33345,7 +31046,7 @@ pub const Session = struct {
             .array => if (stringBytes(right)) |text|
                 try self.randomSelectStringValue(count_value, text)
             else switch (right.arrayKind()) {
-                .host_dense_array, .backend_array, .numeric_array => try self.randomSelectValue(count_value, right),
+                .numeric_array => try self.randomSelectValue(count_value, right),
                 else => error.Type,
             },
             .bool, .builtin, .closure => error.Type,
@@ -33363,6 +31064,37 @@ pub const Session = struct {
             return null;
         }
         return numericFlatLen(value);
+    }
+
+    fn numericFindShape(value: Value) ?NumericShapeSnapshot {
+        if (valueNumericMode(value) == null) return null;
+        if (valueNumericHandle(value)) |handle| return numericShapeSnapshotFromHandle(handle);
+        return switch (value.tag()) {
+            .int, .bool, .float32, .float => NumericShapeSnapshot{},
+            .array => blk: {
+                const len = numericFlatLen(value) orelse return null;
+                var snapshot = NumericShapeSnapshot{};
+                snapshot.rank = 1;
+                snapshot.shape[0] = std.math.cast(i32, len) orelse return null;
+                break :blk snapshot;
+            },
+            else => null,
+        };
+    }
+
+    fn numericFindOutputShape(right_shape: NumericShapeSnapshot, output_rank: u8) NumericShapeSnapshot {
+        var snapshot = NumericShapeSnapshot{};
+        snapshot.rank = output_rank;
+        for (0..output_rank) |idx| snapshot.shape[idx] = right_shape.shape[idx];
+        return snapshot;
+    }
+
+    fn numericFindTrailingShapeMatches(right_shape: NumericShapeSnapshot, output_rank: u8, cell_shape: NumericShapeSnapshot) bool {
+        if (right_shape.rank != output_rank + cell_shape.rank) return false;
+        for (0..cell_shape.rank) |idx| {
+            if (right_shape.shape[output_rank + idx] != cell_shape.shape[idx]) return false;
+        }
+        return true;
     }
 
     fn numericValuesEqualAt(left: Value, left_idx: usize, right: Value, right_idx: usize) KError!bool {
@@ -33505,14 +31237,8 @@ pub const Session = struct {
     fn hostFloatDenseValueFlags(value: Value, view: HostFloatDenseView) u8 {
         return switch (view) {
             .dense => switch (value.arrayKind()) {
-                .host_dense_array => value.asHostDenseArray().flags,
                 .numeric_array => blk: {
                     const handle = value.asNumericArray();
-                    if (numericHostAttachment(handle)) |array| break :blk array.flags;
-                    break :blk 0;
-                },
-                .backend_array => blk: {
-                    const handle = valueNumericHandle(value) orelse break :blk 0;
                     if (numericHostAttachment(handle)) |array| break :blk array.flags;
                     break :blk 0;
                 },
@@ -33926,72 +31652,16 @@ pub const Session = struct {
         fn get(self: *const DenseFindLookup, key: u64) ?usize {
             return denseFindLookupGet(self.keys, self.slots, self.mask, key);
         }
-
-        fn slotIndex(self: *const DenseFindLookup, key: u64) usize {
-            return denseFindLookupSlotIndex(self.mask, key);
-        }
-    };
-
-    pub const DebugFloatFindLookupFlavor = enum {
-        dense,
-        generic,
-    };
-
-    pub const DebugFloatFindLookup = union(DebugFloatFindLookupFlavor) {
-        dense: DenseFindLookup,
-        generic: std.AutoHashMap(u64, usize),
-
-        pub fn deinit(self: *DebugFloatFindLookup) void {
-            switch (self.*) {
-                .dense => |*lookup| lookup.deinit(),
-                .generic => |*lookup| lookup.deinit(),
-            }
-        }
-
-        pub fn probe(self: *const DebugFloatFindLookup, right_items: []const f64, out: []i64, miss_index: usize) KError!void {
-            const miss_i64 = std.math.cast(i64, miss_index) orelse return error.Unsupported;
-            switch (self.*) {
-                .dense => |*lookup| {
-                    for (right_items, 0..) |query, query_idx| {
-                        if (floatFindHashKey(query)) |key| {
-                            out[query_idx] = if (lookup.get(key)) |found_idx|
-                                std.math.cast(i64, found_idx) orelse return error.Unsupported
-                            else
-                                miss_i64;
-                        } else {
-                            out[query_idx] = miss_i64;
-                        }
-                    }
-                },
-                .generic => |*lookup| {
-                    for (right_items, 0..) |query, query_idx| {
-                        if (floatFindHashKey(query)) |key| {
-                            out[query_idx] = if (lookup.get(key)) |found_idx|
-                                std.math.cast(i64, found_idx) orelse return error.Unsupported
-                            else
-                                miss_i64;
-                        } else {
-                            out[query_idx] = miss_i64;
-                        }
-                    }
-                },
-            }
-        }
     };
 
     fn managedHostDenseArrayForFindCache(value: Value) ?*HostDenseArray {
         if (value.tag() != .array) return null;
-        const array: *const HostDenseArray = if (valueNumericHandle(value)) |handle|
-            numericHostAttachment(handle) orelse return null
-        else switch (value.arrayKind()) {
-            .host_dense_array => value.asHostDenseArray(),
-            else => return null,
-        };
-        return if (numericPayloadOwner(array) == .managed) @constCast(array) else null;
+        const handle = valueNumericHandle(value) orelse return null;
+        const array = numericHostAttachment(handle) orelse return null;
+        return if (handle.header.owner == .managed) @constCast(array) else null;
     }
 
     fn ensureManagedHostFloatFindCache(self: *Session, array: *HostDenseArray, items: []const f64) KError!bool {
-        if (numericPayloadOwner(array) != .managed) return false;
         if (array.find_cache) |cache| {
             if (cache.kind == .float and cache.keys != null and cache.slots != null) return true;
         }
@@ -34035,7 +31705,6 @@ pub const Session = struct {
     }
 
     fn ensureManagedHostIntFindCache(self: *Session, array: *HostDenseArray) KError!bool {
-        if (numericPayloadOwner(array) != .managed) return false;
         if (array.find_cache) |cache| {
             if (cache.kind == .int and cache.keys != null and cache.slots != null) return true;
         }
@@ -34069,60 +31738,6 @@ pub const Session = struct {
         cache.slots = slots;
         cache.mask = capacity - 1;
         return true;
-    }
-
-    fn buildGenericFloatFindLookup(self: *Session, left_items: []const f64) KError!std.AutoHashMap(u64, usize) {
-        var lookup = std.AutoHashMap(u64, usize).init(self.allocator);
-        errdefer lookup.deinit();
-        try lookup.ensureTotalCapacity(std.math.cast(u32, left_items.len) orelse return error.Unsupported);
-        for (left_items, 0..) |item, idx| {
-            const key = floatFindHashKey(item) orelse continue;
-            if (lookup.get(key) == null) try lookup.put(key, idx);
-        }
-        return lookup;
-    }
-
-    pub fn debugBuildFloatFindLookup(self: *Session, flavor: DebugFloatFindLookupFlavor, left_items: []const f64) KError!DebugFloatFindLookup {
-        return switch (flavor) {
-            .dense => blk: {
-                var lookup = try DenseFindLookup.init(self.allocator, left_items.len);
-                errdefer lookup.deinit();
-                for (left_items, 0..) |item, idx| {
-                    const key = floatFindHashKey(item) orelse continue;
-                    lookup.insertFirst(key, idx);
-                }
-                break :blk .{ .dense = lookup };
-            },
-            .generic => .{ .generic = try self.buildGenericFloatFindLookup(left_items) },
-        };
-    }
-
-    pub fn debugRunFloatFindLookupBuildProbe(
-        self: *Session,
-        flavor: DebugFloatFindLookupFlavor,
-        left_items: []const f64,
-        right_items: []const f64,
-        out: []i64,
-        miss_index: usize,
-    ) KError!void {
-        switch (flavor) {
-            .dense => try fillFloatFindDenseHashedFloatQueries(self, out, null, left_items, right_items, miss_index),
-            .generic => {
-                var lookup = try self.buildGenericFloatFindLookup(left_items);
-                defer lookup.deinit();
-                const miss_i64 = std.math.cast(i64, miss_index) orelse return error.Unsupported;
-                for (right_items, 0..) |query, query_idx| {
-                    if (floatFindHashKey(query)) |key| {
-                        out[query_idx] = if (lookup.get(key)) |found_idx|
-                            std.math.cast(i64, found_idx) orelse return error.Unsupported
-                        else
-                            miss_i64;
-                    } else {
-                        out[query_idx] = miss_i64;
-                    }
-                }
-            },
-        }
     }
 
     fn fillFloatFindDenseHashedFloatQueries(
@@ -35297,7 +32912,7 @@ pub const Session = struct {
         miss_index: usize,
         out_len: usize,
     ) KError!Value {
-        const value = try out.value(self);
+        const value = out.value();
         const host = try mutableNumericHostArrayValue(self, value);
         hostDenseSetFlags(host, stats.flags());
         hostDenseSetCachedIntRange(host, stats.range());
@@ -35308,7 +32923,7 @@ pub const Session = struct {
     }
 
     fn finishFindFullDomainOutputValue(self: *Session, out: *HostIntResult, saw_miss: bool, miss_index: usize, out_len: usize) KError!Value {
-        const value = try out.value(self);
+        const value = out.value();
         const host = try mutableNumericHostArrayValue(self, value);
         hostDenseSetFlags(host, host_dense_flag_normalized);
         hostDenseClearCachedIntRange(host);
@@ -35707,7 +33322,7 @@ pub const Session = struct {
     }
 
     fn finishFindSelfOutput(self: *Session, out: *HostIntResult, stats: FindSelfOutputStats) KError!Value {
-        const value = try out.value(self);
+        const value = out.value();
         const host = try mutableNumericHostArrayValue(self, value);
         hostDenseSetFlags(host, stats.flags());
         hostDenseSetCachedIntRange(host, stats.range());
@@ -35998,107 +33613,91 @@ pub const Session = struct {
     }
 
     fn finishManagedHostInt64MultiFindResult(self: *Session, out: *HostIntResult, out_items: []const i64) !Value {
+        _ = self;
         const analysis = analyzeIntSlice(out_items);
         hostDenseSetFlags(out.arrayPtr(), analysis.flags);
         hostDenseSetCachedIntRange(out.arrayPtr(), analysis.range);
-        return try out.value(self);
+        return out.value();
     }
 
-    fn findNumericMatrixRowValue(self: *Session, left: Value, right: Value, shape: NumericMatrixShape) KError!?Value {
-        const query_len = numericRowQueryLen(right) orelse return null;
-        if (query_len != shape.cols) return error.Type;
-        for (0..shape.rows) |row_idx| {
-            const base = row_idx * shape.cols;
-            var matched = true;
-            for (0..shape.cols) |col_idx| {
-                if (!try numericValuesEqualAt(left, base + col_idx, right, col_idx)) {
-                    matched = false;
-                    break;
+    fn numericMajorCellMatchesAt(left: Value, left_base: usize, right: Value, right_base: usize, cell_len: usize) KError!bool {
+        for (0..cell_len) |offset| {
+            if (!try numericValuesEqualAt(left, left_base + offset, right, right_base + offset)) return false;
+        }
+        return true;
+    }
+
+    fn findNumericMajorCellIndex(
+        left: Value,
+        right: Value,
+        left_count: usize,
+        cell_len: usize,
+        query_base: usize,
+    ) KError!?usize {
+        for (0..left_count) |left_idx| {
+            const left_base = left_idx * cell_len;
+            if (try numericMajorCellMatchesAt(left, left_base, right, query_base, cell_len)) return left_idx;
+        }
+        return null;
+    }
+
+    fn shapedNumericFindValues(self: *Session, left: Value, right: Value) KError!?Value {
+        const left_shape = numericFindShape(left) orelse return null;
+        if (left_shape.rank <= 1) return null;
+        const right_shape = numericFindShape(right) orelse return null;
+
+        const cell_rank = left_shape.rank - 1;
+        if (right_shape.rank < cell_rank) return error.Type;
+
+        var cell_shape = NumericShapeSnapshot{};
+        cell_shape.rank = cell_rank;
+        for (0..cell_rank) |idx| cell_shape.shape[idx] = left_shape.shape[idx + 1];
+
+        const output_rank = right_shape.rank - cell_rank;
+        const output_shape = numericFindOutputShape(right_shape, output_rank);
+        const query_count: usize = if (output_rank == 0) 1 else try fixedShapeProduct(output_shape.shapeSlice());
+        const left_count = @as(usize, @intCast(left_shape.shape[0]));
+        const cell_len = try fixedShapeProduct(cell_shape.shapeSlice());
+        const shapes_match = numericFindTrailingShapeMatches(right_shape, output_rank, cell_shape);
+
+        if (valueNumericHandle(left)) |handle| _ = try tryEnsureHostRealizationForHandle(self, @constCast(handle));
+        if (valueNumericHandle(right)) |handle| _ = try tryEnsureHostRealizationForHandle(self, @constCast(handle));
+
+        if (output_rank == 0) {
+            if (shapes_match) {
+                if (try findNumericMajorCellIndex(left, right, left_count, cell_len, 0)) |found| {
+                    return try self.intValue(@intCast(found));
                 }
             }
-            if (matched) return try self.intValue(@intCast(row_idx));
+            return try self.intNullValue();
         }
-        return try self.intNullValue();
+
+        const out = try self.allocator.alloc(i64, query_count);
+        defer self.allocator.free(out);
+
+        if (!shapes_match) {
+            @memset(out, kiwi_int_null);
+        } else {
+            for (0..query_count) |query_idx| {
+                const query_base = query_idx * cell_len;
+                out[query_idx] = if (try findNumericMajorCellIndex(left, right, left_count, cell_len, query_base)) |found|
+                    @intCast(found)
+                else
+                    kiwi_int_null;
+            }
+        }
+
+        const result = try self.createManagedHostIntArray(out);
+        if (output_shape.rank > 1) return try applyNonVectorNumericShapeToValue(self, result, output_shape);
+        return result;
     }
 
     fn tryFastBackendNumericVectorFindValue(self: *Session, left: Value, right: Value) KError!?Value {
-        return runtime_backend_exec.tryFastBackendNumericVectorFindValue(.{
-            .Session = Session,
-            .Value = Value,
-            .NumericArray = NumericArray,
-            .KError = KError,
-            .c = c,
-            .mlx = mlx,
-            .runtime_has_mlx = runtime_has_mlx,
-            .valueNumericMode = valueNumericMode,
-            .valueNumericMatrixShape = valueNumericMatrixShape,
-            .valueNumericHandle = valueNumericHandle,
-            .numericFlatLen = numericFlatLen,
-            .numericIntAt = numericIntAt,
-            .numericFloatAt = numericFloatAt,
-            .numericRowQueryLen = numericRowQueryLen,
-            .numericArrayIsFirstAxisSlice = numericArrayIsFirstAxisSlice,
-            .numericArrayFirstAxisSliceSource = numericArrayFirstAxisSliceSource,
-            .numericArrayFirstAxisSliceRowStart = numericArrayFirstAxisSliceRowStart,
-            .numericArrayFirstAxisSliceRowStep = numericArrayFirstAxisSliceRowStep,
-            .numericArrayIsFirstAxisIndex = numericArrayIsFirstAxisIndex,
-            .numericArrayFirstAxisIndexSource = numericArrayFirstAxisIndexSource,
-            .numericArrayFirstAxisIndexRows = numericArrayFirstAxisIndexRows,
-            .numericArrayIsFirstAxisConcat = numericArrayIsFirstAxisConcat,
-            .numericArrayFirstAxisConcatLeft = numericArrayFirstAxisConcatLeft,
-            .numericArrayFirstAxisConcatRight = numericArrayFirstAxisConcatRight,
-            .numericArrayIsReshapeView = numericArrayIsReshapeView,
-            .numericArrayReshapeSource = numericArrayReshapeSource,
-            .numericArrayIsTransposeView = numericArrayIsTransposeView,
-            .numericArrayTransposeSource = numericArrayTransposeSource,
-            .isBackendArrayValue = isBackendArrayValue,
-            .hasBackendRealization = hasBackendRealization,
-            .materializeBackendArray = Session.materializeBackendArray,
-            .backendContext = Session.backendContext,
-            .mapMlxError = mapMlxError,
-            .intValue = Session.intValue,
-            .wrapManagedBackendArray = Session.wrapManagedBackendArray,
-            .numeric_array_max_rank = numeric_array_max_rank,
-        }, self, left, right);
+        return runtime_backend_exec.tryFastBackendNumericVectorFindValue(backend_exec_api, self, left, right);
     }
 
     fn tryFastBackendArgmaxValue(self: *Session, value: Value) KError!?Value {
-        return runtime_backend_exec.tryFastBackendArgmaxValue(.{
-            .Session = Session,
-            .Value = Value,
-            .NumericArray = NumericArray,
-            .KError = KError,
-            .c = c,
-            .mlx = mlx,
-            .enable_probe_instrumentation = enable_probe_instrumentation,
-            .runtime_has_mlx = runtime_has_mlx,
-            .valueNumericMode = valueNumericMode,
-            .valueNumericMatrixShape = valueNumericMatrixShape,
-            .numericFlatLen = numericFlatLen,
-            .valueNumericHandle = valueNumericHandle,
-            .numericIntAt = numericIntAt,
-            .numericArrayIsFirstAxisSlice = numericArrayIsFirstAxisSlice,
-            .numericArrayFirstAxisSliceSource = numericArrayFirstAxisSliceSource,
-            .numericArrayFirstAxisSliceRowStart = numericArrayFirstAxisSliceRowStart,
-            .numericArrayFirstAxisSliceRowStep = numericArrayFirstAxisSliceRowStep,
-            .numericArrayIsFirstAxisIndex = numericArrayIsFirstAxisIndex,
-            .numericArrayFirstAxisIndexSource = numericArrayFirstAxisIndexSource,
-            .numericArrayFirstAxisIndexRows = numericArrayFirstAxisIndexRows,
-            .numericArrayIsFirstAxisConcat = numericArrayIsFirstAxisConcat,
-            .numericArrayFirstAxisConcatLeft = numericArrayFirstAxisConcatLeft,
-            .numericArrayFirstAxisConcatRight = numericArrayFirstAxisConcatRight,
-            .numericArrayIsReshapeView = numericArrayIsReshapeView,
-            .numericArrayReshapeSource = numericArrayReshapeSource,
-            .numericArrayIsTransposeView = numericArrayIsTransposeView,
-            .numericArrayTransposeSource = numericArrayTransposeSource,
-            .isBackendArrayValue = isBackendArrayValue,
-            .hasBackendRealization = hasBackendRealization,
-            .materializeBackendArray = Session.materializeBackendArray,
-            .backendContext = Session.backendContext,
-            .mapMlxError = mapMlxError,
-            .intValue = Session.intValue,
-            .numeric_array_max_rank = numeric_array_max_rank,
-        }, self, value);
+        return runtime_backend_exec.tryFastBackendArgmaxValue(backend_exec_api, self, value);
     }
 
     fn argmaxValue(self: *Session, value: Value) KError!Value {
@@ -36142,8 +33741,8 @@ pub const Session = struct {
     const dense_backend_find_multi_host_query_len: usize = 256;
 
     fn valueHasHostDenseRealization(value: Value) bool {
-        if (valueNumericHandle(value)) |handle| return numericHasHostAttachment(handle);
-        return value.tag() == .array and value.arraySubkind() == .host_dense_array;
+        const handle = valueNumericHandle(value) orelse return false;
+        return numericHasHostAttachment(handle);
     }
 
     fn backendResidentNumericVectorFindPrefersHost(
@@ -36220,7 +33819,7 @@ pub const Session = struct {
     }
 
     fn findNumericVectorValue(self: *Session, left: Value, right: Value) KError!?Value {
-        if (valueNumericMode(left) == null or valueNumericMatrixShape(left) != null) return null;
+        if (valueNumericMode(left) == null or (numericFindShape(left) orelse return null).rank > 1) return null;
         const left_len = numericFlatLen(left) orelse return null;
         const query_len = numericRowQueryLen(right) orelse return null;
         if (!backendResidentNumericVectorFindPrefersHost(self, left, right, left_len, query_len)) {
@@ -36487,9 +34086,7 @@ pub const Session = struct {
 
     fn findValues(self: *Session, left: Value, right: Value) KError!Value {
         if (try self.findStringValue(left, right)) |result| return result;
-        if (valueNumericMatrixShape(left)) |shape| {
-            if (try self.findNumericMatrixRowValue(left, right, shape)) |result| return result;
-        }
+        if (try self.shapedNumericFindValues(left, right)) |result| return result;
         if (try self.findNumericVectorValue(left, right)) |result| return result;
         if (left.tag() == .array and left.arrayKind() == .host_keyed_store) {
             const store = left.asHostKeyedStore();
@@ -36565,7 +34162,6 @@ pub const Session = struct {
                     if (handle.rank != 0) break :blk try countDimAsI64(handle.shape[0]);
                 }
                 break :blk switch (value.arrayKind()) {
-                    .host_dense_array => try countLenAsI64(value.asHostDenseArray().len()),
                     .host_boxed_array => try countLenAsI64(value.asHostBoxedArray().len()),
                     .host_string_list, .host_symbol_list => try countLenAsI64(value.asHostStringList().len),
                     .host_handle => 1,
@@ -36574,7 +34170,6 @@ pub const Session = struct {
                         const store = value.asHostKeyedStore();
                         break :blk2 try countLenAsI64(if (store.layout == .table) store.row_count else keyedStoreNameCount(store));
                     },
-                    .backend_array => std.math.cast(i64, value.asBackendArray().array.shape()[0]) orelse return error.Unsupported,
                     else => error.Internal,
                 };
             },
@@ -36682,20 +34277,8 @@ pub const Session = struct {
                 break :blk try self.intValue(int_value);
             },
             .array => switch (value.arrayKind()) {
-                .host_dense_array => if (valueHostIntStructuralView(value) != null)
-                    self.shareValue(value)
-                else switch (value.asHostDenseArray().storage) {
-                    .float64 => |items| blk: {
-                        var out = std.ArrayList(i64).empty;
-                        defer out.deinit(self.allocator);
-                        try out.ensureTotalCapacity(self.allocator, items.len);
-                        for (items) |item| try out.append(self.allocator, std.math.lossyCast(i64, @floor(item)));
-                        break :blk try self.createManagedHostIntArray(out.items);
-                    },
-                    else => self.shareValue(value),
-                },
                 .host_boxed_array => try self.floorBoxedArrayValue(value.asHostBoxedArray()),
-                .backend_array, .numeric_array => if (valueHostIntStructuralView(value) != null)
+                .numeric_array => if (valueHostIntStructuralView(value) != null)
                     self.shareValue(value)
                 else switch ((try numericHostArrayValue(self, value)).storage) {
                     .float64 => |items| blk: {
@@ -37162,14 +34745,6 @@ pub const Session = struct {
         std.debug.assert(out_idx == out.len);
     }
 
-    fn whereBitVectorRange(bits: HostBitSlice, count: usize) HostIntRange {
-        if (count == 0) return .{ .min = 0, .max = 0 };
-        return .{
-            .min = @intCast(firstSelectedBitIndex(bits).?),
-            .max = @intCast(lastSelectedBitIndex(bits).?),
-        };
-    }
-
     fn whereFilledIntRange(comptime T: type, items: []const T) HostIntRange {
         if (items.len == 0) return .{ .min = 0, .max = 0 };
         return .{
@@ -37274,7 +34849,7 @@ pub const Session = struct {
             },
             .int64 => |*result| fillWhereBitVectorIndices(i64, result.items, bits),
         };
-        const value = try out.value(self);
+        const value = out.value();
         const host = try mutableNumericHostArrayValue(self, value);
         hostDenseSetFlags(host, if (count <= 1)
             host_dense_flag_normalized | host_dense_flag_asc | host_dense_flag_dsc
@@ -37379,7 +34954,7 @@ pub const Session = struct {
             .int64 => |*result| fillWhereIntVectorIndicesForView(i64, result.items, view),
         }
         const range: HostIntRange = .{ .min = stats.first_value.?, .max = stats.last_value };
-        const value = try out.value(self);
+        const value = out.value();
         const host = try mutableNumericHostArrayValue(self, value);
         hostDenseSetFlags(host, if (range.min == range.max)
             host_dense_flag_normalized | host_dense_flag_asc | host_dense_flag_dsc
@@ -37991,7 +35566,7 @@ pub const Session = struct {
         }
         for (counts, 0..) |count, idx| {
             outputs[idx] = try self.allocManagedHostIntResult(index_kind, count);
-            values[idx] = try outputs[idx].value(self);
+            values[idx] = outputs[idx].value();
             initialized += 1;
         }
     }
@@ -38053,7 +35628,7 @@ pub const Session = struct {
             else
                 fillWhereBitVectorRejectIndices(i64, result.items, bits),
         };
-        const value = try out.value(self);
+        const value = out.value();
         const host = try mutableNumericHostArrayValue(self, value);
         hostDenseSetFlags(host, if (count <= 1)
             host_dense_flag_normalized | host_dense_flag_asc | host_dense_flag_dsc
@@ -38263,9 +35838,9 @@ pub const Session = struct {
                     }
                     break :blk true;
                 },
-                .host_dense_array, .backend_array, .numeric_array => blk: {
+                .numeric_array => blk: {
                     switch (right.arrayKind()) {
-                        .host_dense_array, .backend_array, .numeric_array => {},
+                        .numeric_array => {},
                         else => break :blk false,
                     }
                     const lhs = try numericHostArrayValue(self, left);
@@ -38273,10 +35848,10 @@ pub const Session = struct {
                     if (lhs.len() != rhs.len()) break :blk false;
                     var lhs_dims_buf: [numeric_array_max_rank]i32 = @as([numeric_array_max_rank]i32, @splat(0));
                     var rhs_dims_buf: [numeric_array_max_rank]i32 = @as([numeric_array_max_rank]i32, @splat(0));
-                    if (!std.mem.eql(i32, hostDenseShapeDims(lhs, &lhs_dims_buf), hostDenseShapeDims(rhs, &rhs_dims_buf))) break :blk false;
+                    if (!std.mem.eql(i32, numericValueShapeDims(left, lhs, &lhs_dims_buf), numericValueShapeDims(right, rhs, &rhs_dims_buf))) break :blk false;
                     for (0..lhs.len()) |idx| {
-                        const left_item = try self.hostDenseIndexScalar(lhs, @intCast(idx));
-                        const right_item = try self.hostDenseIndexScalar(rhs, @intCast(idx));
+                        const left_item = try self.hostDenseIndexScalar(left, lhs, @intCast(idx));
+                        const right_item = try self.hostDenseIndexScalar(right, rhs, @intCast(idx));
                         defer self.releaseValue(left_item);
                         defer self.releaseValue(right_item);
                         if (!try self.valueGroupEqual(left_item, right_item)) break :blk false;
@@ -39011,7 +36586,7 @@ pub const Session = struct {
             return try self.createManagedHostBoxedArray(out.items);
         }
         const array = try numericHostArrayValue(self, value);
-        if (hostNumericMatrixShape(array)) |shape| {
+        if (valueNumericMatrixShape(value)) |shape| {
             var row_indices = std.ArrayList(usize).empty;
             defer row_indices.deinit(self.allocator);
             try row_indices.ensureTotalCapacity(self.allocator, shape.rows);
@@ -39095,7 +36670,7 @@ pub const Session = struct {
                 const host = out.array;
                 hostDenseSetFlags(host, reversedDenseFlags(array.flags));
                 hostDenseSetCachedIntRange(host, sourceHostIntRange(value, array));
-                break :blk try wrapOwnedHostArrayValue(self, host);
+                break :blk out.value();
             },
             .int16 => |items| blk: {
                 const out = try self.allocHostArrayTyped(i16, .int16, .managed, items.len);
@@ -39103,7 +36678,7 @@ pub const Session = struct {
                 const host = out.array;
                 hostDenseSetFlags(host, reversedDenseFlags(array.flags));
                 hostDenseSetCachedIntRange(host, sourceHostIntRange(value, array));
-                break :blk try wrapOwnedHostArrayValue(self, host);
+                break :blk out.value();
             },
             .int32 => |items| blk: {
                 const out = try self.allocHostArrayTyped(i32, .int32, .managed, items.len);
@@ -39111,7 +36686,7 @@ pub const Session = struct {
                 const host = out.array;
                 hostDenseSetFlags(host, reversedDenseFlags(array.flags));
                 hostDenseSetCachedIntRange(host, sourceHostIntRange(value, array));
-                break :blk try wrapOwnedHostArrayValue(self, host);
+                break :blk out.value();
             },
             .int64 => |items| blk: {
                 const out = try self.allocHostArrayTyped(i64, .int64, .managed, items.len);
@@ -39119,7 +36694,7 @@ pub const Session = struct {
                 const host = out.array;
                 hostDenseSetFlags(host, reversedDenseFlags(array.flags));
                 hostDenseSetCachedIntRange(host, sourceHostIntRange(value, array));
-                break :blk try wrapOwnedHostArrayValue(self, host);
+                break :blk out.value();
             },
             .float32 => |items| blk: {
                 const out = try self.allocHostArrayTyped(f32, .float32, .managed, items.len);
@@ -39127,7 +36702,7 @@ pub const Session = struct {
                 const host = out.array;
                 hostDenseSetFlags(host, reversedDenseFlags(array.flags));
                 hostDenseCopyFloatBounds(host, array);
-                break :blk try wrapOwnedHostArrayValue(self, host);
+                break :blk out.value();
             },
             .float64 => |items| blk: {
                 const out = try self.allocHostArrayTyped(f64, .float64, .managed, items.len);
@@ -39135,7 +36710,7 @@ pub const Session = struct {
                 const host = out.array;
                 hostDenseSetFlags(host, reversedDenseFlags(array.flags));
                 hostDenseCopyFloatBounds(host, array);
-                break :blk try wrapOwnedHostArrayValue(self, host);
+                break :blk out.value();
             },
         };
     }
@@ -39224,7 +36799,7 @@ pub const Session = struct {
                     .words = hostDenseLogicalBitWords(array, words),
                     .len = array.logical_len,
                 };
-                const plan = try self.planHostIntUnaryOutput(hostDenseSourceValue(array), .bit, .bit, array.logical_len, true, true);
+                const plan = try self.planHostIntUnaryOutput(value, .bit, .bit, array.logical_len, true, true);
                 fillBitNotWords(plan.output.bit.words, source_bits);
                 const result = try self.finishHostIntOutput(plan, host_dense_flag_normalized | invertMonotonicFlags(array.flags));
                 hostDenseSetCachedIntRange(try mutableNumericHostArrayValue(self, result), .{ .min = 0, .max = 1 });
@@ -39247,7 +36822,7 @@ pub const Session = struct {
         const array = try numericHostArrayValue(self, value);
         switch (array.storage) {
             .bit => |words| {
-                const plan = try self.planHostIntUnaryOutput(hostDenseSourceValue(array), .bit, .bit, array.len(), true, true);
+                const plan = try self.planHostIntUnaryOutput(value, .bit, .bit, array.len(), true, true);
                 fillBitNotWords(plan.output.bit.words, .{ .words = words, .len = array.len() });
                 const result = try self.finishHostIntOutput(plan, host_dense_flag_normalized | invertMonotonicFlags(array.flags));
                 hostDenseSetCachedIntRange(try mutableNumericHostArrayValue(self, result), .{ .min = 0, .max = 1 });
@@ -39517,7 +37092,7 @@ pub const Session = struct {
 
     fn numericScalarItemValue(self: *Session, value: Value, idx: usize) KError!Value {
         const array = try numericHostArrayValue(self, value);
-        return try self.hostDenseIndexScalar(array, @intCast(idx));
+        return try self.hostDenseIndexScalar(value, array, @intCast(idx));
     }
 
     fn sequenceContainsValue(self: *Session, haystack: Value, needle: Value) KError!bool {
@@ -39770,16 +37345,21 @@ pub const Session = struct {
         };
     }
 
-    fn hostItemOrder(array: *const HostDenseArray, lhs: usize, rhs: usize) std.math.Order {
-        if (hostNumericMatrixShape(array)) |shape| return hostNumericMatrixRowOrder(array, lhs, rhs, shape.cols);
-        return switch (array.storage) {
-            .bit => std.math.order(@intFromBool(bitGet(array.storage.bit, lhs)), @intFromBool(bitGet(array.storage.bit, rhs))),
-            .int8 => std.math.order(array.storage.int8[lhs], array.storage.int8[rhs]),
-            .int16 => std.math.order(array.storage.int16[lhs], array.storage.int16[rhs]),
-            .int32 => std.math.order(array.storage.int32[lhs], array.storage.int32[rhs]),
-            .int64 => std.math.order(array.storage.int64[lhs], array.storage.int64[rhs]),
-            .float32 => std.math.order(array.storage.float32[lhs], array.storage.float32[rhs]),
-            .float64 => std.math.order(array.storage.float64[lhs], array.storage.float64[rhs]),
+    const HostIndexedOrderContext = struct {
+        array: *const HostDenseArray,
+        matrix_cols: ?usize = null,
+    };
+
+    fn hostItemOrder(context: HostIndexedOrderContext, lhs: usize, rhs: usize) std.math.Order {
+        if (context.matrix_cols) |cols| return hostNumericMatrixRowOrder(context.array, lhs, rhs, cols);
+        return switch (context.array.storage) {
+            .bit => std.math.order(@intFromBool(bitGet(context.array.storage.bit, lhs)), @intFromBool(bitGet(context.array.storage.bit, rhs))),
+            .int8 => std.math.order(context.array.storage.int8[lhs], context.array.storage.int8[rhs]),
+            .int16 => std.math.order(context.array.storage.int16[lhs], context.array.storage.int16[rhs]),
+            .int32 => std.math.order(context.array.storage.int32[lhs], context.array.storage.int32[rhs]),
+            .int64 => std.math.order(context.array.storage.int64[lhs], context.array.storage.int64[rhs]),
+            .float32 => std.math.order(context.array.storage.float32[lhs], context.array.storage.float32[rhs]),
+            .float64 => std.math.order(context.array.storage.float64[lhs], context.array.storage.float64[rhs]),
         };
     }
 
@@ -39787,8 +37367,8 @@ pub const Session = struct {
         return if (ascending) order == .lt else order == .gt;
     }
 
-    fn hostIndexedOrder(_: *Session, array: *const HostDenseArray, lhs: usize, rhs: usize) KError!std.math.Order {
-        return hostItemOrder(array, lhs, rhs);
+    fn hostIndexedOrder(_: *Session, context: HostIndexedOrderContext, lhs: usize, rhs: usize) KError!std.math.Order {
+        return hostItemOrder(context, lhs, rhs);
     }
 
     fn numericVectorIndexedOrder(_: *Session, value: Value, lhs: usize, rhs: usize) KError!std.math.Order {
@@ -39931,13 +37511,13 @@ pub const Session = struct {
         const idxs = try self.allocator.alloc(usize, shape.rows);
         defer self.allocator.free(idxs);
         for (idxs, 0..) |*slot, idx| slot.* = idx;
-        try self.stableMergeSortIndices(idxs, ascending, array, hostIndexedOrder);
+        try self.stableMergeSortIndices(idxs, ascending, HostIndexedOrderContext{ .array = array, .matrix_cols = shape.cols }, hostIndexedOrder);
         return try self.managedHostIndexArrayValue(idxs);
     }
 
     fn tryFastHostNumericMatrixGradeValue(self: *Session, value: Value, ascending: bool) KError!?Value {
         const array = hostDenseIfPresent(value) orelse return null;
-        const shape = hostNumericMatrixShape(array) orelse return null;
+        const shape = valueNumericMatrixShape(value) orelse return null;
         return try self.managedHostNumericMatrixGradeValue(array, shape, ascending);
     }
 
@@ -40030,7 +37610,7 @@ pub const Session = struct {
             prev = value;
         }
 
-        const value = try out.value(self);
+        const value = out.value();
         const host = try mutableNumericHostArrayValue(self, value);
         hostDenseSetFlags(host, host_dense_flag_normalized | orderFlagsFromMonotonic(asc, dsc));
         hostDenseSetCachedIntRange(host, .{ .min = 0, .max = max_value });
@@ -40071,7 +37651,7 @@ pub const Session = struct {
     }
 
     fn finishManagedGradeResultWithFlags(self: *Session, out: *HostIntResult, max_value: i64, flags: u8) KError!Value {
-        const value = try out.value(self);
+        const value = out.value();
         const host = try mutableNumericHostArrayValue(self, value);
         hostDenseSetFlags(host, flags);
         hostDenseSetCachedIntRange(host, .{ .min = 0, .max = max_value });
@@ -40473,22 +38053,6 @@ pub const Session = struct {
         return if (ascending) key else ~key;
     }
 
-    fn fillInsertionGradeIndicesIntSlice(comptime T: type, out: []usize, items: []const T, ascending: bool) void {
-        for (out, 0..) |*slot, idx| slot.* = idx;
-        for (1..out.len) |idx| {
-            const key_idx = out[idx];
-            const key = items[key_idx];
-            var scan = idx;
-            while (scan > 0) {
-                const prev_idx = out[scan - 1];
-                if (!orderComesBefore(std.math.order(key, items[prev_idx]), ascending)) break;
-                out[scan] = prev_idx;
-                scan -= 1;
-            }
-            out[scan] = key_idx;
-        }
-    }
-
     fn fillInsertionGradeIndicesIntView(out: []usize, view: HostIntDenseView, ascending: bool) KError!void {
         for (out, 0..) |*slot, idx| slot.* = idx;
         for (1..out.len) |idx| {
@@ -40498,22 +38062,6 @@ pub const Session = struct {
             while (scan > 0) {
                 const prev_idx = out[scan - 1];
                 if (!orderComesBefore(std.math.order(key, try hostIntDenseViewItem(view, prev_idx)), ascending)) break;
-                out[scan] = prev_idx;
-                scan -= 1;
-            }
-            out[scan] = key_idx;
-        }
-    }
-
-    fn fillInsertionGradeIndicesFloatSlice(out: []usize, items: []const f64, ascending: bool) void {
-        for (out, 0..) |*slot, idx| slot.* = idx;
-        for (1..out.len) |idx| {
-            const key_idx = out[idx];
-            const key = items[key_idx];
-            var scan = idx;
-            while (scan > 0) {
-                const prev_idx = out[scan - 1];
-                if (!orderComesBefore(std.math.order(key, items[prev_idx]), ascending)) break;
                 out[scan] = prev_idx;
                 scan -= 1;
             }
@@ -40537,44 +38085,6 @@ pub const Session = struct {
         }
     }
 
-    fn fillReverseMonotonicGradeIndicesBitSlice(out: []usize, bits: HostBitSlice) bool {
-        var out_idx: usize = 0;
-        var scan = bits.len;
-        var unique = true;
-        while (scan > 0) {
-            const run_end = scan;
-            const run_value = bitGet(bits.words, run_end - 1);
-            scan -= 1;
-            while (scan > 0 and bitGet(bits.words, scan - 1) == run_value) : (scan -= 1) {
-                unique = false;
-            }
-            for (scan..run_end) |idx| {
-                out[out_idx] = idx;
-                out_idx += 1;
-            }
-        }
-        return unique;
-    }
-
-    fn fillReverseMonotonicGradeIndicesIntSlice(comptime T: type, out: []usize, items: []const T) bool {
-        var out_idx: usize = 0;
-        var scan = items.len;
-        var unique = true;
-        while (scan > 0) {
-            const run_end = scan;
-            const run_value = items[run_end - 1];
-            scan -= 1;
-            while (scan > 0 and items[scan - 1] == run_value) : (scan -= 1) {
-                unique = false;
-            }
-            for (scan..run_end) |idx| {
-                out[out_idx] = idx;
-                out_idx += 1;
-            }
-        }
-        return unique;
-    }
-
     fn fillReverseMonotonicGradeIndicesIntView(out: []usize, view: HostIntDenseView) KError!bool {
         var out_idx: usize = 0;
         var scan = out.len;
@@ -40584,25 +38094,6 @@ pub const Session = struct {
             const run_value = try hostIntDenseViewItem(view, run_end - 1);
             scan -= 1;
             while (scan > 0 and (try hostIntDenseViewItem(view, scan - 1)) == run_value) : (scan -= 1) {
-                unique = false;
-            }
-            for (scan..run_end) |idx| {
-                out[out_idx] = idx;
-                out_idx += 1;
-            }
-        }
-        return unique;
-    }
-
-    fn fillReverseMonotonicGradeIndicesFloatSlice(out: []usize, items: []const f64) bool {
-        var out_idx: usize = 0;
-        var scan = items.len;
-        var unique = true;
-        while (scan > 0) {
-            const run_end = scan;
-            const run_value = items[run_end - 1];
-            scan -= 1;
-            while (scan > 0 and std.math.order(items[scan - 1], run_value) == .eq) : (scan -= 1) {
                 unique = false;
             }
             for (scan..run_end) |idx| {
@@ -40630,40 +38121,6 @@ pub const Session = struct {
             }
         }
         return unique;
-    }
-
-    fn fillBucketGradeIndicesIntSlice(comptime T: type, out: []usize, items: []const T, range: HostIntRange, ascending: bool, allocator: std.mem.Allocator) KError!void {
-        const bucket_count = intGradeRangeLen(range) orelse return error.Unsupported;
-        const counts = try allocator.alloc(usize, bucket_count);
-        defer allocator.free(counts);
-        @memset(counts, 0);
-
-        for (items) |item| {
-            const value: i64 = item;
-            const bucket_i128 = if (ascending)
-                @as(i128, value) - @as(i128, range.min)
-            else
-                @as(i128, range.max) - @as(i128, value);
-            counts[@intCast(bucket_i128)] += 1;
-        }
-
-        var total: usize = 0;
-        for (counts) |*count| {
-            const next = total + count.*;
-            count.* = total;
-            total = next;
-        }
-
-        for (items, 0..) |item, idx| {
-            const value: i64 = item;
-            const bucket_i128 = if (ascending)
-                @as(i128, value) - @as(i128, range.min)
-            else
-                @as(i128, range.max) - @as(i128, value);
-            const bucket: usize = @intCast(bucket_i128);
-            out[counts[bucket]] = idx;
-            counts[bucket] += 1;
-        }
     }
 
     fn fillTypedBucketGradeIndicesIntSlice(
@@ -40706,46 +38163,6 @@ pub const Session = struct {
             out[counts[bucket]] = @intCast(idx);
             counts[bucket] += 1;
         }
-    }
-
-    fn fillRadixGradeIndicesIntSlice(comptime T: type, kind: HostIntStorageKind, out: []usize, items: []const T, ascending: bool, allocator: std.mem.Allocator) KError!void {
-        if (out.len == 0) return;
-
-        const scratch = try allocator.alloc(usize, out.len);
-        defer allocator.free(scratch);
-        for (out, 0..) |*slot, idx| slot.* = idx;
-
-        var counts: [256]usize = undefined;
-        var src: []usize = out;
-        var dst: []usize = scratch;
-        const pass_count = intGradePassCount(kind);
-        for (0..pass_count) |pass| {
-            @memset(counts[0..], 0);
-            const shift: u6 = @intCast(pass * 8);
-            for (src) |idx| {
-                const digit = @as(u8, @truncate(intGradeKey(@as(i64, items[idx]), kind, ascending) >> shift));
-                counts[digit] += 1;
-            }
-
-            var total: usize = 0;
-            for (counts[0..]) |*count| {
-                const next = total + count.*;
-                count.* = total;
-                total = next;
-            }
-
-            for (src) |idx| {
-                const digit = @as(u8, @truncate(intGradeKey(@as(i64, items[idx]), kind, ascending) >> shift));
-                dst[counts[digit]] = idx;
-                counts[digit] += 1;
-            }
-
-            const tmp = src;
-            src = dst;
-            dst = tmp;
-        }
-
-        if (src.ptr != out.ptr) @memcpy(out, src);
     }
 
     fn fillRadixGradeIndicesTypedIntSlice(
@@ -40822,52 +38239,6 @@ pub const Session = struct {
         }
 
         if (src.ptr != out.ptr) @memcpy(out, src);
-    }
-
-    fn fillRadixGradeIndicesFloatSlice(out: []usize, items: []const f64, ascending: bool, allocator: std.mem.Allocator) KError!bool {
-        if (out.len == 0) return true;
-
-        const keys = try allocator.alloc(u64, out.len);
-        defer allocator.free(keys);
-        for (items, 0..) |item, idx| {
-            keys[idx] = floatGradeKey(item, ascending) orelse return false;
-            out[idx] = idx;
-        }
-
-        const scratch = try allocator.alloc(usize, out.len);
-        defer allocator.free(scratch);
-
-        var counts: [256]usize = undefined;
-        var src: []usize = out;
-        var dst: []usize = scratch;
-        for (0..8) |pass| {
-            @memset(counts[0..], 0);
-            const shift: u6 = @intCast(pass * 8);
-            for (src) |idx| {
-                const digit = @as(u8, @truncate(keys[idx] >> shift));
-                counts[digit] += 1;
-            }
-
-            var total: usize = 0;
-            for (counts[0..]) |*count| {
-                const next = total + count.*;
-                count.* = total;
-                total = next;
-            }
-
-            for (src) |idx| {
-                const digit = @as(u8, @truncate(keys[idx] >> shift));
-                dst[counts[digit]] = idx;
-                counts[digit] += 1;
-            }
-
-            const tmp = src;
-            src = dst;
-            dst = tmp;
-        }
-
-        if (src.ptr != out.ptr) @memcpy(out, src);
-        return true;
     }
 
     fn fillRadixGradeIndicesTypedFloatSlice(comptime IdxT: type, out: []IdxT, items: []const f64, ascending: bool, allocator: std.mem.Allocator) KError!bool {
@@ -41423,7 +38794,7 @@ pub const Session = struct {
         }
         if (NumericStructuralView.init(value)) |structural| {
             if (try numericStructuralGradeValue(self, structural, ascending)) |result| {
-                if (self.debugDetailedProbeActive()) self.debug_grade_structural_numeric_fast_count += 1;
+                if (self.debugDetailedProbeActive()) self.debug.grade_structural_numeric_fast_count += 1;
                 return result;
             }
         }
@@ -41434,13 +38805,13 @@ pub const Session = struct {
                     switch (view) {
                         .int_array => |items| {
                             if (try self.tryFastHostIntDenseGradeValue(value, items, ascending)) |result| {
-                                if (self.debugDetailedProbeActive()) self.debug_grade_structural_numeric_fast_count += 1;
+                                if (self.debugDetailedProbeActive()) self.debug.grade_structural_numeric_fast_count += 1;
                                 return result;
                             }
                         },
                         .float_array => |items| {
                             if (try self.tryFastHostFloatDenseGradeValue(value, items, ascending)) |result| {
-                                if (self.debugDetailedProbeActive()) self.debug_grade_structural_numeric_fast_count += 1;
+                                if (self.debugDetailedProbeActive()) self.debug.grade_structural_numeric_fast_count += 1;
                                 return result;
                             }
                         },
@@ -41450,29 +38821,30 @@ pub const Session = struct {
                     defer self.allocator.free(idxs);
                     for (idxs, 0..) |*slot, idx| slot.* = idx;
                     try self.stableMergeSortIndices(idxs, ascending, value, numericVectorIndexedOrder);
-                    if (self.debugDetailedProbeActive()) self.debug_grade_structural_numeric_fast_count += 1;
+                    if (self.debugDetailedProbeActive()) self.debug.grade_structural_numeric_fast_count += 1;
                     return try self.managedHostIndexArrayValue(idxs);
                 }
             }
         }
         if (valueNumericMatrixView(value)) |matrix| {
             if (try self.tryFastHostNumericMatrixGradeValue(value, ascending)) |result| {
-                if (self.debugDetailedProbeActive()) self.debug_grade_structural_numeric_fast_count += 1;
+                if (self.debugDetailedProbeActive()) self.debug.grade_structural_numeric_fast_count += 1;
                 return result;
             }
             const idxs = try self.allocator.alloc(usize, matrix.shape.rows);
             defer self.allocator.free(idxs);
             for (idxs, 0..) |*slot, idx| slot.* = idx;
             try self.stableMergeSortIndices(idxs, ascending, matrix, numericMatrixIndexedOrder);
-            if (self.debugDetailedProbeActive()) self.debug_grade_structural_numeric_fast_count += 1;
+            if (self.debugDetailedProbeActive()) self.debug.grade_structural_numeric_fast_count += 1;
             return try self.managedHostIndexArrayValue(idxs);
         }
         const array = try numericHostArrayValue(self, value);
-        const len = if (hostNumericMatrixShape(array)) |shape| shape.rows else array.len();
+        const matrix_shape = valueNumericMatrixShape(value);
+        const len = if (matrix_shape) |shape| shape.rows else array.len();
         const idxs = try self.allocator.alloc(usize, len);
         defer self.allocator.free(idxs);
         for (idxs, 0..) |*slot, idx| slot.* = idx;
-        try self.stableMergeSortIndices(idxs, ascending, array, hostIndexedOrder);
+        try self.stableMergeSortIndices(idxs, ascending, HostIndexedOrderContext{ .array = array, .matrix_cols = if (matrix_shape) |shape| shape.cols else null }, hostIndexedOrder);
         return try self.managedHostIndexArrayValue(idxs);
     }
 
@@ -41959,7 +39331,7 @@ pub const Session = struct {
         const flags = host_dense_flag_normalized |
             (if (ascending or all_equal) host_dense_flag_asc else 0) |
             (if (!ascending or all_equal) host_dense_flag_dsc else 0);
-        const value = try out.value(self);
+        const value = out.value();
         const host = try mutableNumericHostArrayValue(self, value);
         hostDenseSetFlags(host, flags);
         hostDenseSetCachedIntRange(host, .{ .min = min_value, .max = max_value });
@@ -42005,7 +39377,7 @@ pub const Session = struct {
         const flags = host_dense_flag_normalized |
             (if (ascending or all_equal) host_dense_flag_asc else 0) |
             (if (!ascending or all_equal) host_dense_flag_dsc else 0);
-        const value = try out.value(self);
+        const value = out.value();
         const host = try mutableNumericHostArrayValue(self, value);
         hostDenseSetFlags(host, flags);
         hostDenseSetCachedIntRange(host, .{ .min = min_value, .max = max_value });
@@ -42044,7 +39416,7 @@ pub const Session = struct {
         const flags = host_dense_flag_normalized |
             (if (ascending or all_equal) host_dense_flag_asc else 0) |
             (if (!ascending or all_equal) host_dense_flag_dsc else 0);
-        const value = try out.value(self);
+        const value = out.value();
         const host = try mutableNumericHostArrayValue(self, value);
         hostDenseSetFlags(host, flags);
         hostDenseSetCachedIntRange(host, .{ .min = min_value, .max = max_value });
@@ -42113,7 +39485,7 @@ pub const Session = struct {
         const flags = host_dense_flag_normalized |
             (if (ascending or all_equal) host_dense_flag_asc else 0) |
             (if (!ascending or all_equal) host_dense_flag_dsc else 0);
-        const value = try out.value(self);
+        const value = out.value();
         const host = try mutableNumericHostArrayValue(self, value);
         hostDenseSetFlags(host, flags);
         hostDenseSetCachedIntRange(host, .{ .min = min_value, .max = max_value });
@@ -42160,7 +39532,7 @@ pub const Session = struct {
         const flags = host_dense_flag_normalized |
             (if (ascending or all_equal) host_dense_flag_asc else 0) |
             (if (!ascending or all_equal) host_dense_flag_dsc else 0);
-        const value = try out.value(self);
+        const value = out.value();
         const host = try mutableNumericHostArrayValue(self, value);
         hostDenseSetFlags(host, flags);
         hostDenseSetCachedIntRange(host, .{ .min = min_value, .max = max_value });
@@ -42239,7 +39611,7 @@ pub const Session = struct {
         const flags = host_dense_flag_normalized |
             (if (ascending or all_equal) host_dense_flag_asc else 0) |
             (if (!ascending or all_equal) host_dense_flag_dsc else 0);
-        const value = try out.value(self);
+        const value = out.value();
         const host = try mutableNumericHostArrayValue(self, value);
         hostDenseSetFlags(host, flags);
         hostDenseSetCachedIntRange(host, .{ .min = min_value, .max = max_value });
@@ -42283,7 +39655,7 @@ pub const Session = struct {
         const flags = host_dense_flag_normalized |
             (if (ascending or all_equal) host_dense_flag_asc else 0) |
             (if (!ascending or all_equal) host_dense_flag_dsc else 0);
-        const value = try out.value(self);
+        const value = out.value();
         const host = try mutableNumericHostArrayValue(self, value);
         hostDenseSetFlags(host, flags);
         hostDenseSetCachedIntRange(host, .{ .min = min_value, .max = max_value });
@@ -42352,7 +39724,7 @@ pub const Session = struct {
         const flags = host_dense_flag_normalized |
             (if (ascending or all_equal) host_dense_flag_asc else 0) |
             (if (!ascending or all_equal) host_dense_flag_dsc else 0);
-        const value = try out.value(self);
+        const value = out.value();
         const host = try mutableNumericHostArrayValue(self, value);
         hostDenseSetFlags(host, flags);
         hostDenseSetCachedIntRange(host, .{ .min = min_value, .max = max_value });
@@ -42366,7 +39738,7 @@ pub const Session = struct {
 
     fn tryFastSortSelfGradeValue(self: *Session, value: Value, ascending: bool) KError!?Value {
         const array = hostDenseIfPresent(value) orelse return null;
-        if (hostNumericMatrixShape(array) != null) return null;
+        if (valueNumericMatrixShape(value) != null) return null;
         const target_flag = if (ascending) host_dense_flag_asc else host_dense_flag_dsc;
         if ((monotonicFlags(array.flags) & target_flag) != 0) return self.shareValue(value);
         return switch (array.storage) {
@@ -42382,7 +39754,7 @@ pub const Session = struct {
     fn stampSortSelfGradeMetadata(self: *Session, source: Value, result: Value, ascending: bool) void {
         _ = self;
         const result_host = hostDenseIfPresent(result) orelse return;
-        if (hostNumericMatrixShape(result_host) != null) return;
+        if (valueNumericMatrixShape(result) != null) return;
         var flags = host_dense_flag_normalized |
             (if (ascending) host_dense_flag_asc else host_dense_flag_dsc);
 
@@ -42398,7 +39770,7 @@ pub const Session = struct {
         hostDenseSetFlags(mutable_result, flags);
 
         const source_host = hostDenseIfPresent(source) orelse return;
-        if (hostNumericMatrixShape(source_host) != null) return;
+        if (valueNumericMatrixShape(source) != null) return;
         const source_view = hostIntArrayView(source_host) orelse return;
         const range = hostDenseCachedIntRange(source_host) orelse
             hostIntArrayViewEndpointRange(source_view, source_host.flags) orelse
@@ -42416,16 +39788,13 @@ pub const Session = struct {
         return result;
     }
 
-    fn canMutateHostDenseAppend(array: *const HostDenseArray) bool {
-        if (numericPayloadOwner(array) != .managed) return false;
-        if (numericPayloadManagedRefCount(array) != 1) return false;
-        if (array.logical_handle) |handle| {
-            if (handle.host != array) return false;
-            if (handle.mlx != null) return false;
-            if (numericArrayStructuralTag(handle) != .materialized) return false;
-            if (handle.rank != 1) return false;
-            if (@as(usize, @intCast(handle.shape[0])) != array.logical_len) return false;
-        }
+    fn canMutateHostDenseAppend(handle: *const NumericArray, array: *const HostDenseArray) bool {
+        if (handle.header.owner != .managed or handle.header.ref_count != 1) return false;
+        if (handle.host != array) return false;
+        if (handle.mlx != null) return false;
+        if (numericArrayStructuralTag(handle) != .materialized) return false;
+        if (handle.rank != 1) return false;
+        if (@as(usize, @intCast(handle.shape[0])) != array.logical_len) return false;
         return true;
     }
 
@@ -42455,15 +39824,16 @@ pub const Session = struct {
             .dense => {},
             else => return null,
         }
+        const handle = mutableNumericHandle(vector) orelse return null;
         const array = @constCast(hostDenseIfPresent(vector) orelse return null);
-        if (!canMutateHostDenseAppend(array)) return null;
+        if (!canMutateHostDenseAppend(handle, array)) return null;
 
         const old_len = array.logical_len;
         const new_len = std.math.add(usize, old_len, 1) catch return error.Unsupported;
         try self.ensureManagedHostDenseIntCapacity(array, result_kind, new_len);
         try writeHostDenseIntScalar(array, result_kind, old_len, scalar_int);
         array.logical_len = new_len;
-        if (array.logical_handle) |handle| numericArraySetVectorShape(handle, new_len);
+        numericArraySetVectorShape(handle, new_len);
         if (result_kind == .bit) bitClearUnusedTail(array.storage.bit, new_len);
         self.clearManagedHostDenseFindCache(array);
         hostDenseSetFlags(array, flags);
@@ -42514,7 +39884,7 @@ pub const Session = struct {
         for (0..len) |idx| try out.set(write_idx + idx, try hostIntDenseViewItem(view, idx));
         if (scalar_on_right) try out.set(len, scalar_int);
 
-        const result = try out.value(self);
+        const result = out.value();
         const host = try mutableNumericHostArrayValue(self, result);
         hostDenseSetFlags(host, flags);
         hostDenseSetCachedIntRange(host, range);
@@ -42552,7 +39922,7 @@ pub const Session = struct {
         if (scalar_on_right) out.items[len] = scalar_float;
 
         const analysis = analyzeFloatSlice(out.items);
-        const result = try out.value(self);
+        const result = out.value();
         hostDenseSetFlags(try mutableNumericHostArrayValue(self, result), analysis.flags);
         return result;
     }
@@ -42808,7 +40178,7 @@ pub const Session = struct {
                 }
             }
         }
-        return try self.takeHostArray(raw_count, try numericHostArrayValue(self, right));
+        return try self.takeHostArray(raw_count, right, try numericHostArrayValue(self, right));
     }
 
     fn takeValueWithOwner(self: *Session, owner: HeapOwner, left: Value, right: Value) KError!Value {
@@ -42856,11 +40226,6 @@ pub const Session = struct {
             dims_buf[idx] = std.math.cast(i32, dim) orelse return error.Unsupported;
         }
         return try numericShapeSnapshotFromDims(dims_buf[0..shape.rank]);
-    }
-
-    fn shapeVectorSnapshotValue(value: Value) KError!?NumericShapeSnapshot {
-        const shape = (try reshapeShapeSnapshotValue(value)) orelse return null;
-        return try fixedReshapeShapeSnapshot(shape);
     }
 
     fn fixedShapeContainsZero(shape: NumericShapeSnapshot) bool {
@@ -43581,14 +40946,6 @@ pub const Session = struct {
         };
     }
 
-    fn emptyChunkPrototypeForValue(self: *Session, owner: HeapOwner, value: Value) KError!?Value {
-        if (stringSourceInfo(value) != null) return try self.createOwnedHostString(owner, &.{});
-        if (valueNumericMode(value) != null and numericVectorLen(value) != null) {
-            return try self.createOwnedNumericVectorSlice(owner, value, 0, 0);
-        }
-        return null;
-    }
-
     fn chunkHostStringBySize(self: *Session, owner: HeapOwner, source: []const u8, chunk_size: usize) KError!Value {
         const count = if (chunk_size == 0 or source.len == 0) 0 else (source.len + chunk_size - 1) / chunk_size;
         if (count == 0) {
@@ -44129,8 +41486,8 @@ pub const Session = struct {
         }
     }
 
-    fn takeHostArray(self: *Session, raw_count: i64, array: *const HostDenseArray) KError!Value {
-        if (hostNumericMatrixShape(array)) |shape| {
+    fn takeHostArray(self: *Session, raw_count: i64, source_value: Value, array: *const HostDenseArray) KError!Value {
+        if (valueNumericMatrixShape(source_value)) |shape| {
             const count: usize = @intCast(@abs(raw_count));
             if (count == 0) {
                 const value = switch (array.storage) {
@@ -44182,7 +41539,7 @@ pub const Session = struct {
                     break :blk try self.finishManagedHostBitAlloc(
                         out,
                         if (count <= array.len()) array.flags else host_dense_flag_normalized,
-                        sourceHostIntRange(hostDenseSourceValue(array), array),
+                        sourceHostIntRange(source_value, array),
                     );
                 },
                 .float64 => |items| blk: {
@@ -44220,7 +41577,7 @@ pub const Session = struct {
                 break :blk try self.finishManagedHostBitAlloc(
                     out,
                     if (count <= array.len()) array.flags else host_dense_flag_normalized,
-                    sourceHostIntRange(hostDenseSourceValue(array), array),
+                    sourceHostIntRange(source_value, array),
                 );
             },
             .float64 => |items| blk: {
@@ -44462,7 +41819,7 @@ pub const Session = struct {
             }
         }
         const array = try numericHostArrayValue(self, right);
-        if (hostNumericMatrixShape(array)) |shape| {
+        if (valueNumericMatrixShape(right)) |shape| {
             const bounds = dropSliceBounds(raw_count, shape.rows);
             var row_indices = std.ArrayList(usize).empty;
             defer row_indices.deinit(self.allocator);
@@ -44476,7 +41833,7 @@ pub const Session = struct {
             .bit => blk: {
                 const out = try self.allocHostBitArray(.managed, bounds.end - bounds.start);
                 bitCopyRange(out.words, 0, .{ .words = array.storage.bit, .len = array.logical_len }, bounds.start, bounds.end - bounds.start);
-                break :blk try self.finishManagedHostBitAlloc(out, array.flags, sourceHostIntRange(hostDenseSourceValue(array), array));
+                break :blk try self.finishManagedHostBitAlloc(out, array.flags, sourceHostIntRange(right, array));
             },
             .float64 => |items| try self.createManagedHostFloatArray(hostDenseLogicalItems(f64, array, items)[bounds.start..bounds.end]),
             else => blk: {
@@ -44572,7 +41929,7 @@ pub const Session = struct {
                 .bit => blk: {
                     const out = try self.allocHostBitArray(.managed, total);
                     bitCopyRange(out.words, 0, .{ .words = source.storage.bit, .len = source.logical_len }, 0, total);
-                    break :blk try self.finishManagedHostBitAlloc(out, source.flags, sourceHostIntRange(hostDenseSourceValue(source), source));
+                    break :blk try self.finishManagedHostBitAlloc(out, source.flags, sourceHostIntRange(right, source));
                 },
                 .float64 => |items| try self.createManagedHostFloatArray(hostDenseLogicalItems(f64, source, items)),
                 else => blk: {
@@ -44600,7 +41957,7 @@ pub const Session = struct {
             try inner.ensureTotalCapacity(self.allocator, row_len);
             const start = row_idx * row_len;
             for (0..row_len) |col_idx| {
-                try inner.append(self.allocator, try self.hostDenseIndexScalar(source, @intCast(start + col_idx)));
+                try inner.append(self.allocator, try self.hostDenseIndexScalar(right, source, @intCast(start + col_idx)));
             }
             try outer.append(self.allocator, try self.createManagedArrayLikeFromValues(inner.items));
         }
@@ -44715,7 +42072,7 @@ pub const Session = struct {
             var out = try self.allocManagedHostIntResult(.bit, left_bits.len);
             fillBitWordsBinary(out.bit.words, op, left_bits.words, right_bits.words);
             bitClearUnusedTail(out.bit.words, out.bit.len);
-            const result = try out.value(self);
+            const result = out.value();
             self.noteSimdKernel(.packed_bool);
             return try applyNonVectorNumericShapeToValue(self, result, shape);
         }
@@ -44787,15 +42144,6 @@ pub const Session = struct {
         len: usize,
     };
 
-    const HostCompareIntFloatPrepared = struct {
-        len: usize,
-        shape: ?NumericShapeSnapshot,
-        op_code: i32,
-        int_ptr: HostCompareIntDensePtr,
-        float_items: []const f64,
-        int_left: bool,
-    };
-
     fn hostCompareIntDensePtr(view: HostIntArrayView) ?HostCompareIntDensePtr {
         return switch (view) {
             .int8 => |items| .{ .ptr = @ptrCast(items.ptr), .width = 1, .len = items.len },
@@ -44804,60 +42152,6 @@ pub const Session = struct {
             .int64 => |items| .{ .ptr = @ptrCast(items.ptr), .width = 8, .len = items.len },
             .bit => null,
         };
-    }
-
-    fn prepareFastHostCompareIntFloat(self: *Session, op: BuiltinId, left: Value, right: Value) KError!?HostCompareIntFloatPrepared {
-        const op_code = hostCompareOpCode(op) orelse return null;
-        const shape = try nonVectorNumericShapeForDyad(left, right);
-        const len = try arrayResultLen(left, right);
-        if (len < host_compare_vector_min_len) return null;
-        if (rowwiseMatrixVectorDyad(left, right) != null) return null;
-
-        const left_view = hostDenseView(self, left) catch |err| switch (err) {
-            error.Type => return null,
-            else => return err,
-        };
-        const right_view = hostDenseView(self, right) catch |err| switch (err) {
-            error.Type => return null,
-            else => return err,
-        };
-
-        switch (left_view) {
-            .int_array => |left_items| switch (right_view) {
-                .float_array => |right_items| {
-                    if (left_items != .dense or right_items != .dense) return null;
-                    const int_ptr = hostCompareIntDensePtr(left_items.dense) orelse return null;
-                    if (int_ptr.len != right_items.dense.len or int_ptr.len != len) return error.Type;
-                    return .{
-                        .len = len,
-                        .shape = shape,
-                        .op_code = op_code,
-                        .int_ptr = int_ptr,
-                        .float_items = right_items.dense,
-                        .int_left = true,
-                    };
-                },
-                else => {},
-            },
-            .float_array => |left_items| switch (right_view) {
-                .int_array => |right_items| {
-                    if (left_items != .dense or right_items != .dense) return null;
-                    const int_ptr = hostCompareIntDensePtr(right_items.dense) orelse return null;
-                    if (int_ptr.len != left_items.dense.len or int_ptr.len != len) return error.Type;
-                    return .{
-                        .len = len,
-                        .shape = shape,
-                        .op_code = op_code,
-                        .int_ptr = int_ptr,
-                        .float_items = left_items.dense,
-                        .int_left = false,
-                    };
-                },
-                else => {},
-            },
-            else => {},
-        }
-        return null;
     }
 
     fn fillFastHostCompareIntArrays(out: *HostBitAlloc, op_code: i32, left: HostIntArrayView, right: HostIntArrayView) bool {
@@ -44903,7 +42197,7 @@ pub const Session = struct {
 
     fn useZigFastHostCompareIntArrays(left: HostIntArrayView, right: HostIntArrayView) bool {
         if (comptime enable_host_compare_zig_vectorized) return true;
-        if (comptime !host_compare_native_auto_selective) return false;
+        if (comptime !enable_host_compare_vectorized) return false;
         return switch (left) {
             .int64 => switch (right) {
                 .int64 => true,
@@ -44918,19 +42212,6 @@ pub const Session = struct {
         const int_ptr = hostCompareIntDensePtr(int_items) orelse return false;
         if (int_ptr.len != float_items.len) return false;
         kiwi_host_compare_int_f64_array(out.words.ptr, int_ptr.ptr, int_ptr.width, float_items.ptr, int_ptr.len, if (int_left) 1 else 0, op_code);
-        return true;
-    }
-
-    fn fillFastHostCompareFloatArrays(out: *HostBitAlloc, op_code: i32, left: []const f64, right: []const f64) bool {
-        if (comptime !enable_host_compare_vectorized) return false;
-        if (left.len != right.len) return false;
-        kiwi_host_compare_f64_array(out.words.ptr, left.ptr, right.ptr, left.len, op_code);
-        return true;
-    }
-
-    fn fillFastHostCompareFloatScalar(out: *HostBitAlloc, op_code: i32, items: []const f64, scalar: f64, scalar_left: bool) bool {
-        if (comptime !enable_host_compare_vectorized) return false;
-        kiwi_host_compare_f64_scalar(out.words.ptr, items.ptr, items.len, scalar, if (scalar_left) 1 else 0, op_code);
         return true;
     }
 
@@ -44978,7 +42259,7 @@ pub const Session = struct {
 
     fn useZigFastHostCompareIntScalar(items: HostIntArrayView) bool {
         if (comptime enable_host_compare_zig_vectorized) return true;
-        if (comptime !host_compare_native_auto_selective) return false;
+        if (comptime !enable_host_compare_vectorized) return false;
         return switch (items) {
             .int64 => true,
             else => false,
@@ -45031,8 +42312,8 @@ pub const Session = struct {
         len: usize,
         shape: ?NumericShapeSnapshot,
         op: BuiltinId,
-        left: DenseIntResolvedSource(T),
-        right: DenseIntResolvedSource(T),
+        left: DenseResolvedSource(T),
+        right: DenseResolvedSource(T),
     ) KError!?Value {
         var out = try self.allocHostBitArrayUninitialized(.managed, len);
         const summary = fillDenseIntCompareSources(T, &out, op, left, right, len) orelse return null;
@@ -45103,7 +42384,7 @@ pub const Session = struct {
         inline for (.{ i8, i16, i32, i64 }) |T| {
             if (denseIntArrayViewResolvedSource(T, items, reverse_items)) |item_source| {
                 const typed_scalar = std.math.cast(T, scalar) orelse return null;
-                const scalar_source = DenseIntResolvedSource(T){ .scalar = typed_scalar };
+                const scalar_source = DenseResolvedSource(T){ .scalar = typed_scalar };
                 return try self.finishFastHostCompareIntSourcesTyped(
                     T,
                     len,
@@ -45142,35 +42423,19 @@ pub const Session = struct {
         return try self.finishFastHostCompareResult(out, shape);
     }
 
-    fn useZigFastHostCompareFloatSource(comptime T: type, comptime direct: bool) bool {
-        if (comptime T == f64) return if (direct) host_compare_use_zig_f64_direct else true;
-        if (comptime T == f32) return host_compare_mode != .c;
-        @compileError("unsupported host compare float source type");
-    }
-
-    fn finishFastHostCompareFloatArraysTyped(self: *Session, comptime T: type, len: usize, shape: ?NumericShapeSnapshot, op: BuiltinId, op_code: i32, left: []const T, right: []const T) KError!?Value {
-        if (comptime !useZigFastHostCompareFloatSource(T, true) and T != f64) return null;
+    fn finishFastHostCompareFloatArraysTyped(self: *Session, comptime T: type, len: usize, shape: ?NumericShapeSnapshot, op: BuiltinId, left: []const T, right: []const T) KError!?Value {
         var out = try self.allocHostBitArrayUninitialized(.managed, len);
-        if (comptime useZigFastHostCompareFloatSource(T, true)) {
-            const summary = switch (op) {
-                .equal => fillZigHostCompareFloatArraysOp(T, .equal, &out, left, right),
-                .less => fillZigHostCompareFloatArraysOp(T, .less, &out, left, right),
-                .more => fillZigHostCompareFloatArraysOp(T, .more, &out, left, right),
-                else => null,
-            } orelse return null;
-            self.noteSimdKernel(.compare);
-            return try self.finishFastHostCompareResultWithSummary(out, shape, summary);
-        }
-        if (comptime T == f64) {
-            if (!fillFastHostCompareFloatArrays(&out, op_code, left, right)) return null;
-            self.noteSimdKernel(.compare);
-            return try self.finishFastHostCompareResult(out, shape);
-        }
-        return null;
+        const summary = switch (op) {
+            .equal => fillZigHostCompareFloatArraysOp(T, .equal, &out, left, right),
+            .less => fillZigHostCompareFloatArraysOp(T, .less, &out, left, right),
+            .more => fillZigHostCompareFloatArraysOp(T, .more, &out, left, right),
+            else => null,
+        } orelse return null;
+        self.noteSimdKernel(.compare);
+        return try self.finishFastHostCompareResultWithSummary(out, shape, summary);
     }
 
     fn finishFastHostCompareFloat64PromotedSources(self: *Session, len: usize, shape: ?NumericShapeSnapshot, op: BuiltinId, left: DenseFloat64PromotedSource, right: DenseFloat64PromotedSource) KError!?Value {
-        if (comptime host_compare_mode == .c) return null;
         var out = try self.allocHostBitArrayUninitialized(.managed, len);
         const summary = fillDenseFloat64PromotedCompareSources(&out, op, left, right, len) orelse return null;
         self.noteSimdKernel(.compare);
@@ -45180,14 +42445,12 @@ pub const Session = struct {
     fn finishFastHostCompareFloatSourcesTyped(
         self: *Session,
         comptime T: type,
-        comptime direct: bool,
         len: usize,
         shape: ?NumericShapeSnapshot,
         op: BuiltinId,
-        left: DenseFloatResolvedSource(T),
-        right: DenseFloatResolvedSource(T),
+        left: DenseResolvedSource(T),
+        right: DenseResolvedSource(T),
     ) KError!?Value {
-        if (comptime !useZigFastHostCompareFloatSource(T, direct)) return null;
         var out = try self.allocHostBitArrayUninitialized(.managed, len);
         const summary = fillDenseFloatCompareSources(T, &out, op, left, right, len) orelse return null;
         self.noteSimdKernel(.compare);
@@ -45201,10 +42464,9 @@ pub const Session = struct {
         len: usize,
         shape: ?NumericShapeSnapshot,
         op: BuiltinId,
-        int_source: DenseIntResolvedSource(T),
+        int_source: DenseResolvedSource(T),
         float_source: DenseFloat64PromotedSource,
     ) KError!?Value {
-        if (comptime host_compare_mode == .c) return null;
         var out = try self.allocHostBitArrayUninitialized(.managed, len);
         const summary = fillDenseIntFloatCompareSources(T, int_left, &out, op, int_source, float_source, len) orelse return null;
         self.noteSimdKernel(.compare);
@@ -45242,28 +42504,17 @@ pub const Session = struct {
         return try self.finishFastHostCompareIntFloatSourcesTyped(i64, int_left, len, shape, op, .{ .scalar = scalar }, float_source);
     }
 
-    fn finishFastHostCompareFloatScalarTyped(self: *Session, comptime T: type, len: usize, shape: ?NumericShapeSnapshot, op: BuiltinId, op_code: i32, items: []const T, scalar: T, scalar_left: bool) KError!?Value {
-        if (comptime !useZigFastHostCompareFloatSource(T, true) and T != f64) return null;
-        if (comptime useZigFastHostCompareFloatSource(T, true)) {
-            const scalar_source = DenseFloatResolvedSource(T){ .scalar = scalar };
-            const item_source = DenseFloatResolvedSource(T){ .array = items };
-            return try self.finishFastHostCompareFloatSourcesTyped(
-                T,
-                true,
-                len,
-                shape,
-                op,
-                if (scalar_left) scalar_source else item_source,
-                if (scalar_left) item_source else scalar_source,
-            );
-        }
-        if (comptime T == f64) {
-            var out = try self.allocHostBitArrayUninitialized(.managed, len);
-            if (!fillFastHostCompareFloatScalar(&out, op_code, items, scalar, scalar_left)) return null;
-            self.noteSimdKernel(.compare);
-            return try self.finishFastHostCompareResult(out, shape);
-        }
-        return null;
+    fn finishFastHostCompareFloatScalarTyped(self: *Session, comptime T: type, len: usize, shape: ?NumericShapeSnapshot, op: BuiltinId, items: []const T, scalar: T, scalar_left: bool) KError!?Value {
+        const scalar_source = DenseResolvedSource(T){ .scalar = scalar };
+        const item_source = DenseResolvedSource(T){ .array = items };
+        return try self.finishFastHostCompareFloatSourcesTyped(
+            T,
+            len,
+            shape,
+            op,
+            if (scalar_left) scalar_source else item_source,
+            if (scalar_left) item_source else scalar_source,
+        );
     }
 
     fn tryFastHostDenseCompare(self: *Session, op: BuiltinId, left: Value, right: Value, shape: ?NumericShapeSnapshot) KError!?Value {
@@ -45349,10 +42600,10 @@ pub const Session = struct {
                 },
                 .float_array => |right_items| {
                     if (right_items == .dense) {
-                        return try self.finishFastHostCompareFloatScalarTyped(f64, len, shape, op, op_code, right_items.dense, @floatFromInt(scalar), true);
+                        return try self.finishFastHostCompareFloatScalarTyped(f64, len, shape, op, right_items.dense, @floatFromInt(scalar), true);
                     }
                     if (fullReverseFloatDenseViewSource64(right_items)) |source| {
-                        return try self.finishFastHostCompareFloatSourcesTyped(f64, false, len, shape, op, .{ .scalar = @floatFromInt(scalar) }, .{ .reverse_array = source });
+                        return try self.finishFastHostCompareFloatSourcesTyped(f64, len, shape, op, .{ .scalar = @floatFromInt(scalar) }, .{ .reverse_array = source });
                     }
                     if (self.denseFloat64PromotedStoreSourceFromHostDenseView(.{ .float_array = right_items })) |source| {
                         return try self.finishFastHostCompareIntScalarFloatSource(true, len, shape, op, scalar, source);
@@ -45367,15 +42618,15 @@ pub const Session = struct {
                     const right_f32 = hostFloatDenseViewDirectFloat32Slice(right_items);
                     if (left_f32) |left_source| {
                         if (right_f32) |right_source| {
-                            return try self.finishFastHostCompareFloatArraysTyped(f32, len, shape, op, op_code, left_source, right_source);
+                            return try self.finishFastHostCompareFloatArraysTyped(f32, len, shape, op, left_source, right_source);
                         }
                         if (fullReverseFloatDenseViewSource32(right_items)) |right_source| {
-                            return try self.finishFastHostCompareFloatSourcesTyped(f32, false, len, shape, op, .{ .array = left_source }, .{ .reverse_array = right_source });
+                            return try self.finishFastHostCompareFloatSourcesTyped(f32, len, shape, op, .{ .array = left_source }, .{ .reverse_array = right_source });
                         }
                     }
                     if (right_f32) |right_source| {
                         if (fullReverseFloatDenseViewSource32(left_items)) |left_source| {
-                            return try self.finishFastHostCompareFloatSourcesTyped(f32, false, len, shape, op, .{ .reverse_array = left_source }, .{ .array = right_source });
+                            return try self.finishFastHostCompareFloatSourcesTyped(f32, len, shape, op, .{ .reverse_array = left_source }, .{ .array = right_source });
                         }
                     }
                     const left_promoted = self.denseFloat64PromotedStoreSourceFromHostDenseView(.{ .float_array = left_items });
@@ -45389,16 +42640,16 @@ pub const Session = struct {
                     }
                     if (left_items == .dense and right_items == .dense) {
                         if (left_items.dense.len != right_items.dense.len) return error.Type;
-                        return try self.finishFastHostCompareFloatArraysTyped(f64, len, shape, op, op_code, left_items.dense, right_items.dense);
+                        return try self.finishFastHostCompareFloatArraysTyped(f64, len, shape, op, left_items.dense, right_items.dense);
                     }
                     if (left_items == .dense) {
                         if (fullReverseFloatDenseViewSource64(right_items)) |right_source| {
-                            return try self.finishFastHostCompareFloatSourcesTyped(f64, false, len, shape, op, .{ .array = left_items.dense }, .{ .reverse_array = right_source });
+                            return try self.finishFastHostCompareFloatSourcesTyped(f64, len, shape, op, .{ .array = left_items.dense }, .{ .reverse_array = right_source });
                         }
                     }
                     if (right_items == .dense) {
                         if (fullReverseFloatDenseViewSource64(left_items)) |left_source| {
-                            return try self.finishFastHostCompareFloatSourcesTyped(f64, false, len, shape, op, .{ .reverse_array = left_source }, .{ .array = right_items.dense });
+                            return try self.finishFastHostCompareFloatSourcesTyped(f64, len, shape, op, .{ .reverse_array = left_source }, .{ .array = right_items.dense });
                         }
                     }
                     return null;
@@ -45407,10 +42658,10 @@ pub const Session = struct {
                     if (scalarFloatStorageKind(right) == .float32) {
                         const typed_scalar: f32 = @floatCast(scalar);
                         if (hostFloatDenseViewDirectFloat32Slice(left_items)) |source| {
-                            return try self.finishFastHostCompareFloatScalarTyped(f32, len, shape, op, op_code, source, typed_scalar, false);
+                            return try self.finishFastHostCompareFloatScalarTyped(f32, len, shape, op, source, typed_scalar, false);
                         }
                         if (fullReverseFloatDenseViewSource32(left_items)) |source| {
-                            return try self.finishFastHostCompareFloatSourcesTyped(f32, false, len, shape, op, .{ .reverse_array = source }, .{ .scalar = typed_scalar });
+                            return try self.finishFastHostCompareFloatSourcesTyped(f32, len, shape, op, .{ .reverse_array = source }, .{ .scalar = typed_scalar });
                         }
                     }
                     if (self.denseFloat64PromotedStoreSourceFromHostDenseView(.{ .float_array = left_items })) |source| {
@@ -45419,19 +42670,19 @@ pub const Session = struct {
                         }
                     }
                     if (left_items == .dense) {
-                        return try self.finishFastHostCompareFloatScalarTyped(f64, len, shape, op, op_code, left_items.dense, scalar, false);
+                        return try self.finishFastHostCompareFloatScalarTyped(f64, len, shape, op, left_items.dense, scalar, false);
                     }
                     if (fullReverseFloatDenseViewSource64(left_items)) |source| {
-                        return try self.finishFastHostCompareFloatSourcesTyped(f64, false, len, shape, op, .{ .reverse_array = source }, .{ .scalar = scalar });
+                        return try self.finishFastHostCompareFloatSourcesTyped(f64, len, shape, op, .{ .reverse_array = source }, .{ .scalar = scalar });
                     }
                     return null;
                 },
                 .scalar_int => |scalar| {
                     if (left_items == .dense) {
-                        return try self.finishFastHostCompareFloatScalarTyped(f64, len, shape, op, op_code, left_items.dense, @floatFromInt(scalar), false);
+                        return try self.finishFastHostCompareFloatScalarTyped(f64, len, shape, op, left_items.dense, @floatFromInt(scalar), false);
                     }
                     if (fullReverseFloatDenseViewSource64(left_items)) |source| {
-                        return try self.finishFastHostCompareFloatSourcesTyped(f64, false, len, shape, op, .{ .reverse_array = source }, .{ .scalar = @floatFromInt(scalar) });
+                        return try self.finishFastHostCompareFloatSourcesTyped(f64, len, shape, op, .{ .reverse_array = source }, .{ .scalar = @floatFromInt(scalar) });
                     }
                     if (self.denseFloat64PromotedStoreSourceFromHostDenseView(.{ .float_array = left_items })) |source| {
                         return try self.finishFastHostCompareIntScalarFloatSource(false, len, shape, op, scalar, source);
@@ -45458,10 +42709,10 @@ pub const Session = struct {
                     if (scalarFloatStorageKind(left) == .float32) {
                         const typed_scalar: f32 = @floatCast(scalar);
                         if (hostFloatDenseViewDirectFloat32Slice(right_items)) |source| {
-                            return try self.finishFastHostCompareFloatScalarTyped(f32, len, shape, op, op_code, source, typed_scalar, true);
+                            return try self.finishFastHostCompareFloatScalarTyped(f32, len, shape, op, source, typed_scalar, true);
                         }
                         if (fullReverseFloatDenseViewSource32(right_items)) |source| {
-                            return try self.finishFastHostCompareFloatSourcesTyped(f32, false, len, shape, op, .{ .scalar = typed_scalar }, .{ .reverse_array = source });
+                            return try self.finishFastHostCompareFloatSourcesTyped(f32, len, shape, op, .{ .scalar = typed_scalar }, .{ .reverse_array = source });
                         }
                     }
                     if (self.denseFloat64PromotedStoreSourceFromHostDenseView(.{ .float_array = right_items })) |source| {
@@ -45470,10 +42721,10 @@ pub const Session = struct {
                         }
                     }
                     if (right_items == .dense) {
-                        return try self.finishFastHostCompareFloatScalarTyped(f64, len, shape, op, op_code, right_items.dense, scalar, true);
+                        return try self.finishFastHostCompareFloatScalarTyped(f64, len, shape, op, right_items.dense, scalar, true);
                     }
                     if (fullReverseFloatDenseViewSource64(right_items)) |source| {
-                        return try self.finishFastHostCompareFloatSourcesTyped(f64, false, len, shape, op, .{ .scalar = scalar }, .{ .reverse_array = source });
+                        return try self.finishFastHostCompareFloatSourcesTyped(f64, len, shape, op, .{ .scalar = scalar }, .{ .reverse_array = source });
                     }
                     return null;
                 },
@@ -45556,7 +42807,7 @@ pub const Session = struct {
                         out.items[col_idx * shape.rows + row_idx] = try hostFloatDenseViewItem(items, row_idx * shape.cols + col_idx);
                     }
                 }
-                const transposed = try out.value(self);
+                const transposed = out.value();
                 break :blk try applyNonVectorNumericShapeToValue(self, transposed, out_shape);
             },
             .int_array => |items| blk: {
@@ -45568,7 +42819,7 @@ pub const Session = struct {
                         try out.set(col_idx * shape.rows + row_idx, try hostIntDenseViewItem(items, row_idx * shape.cols + col_idx));
                     }
                 }
-                const transposed = try out.value(self);
+                const transposed = out.value();
                 const transposed_host = try mutableNumericHostArrayValue(self, transposed);
                 hostDenseSetFlags(transposed_host, if (range.min >= 0 and range.max <= 1) host_dense_flag_normalized else 0);
                 hostDenseSetCachedIntRange(transposed_host, range);
@@ -45580,68 +42831,14 @@ pub const Session = struct {
 
     fn transposeBackendMatrixValue(self: *Session, value: Value) KError!Value {
         if (comptime runtime_has_mlx) {
-            return runtime_backend_exec.transposeBackendMatrixValue(.{
-                .Session = Session,
-                .Value = Value,
-                .NumericArray = NumericArray,
-                .KError = KError,
-                .mlx = mlx,
-                .mapMlxError = mapMlxError,
-                .backendContext = Session.backendContext,
-                .valueNumericHandle = valueNumericHandle,
-                .numericIntAt = numericIntAt,
-                .numericArrayIsFirstAxisSlice = numericArrayIsFirstAxisSlice,
-                .numericArrayFirstAxisSliceSource = numericArrayFirstAxisSliceSource,
-                .numericArrayFirstAxisSliceRowStart = numericArrayFirstAxisSliceRowStart,
-                .numericArrayFirstAxisSliceRowStep = numericArrayFirstAxisSliceRowStep,
-                .numericArrayIsFirstAxisIndex = numericArrayIsFirstAxisIndex,
-                .numericArrayFirstAxisIndexSource = numericArrayFirstAxisIndexSource,
-                .numericArrayFirstAxisIndexRows = numericArrayFirstAxisIndexRows,
-                .numericArrayIsFirstAxisConcat = numericArrayIsFirstAxisConcat,
-                .numericArrayFirstAxisConcatLeft = numericArrayFirstAxisConcatLeft,
-                .numericArrayFirstAxisConcatRight = numericArrayFirstAxisConcatRight,
-                .numericArrayIsReshapeView = numericArrayIsReshapeView,
-                .numericArrayReshapeSource = numericArrayReshapeSource,
-                .numericArrayIsTransposeView = numericArrayIsTransposeView,
-                .numericArrayTransposeSource = numericArrayTransposeSource,
-                .materializeBackendArray = Session.materializeBackendArray,
-                .wrapManagedBackendArray = Session.wrapManagedBackendArray,
-                .numeric_array_max_rank = numeric_array_max_rank,
-            }, self, value);
+            return runtime_backend_exec.transposeBackendMatrixValue(backend_exec_api, self, value);
         }
         return error.Unsupported;
     }
 
     fn transposeBackendSwapAxesValue(self: *Session, value: Value, axis1: usize, axis2: usize) KError!Value {
         if (comptime runtime_has_mlx) {
-            return runtime_backend_exec.transposeBackendSwapAxesValue(.{
-                .Session = Session,
-                .Value = Value,
-                .NumericArray = NumericArray,
-                .KError = KError,
-                .mlx = mlx,
-                .mapMlxError = mapMlxError,
-                .backendContext = Session.backendContext,
-                .valueNumericHandle = valueNumericHandle,
-                .numericIntAt = numericIntAt,
-                .numericArrayIsFirstAxisSlice = numericArrayIsFirstAxisSlice,
-                .numericArrayFirstAxisSliceSource = numericArrayFirstAxisSliceSource,
-                .numericArrayFirstAxisSliceRowStart = numericArrayFirstAxisSliceRowStart,
-                .numericArrayFirstAxisSliceRowStep = numericArrayFirstAxisSliceRowStep,
-                .numericArrayIsFirstAxisIndex = numericArrayIsFirstAxisIndex,
-                .numericArrayFirstAxisIndexSource = numericArrayFirstAxisIndexSource,
-                .numericArrayFirstAxisIndexRows = numericArrayFirstAxisIndexRows,
-                .numericArrayIsFirstAxisConcat = numericArrayIsFirstAxisConcat,
-                .numericArrayFirstAxisConcatLeft = numericArrayFirstAxisConcatLeft,
-                .numericArrayFirstAxisConcatRight = numericArrayFirstAxisConcatRight,
-                .numericArrayIsReshapeView = numericArrayIsReshapeView,
-                .numericArrayReshapeSource = numericArrayReshapeSource,
-                .numericArrayIsTransposeView = numericArrayIsTransposeView,
-                .numericArrayTransposeSource = numericArrayTransposeSource,
-                .materializeBackendArray = Session.materializeBackendArray,
-                .wrapManagedBackendArray = Session.wrapManagedBackendArray,
-                .numeric_array_max_rank = numeric_array_max_rank,
-            }, self, value, @intCast(axis1), @intCast(axis2));
+            return runtime_backend_exec.transposeBackendSwapAxesValue(backend_exec_api, self, value, @intCast(axis1), @intCast(axis2));
         }
         return error.Unsupported;
     }
@@ -46147,8 +43344,8 @@ pub const Session = struct {
         const out = try self.allocHostBitArray(.managed, len);
         var stats = BitSequenceStats{};
         for (0..len) |idx| {
-            const lhs = if (left_array) |array| try self.hostDenseIndexScalar(array, @intCast(idx)) else left;
-            const rhs = if (right_array) |array| try self.hostDenseIndexScalar(array, @intCast(idx)) else right;
+            const lhs = if (left_array) |array| try self.hostDenseIndexScalar(left, array, @intCast(idx)) else left;
+            const rhs = if (right_array) |array| try self.hostDenseIndexScalar(right, array, @intCast(idx)) else right;
             defer if (left_array != null) self.releaseValue(lhs);
             defer if (right_array != null) self.releaseValue(rhs);
             const eq = try self.equalValues(lhs, rhs);
@@ -46397,7 +43594,7 @@ pub const Session = struct {
 
     fn finishHostMatmulFloatResult(self: *Session, shape: MatmulShape, out: HostFloatResult) KError!Value {
         if (shape.result_rank == 0) return try self.floatValue(out.items[0]);
-        const value = try out.value(self);
+        const value = out.value();
         hostDenseSetFlags(try mutableNumericHostArrayValue(self, value), hostMatmulFloatResultFlags(out.items.len));
         if (shape.result_rank == 2) {
             defer self.releaseValue(value);
@@ -46408,7 +43605,7 @@ pub const Session = struct {
 
     fn finishHostMatmulFloat32Result(self: *Session, shape: MatmulShape, out: HostFloat32Result) KError!Value {
         if (shape.result_rank == 0) return try self.float32Value(out.items[0]);
-        const value = try out.value(self);
+        const value = out.value();
         hostDenseSetFlags(try mutableNumericHostArrayValue(self, value), hostMatmulFloatResultFlags(out.items.len));
         if (shape.result_rank == 2) {
             defer self.releaseValue(value);
@@ -46896,35 +44093,7 @@ pub const Session = struct {
 
     fn applyBackendMatmulValues(self: *Session, left: Value, right: Value) KError!Value {
         if (comptime runtime_has_mlx) {
-            return runtime_backend_exec.applyBackendMatmulValues(.{
-                .Session = Session,
-                .Value = Value,
-                .NumericArray = NumericArray,
-                .KError = KError,
-                .c = c,
-                .mlx = mlx,
-                .mapMlxError = mapMlxError,
-                .backendContext = Session.backendContext,
-                .valueNumericHandle = valueNumericHandle,
-                .numericIntAt = numericIntAt,
-                .numericArrayIsFirstAxisSlice = numericArrayIsFirstAxisSlice,
-                .numericArrayFirstAxisSliceSource = numericArrayFirstAxisSliceSource,
-                .numericArrayFirstAxisSliceRowStart = numericArrayFirstAxisSliceRowStart,
-                .numericArrayFirstAxisSliceRowStep = numericArrayFirstAxisSliceRowStep,
-                .numericArrayIsFirstAxisIndex = numericArrayIsFirstAxisIndex,
-                .numericArrayFirstAxisIndexSource = numericArrayFirstAxisIndexSource,
-                .numericArrayFirstAxisIndexRows = numericArrayFirstAxisIndexRows,
-                .numericArrayIsFirstAxisConcat = numericArrayIsFirstAxisConcat,
-                .numericArrayFirstAxisConcatLeft = numericArrayFirstAxisConcatLeft,
-                .numericArrayFirstAxisConcatRight = numericArrayFirstAxisConcatRight,
-                .numericArrayIsReshapeView = numericArrayIsReshapeView,
-                .numericArrayReshapeSource = numericArrayReshapeSource,
-                .numericArrayIsTransposeView = numericArrayIsTransposeView,
-                .numericArrayTransposeSource = numericArrayTransposeSource,
-                .numeric_array_max_rank = numeric_array_max_rank,
-                .materializeBackendArray = Session.materializeBackendArray,
-                .wrapManagedBackendArray = Session.wrapManagedBackendArray,
-            }, self, left, right);
+            return runtime_backend_exec.applyBackendMatmulValues(backend_exec_api, self, left, right);
         }
         return error.Unsupported;
     }
@@ -47025,7 +44194,7 @@ pub const Session = struct {
         @compileError("unsupported dense float type");
     }
 
-    fn foldAddMapFloatSourcesResult(self: *Session, comptime T: type, op: BuiltinId, left: DenseFloatResolvedSource(T), right: DenseFloatResolvedSource(T), len: usize) KError!Value {
+    fn foldAddMapFloatSourcesResult(self: *Session, comptime T: type, op: BuiltinId, left: DenseResolvedSource(T), right: DenseResolvedSource(T), len: usize) KError!Value {
         const total = if (self.morselWorkersForDenseFusedReduction(len)) |workers|
             try foldAddMapFloatSourcesMorselOp(self, T, op, left, right, len, workers)
         else
@@ -47033,7 +44202,7 @@ pub const Session = struct {
         return try self.denseFloatResultValue(T, total);
     }
 
-    fn foldAddUnaryFloatSourceResult(self: *Session, comptime T: type, op: BuiltinId, source: DenseFloatResolvedSource(T), len: usize) KError!Value {
+    fn foldAddUnaryFloatSourceResult(self: *Session, comptime T: type, op: BuiltinId, source: DenseResolvedSource(T), len: usize) KError!Value {
         const total = if (self.morselWorkersForDenseFusedReduction(len)) |workers|
             try foldAddUnaryFloatSourceMorselOp(self, T, op, source, len, workers)
         else
@@ -47041,7 +44210,7 @@ pub const Session = struct {
         return try self.denseFloatResultValue(T, total);
     }
 
-    fn foldAddSquaredDiffFloatSourcesResult(self: *Session, comptime T: type, left: DenseFloatResolvedSource(T), right: DenseFloatResolvedSource(T), len: usize) KError!Value {
+    fn foldAddSquaredDiffFloatSourcesResult(self: *Session, comptime T: type, left: DenseResolvedSource(T), right: DenseResolvedSource(T), len: usize) KError!Value {
         const total = if (self.morselWorkersForDenseFusedReduction(len)) |workers|
             try foldAddSquaredDiffFloatSourcesMorselOp(self, T, left, right, len, workers)
         else
@@ -47170,9 +44339,9 @@ pub const Session = struct {
         if (args.len == 0 or args.len > 2) return null;
         const info = classifyCompactDenseAddFoldMapCode(code) orelse return null;
         if (comptime enable_probe_instrumentation) {
-            self.debug_dense_fusion_compact_add_fold_map_candidate_count += 1;
-            if (self.debug_disable_dense_fusion) {
-                self.debug_dense_fusion_compact_add_fold_map_disabled_count += 1;
+            self.debug.dense_fusion_compact_add_fold_map_candidate_count += 1;
+            if (self.debug.disable_dense_fusion) {
+                self.debug.dense_fusion_compact_add_fold_map_disabled_count += 1;
                 return null;
             }
         }
@@ -47191,7 +44360,7 @@ pub const Session = struct {
             .squared_diff => (try self.tryFastDenseFloatAddFoldMapSources(info, args)) orelse return null,
             .compare_count => (try self.tryFastDenseFloatAddFoldMapSources(info, args)) orelse return null,
         };
-        if (comptime enable_probe_instrumentation) self.debug_dense_fusion_compact_add_fold_map_hit_count += 1;
+        if (comptime enable_probe_instrumentation) self.debug.dense_fusion_compact_add_fold_map_hit_count += 1;
         return value;
     }
 
@@ -47334,14 +44503,14 @@ pub const Session = struct {
     }
 
     fn finishHostBatchedMatmulFloatResult(self: *Session, shape: BatchedMatmulShape, out: HostFloatResult) KError!Value {
-        const value = try out.value(self);
+        const value = out.value();
         hostDenseSetFlags(try mutableNumericHostArrayValue(self, value), hostMatmulFloatResultFlags(out.items.len));
         defer self.releaseValue(value);
         return try newReshapeViewValue(self, value, batchedMatmulResultShapeSnapshot(shape));
     }
 
     fn finishHostBatchedMatmulFloat32Result(self: *Session, shape: BatchedMatmulShape, out: HostFloat32Result) KError!Value {
-        const value = try out.value(self);
+        const value = out.value();
         hostDenseSetFlags(try mutableNumericHostArrayValue(self, value), hostMatmulFloatResultFlags(out.items.len));
         defer self.releaseValue(value);
         return try newReshapeViewValue(self, value, batchedMatmulResultShapeSnapshot(shape));
@@ -47461,23 +44630,15 @@ pub const Session = struct {
         if (NumericStructuralView.init(value)) |structural| {
             if (try numericStructuralDenseMonadValue(self, value, structural, op)) |result| return result;
         }
-        if (valueNumericHandle(value)) |const_handle| {
-            const handle = @constCast(const_handle);
-            if (supportsBackendMonad(op) and !numericHasHostAttachment(handle) and hasBackendRealization(value)) {
-                return try self.applyBackendArrayMonad(op, value);
-            }
-            if (!numericHasHostAttachment(handle) and numericArrayStructuralTag(handle) != .materialized) {
-                const view = try hostDenseView(self, value);
-                return try self.applyHostDenseViewMonad(op, value, view);
-            }
-            return self.applyHostArrayMonad(op, try hostStructuralArrayForHandle(self, handle));
+        const handle = mutableNumericHandle(value) orelse return error.Type;
+        if (supportsBackendMonad(op) and !numericHasHostAttachment(handle) and hasBackendRealization(value)) {
+            return try self.applyBackendArrayMonad(op, value);
         }
-        if (value.tag() != .array) return error.Type;
-        return switch (value.arrayKind()) {
-            .host_dense_array => self.applyHostArrayMonad(op, value.asHostDenseArray()),
-            .backend_array => self.applyBackendArrayMonad(op, value),
-            else => error.Type,
-        };
+        if (!numericHasHostAttachment(handle) and numericArrayStructuralTag(handle) != .materialized) {
+            const view = try hostDenseView(self, value);
+            return try self.applyHostDenseViewMonad(op, value, view);
+        }
+        return self.applyHostArrayMonad(op, value, try hostStructuralArrayForHandle(self, handle));
     }
 
     fn applyHostDenseViewMonad(self: *Session, op: BuiltinId, source_value: Value, view: HostDenseView) KError!Value {
@@ -47638,14 +44799,14 @@ pub const Session = struct {
         try out.ensureTotalCapacity(self.allocator, len);
         for (0..len) |idx| {
             const lhs = if (left_dense) |array|
-                try self.hostDenseIndexScalar(array, @intCast(idx))
+                try self.hostDenseIndexScalar(left, array, @intCast(idx))
             else if (left_boxed) |array|
                 try self.hostBoxedArrayIndexScalar(array, @intCast(idx))
             else
                 left;
             defer if (left_dense != null or left_boxed != null) self.releaseValue(lhs);
             const rhs = if (right_dense) |array|
-                try self.hostDenseIndexScalar(array, @intCast(idx))
+                try self.hostDenseIndexScalar(right, array, @intCast(idx))
             else if (right_boxed) |array|
                 try self.hostBoxedArrayIndexScalar(array, @intCast(idx))
             else
@@ -47668,9 +44829,9 @@ pub const Session = struct {
         return try self.makeArrayFromValues(out.items);
     }
 
-    fn applyHostArrayMonad(self: *Session, op: BuiltinId, array: *const HostDenseArray) KError!Value {
+    fn applyHostArrayMonad(self: *Session, op: BuiltinId, source_value: Value, array: *const HostDenseArray) KError!Value {
         return switch (op) {
-            .add => self.shareValue(hostDenseSourceValue(array)),
+            .add => self.shareValue(source_value),
             .sub => switch (array.storage) {
                 .bit, .int8, .int16, .int32, .int64 => blk: {
                     const items = hostIntArrayView(array).?;
@@ -47678,14 +44839,14 @@ pub const Session = struct {
                     const len = hostIntArrayViewLen(items);
                     if (hostIntNegRange(hostDenseCachedIntRange(array) orelse hostIntArrayViewEndpointRange(items, array.flags) orelse hostIntArrayViewRange(items))) |result_range| {
                         const result_kind = hostIntStorageKindForRange(result_range.min, result_range.max);
-                        var plan = try self.planHostIntUnaryOutput(hostDenseSourceValue(array), input_kind, result_kind, len, true, true);
+                        var plan = try self.planHostIntUnaryOutput(source_value, input_kind, result_kind, len, true, true);
                         try fillIntNegArrayResult(&plan.output, items, plan.unchecked_safe);
                         break :blk try self.finishHostIntOutput(plan, intNegResultFlags(array.flags));
                     }
                     var attempt_kind = hostNegInitialResultKind(input_kind);
                     while (true) {
                         var plan = try self.planHostIntUnaryOutput(
-                            hostDenseSourceValue(array),
+                            source_value,
                             input_kind,
                             attempt_kind,
                             len,
@@ -47703,52 +44864,52 @@ pub const Session = struct {
                     }
                 },
                 .float64 => |items| blk: {
-                    var plan = try self.planHostFloatUnaryOutput(hostDenseSourceValue(array), items.len, true);
+                    var plan = try self.planHostFloatUnaryOutput(source_value, items.len, true);
                     for (items, 0..) |item, idx| plan.output.items[idx] = -item;
                     break :blk try self.finishHostFloatOutput(plan, 0);
                 },
                 .float32 => |items| blk: {
                     const logical_items = hostDenseLogicalItems(f32, array, items);
-                    var plan = try self.planHostFloat32UnaryOutput(hostDenseSourceValue(array), logical_items.len, true);
+                    var plan = try self.planHostFloat32UnaryOutput(source_value, logical_items.len, true);
                     for (logical_items, 0..) |item, idx| plan.output.items[idx] = -item;
                     break :blk try self.finishHostFloat32Output(plan, 0);
                 },
             },
-            .mul => self.shareValue(hostDenseSourceValue(array)),
+            .mul => self.shareValue(source_value),
             .div, .exp, .log, .sin, .cos, .tanh, .sigmoid => switch (array.storage) {
                 .bit => |words| blk: {
-                    const plan = try self.planHostFloatUnaryOutput(hostDenseSourceValue(array), array.logical_len, false);
+                    const plan = try self.planHostFloatUnaryOutput(source_value, array.logical_len, false);
                     fillFloatUnaryBitArray(plan.output.items, op, .{ .words = words, .len = array.logical_len });
                     break :blk try self.finishHostFloatOutput(plan, 0);
                 },
                 .int8 => |items| blk: {
-                    const plan = try self.planHostFloatUnaryOutput(hostDenseSourceValue(array), items.len, false);
+                    const plan = try self.planHostFloatUnaryOutput(source_value, items.len, false);
                     fillFloatUnaryArray(i8, plan.output.items, op, items);
                     break :blk try self.finishHostFloatOutput(plan, 0);
                 },
                 .int16 => |items| blk: {
-                    const plan = try self.planHostFloatUnaryOutput(hostDenseSourceValue(array), items.len, false);
+                    const plan = try self.planHostFloatUnaryOutput(source_value, items.len, false);
                     fillFloatUnaryArray(i16, plan.output.items, op, items);
                     break :blk try self.finishHostFloatOutput(plan, 0);
                 },
                 .int32 => |items| blk: {
-                    const plan = try self.planHostFloatUnaryOutput(hostDenseSourceValue(array), items.len, false);
+                    const plan = try self.planHostFloatUnaryOutput(source_value, items.len, false);
                     fillFloatUnaryArray(i32, plan.output.items, op, items);
                     break :blk try self.finishHostFloatOutput(plan, 0);
                 },
                 .int64 => |items| blk: {
-                    const plan = try self.planHostFloatUnaryOutput(hostDenseSourceValue(array), items.len, false);
+                    const plan = try self.planHostFloatUnaryOutput(source_value, items.len, false);
                     fillFloatUnaryArray(i64, plan.output.items, op, items);
                     break :blk try self.finishHostFloatOutput(plan, 0);
                 },
                 .float64 => |items| blk: {
-                    const plan = try self.planHostFloatUnaryOutput(hostDenseSourceValue(array), items.len, true);
+                    const plan = try self.planHostFloatUnaryOutput(source_value, items.len, true);
                     fillFloatUnaryArray(f64, plan.output.items, op, items);
                     break :blk try self.finishHostFloatOutput(plan, 0);
                 },
                 .float32 => |items| blk: {
                     const logical_items = hostDenseLogicalItems(f32, array, items);
-                    const plan = try self.planHostFloat32UnaryOutput(hostDenseSourceValue(array), logical_items.len, true);
+                    const plan = try self.planHostFloat32UnaryOutput(source_value, logical_items.len, true);
                     for (logical_items, 0..) |item, idx| plan.output.items[idx] = @floatCast(applyFloatMonadOp(op, @as(f64, item)));
                     break :blk try self.finishHostFloat32Output(plan, 0);
                 },
@@ -47831,7 +44992,7 @@ pub const Session = struct {
                     else => return error.Type,
                 });
             }
-            const result = try out.value(self);
+            const result = out.value();
             return try applyNonVectorNumericShapeToValue(self, result, numericShapeSnapshotMatrix(rowwise.rows, rowwise.cols));
         }
 
@@ -47893,8 +45054,8 @@ pub const Session = struct {
         comptime RightT: type,
         out: []OutT,
         op: BuiltinId,
-        left: DenseIntResolvedSource(LeftT),
-        right: DenseIntResolvedSource(RightT),
+        left: DenseResolvedSource(LeftT),
+        right: DenseResolvedSource(RightT),
         len: usize,
     ) void {
         if (self.morselWorkersForDenseMap(len)) |workers| {
@@ -47944,7 +45105,7 @@ pub const Session = struct {
     fn tryFillIntScalarDenseResultSourcesTyped(self: *Session, comptime OutT: type, out: []OutT, op: BuiltinId, scalar: i64, items: HostIntDenseView, scalar_left: bool, len: usize) bool {
         const out_kind = comptime hostIntStorageKindForDenseType(OutT);
         const scalar_value = std.math.cast(OutT, scalar) orelse return false;
-        const scalar_source = DenseIntResolvedSource(OutT){ .scalar = scalar_value };
+        const scalar_source = DenseResolvedSource(OutT){ .scalar = scalar_value };
         inline for (.{ i8, i16, i32, i64 }) |InT| {
             if (comptime hostIntStorageRank(hostIntStorageKindForDenseType(InT)) <= hostIntStorageRank(out_kind)) {
                 if (denseIntDenseViewResolvedSource(InT, items)) |item_source| {
@@ -48174,7 +45335,7 @@ pub const Session = struct {
         comptime int_left: bool,
         out: []f64,
         op: BuiltinId,
-        int_source: DenseIntResolvedSource(T),
+        int_source: DenseResolvedSource(T),
         float_source: DenseFloat64PromotedSource,
         len: usize,
     ) void {
@@ -48192,26 +45353,16 @@ pub const Session = struct {
         comptime int_left: bool,
         out: []f32,
         op: BuiltinId,
-        int_source: DenseIntResolvedSource(T),
+        int_source: DenseResolvedSource(T),
         float_source: DenseFloat32ResolvedSource,
         len: usize,
     ) void {
-        switch (comptime dense_materialize_f32_mode) {
-            .generic => unreachable,
-            .scalar => fillDenseIntResolvedFloatSourcesStoreScalar(T, f32, int_left, out, op, int_source, float_source, len),
-            .simd => {
-                fillDenseIntResolvedFloatSourcesStore(T, f32, int_left, out, op, int_source, float_source, len);
-                self.noteSimdKernel(.dense_dyad);
-            },
-            .morsel => {
-                if (self.morselWorkersForDenseMap(len)) |workers| {
-                    fillDenseIntResolvedFloatSourcesStoreMorsel(self, T, f32, int_left, out, op, int_source, float_source, len, workers);
-                } else {
-                    fillDenseIntResolvedFloatSourcesStore(T, f32, int_left, out, op, int_source, float_source, len);
-                }
-                self.noteSimdKernel(.dense_dyad);
-            },
+        if (self.morselWorkersForDenseMap(len)) |workers| {
+            fillDenseIntResolvedFloatSourcesStoreMorsel(self, T, f32, int_left, out, op, int_source, float_source, len, workers);
+        } else {
+            fillDenseIntResolvedFloatSourcesStore(T, f32, int_left, out, op, int_source, float_source, len);
         }
+        self.noteSimdKernel(.dense_dyad);
     }
 
     fn fillHostArrayDyadIntFloat32Direct(
@@ -48224,7 +45375,6 @@ pub const Session = struct {
         len: usize,
     ) bool {
         if (!denseFloatSimdSupported(op)) return false;
-        if (comptime dense_materialize_f32_mode == .generic) return false;
         inline for (.{ i8, i16, i32, i64 }) |T| {
             if (denseIntDenseViewResolvedSource(T, int_items)) |int_source| {
                 const source_len = denseIntResolvedFloatSourcesLen(T, f32, int_source, float_source) orelse return false;
@@ -48262,7 +45412,6 @@ pub const Session = struct {
 
     fn fillHostArrayDyadFloat32Direct(self: *Session, out: []f32, op: BuiltinId, left: HostDenseView, right: HostDenseView) bool {
         if (!denseFloatSimdSupported(op)) return false;
-        if (comptime dense_materialize_f32_mode == .generic) return false;
         if (left == .float_array and left.float_array == .transpose) {
             switch (right) {
                 .scalar_int => |value| return fillFloat32ScalarTransposeDenseView(out, op, @floatFromInt(value), left.float_array.transpose, false),
@@ -48283,22 +45432,12 @@ pub const Session = struct {
         const len = denseFloatResolvedSourcesLen(f32, left_source, right_source) orelse return false;
         if (len != out.len) return false;
 
-        switch (comptime dense_materialize_f32_mode) {
-            .generic => unreachable,
-            .scalar => fillDenseFloatSourcesStoreScalar(f32, out, op, left_source, right_source, out.len),
-            .simd => {
-                fillDenseFloatSourcesStore(f32, out, op, left_source, right_source, out.len);
-                self.noteSimdKernel(.dense_dyad);
-            },
-            .morsel => {
-                if (self.morselWorkersForDenseMap(out.len)) |workers| {
-                    fillDenseFloatSourcesStoreMorsel(self, f32, out, op, left_source, right_source, out.len, workers);
-                } else {
-                    fillDenseFloatSourcesStore(f32, out, op, left_source, right_source, out.len);
-                }
-                self.noteSimdKernel(.dense_dyad);
-            },
+        if (self.morselWorkersForDenseMap(out.len)) |workers| {
+            fillDenseFloatSourcesStoreMorsel(self, f32, out, op, left_source, right_source, out.len, workers);
+        } else {
+            fillDenseFloatSourcesStore(f32, out, op, left_source, right_source, out.len);
         }
+        self.noteSimdKernel(.dense_dyad);
         return true;
     }
 
@@ -48307,21 +45446,16 @@ pub const Session = struct {
         defer profile_scope.end();
         if (hostFloatDyadResultStorageKindForValues(left_value, right_value, left, right) == .float32) {
             const plan = try self.planHostFloat32DyadOutput(left_value, right_value, len, true);
-            var filled_direct = if (comptime dense_materialize_source_sinks)
-                self.fillHostArrayDyadFloat32Direct(plan.output.items, op, left, right)
-            else
-                false;
+            var filled_direct = self.fillHostArrayDyadFloat32Direct(plan.output.items, op, left, right);
             if (!filled_direct) {
-                if (comptime dense_materialize_source_sinks) {
-                    if (left == .int_array) {
-                        if (self.denseFloat32StoreSourceFromHostDenseView(right)) |float_source| {
-                            filled_direct = self.fillHostArrayDyadIntFloat32Direct(true, plan.output.items, op, left.int_array, float_source, len);
-                        }
+                if (left == .int_array) {
+                    if (self.denseFloat32StoreSourceFromHostDenseView(right)) |float_source| {
+                        filled_direct = self.fillHostArrayDyadIntFloat32Direct(true, plan.output.items, op, left.int_array, float_source, len);
                     }
-                    if (!filled_direct and right == .int_array) {
-                        if (self.denseFloat32StoreSourceFromHostDenseView(left)) |float_source| {
-                            filled_direct = self.fillHostArrayDyadIntFloat32Direct(false, plan.output.items, op, right.int_array, float_source, len);
-                        }
+                }
+                if (!filled_direct and right == .int_array) {
+                    if (self.denseFloat32StoreSourceFromHostDenseView(left)) |float_source| {
+                        filled_direct = self.fillHostArrayDyadIntFloat32Direct(false, plan.output.items, op, right.int_array, float_source, len);
                     }
                 }
             }
@@ -48336,46 +45470,40 @@ pub const Session = struct {
             }
             return try self.finishHostFloat32Output(plan, 0);
         }
-        if (comptime dense_materialize_source_sinks) {
-            if (denseFloatSimdSupported(op)) {
-                if (self.denseFloat64StoreSourceFromHostDenseView(left)) |left_source| {
-                    if (self.denseFloat64StoreSourceFromHostDenseView(right)) |right_source| {
-                        if (denseFloatResolvedSourcesLen(f64, left_source, right_source)) |source_len| {
-                            if (source_len == len) {
-                                const plan = try self.planHostFloatDyadOutput(left_value, right_value, len, true);
-                                self.fillHostArrayDyadFloat64Resolved(plan.output.items, op, left_source, right_source, len);
-                                return try self.finishHostFloatOutput(plan, 0);
-                            }
+        if (denseFloatSimdSupported(op)) {
+            if (self.denseFloat64StoreSourceFromHostDenseView(left)) |left_source| {
+                if (self.denseFloat64StoreSourceFromHostDenseView(right)) |right_source| {
+                    if (denseFloatResolvedSourcesLen(f64, left_source, right_source)) |source_len| {
+                        if (source_len == len) {
+                            const plan = try self.planHostFloatDyadOutput(left_value, right_value, len, true);
+                            self.fillHostArrayDyadFloat64Resolved(plan.output.items, op, left_source, right_source, len);
+                            return try self.finishHostFloatOutput(plan, 0);
                         }
                     }
                 }
             }
         }
-        if (comptime dense_materialize_source_sinks) {
-            if (denseFloatSimdSupported(op)) {
-                if (self.denseFloat64PromotedStoreSourceFromHostDenseView(left)) |left_source| {
-                    if (self.denseFloat64PromotedStoreSourceFromHostDenseView(right)) |right_source| {
-                        if (denseFloat64PromotedSourcesLen(left_source, right_source)) |source_len| {
-                            if (source_len == len) {
-                                const plan = try self.planHostFloatDyadOutput(left_value, right_value, len, true);
-                                self.fillHostArrayDyadFloat64PromotedResolved(plan.output.items, op, left_source, right_source, len);
-                                return try self.finishHostFloatOutput(plan, 0);
-                            }
+        if (denseFloatSimdSupported(op)) {
+            if (self.denseFloat64PromotedStoreSourceFromHostDenseView(left)) |left_source| {
+                if (self.denseFloat64PromotedStoreSourceFromHostDenseView(right)) |right_source| {
+                    if (denseFloat64PromotedSourcesLen(left_source, right_source)) |source_len| {
+                        if (source_len == len) {
+                            const plan = try self.planHostFloatDyadOutput(left_value, right_value, len, true);
+                            self.fillHostArrayDyadFloat64PromotedResolved(plan.output.items, op, left_source, right_source, len);
+                            return try self.finishHostFloatOutput(plan, 0);
                         }
                     }
                 }
             }
         }
-        if (comptime dense_materialize_source_sinks) {
-            if (left == .int_array) {
-                if (self.denseFloat64PromotedStoreSourceFromHostDenseView(right)) |float_source| {
-                    if (try self.tryFastHostArrayDyadIntFloat(true, op, left_value, right_value, left.int_array, float_source, len, right == .float_array)) |result| return result;
-                }
+        if (left == .int_array) {
+            if (self.denseFloat64PromotedStoreSourceFromHostDenseView(right)) |float_source| {
+                if (try self.tryFastHostArrayDyadIntFloat(true, op, left_value, right_value, left.int_array, float_source, len, right == .float_array)) |result| return result;
             }
-            if (right == .int_array) {
-                if (self.denseFloat64PromotedStoreSourceFromHostDenseView(left)) |float_source| {
-                    if (try self.tryFastHostArrayDyadIntFloat(false, op, left_value, right_value, right.int_array, float_source, len, left == .float_array)) |result| return result;
-                }
+        }
+        if (right == .int_array) {
+            if (self.denseFloat64PromotedStoreSourceFromHostDenseView(left)) |float_source| {
+                if (try self.tryFastHostArrayDyadIntFloat(false, op, left_value, right_value, right.int_array, float_source, len, left == .float_array)) |result| return result;
             }
         }
         return switch (left) {
@@ -48468,36 +45596,7 @@ pub const Session = struct {
 
     fn applyBackendArrayMonad(self: *Session, op: BuiltinId, value: Value) KError!Value {
         if (comptime runtime_has_mlx) {
-            return runtime_backend_exec.applyBackendArrayMonad(.{
-                .Session = Session,
-                .Value = Value,
-                .NumericArray = NumericArray,
-                .BuiltinId = BuiltinId,
-                .KError = KError,
-                .c = c,
-                .mlx = mlx,
-                .mapMlxError = mapMlxError,
-                .backendContext = Session.backendContext,
-                .valueNumericHandle = valueNumericHandle,
-                .numericIntAt = numericIntAt,
-                .numericArrayIsFirstAxisSlice = numericArrayIsFirstAxisSlice,
-                .numericArrayFirstAxisSliceSource = numericArrayFirstAxisSliceSource,
-                .numericArrayFirstAxisSliceRowStart = numericArrayFirstAxisSliceRowStart,
-                .numericArrayFirstAxisSliceRowStep = numericArrayFirstAxisSliceRowStep,
-                .numericArrayIsFirstAxisIndex = numericArrayIsFirstAxisIndex,
-                .numericArrayFirstAxisIndexSource = numericArrayFirstAxisIndexSource,
-                .numericArrayFirstAxisIndexRows = numericArrayFirstAxisIndexRows,
-                .numericArrayIsFirstAxisConcat = numericArrayIsFirstAxisConcat,
-                .numericArrayFirstAxisConcatLeft = numericArrayFirstAxisConcatLeft,
-                .numericArrayFirstAxisConcatRight = numericArrayFirstAxisConcatRight,
-                .numericArrayIsReshapeView = numericArrayIsReshapeView,
-                .numericArrayReshapeSource = numericArrayReshapeSource,
-                .numericArrayIsTransposeView = numericArrayIsTransposeView,
-                .numericArrayTransposeSource = numericArrayTransposeSource,
-                .materializeBackendArray = Session.materializeBackendArray,
-                .wrapManagedBackendArray = Session.wrapManagedBackendArray,
-                .numeric_array_max_rank = numeric_array_max_rank,
-            }, self, op, value);
+            return runtime_backend_exec.applyBackendArrayMonad(backend_exec_api, self, op, value);
         }
         return error.Unsupported;
     }
@@ -48506,37 +45605,7 @@ pub const Session = struct {
         if (comptime runtime_has_mlx) {
             var profile_scope = self.beginSamplingProfileScope(.dense_mlx);
             defer profile_scope.end();
-            return runtime_backend_exec.applyBackendArrayDyad(.{
-                .Session = Session,
-                .Value = Value,
-                .NumericArray = NumericArray,
-                .BuiltinId = BuiltinId,
-                .KError = KError,
-                .c = c,
-                .mlx = mlx,
-                .mapMlxError = mapMlxError,
-                .backendContext = Session.backendContext,
-                .valueNumericHandle = valueNumericHandle,
-                .numericIntAt = numericIntAt,
-                .numericArrayIsFirstAxisSlice = numericArrayIsFirstAxisSlice,
-                .numericArrayFirstAxisSliceSource = numericArrayFirstAxisSliceSource,
-                .numericArrayFirstAxisSliceRowStart = numericArrayFirstAxisSliceRowStart,
-                .numericArrayFirstAxisSliceRowStep = numericArrayFirstAxisSliceRowStep,
-                .numericArrayIsFirstAxisIndex = numericArrayIsFirstAxisIndex,
-                .numericArrayFirstAxisIndexSource = numericArrayFirstAxisIndexSource,
-                .numericArrayFirstAxisIndexRows = numericArrayFirstAxisIndexRows,
-                .numericArrayIsFirstAxisConcat = numericArrayIsFirstAxisConcat,
-                .numericArrayFirstAxisConcatLeft = numericArrayFirstAxisConcatLeft,
-                .numericArrayFirstAxisConcatRight = numericArrayFirstAxisConcatRight,
-                .numericArrayIsReshapeView = numericArrayIsReshapeView,
-                .numericArrayReshapeSource = numericArrayReshapeSource,
-                .numericArrayIsTransposeView = numericArrayIsTransposeView,
-                .numericArrayTransposeSource = numericArrayTransposeSource,
-                .materializeBackendArray = Session.materializeBackendArray,
-                .wrapManagedBackendArray = Session.wrapManagedBackendArray,
-                .rowwiseMatrixVectorDyad = rowwiseMatrixVectorDyad,
-                .numeric_array_max_rank = numeric_array_max_rank,
-            }, self, op, left, right);
+            return runtime_backend_exec.applyBackendArrayDyad(backend_exec_api, self, op, left, right);
         }
         return error.Unsupported;
     }
@@ -48557,7 +45626,7 @@ pub const Session = struct {
             if (numericArrayIsFirstAxisConcat(handle)) return try createBackendArrayFromFirstAxisConcat(self, handle);
             if (numericArrayIsReshapeView(handle)) return try createBackendArrayFromReshapeView(self, handle);
             if (numericArrayIsTransposeView(handle)) return try createBackendArrayFromTransposeView(self, handle);
-            return try createBackendArrayFromHostArray(self, try hostStructuralArrayForHandle(self, handle));
+            return try createBackendArrayFromHostArray(self, Value.numericArray(handle), try hostStructuralArrayForHandle(self, handle));
         }
         return error.Unsupported;
     }
@@ -48572,12 +45641,8 @@ pub const Session = struct {
             .float => mlx.Array.fromFloat64(value.asFloat()),
             .bool => mlx.Array.fromInt(@intFromBool(value.asBool())),
             .array => blk: {
-                if (valueNumericHandle(value)) |handle| break :blk try self.materializeBackendArrayFromHandle(@constCast(handle));
-                break :blk switch (value.arraySubkind()) {
-                    .host_dense_array => try createBackendArrayFromHostArray(self, value.asHostDenseArray()),
-                    .backend_array => value.asBackendArray().array.clone() catch |err| return mapMlxError(err),
-                    else => error.Internal,
-                };
+                const handle = mutableNumericHandle(value) orelse return error.Internal;
+                break :blk try self.materializeBackendArrayFromHandle(handle);
             },
             else => error.Type,
         };
@@ -48640,7 +45705,6 @@ pub const Session = struct {
         const owned_name = try self.arena.allocator().dupe(u8, name);
         try self.global_cells.append(self.allocator, .{});
         try self.global_names.append(self.allocator, owned_name);
-        try self.debug_global_call_counts.append(self.allocator, 0);
         try self.global_slots.put(owned_name, slot);
         return slot;
     }
@@ -48670,23 +45734,6 @@ pub const Session = struct {
         return try self.loadGlobalSlot(slot);
     }
 
-    pub fn debugGlobalSlotCount(self: *const Session) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        return self.global_names.items.len;
-    }
-
-    pub fn debugGlobalNameAt(self: *const Session, slot: usize) ?[]const u8 {
-        if (comptime !enable_probe_instrumentation) return null;
-        if (slot >= self.global_names.items.len) return null;
-        return self.global_names.items[slot];
-    }
-
-    pub fn debugGlobalCallCountAt(self: *const Session, slot: usize) usize {
-        if (comptime !enable_probe_instrumentation) return 0;
-        if (slot >= self.debug_global_call_counts.items.len) return 0;
-        return self.debug_global_call_counts.items[slot];
-    }
-
     pub fn debugMakeManagedHostIntVector(self: *Session, data: []const i64) !Value {
         var min_value: i64 = 0;
         var max_value: i64 = 0;
@@ -48700,7 +45747,7 @@ pub const Session = struct {
         }
         var out = try self.allocManagedHostIntResult(hostIntStorageKindForRange(min_value, max_value), data.len);
         for (data, 0..) |item, idx| try out.set(idx, item);
-        return try out.value(self);
+        return out.value();
     }
 
     pub fn debugMaterializeBackendArrayValue(self: *Session, value: Value) !void {
@@ -48710,489 +45757,6 @@ pub const Session = struct {
 
     pub fn debugEnsureHostRealizationValue(self: *Session, value: Value) !void {
         _ = try tryEnsureHostRealization(self, value) orelse return error.Unsupported;
-    }
-
-    pub const DebugHostCompareIntFloatStage = enum {
-        views,
-        scratch_kernel,
-        managed_finish,
-        full_fast,
-        array_compare,
-    };
-
-    pub const DebugHostMatmulFloat32Stage = enum {
-        views,
-        raw_blas,
-        reused_managed_blas,
-        managed_finish,
-        managed_blas_finish,
-        full_host,
-    };
-
-    pub const DebugHostTransposeIntStage = enum {
-        views,
-        analyze,
-        raw_transpose,
-        raw_transpose_scalar,
-        managed_alloc_finish,
-        managed_transpose_scalar_finish,
-        full_host_dyad,
-    };
-
-    pub const DebugHostScanIntStage = enum {
-        views,
-        add_analyze,
-        add_fill_i32,
-        add_finish_i32,
-        add_full,
-    };
-
-    pub const DebugHostWhereStage = enum {
-        views,
-        count,
-        raw_fill_i8,
-        raw_fill_i8_table,
-        raw_fill_i16,
-        raw_fill_i32,
-        managed_i8_finish,
-        managed_i8_table_finish,
-        managed_i16_finish,
-        managed_i32_finish,
-        full_host,
-    };
-
-    const DebugHostMatmulFloat32Prepared = struct {
-        shape: MatmulShape,
-        left_items: []const f32,
-        right_items: []const f32,
-    };
-
-    fn debugPrepareHostMatmulFloat32(self: *Session, left: Value, right: Value) KError!DebugHostMatmulFloat32Prepared {
-        const shape = (try matmulShapeForValues(left, right)) orelse return error.Unsupported;
-        if (!hostBlasMatmulShapeSupported(shape)) return error.Unsupported;
-
-        const left_view = try hostDenseView(self, left);
-        const right_view = try hostDenseView(self, right);
-        if (left_view != .float_array or right_view != .float_array) return error.Unsupported;
-
-        const left_items = hostFloatDenseViewContiguousFloat32(left_view.float_array) orelse return error.Unsupported;
-        const right_items = hostFloatDenseViewContiguousFloat32(right_view.float_array) orelse return error.Unsupported;
-        return .{
-            .shape = shape,
-            .left_items = left_items,
-            .right_items = right_items,
-        };
-    }
-
-    fn debugPrepareHostScanInt(value: Value) KError!HostIntArrayView {
-        const array = hostDenseIfPresent(value) orelse return error.Unsupported;
-        return hostIntArrayView(array) orelse return error.Unsupported;
-    }
-
-    const DebugHostWherePrepared = struct {
-        array: *const HostDenseArray,
-        bits: HostBitSlice,
-    };
-
-    fn debugPrepareHostWhere(value: Value) KError!DebugHostWherePrepared {
-        const array = hostDenseIfPresent(value) orelse return error.Unsupported;
-        const bits: HostBitSlice = switch (array.storage) {
-            .bit => |words| .{ .words = hostDenseLogicalBitWords(array, words), .len = array.logical_len },
-            else => return error.Unsupported,
-        };
-        return .{
-            .array = array,
-            .bits = bits,
-        };
-    }
-
-    const DebugHostTransposeInt16Prepared = struct {
-        view: HostTransposeView,
-        source_items: []const i16,
-        len: usize,
-    };
-
-    fn debugPrepareHostTransposeInt16(value: Value) KError!DebugHostTransposeInt16Prepared {
-        const items = valueHostIntStructuralView(value) orelse return error.Unsupported;
-        const transpose = switch (items) {
-            .transpose => |view| view,
-            else => return error.Unsupported,
-        };
-        const source_host = transpose.source_host orelse return error.Unsupported;
-        const total_len = transpose.source_rows * transpose.source_cols;
-        const source_items = switch (source_host.storage) {
-            .int16 => |source| hostDenseLogicalItems(i16, source_host, source),
-            else => return error.Unsupported,
-        };
-        if (source_items.len != total_len) return error.Type;
-        return .{
-            .view = transpose,
-            .source_items = source_items,
-            .len = total_len,
-        };
-    }
-
-    fn debugFillAddScanInt32(out: []i32, view: HostIntArrayView, seed: ?i64) KError!void {
-        if (out.len < hostIntArrayViewLen(view)) return error.Type;
-        const dest = out[0..hostIntArrayViewLen(view)];
-        switch (view) {
-            .bit => |items| fillAddScanBitTo(i32, dest, items, seed),
-            .int8 => |items| fillAddScanIntTo(i32, i8, dest, items, seed),
-            .int16 => |items| fillAddScanIntTo(i32, i16, dest, items, seed),
-            .int32 => |items| fillAddScanIntTo(i32, i32, dest, items, seed),
-            .int64 => |items| fillAddScanIntTo(i32, i64, dest, items, seed),
-        }
-    }
-
-    pub fn debugRunHostTransposeIntStage(self: *Session, stage: DebugHostTransposeIntStage, transpose_value: Value, scratch_i16: []i16) KError!void {
-        const prepared = try debugPrepareHostTransposeInt16(transpose_value);
-        if (scratch_i16.len < prepared.len) return error.Type;
-        const out = scratch_i16[0..prepared.len];
-        const transpose_items = HostIntDenseView{ .transpose = prepared.view };
-        const scalar_value = try Value.int(1);
-        switch (stage) {
-            .views => {
-                std.mem.doNotOptimizeAway(prepared.view.source_rows);
-                std.mem.doNotOptimizeAway(prepared.view.source_cols);
-                std.mem.doNotOptimizeAway(prepared.source_items.ptr);
-            },
-            .analyze => {
-                const range = hostIntDenseValueRange(transpose_value, transpose_items);
-                const flags = hostIntDenseValueFlags(transpose_value, transpose_items);
-                const result_range = hostIntDyadRange(.add, range, hostIntRangeForValue(1)) orelse return error.Unsupported;
-                const result_kind = hostIntDyadResultKindForRange(.add, .int16, .int8, result_range);
-                std.mem.doNotOptimizeAway(range);
-                std.mem.doNotOptimizeAway(flags);
-                std.mem.doNotOptimizeAway(result_range);
-                std.mem.doNotOptimizeAway(result_kind);
-            },
-            .raw_transpose => {
-                transposeBlockedTyped(i16, out, prepared.source_items, prepared.view.source_rows, prepared.view.source_cols);
-                if (prepared.len != 0) std.mem.doNotOptimizeAway(out[prepared.len - 1]);
-            },
-            .raw_transpose_scalar => {
-                try fillIntScalarTransposeTo(i16, i16, out, .add, 1, prepared.source_items, prepared.view.source_rows, prepared.view.source_cols, false, true);
-                if (prepared.len != 0) std.mem.doNotOptimizeAway(out[prepared.len - 1]);
-            },
-            .managed_alloc_finish => {
-                var result_out = try self.allocManagedHostIntResult(.int16, prepared.len);
-                const result_value = try result_out.value(self);
-                const result = try applyNonVectorNumericShapeToValue(self, result_value, valueNonVectorNumericShape(transpose_value));
-                defer self.discardValue(result);
-                std.mem.doNotOptimizeAway(result);
-            },
-            .managed_transpose_scalar_finish => {
-                var result_out = try self.allocManagedHostIntResult(.int16, prepared.len);
-                try fillIntScalarDenseResult(&result_out, .add, 1, transpose_items, false, true);
-                const result_value = try result_out.value(self);
-                const host = result_out.arrayPtr();
-                hostDenseSetFlags(host, host_dense_flag_normalized);
-                hostDenseSetCachedIntRange(host, .{ .min = 1, .max = 8192 });
-                const result = try applyNonVectorNumericShapeToValue(self, result_value, valueNonVectorNumericShape(transpose_value));
-                defer self.discardValue(result);
-                try self.forceValue(result);
-            },
-            .full_host_dyad => {
-                const result = try self.applyHostArrayDyad(.add, transpose_value, scalar_value);
-                try self.forceValue(result);
-                self.discardValue(result);
-                self.resetScratchArenaRetainCapacity();
-            },
-        }
-    }
-
-    pub fn debugRunHostScanIntStage(self: *Session, stage: DebugHostScanIntStage, value: Value, scratch_i32: []i32) KError!void {
-        const view = try debugPrepareHostScanInt(value);
-        const len = hostIntArrayViewLen(view);
-        switch (stage) {
-            .views => {
-                std.mem.doNotOptimizeAway(len);
-                std.mem.doNotOptimizeAway(hostIntArrayViewKind(view));
-            },
-            .add_analyze => {
-                const analysis = try analyzeAddScanIntView(view, null);
-                std.mem.doNotOptimizeAway(analysis.kind);
-                std.mem.doNotOptimizeAway(analysis.flags);
-                std.mem.doNotOptimizeAway(analysis.range.min);
-                std.mem.doNotOptimizeAway(analysis.range.max);
-            },
-            .add_fill_i32 => {
-                try debugFillAddScanInt32(scratch_i32, view, null);
-                if (len != 0) std.mem.doNotOptimizeAway(scratch_i32[len - 1]);
-            },
-            .add_finish_i32 => {
-                const plan = try self.planHostIntUnaryOutput(value, hostIntArrayViewKind(view), .int32, len, false, true);
-                const result = try self.finishHostIntOutput(plan, host_dense_flag_normalized | host_dense_flag_asc);
-                defer self.discardValue(result);
-                try self.forceValue(result);
-            },
-            .add_full => {
-                const result = try self.fastHostAddScanIntMaybeSeed(value, view, null);
-                defer self.discardValue(result);
-                try self.forceValue(result);
-            },
-        }
-    }
-
-    fn debugFinishWhereI8(self: *Session, prepared: DebugHostWherePrepared) KError!void {
-        const count = bitCountTrue(prepared.bits);
-        var result_out = try self.allocManagedHostIntResult(.int8, count);
-        _ = fillWhereBitVectorIndices(i8, result_out.int8.items, prepared.bits);
-        const result_value = try result_out.value(self);
-        const host = try mutableNumericHostArrayValue(self, result_value);
-        hostDenseSetFlags(host, if (count <= 1)
-            host_dense_flag_normalized | host_dense_flag_asc | host_dense_flag_dsc
-        else
-            host_dense_flag_normalized | host_dense_flag_asc);
-        hostDenseSetCachedIntRange(host, whereFilledIntRange(i8, result_out.int8.items));
-        defer self.discardValue(result_value);
-        try self.forceValue(result_value);
-    }
-
-    fn debugFinishWhereI8Table(self: *Session, prepared: DebugHostWherePrepared) KError!void {
-        const count = bitCountTrue(prepared.bits);
-        var result_out = try self.allocManagedHostIntResult(.int8, count);
-        _ = fillWhereBitVectorIndicesI8Table(result_out.int8.items, prepared.bits);
-        const result_value = try result_out.value(self);
-        const host = try mutableNumericHostArrayValue(self, result_value);
-        hostDenseSetFlags(host, if (count <= 1)
-            host_dense_flag_normalized | host_dense_flag_asc | host_dense_flag_dsc
-        else
-            host_dense_flag_normalized | host_dense_flag_asc);
-        hostDenseSetCachedIntRange(host, whereFilledIntRange(i8, result_out.int8.items));
-        defer self.discardValue(result_value);
-        try self.forceValue(result_value);
-    }
-
-    fn debugFinishWhereI16(self: *Session, prepared: DebugHostWherePrepared) KError!void {
-        const count = bitCountTrue(prepared.bits);
-        var result_out = try self.allocManagedHostIntResult(.int16, count);
-        if (!fillWhereBitVectorIndicesI16Vector(result_out.int16.items, prepared.bits)) {
-            _ = fillWhereBitVectorIndices(i16, result_out.int16.items, prepared.bits);
-        }
-        const result_value = try result_out.value(self);
-        const host = try mutableNumericHostArrayValue(self, result_value);
-        hostDenseSetFlags(host, if (count <= 1)
-            host_dense_flag_normalized | host_dense_flag_asc | host_dense_flag_dsc
-        else
-            host_dense_flag_normalized | host_dense_flag_asc);
-        hostDenseSetCachedIntRange(host, whereFilledIntRange(i16, result_out.int16.items));
-        defer self.discardValue(result_value);
-        try self.forceValue(result_value);
-    }
-
-    fn debugFinishWhereI32(self: *Session, prepared: DebugHostWherePrepared) KError!void {
-        const count = bitCountTrue(prepared.bits);
-        var result_out = try self.allocManagedHostIntResult(.int32, count);
-        if (!fillWhereBitVectorIndicesI32Vector(result_out.int32.items, prepared.bits)) {
-            _ = fillWhereBitVectorIndices(i32, result_out.int32.items, prepared.bits);
-        }
-        const result_value = try result_out.value(self);
-        const host = try mutableNumericHostArrayValue(self, result_value);
-        hostDenseSetFlags(host, if (count <= 1)
-            host_dense_flag_normalized | host_dense_flag_asc | host_dense_flag_dsc
-        else
-            host_dense_flag_normalized | host_dense_flag_asc);
-        hostDenseSetCachedIntRange(host, whereFilledIntRange(i32, result_out.int32.items));
-        defer self.discardValue(result_value);
-        try self.forceValue(result_value);
-    }
-
-    pub fn debugRunHostWhereStage(
-        self: *Session,
-        stage: DebugHostWhereStage,
-        value: Value,
-        scratch_i8: []i8,
-        scratch_i16: []i16,
-        scratch_i32: []i32,
-    ) KError!void {
-        const prepared = try debugPrepareHostWhere(value);
-        switch (stage) {
-            .views => {
-                std.mem.doNotOptimizeAway(prepared.bits.len);
-                std.mem.doNotOptimizeAway(prepared.bits.words.ptr);
-                std.mem.doNotOptimizeAway(prepared.array.logical_len);
-            },
-            .count => {
-                std.mem.doNotOptimizeAway(bitCountTrue(prepared.bits));
-            },
-            .raw_fill_i8 => {
-                if (prepared.bits.len == 0 or prepared.bits.len > 128) return error.Unsupported;
-                _ = fillWhereBitVectorIndices(i8, scratch_i8, prepared.bits);
-                if (scratch_i8.len != 0) std.mem.doNotOptimizeAway(scratch_i8[scratch_i8.len - 1]);
-            },
-            .raw_fill_i8_table => {
-                if (prepared.bits.len == 0 or prepared.bits.len > 128) return error.Unsupported;
-                _ = fillWhereBitVectorIndicesI8Table(scratch_i8, prepared.bits);
-                if (scratch_i8.len != 0) std.mem.doNotOptimizeAway(scratch_i8[scratch_i8.len - 1]);
-            },
-            .raw_fill_i16 => {
-                if (prepared.bits.len == 0 or prepared.bits.len > 32768) return error.Unsupported;
-                if (!fillWhereBitVectorIndicesI16Vector(scratch_i16, prepared.bits)) {
-                    _ = fillWhereBitVectorIndices(i16, scratch_i16, prepared.bits);
-                }
-                if (scratch_i16.len != 0) std.mem.doNotOptimizeAway(scratch_i16[scratch_i16.len - 1]);
-            },
-            .raw_fill_i32 => {
-                if (prepared.bits.len == 0) return error.Unsupported;
-                if (!fillWhereBitVectorIndicesI32Vector(scratch_i32, prepared.bits)) {
-                    _ = fillWhereBitVectorIndices(i32, scratch_i32, prepared.bits);
-                }
-                if (scratch_i32.len != 0) std.mem.doNotOptimizeAway(scratch_i32[scratch_i32.len - 1]);
-            },
-            .managed_i8_finish => {
-                if (prepared.bits.len == 0 or prepared.bits.len > 128) return error.Unsupported;
-                try self.debugFinishWhereI8(prepared);
-            },
-            .managed_i8_table_finish => {
-                if (prepared.bits.len == 0 or prepared.bits.len > 128) return error.Unsupported;
-                try self.debugFinishWhereI8Table(prepared);
-            },
-            .managed_i16_finish => {
-                if (prepared.bits.len == 0 or prepared.bits.len > 32768) return error.Unsupported;
-                try self.debugFinishWhereI16(prepared);
-            },
-            .managed_i32_finish => {
-                if (prepared.bits.len == 0) return error.Unsupported;
-                try self.debugFinishWhereI32(prepared);
-            },
-            .full_host => {
-                const result = try self.whereBitVectorValue(prepared.array);
-                defer self.discardValue(result);
-                try self.forceValue(result);
-                self.resetScratchArenaRetainCapacity();
-            },
-        }
-    }
-
-    pub fn debugRunHostMatmulFloat32Stage(
-        self: *Session,
-        stage: DebugHostMatmulFloat32Stage,
-        left: Value,
-        right: Value,
-        scratch_out: []f32,
-        reusable_out: Value,
-    ) KError!void {
-        switch (stage) {
-            .views => {
-                const prepared = try self.debugPrepareHostMatmulFloat32(left, right);
-                std.mem.doNotOptimizeAway(prepared.shape.result_len);
-                std.mem.doNotOptimizeAway(prepared.left_items.ptr);
-                std.mem.doNotOptimizeAway(prepared.right_items.ptr);
-            },
-            .raw_blas => {
-                const prepared = try self.debugPrepareHostMatmulFloat32(left, right);
-                if (scratch_out.len < prepared.shape.result_len) return error.Type;
-                if (kiwi_host_blas_sgemm_rowmajor(
-                    scratch_out.ptr,
-                    prepared.left_items.ptr,
-                    prepared.right_items.ptr,
-                    prepared.shape.left_rows,
-                    prepared.shape.result_cols,
-                    prepared.shape.left_cols,
-                ) == 0) return error.Unsupported;
-                if (prepared.shape.result_len != 0) std.mem.doNotOptimizeAway(scratch_out[0]);
-            },
-            .reused_managed_blas => {
-                const prepared = try self.debugPrepareHostMatmulFloat32(left, right);
-                const out_host = try mutableNumericHostArrayValue(self, reusable_out);
-                const out_items = switch (out_host.storage) {
-                    .float32 => |items| hostDenseMutableLogicalItems(f32, out_host, items),
-                    else => return error.Type,
-                };
-                if (out_items.len < prepared.shape.result_len) return error.Type;
-                if (kiwi_host_blas_sgemm_rowmajor(
-                    out_items.ptr,
-                    prepared.left_items.ptr,
-                    prepared.right_items.ptr,
-                    prepared.shape.left_rows,
-                    prepared.shape.result_cols,
-                    prepared.shape.left_cols,
-                ) == 0) return error.Unsupported;
-                hostDenseSetFlags(out_host, hostMatmulFloatResultFlags(prepared.shape.result_len));
-                if (prepared.shape.result_len != 0) std.mem.doNotOptimizeAway(out_items[0]);
-            },
-            .managed_finish => {
-                const prepared = try self.debugPrepareHostMatmulFloat32(left, right);
-                const out = try self.allocManagedHostFloat32Result(prepared.shape.result_len);
-                const value = try self.finishHostMatmulFloat32Result(prepared.shape, out);
-                defer self.discardValue(value);
-                try self.forceValue(value);
-            },
-            .managed_blas_finish => {
-                const prepared = try self.debugPrepareHostMatmulFloat32(left, right);
-                const value = (try self.tryHostBlasMatmulFloat32Dense(prepared.left_items, prepared.right_items, prepared.shape)) orelse return error.Unsupported;
-                defer self.discardValue(value);
-                try self.forceValue(value);
-            },
-            .full_host => {
-                const shape = (try matmulShapeForValues(left, right)) orelse return error.Unsupported;
-                const value = try self.applyHostMatmulGeneric(left, right, shape);
-                defer self.discardValue(value);
-                try self.forceValue(value);
-            },
-        }
-    }
-
-    pub fn debugRunHostCompareIntFloatStage(
-        self: *Session,
-        stage: DebugHostCompareIntFloatStage,
-        left: Value,
-        right: Value,
-        scratch_words: []u64,
-    ) KError!void {
-        switch (stage) {
-            .views => {
-                const prepared = (try self.prepareFastHostCompareIntFloat(.less, left, right)) orelse return error.Unsupported;
-                std.mem.doNotOptimizeAway(prepared.len);
-                std.mem.doNotOptimizeAway(prepared.int_ptr.width);
-                std.mem.doNotOptimizeAway(prepared.int_left);
-            },
-            .scratch_kernel => {
-                const prepared = (try self.prepareFastHostCompareIntFloat(.less, left, right)) orelse return error.Unsupported;
-                if (scratch_words.len < bitWordCount(prepared.len)) return error.Type;
-                kiwi_host_compare_int_f64_array(
-                    scratch_words.ptr,
-                    prepared.int_ptr.ptr,
-                    prepared.int_ptr.width,
-                    prepared.float_items.ptr,
-                    prepared.len,
-                    if (prepared.int_left) 1 else 0,
-                    prepared.op_code,
-                );
-                var summary: HostCompareSummary = undefined;
-                kiwi_host_compare_last_summary(&summary);
-                std.mem.doNotOptimizeAway(summary);
-                std.mem.doNotOptimizeAway(scratch_words[0]);
-            },
-            .managed_finish => {
-                const prepared = (try self.prepareFastHostCompareIntFloat(.less, left, right)) orelse return error.Unsupported;
-                const out = try self.allocHostBitArrayUninitialized(.managed, prepared.len);
-                kiwi_host_compare_int_f64_array(
-                    out.words.ptr,
-                    prepared.int_ptr.ptr,
-                    prepared.int_ptr.width,
-                    prepared.float_items.ptr,
-                    prepared.len,
-                    if (prepared.int_left) 1 else 0,
-                    prepared.op_code,
-                );
-                const value = try self.finishFastHostCompareResult(out, prepared.shape);
-                defer self.discardValue(value);
-                try self.forceValue(value);
-            },
-            .full_fast => {
-                const shape = try nonVectorNumericShapeForDyad(left, right);
-                const value = (try self.tryFastHostDenseCompare(.less, left, right, shape)) orelse return error.Unsupported;
-                defer self.discardValue(value);
-                try self.forceValue(value);
-            },
-            .array_compare => {
-                const value = try self.compareNumericArrayValues(.less, left, right);
-                defer self.discardValue(value);
-                try self.forceValue(value);
-            },
-        }
     }
 
     fn loadGlobalSlot(self: *Session, slot: u16) KError!Value {
@@ -49215,33 +45779,11 @@ pub const Session = struct {
         return value;
     }
 
-    fn noteGlobalCall(self: *Session, slot: u16) void {
-        if (!self.debugDetailedProbeActive()) return;
-        const idx: usize = slot;
-        if (idx >= self.debug_global_call_counts.items.len) return;
-        self.debug_global_call_counts.items[idx] += 1;
-    }
-
-    inline fn pop(self: *Session) Value {
-        self.stack_len -= 1;
-        return self.stack[self.stack_len];
-    }
-
-    inline fn peek(self: *Session) Value {
-        return self.stack[self.stack_len - 1];
-    }
-
-    inline fn push(self: *Session, value: Value) KError!void {
-        if (self.stack_len >= self.stack.len) return error.Unsupported;
-        self.stack[self.stack_len] = value;
-        self.stack_len += 1;
-    }
-
     fn createOwnedHostIntArray(self: *Session, owner: HeapOwner, items: []const i64) !Value {
         const analysis = analyzeIntSlice(items);
         var out = try self.allocOwnedHostIntResult(owner, analysis.kind, items.len);
         for (items, 0..) |item, idx| try out.set(idx, item);
-        const value = try out.value(self);
+        const value = out.value();
         const host = try mutableNumericHostArrayValue(self, value);
         hostDenseSetFlags(host, analysis.flags);
         hostDenseSetCachedIntRange(host, analysis.range);
@@ -49270,7 +45812,7 @@ pub const Session = struct {
 
         var out = try self.allocOwnedHostIntResult(owner, .bit, items.len);
         for (items, 0..) |item, idx| try out.set(idx, @intFromBool(item));
-        const value = try out.value(self);
+        const value = out.value();
         const host = try mutableNumericHostArrayValue(self, value);
         hostDenseSetFlags(host, host_dense_flag_normalized | orderFlagsFromMonotonic(asc, dsc));
         hostDenseSetCachedIntRange(host, .{
@@ -49288,7 +45830,7 @@ pub const Session = struct {
         const analysis = analyzeFloatSlice(items);
         const out = try self.allocOwnedHostFloatResult(owner, items.len);
         @memcpy(out.items, items);
-        const value = try out.value(self);
+        const value = out.value();
         hostDenseSetFlags(try mutableNumericHostArrayValue(self, value), analysis.flags);
         return value;
     }
@@ -49297,7 +45839,7 @@ pub const Session = struct {
         const analysis = analyzeFloatSlice32(items);
         const out = try self.allocOwnedHostFloat32Result(owner, items.len);
         @memcpy(out.items, items);
-        const value = try out.value(self);
+        const value = out.value();
         hostDenseSetFlags(try mutableNumericHostArrayValue(self, value), analysis.flags);
         return value;
     }
@@ -49313,7 +45855,7 @@ pub const Session = struct {
     fn createOwnedHostIntArrayFromValues(self: *Session, owner: HeapOwner, values: []const Value) !Value {
         if (values.len == 0) {
             var out = try self.allocOwnedHostIntResult(owner, .bit, 0);
-            const value = try out.value(self);
+            const value = out.value();
             const host = try mutableNumericHostArrayValue(self, value);
             hostDenseSetFlags(host, host_dense_flag_normalized | host_dense_flag_asc | host_dense_flag_dsc);
             hostDenseSetCachedIntRange(host, .{ .min = 0, .max = 0 });
@@ -49361,7 +45903,7 @@ pub const Session = struct {
                 else => unreachable,
             });
         }
-        const result = try out.value(self);
+        const result = out.value();
         const result_host = try mutableNumericHostArrayValue(self, result);
         hostDenseSetFlags(result_host, host_dense_flag_normalized | orderFlagsFromMonotonic(asc, dsc));
         hostDenseSetCachedIntRange(result_host, .{ .min = min_value, .max = max_value });
@@ -49375,7 +45917,7 @@ pub const Session = struct {
     fn createOwnedHostFloatArrayFromValues(self: *Session, owner: HeapOwner, values: []const Value) !Value {
         if (values.len == 0) {
             const out = try self.allocOwnedHostFloatResult(owner, 0);
-            const value = try out.value(self);
+            const value = out.value();
             hostDenseSetFlags(try mutableNumericHostArrayValue(self, value), host_dense_flag_normalized | host_dense_flag_asc | host_dense_flag_dsc);
             return value;
         }
@@ -49406,7 +45948,7 @@ pub const Session = struct {
             }
         }
 
-        const result = try out.value(self);
+        const result = out.value();
         hostDenseSetFlags(try mutableNumericHostArrayValue(self, result), host_dense_flag_normalized | orderFlagsFromMonotonic(asc, dsc));
         return result;
     }
@@ -49414,7 +45956,7 @@ pub const Session = struct {
     fn createOwnedHostFloat32ArrayFromValues(self: *Session, owner: HeapOwner, values: []const Value) !Value {
         if (values.len == 0) {
             const out = try self.allocOwnedHostFloat32Result(owner, 0);
-            const value = try out.value(self);
+            const value = out.value();
             hostDenseSetFlags(try mutableNumericHostArrayValue(self, value), host_dense_flag_normalized | host_dense_flag_asc | host_dense_flag_dsc);
             return value;
         }
@@ -49445,7 +45987,7 @@ pub const Session = struct {
             }
         }
 
-        const result = try out.value(self);
+        const result = out.value();
         hostDenseSetFlags(try mutableNumericHostArrayValue(self, result), host_dense_flag_normalized | orderFlagsFromMonotonic(asc, dsc));
         return result;
     }
@@ -49532,6 +46074,16 @@ pub const Session = struct {
     }
 
     fn createManagedDuckDbHandle(self: *Session, db_path: ?[]const u8) KError!Value {
+        if (comptime runtime_has_wasm_duckdb_bridge) {
+            if (db_path != null) return error.Unsupported;
+            const handle = try self.allocator.create(HostHandle);
+            errdefer self.allocator.destroy(handle);
+            handle.* = .{
+                .header = HeapHeader.init(.host_handle, .managed),
+                .kind = .duckdb,
+            };
+            return Value.array(handle);
+        }
         if (comptime !runtime_has_duckdb) return error.Unsupported;
 
         var diagnostic: ?[]u8 = null;
@@ -49845,10 +46397,6 @@ pub const Session = struct {
         return Value.array(list);
     }
 
-    fn createManagedHostStringListLazyScalar(self: *Session, base: *HostText, sep: u8, count: usize, bytes_len: usize) !Value {
-        return try self.createManagedHostStringListLazyScalarWithDisplay(base, sep, count, bytes_len, .list);
-    }
-
     fn createManagedHostStringListFromSlices(self: *Session, items: []const []const u8) !Value {
         return try self.createOwnedHostStringListFromSlices(.managed, items);
     }
@@ -49910,8 +46458,14 @@ const HostIntResult = union(HostIntStorageKind) {
         }
     }
 
-    fn value(self: *const HostIntResult, session: *Session) !Value {
-        return try wrapOwnedHostArrayValue(session, self.arrayPtr());
+    fn value(self: *const HostIntResult) Value {
+        return switch (self.*) {
+            .bit => |out| out.value(),
+            .int8 => |out| out.value(),
+            .int16 => |out| out.value(),
+            .int32 => |out| out.value(),
+            .int64 => |out| out.value(),
+        };
     }
 
     fn arrayPtr(self: *const HostIntResult) *HostDenseArray {
@@ -49925,23 +46479,8 @@ const HostIntResult = union(HostIntStorageKind) {
     }
 };
 
-const HostFloatResult = struct {
-    array: *HostDenseArray,
-    items: []f64,
-
-    fn value(self: HostFloatResult, session: *Session) !Value {
-        return try wrapOwnedHostArrayValue(session, self.array);
-    }
-};
-
-const HostFloat32Result = struct {
-    array: *HostDenseArray,
-    items: []f32,
-
-    fn value(self: HostFloat32Result, session: *Session) !Value {
-        return try wrapOwnedHostArrayValue(session, self.array);
-    }
-};
+const HostFloatResult = HostDenseAlloc(f64);
+const HostFloat32Result = HostDenseAlloc(f32);
 
 const DictTableColumnSource = union(enum) {
     scalar_bool: bool,
@@ -50439,11 +46978,6 @@ fn hostFirstAxisIndexSourceRow(view: HostFirstAxisIndexView, row_pos: usize) KEr
     return @as(usize, @intCast(source_row_i64));
 }
 
-fn hostFirstAxisIndexSourceIntAt(view: HostFirstAxisIndexView, flat_idx: usize) KError!i64 {
-    if (view.source_host) |array| return try hostDenseIntAt(array, flat_idx);
-    return try numericIntAt(view.source_value, flat_idx);
-}
-
 fn hostFirstAxisIndexSourceFloatAt(view: HostFirstAxisIndexView, flat_idx: usize) KError!f64 {
     if (view.source_host) |array| return try hostDenseFloatAt(array, flat_idx);
     return try numericFloatAt(view.source_value, flat_idx);
@@ -50714,16 +47248,10 @@ fn hostIntDenseViewItem(view: HostIntDenseView, idx: usize) KError!i64 {
 fn hostIntDenseValueFlags(value: Value, view: HostIntDenseView) u8 {
     return switch (view) {
         .dense => switch (value.arrayKind()) {
-            .host_dense_array => value.asHostDenseArray().flags,
             .numeric_array => blk: {
                 const handle = value.asNumericArray();
                 if (numericHostAttachment(handle)) |array| break :blk array.flags;
                 if (numericArrayIsRangeIota(handle)) break :blk hostRangeIotaViewFlags(.{ .handle = handle });
-                break :blk 0;
-            },
-            .backend_array => blk: {
-                const handle = valueNumericHandle(value) orelse break :blk 0;
-                if (numericHostAttachment(handle)) |array| break :blk array.flags;
                 break :blk 0;
             },
             else => 0,
@@ -50743,9 +47271,6 @@ fn hostIntDenseValueFlags(value: Value, view: HostIntDenseView) u8 {
 fn hostIntDenseValueRange(value: Value, view: HostIntDenseView) HostIntRange {
     return switch (view) {
         .dense => |items| switch (value.arrayKind()) {
-            .host_dense_array => hostDenseCachedIntRange(value.asHostDenseArray()) orelse
-                hostIntArrayViewEndpointRange(items, value.asHostDenseArray().flags) orelse
-                hostIntArrayViewRange(items),
             .numeric_array => blk: {
                 const handle = value.asNumericArray();
                 if (numericHostAttachment(handle)) |array| {
@@ -50754,15 +47279,6 @@ fn hostIntDenseValueRange(value: Value, view: HostIntDenseView) HostIntRange {
                         hostIntArrayViewRange(items);
                 }
                 if (numericArrayIsRangeIota(handle)) break :blk numericArrayRangeIotaBounds(handle);
-                break :blk hostIntArrayViewRange(items);
-            },
-            .backend_array => blk: {
-                const handle = valueNumericHandle(value) orelse break :blk hostIntArrayViewRange(items);
-                if (numericHostAttachment(handle)) |array| {
-                    break :blk hostDenseCachedIntRange(array) orelse
-                        hostIntArrayViewEndpointRange(items, array.flags) orelse
-                        hostIntArrayViewRange(items);
-                }
                 break :blk hostIntArrayViewRange(items);
             },
             else => hostIntArrayViewRange(items),
@@ -50882,136 +47398,10 @@ fn hostIntDenseViewArithmeticSlice(view: HostIntDenseView, len: usize) KError!?A
     };
 }
 
-fn hostIntDenseViewContiguousSlice(view: HostIntDenseView, len: usize) KError!?ContiguousIndexSlice {
-    if (try hostIntDenseViewArithmeticSlice(view, len)) |slice| {
-        if (slice.step == 1) return .{ .start = slice.start, .len = slice.len };
-    }
-    return null;
-}
-
 fn valueHostIntStructuralView(value: Value) ?HostIntDenseView {
-    if (value.tag() != .array) return null;
+    const handle = valueNumericHandle(value) orelse return null;
     return switch (value.arraySubkind()) {
-        .host_dense_array => if (hostIntArrayView(value.asHostDenseArray())) |view|
-            .{ .dense = view }
-        else
-            null,
         .numeric_array => blk: {
-            const handle = value.asNumericArray();
-            if (numericArrayIsRangeIota(handle)) break :blk .{ .range_iota = .{ .handle = handle } };
-            if (numericArrayIsFlatSlice(handle)) {
-                const source = numericArrayFlatSliceSource(handle) orelse break :blk null;
-                const source_host = if (hostDenseIfPresent(source)) |array|
-                    if (hostIntArrayView(array) != null) array else break :blk null
-                else if (numericValueSupportsStructuralFlatItemsWithoutHost(source))
-                    null
-                else
-                    break :blk null;
-                if (valueNumericMode(source) != .int) break :blk null;
-                break :blk .{ .flat_slice = .{
-                    .source_value = source,
-                    .source_host = source_host,
-                    .start = numericArrayFlatSliceStart(handle) orelse break :blk null,
-                    .len = numericFlatLen(value) orelse break :blk null,
-                } };
-            }
-            if (numericArrayIsFlatConcat(handle)) {
-                const left = numericArrayFlatConcatLeft(handle) orelse break :blk null;
-                const right = numericArrayFlatConcatRight(handle) orelse break :blk null;
-                const left_host = if (hostDenseIfPresent(left)) |array|
-                    if (hostIntArrayView(array) != null) array else break :blk null
-                else if (numericValueSupportsStructuralFlatItemsWithoutHost(left))
-                    null
-                else
-                    break :blk null;
-                const right_host = if (hostDenseIfPresent(right)) |array|
-                    if (hostIntArrayView(array) != null) array else break :blk null
-                else if (numericValueSupportsStructuralFlatItemsWithoutHost(right))
-                    null
-                else
-                    break :blk null;
-                if (valueNumericMode(value) != .int) break :blk null;
-                break :blk .{ .flat_concat = .{
-                    .left_value = left,
-                    .left_host = left_host,
-                    .right_value = right,
-                    .right_host = right_host,
-                    .left_len = numericVectorLen(left) orelse break :blk null,
-                    .len = numericFlatLen(value) orelse break :blk null,
-                } };
-            }
-            if (numericArrayIsFlatSegments(handle)) {
-                if (valueNumericMode(value) != .int) break :blk null;
-                break :blk .{ .flat_segments = .{
-                    .values = numericArrayFlatSegmentsValues(handle) orelse break :blk null,
-                    .len = numericFlatLen(value) orelse break :blk null,
-                } };
-            }
-            if (numericArrayIsFirstAxisSlice(handle)) {
-                const slice = numericArrayFirstAxisSlicePayload(handle) orelse break :blk null;
-                if (slice.step != 1) break :blk null;
-                const source_handle = shapedNumericHandle(slice.source) orelse break :blk null;
-                const source_host = if (hostDenseIfPresent(slice.source)) |array|
-                    if (hostIntArrayView(array) != null) array else break :blk null
-                else if (numericValueSupportsStructuralFlatItemsWithoutHost(slice.source))
-                    null
-                else
-                    break :blk null;
-                break :blk .{ .first_axis_slice = .{
-                    .source_value = slice.source,
-                    .source_host = source_host,
-                    .start_row = slice.start,
-                    .len = numericFlatLen(value) orelse break :blk null,
-                    .row_width = numericShapeInnerBlockLen(source_handle),
-                    .row_step = 1,
-                } };
-            }
-            if (numericArrayIsFirstAxisIndex(handle)) {
-                const index = numericArrayFirstAxisIndexPayload(handle) orelse break :blk null;
-                const source_handle = shapedNumericHandle(index.source) orelse break :blk null;
-                const source_host = if (hostDenseIfPresent(index.source)) |array|
-                    if (hostIntArrayView(array) != null) array else break :blk null
-                else if (numericValueSupportsStructuralFlatItemsWithoutHost(index.source))
-                    null
-                else
-                    break :blk null;
-                if (valueNumericMode(index.source) != .int) break :blk null;
-                break :blk .{ .first_axis_index = .{
-                    .source_value = index.source,
-                    .source_host = source_host,
-                    .row_indices = index.row_indices,
-                    .len = numericFlatLen(value) orelse break :blk null,
-                    .row_width = numericShapeInnerBlockLen(source_handle),
-                } };
-            }
-            if (numericArrayIsTransposeView(handle)) {
-                const source = numericArrayTransposeSource(handle) orelse break :blk null;
-                const source_shape = valueNumericMatrixShape(source) orelse break :blk null;
-                const source_host = if (contiguousHostDenseIfPresentThroughReshape(source)) |array|
-                    if (hostIntArrayView(array) != null) array else break :blk null
-                else if (numericValueSupportsStructuralFlatItemsWithoutHost(source))
-                    null
-                else
-                    break :blk null;
-                if (valueNumericMode(source) != .int) break :blk null;
-                break :blk .{ .transpose = .{
-                    .source_value = source,
-                    .source_host = source_host,
-                    .source_rows = source_shape.rows,
-                    .source_cols = source_shape.cols,
-                } };
-            }
-            if (numericArrayIsReshapeView(handle)) {
-                const source = numericArrayReshapeSource(handle) orelse break :blk null;
-                break :blk valueHostIntStructuralView(source);
-            }
-            if (numericHostAttachment(handle)) |array| {
-                if (hostIntArrayView(array)) |view| break :blk .{ .dense = view };
-            }
-            break :blk null;
-        },
-        .backend_array => blk: {
-            const handle = valueNumericHandle(value) orelse break :blk null;
             if (numericArrayIsRangeIota(handle)) break :blk .{ .range_iota = .{ .handle = handle } };
             if (numericArrayIsFlatSlice(handle)) {
                 const source = numericArrayFlatSliceSource(handle) orelse break :blk null;
@@ -51142,14 +47532,6 @@ fn normalizeIndexOrNull(raw_index: i64, len: usize) ?usize {
     if (index < 0) index += @as(i64, @intCast(len));
     if (index < 0 or index >= @as(i64, @intCast(len))) return null;
     return @intCast(index);
-}
-
-fn hostStorageCopyIntSlice(array: *const HostDenseArray) []const i64 {
-    return switch (array.storage) {
-        .int64 => |items| hostDenseLogicalItems(i64, array, items),
-        .bit, .int8, .int16, .int32, .float64 => unreachable,
-        else => unreachable,
-    };
 }
 
 const DuckDbKiwiTableScan = if (runtime_has_duckdb) struct {
@@ -51802,7 +48184,6 @@ const DuckDbKiwiTableScan = if (runtime_has_duckdb) struct {
 } else struct {};
 
 fn destroyManagedHostArrayNoPool(allocator: std.mem.Allocator, array: *HostDenseArray) void {
-    array.logical_handle = null;
     if (array.find_cache) |cache| {
         if (cache.keys) |keys| allocator.free(keys);
         if (cache.slots) |slots| allocator.free(slots);
@@ -51905,7 +48286,6 @@ fn destroyManagedHostKeyedStoreNoPool(allocator: std.mem.Allocator, store: *Host
 }
 
 fn destroyManagedBackendArrayNoPool(allocator: std.mem.Allocator, array: *BackendArray) void {
-    array.logical_handle = null;
     array.array.deinit();
     allocator.destroy(array);
 }
@@ -51978,16 +48358,6 @@ fn retainHeapValue(value: Value) void {
                         handle.header.ref_count += 1;
                     }
                 },
-                .host_dense_array => {
-                    if (logicalHandleForNumericPayloadValue(value)) |handle| {
-                        if (handle.header.owner == .managed) {
-                            handle.header.ref_count += 1;
-                        }
-                    } else {
-                        const array = @constCast(value.asHostDenseArray());
-                        if (array.header.owner == .managed) array.header.ref_count += 1;
-                    }
-                },
                 .host_boxed_array => {
                     const array = @constCast(value.asHostBoxedArray());
                     if (array.header.owner == .managed) array.header.ref_count += 1;
@@ -52024,16 +48394,6 @@ fn retainHeapValue(value: Value) void {
                     const list = @constCast(value.asHostStringList());
                     if (list.header.owner == .managed) list.header.ref_count += 1;
                 },
-                .backend_array => {
-                    if (logicalHandleForNumericPayloadValue(value)) |handle| {
-                        if (handle.header.owner == .managed) {
-                            handle.header.ref_count += 1;
-                        }
-                    } else {
-                        const array = @constCast(value.asBackendArray());
-                        if (array.header.owner == .managed) array.header.ref_count += 1;
-                    }
-                },
             }
         },
         else => {},
@@ -52066,20 +48426,6 @@ fn releaseHeapValue(allocator: std.mem.Allocator, value: Value) void {
                     const handle = @constCast(value.asNumericArray());
                     if (handle.header.owner != .managed) return;
                     releaseManagedNumericHandleNoPool(allocator, handle);
-                },
-                .host_dense_array => {
-                    if (logicalHandleForNumericPayloadValue(value)) |handle| {
-                        if (handle.header.owner != .managed) return;
-                        releaseManagedNumericHandleNoPool(allocator, handle);
-                    } else {
-                        const array = @constCast(value.asHostDenseArray());
-                        if (array.header.owner != .managed) return;
-                        std.debug.assert(array.header.ref_count != 0);
-                        array.header.ref_count -= 1;
-                        if (array.header.ref_count == 0) {
-                            destroyManagedHostArrayNoPool(allocator, array);
-                        }
-                    }
                 },
                 .host_boxed_array => {
                     const array = @constCast(value.asHostBoxedArray());
@@ -52167,20 +48513,6 @@ fn releaseHeapValue(allocator: std.mem.Allocator, value: Value) void {
                         }
                     }
                 },
-                .backend_array => {
-                    if (logicalHandleForNumericPayloadValue(value)) |handle| {
-                        if (handle.header.owner != .managed) return;
-                        releaseManagedNumericHandleNoPool(allocator, handle);
-                    } else {
-                        const array = @constCast(value.asBackendArray());
-                        if (array.header.owner != .managed) return;
-                        std.debug.assert(array.header.ref_count != 0);
-                        array.header.ref_count -= 1;
-                        if (array.header.ref_count == 0) {
-                            destroyManagedBackendArrayNoPool(allocator, array);
-                        }
-                    }
-                },
             }
         },
         else => {},
@@ -52223,15 +48555,6 @@ fn allocNumericArrayHandle(self: *Session, owner: HeapOwner) !*NumericArray {
     return try allocator.create(NumericArray);
 }
 
-fn syncNumericArrayChildren(handle: *NumericArray) void {
-    if (handle.host) |host| {
-        host.logical_handle = handle;
-    }
-    if (handle.mlx) |array| {
-        array.logical_handle = handle;
-    }
-}
-
 fn newNumericArrayValue(
     self: *Session,
     owner: HeapOwner,
@@ -52251,9 +48574,8 @@ fn newNumericArrayValue(
     } else if (backend_array) |array| {
         numericArraySetShapeFromBackend(handle, array.array);
     }
-    syncNumericArrayChildren(handle);
     self.registerManagedNumericHandle(handle);
-    return Value.array(handle);
+    return Value.numericArray(handle);
 }
 
 fn newRangeIotaValue(self: *Session, owner: HeapOwner, len: usize) !Value {
@@ -52264,7 +48586,7 @@ fn newRangeIotaValue(self: *Session, owner: HeapOwner, len: usize) !Value {
     };
     numericArraySetRangeIota(handle, len);
     self.registerManagedNumericHandle(handle);
-    return Value.array(handle);
+    return Value.numericArray(handle);
 }
 
 fn newRangeIotaValueWithParams(self: *Session, owner: HeapOwner, len: usize, start: i64, step: i64) !Value {
@@ -52320,13 +48642,8 @@ fn newFlatSliceValue(self: *Session, source: Value, start: usize, len: usize) KE
     const retained_source = try self.retainEscapedValue(collapsed.source);
     errdefer self.releaseValue(retained_source);
 
-    const source_handle = valueNumericHandle(collapsed.source);
-    const preferred: NumericArrayPreferred = if (source_handle) |handle|
-        handle.preferred
-    else if (collapsed.source.tag() == .array and collapsed.source.arrayKind() == .backend_array)
-        .mlx
-    else
-        .host;
+    const source_handle = valueNumericHandle(collapsed.source) orelse return error.Type;
+    const preferred = source_handle.preferred;
 
     const handle = try allocNumericArrayHandle(self, .managed);
     handle.* = .{
@@ -52338,10 +48655,9 @@ fn newFlatSliceValue(self: *Session, source: Value, start: usize, len: usize) KE
         .host = null,
         .mlx = null,
     };
-    syncNumericArrayChildren(handle);
     self.registerManagedNumericHandle(handle);
     self.noteNumericStructuralAlloc(.flat_slice);
-    return Value.array(handle);
+    return Value.numericArray(handle);
 }
 
 fn newFlatConcatPairValue(self: *Session, left: Value, right: Value) KError!Value {
@@ -52354,10 +48670,9 @@ fn newFlatConcatPairValue(self: *Session, left: Value, right: Value) KError!Valu
     const retained_right = try self.retainEscapedValue(right);
     errdefer self.releaseValue(retained_right);
 
-    const left_handle = valueNumericHandle(left);
-    const right_handle = valueNumericHandle(right);
-    const preferred: NumericArrayPreferred = if ((left_handle != null and left_handle.?.preferred == .mlx) or
-        (right_handle != null and right_handle.?.preferred == .mlx))
+    const left_handle = valueNumericHandle(left) orelse return error.Type;
+    const right_handle = valueNumericHandle(right) orelse return error.Type;
+    const preferred: NumericArrayPreferred = if (left_handle.preferred == .mlx or right_handle.preferred == .mlx)
         .mlx
     else
         .host;
@@ -52372,10 +48687,9 @@ fn newFlatConcatPairValue(self: *Session, left: Value, right: Value) KError!Valu
         .host = null,
         .mlx = null,
     };
-    syncNumericArrayChildren(handle);
     self.registerManagedNumericHandle(handle);
     self.noteNumericStructuralAlloc(.flat_concat);
-    return Value.array(handle);
+    return Value.numericArray(handle);
 }
 
 fn newFlatSegmentsValue(self: *Session, segments: []const FlatNumericSegment) KError!Value {
@@ -52394,11 +48708,8 @@ fn newFlatSegmentsValue(self: *Session, segments: []const FlatNumericSegment) KE
         retained[idx] = try self.retainEscapedValue(segment.value);
         retained_len += 1;
         total_len += segment.len;
-        if (valueNumericHandle(segment.value)) |handle| {
-            if (handle.preferred == .mlx) preferred = .mlx;
-        } else if (segment.value.tag() == .array and segment.value.arrayKind() == .backend_array) {
-            preferred = .mlx;
-        }
+        const segment_handle = valueNumericHandle(segment.value) orelse return error.Type;
+        if (segment_handle.preferred == .mlx) preferred = .mlx;
     }
 
     const handle = try allocNumericArrayHandle(self, .managed);
@@ -52411,10 +48722,9 @@ fn newFlatSegmentsValue(self: *Session, segments: []const FlatNumericSegment) KE
         .host = null,
         .mlx = null,
     };
-    syncNumericArrayChildren(handle);
     self.registerManagedNumericHandle(handle);
     self.noteNumericStructuralAlloc(.flat_segments);
-    return Value.array(handle);
+    return Value.numericArray(handle);
 }
 
 fn newFlatConcatValue(self: *Session, left: Value, right: Value) KError!Value {
@@ -52452,10 +48762,9 @@ fn newFirstAxisSliceValueWithStep(self: *Session, source: Value, start: usize, l
         .mlx = null,
     };
     handle.shape[0] = @intCast(len);
-    syncNumericArrayChildren(handle);
     self.registerManagedNumericHandle(handle);
     self.noteNumericStructuralAlloc(.first_axis_slice);
-    return Value.array(handle);
+    return Value.numericArray(handle);
 }
 
 fn newFirstAxisSliceValue(self: *Session, source: Value, start: usize, len: usize) KError!Value {
@@ -52487,10 +48796,9 @@ fn newFirstAxisIndexValue(self: *Session, source: Value, row_indices: Value) KEr
         .mlx = null,
     };
     handle.shape[0] = @intCast(row_count);
-    syncNumericArrayChildren(handle);
     self.registerManagedNumericHandle(handle);
     self.noteNumericStructuralAlloc(.first_axis_index);
-    return Value.array(handle);
+    return Value.numericArray(handle);
 }
 
 fn newFirstAxisConcatValue(self: *Session, left: Value, right: Value, shape: NumericMatrixShape) KError!Value {
@@ -52501,10 +48809,9 @@ fn newFirstAxisConcatValue(self: *Session, left: Value, right: Value, shape: Num
     const retained_right = try self.retainEscapedValue(right);
     errdefer self.releaseValue(retained_right);
 
-    const left_handle = valueNumericHandle(left);
-    const right_handle = valueNumericHandle(right);
-    const preferred: NumericArrayPreferred = if ((left_handle != null and left_handle.?.preferred == .mlx) or
-        (right_handle != null and right_handle.?.preferred == .mlx))
+    const left_handle = valueNumericHandle(left) orelse return error.Type;
+    const right_handle = valueNumericHandle(right) orelse return error.Type;
+    const preferred: NumericArrayPreferred = if (left_handle.preferred == .mlx or right_handle.preferred == .mlx)
         .mlx
     else
         .host;
@@ -52519,33 +48826,22 @@ fn newFirstAxisConcatValue(self: *Session, left: Value, right: Value, shape: Num
         .host = null,
         .mlx = null,
     };
-    syncNumericArrayChildren(handle);
     self.registerManagedNumericHandle(handle);
     self.noteNumericStructuralAlloc(.first_axis_concat);
-    return Value.array(handle);
+    return Value.numericArray(handle);
 }
 
 fn newReshapeViewValue(self: *Session, source: Value, shape: NumericShapeSnapshot) KError!Value {
     if (shape.rank == 0) return error.Type;
 
-    const source_handle = valueNumericHandle(source);
-    if (source_handle == null and valueNumericMode(source) == null) return error.Type;
-    const retained_source = if (source_handle) |handle|
-        if (numericArrayReshapeSource(handle)) |base_source|
-            try self.retainEscapedValue(base_source)
-        else
-            try self.retainEscapedValue(source)
+    const source_handle = valueNumericHandle(source) orelse return error.Type;
+    const retained_source = if (numericArrayReshapeSource(source_handle)) |base_source|
+        try self.retainEscapedValue(base_source)
     else
         try self.retainEscapedValue(source);
     errdefer self.releaseValue(retained_source);
 
-    const preferred: NumericArrayPreferred = if (source_handle) |handle|
-        handle.preferred
-    else switch (source.arrayKind()) {
-        .backend_array => .mlx,
-        .host_dense_array => .host,
-        else => return error.Type,
-    };
+    const preferred = source_handle.preferred;
 
     const handle = try allocNumericArrayHandle(self, .managed);
     handle.* = .{
@@ -52557,10 +48853,9 @@ fn newReshapeViewValue(self: *Session, source: Value, shape: NumericShapeSnapsho
         .host = null,
         .mlx = null,
     };
-    syncNumericArrayChildren(handle);
     self.registerManagedNumericHandle(handle);
     self.noteNumericStructuralAlloc(.reshape_view);
-    return Value.array(handle);
+    return Value.numericArray(handle);
 }
 
 fn newTransposeViewValue(self: *Session, source: Value) KError!Value {
@@ -52584,25 +48879,9 @@ fn newTransposeViewValue(self: *Session, source: Value) KError!Value {
         .host = null,
         .mlx = null,
     };
-    syncNumericArrayChildren(handle);
     self.registerManagedNumericHandle(handle);
     self.noteNumericStructuralAlloc(.transpose_view);
-    return Value.array(handle);
-}
-
-fn wrapOwnedHostArrayValue(self: *Session, array: *HostDenseArray) !Value {
-    if (array.logical_handle) |handle| return Value.array(handle);
-    return try newNumericArrayValue(self, array.header.owner, .host, array, null);
-}
-
-fn wrapOwnedBackendArrayValue(self: *Session, array: *BackendArray) !Value {
-    if (array.logical_handle) |handle| return Value.array(handle);
-    return try newNumericArrayValue(self, array.header.owner, .mlx, null, array);
-}
-
-fn hostDenseSourceValue(array: *const HostDenseArray) Value {
-    if (array.logical_handle) |handle| return Value.array(handle);
-    return Value.array(@constCast(array));
+    return Value.numericArray(handle);
 }
 
 const dense_backend_min_len_dyad: usize = 500_000;
@@ -52650,104 +48929,34 @@ fn denseValuePlanFacts(value: Value) DenseValuePlanFacts {
     };
 }
 
-fn ensureNumericArrayHandle(self: *Session, value: Value) !*NumericArray {
-    std.debug.assert(value.tag() == .array);
-    return switch (value.arraySubkind()) {
-        .numeric_array => @constCast(value.asNumericArray()),
-        .host_dense_array => blk: {
-            const array = @constCast(value.asHostDenseArray());
-            if (array.logical_handle) |handle| break :blk handle;
-            const handle = try allocNumericArrayHandle(self, array.header.owner);
-            handle.* = .{
-                .header = .{
-                    .kind = .numeric_array,
-                    .owner = array.header.owner,
-                    .ref_count = if (array.header.owner == .managed) array.header.ref_count else 0,
-                },
-                .preferred = .host,
-                .host = array,
-                .mlx = null,
-            };
-            numericArraySetVectorShape(handle, array.len());
-            syncNumericArrayChildren(handle);
-            self.registerManagedNumericHandle(handle);
-            break :blk handle;
-        },
-        .backend_array => blk: {
-            const array = @constCast(value.asBackendArray());
-            if (array.logical_handle) |handle| break :blk handle;
-            const handle = try allocNumericArrayHandle(self, array.header.owner);
-            handle.* = .{
-                .header = .{
-                    .kind = .numeric_array,
-                    .owner = array.header.owner,
-                    .ref_count = if (array.header.owner == .managed) array.header.ref_count else 0,
-                },
-                .preferred = .mlx,
-                .host = null,
-                .mlx = array,
-            };
-            numericArraySetShapeFromBackend(handle, array.array);
-            syncNumericArrayChildren(handle);
-            self.registerManagedNumericHandle(handle);
-            break :blk handle;
-        },
-        else => error.Type,
-    };
-}
-
 fn hasBackendRealization(value: Value) bool {
-    if (value.tag() != .array) return false;
-    return switch (value.arraySubkind()) {
-        .numeric_array => blk: {
-            const handle = value.asNumericArray();
-            if (numericHasBackendAttachment(handle)) break :blk true;
-            if (numericArrayFlatSliceSource(handle)) |source| break :blk hasBackendRealization(source);
-            if (numericArrayFlatConcatLeft(handle)) |left| {
-                const right = numericArrayFlatConcatRight(handle) orelse break :blk hasBackendRealization(left);
-                break :blk hasBackendRealization(left) or hasBackendRealization(right);
-            }
-            if (numericArrayFlatSegmentsValues(handle)) |segments| {
-                for (segments) |segment| {
-                    if (hasBackendRealization(segment)) break :blk true;
-                }
-            }
-            if (numericArrayFirstAxisSliceSource(handle)) |source| break :blk hasBackendRealization(source);
-            if (numericArrayFirstAxisIndexSource(handle)) |source| break :blk hasBackendRealization(source);
-            if (numericArrayFirstAxisConcatLeft(handle)) |left| {
-                const right = numericArrayFirstAxisConcatRight(handle) orelse break :blk hasBackendRealization(left);
-                break :blk hasBackendRealization(left) or hasBackendRealization(right);
-            }
-            if (numericArrayReshapeSource(handle)) |source| break :blk hasBackendRealization(source);
-            if (numericArrayTransposeSource(handle)) |source| break :blk hasBackendRealization(source);
-            break :blk false;
-        },
-        .host_dense_array => if (value.asHostDenseArray().logical_handle != null)
-            numericHasBackendAttachment(value.asHostDenseArray().logical_handle.?)
-        else
-            false,
-        .backend_array => true,
-        else => false,
-    };
+    const handle = valueNumericHandle(value) orelse return false;
+    if (numericHasBackendAttachment(handle)) return true;
+    if (numericArrayFlatSliceSource(handle)) |source| return hasBackendRealization(source);
+    if (numericArrayFlatConcatLeft(handle)) |left| {
+        const right = numericArrayFlatConcatRight(handle) orelse return hasBackendRealization(left);
+        return hasBackendRealization(left) or hasBackendRealization(right);
+    }
+    if (numericArrayFlatSegmentsValues(handle)) |segments| {
+        for (segments) |segment| {
+            if (hasBackendRealization(segment)) return true;
+        }
+    }
+    if (numericArrayFirstAxisSliceSource(handle)) |source| return hasBackendRealization(source);
+    if (numericArrayFirstAxisIndexSource(handle)) |source| return hasBackendRealization(source);
+    if (numericArrayFirstAxisConcatLeft(handle)) |left| {
+        const right = numericArrayFirstAxisConcatRight(handle) orelse return hasBackendRealization(left);
+        return hasBackendRealization(left) or hasBackendRealization(right);
+    }
+    if (numericArrayReshapeSource(handle)) |source| return hasBackendRealization(source);
+    if (numericArrayTransposeSource(handle)) |source| return hasBackendRealization(source);
+    return false;
 }
 
 fn numericVectorLen(value: Value) ?usize {
-    if (valueNumericHandle(value)) |handle| {
-        if (handle.rank != 1) return null;
-        return @intCast(handle.shape[0]);
-    }
-    if (value.tag() != .array) return null;
-    return switch (value.arrayKind()) {
-        .host_dense_array => value.asHostDenseArray().len(),
-        .backend_array => blk: {
-            const array = value.asBackendArray().array;
-            if (array.ndim() != 1) break :blk null;
-            const shape = array.shape();
-            if (shape.len != 1) break :blk null;
-            break :blk @intCast(shape[0]);
-        },
-        else => null,
-    };
+    const handle = valueNumericHandle(value) orelse return null;
+    if (handle.rank != 1) return null;
+    return @intCast(handle.shape[0]);
 }
 
 fn supportsBackendDyad(op: BuiltinId) bool {
@@ -52781,9 +48990,9 @@ fn backendSupportsMatmulDtypes(self: *Session, left: Value, right: Value) bool {
     return left_mode == .float or right_mode == .float;
 }
 
-fn createBackendArrayFromHostArray(self: *Session, array: *const HostDenseArray) KError!mlx.Array {
+fn createBackendArrayFromHostArray(self: *Session, value: Value, array: *const HostDenseArray) KError!mlx.Array {
     var dims_buf: [numeric_array_max_rank]i32 = @as([numeric_array_max_rank]i32, @splat(0));
-    const dims = hostDenseShapeDims(array, &dims_buf);
+    const dims = numericValueShapeDims(value, array, &dims_buf);
     return switch (array.storage) {
         .bit => |words| blk: {
             const converted = try self.allocator.alloc(bool, array.logical_len);
@@ -52830,17 +49039,12 @@ fn backendArrayElementCount(array: mlx.Array) usize {
 }
 
 fn numericArrayValueIsScalarLike(value: Value) bool {
-    if (valueNumericHandle(value)) |handle| return handle.rank == 0;
-    if (value.tag() != .array or value.arrayKind() != .backend_array) return false;
-    return value.asBackendArray().array.ndim() == 0;
+    const handle = valueNumericHandle(value) orelse return false;
+    return handle.rank == 0;
 }
 
 fn transposeTileLen(comptime T: type) usize {
     return if (@sizeOf(T) >= 8) 16 else 32;
-}
-
-fn denseIntScalarFits(comptime T: type, scalar: i64) bool {
-    return std.math.cast(T, scalar) != null;
 }
 
 fn tryHostTransposeTyped(comptime T: type, out: []T, source: []const T, rows: usize, cols: usize) bool {
@@ -53429,10 +49633,6 @@ fn fillFloat32ScalarTransposeDenseView(out: []f32, op: BuiltinId, scalar: f32, v
     }
 }
 
-fn transposeBlockedIntResult(comptime T: type, out: *HostDenseAlloc(T), source: []const T, rows: usize, cols: usize) void {
-    transposeBlockedTyped(T, out.items, source, rows, cols);
-}
-
 fn sourceHostIntRange(value: Value, array: *const HostDenseArray) HostIntRange {
     return if (hostIntArrayView(array)) |view|
         hostIntDenseValueRange(value, .{ .dense = view })
@@ -53442,7 +49642,7 @@ fn sourceHostIntRange(value: Value, array: *const HostDenseArray) HostIntRange {
 
 fn createHostArrayFromTransposeView(self: *Session, owner: HeapOwner, handle: *const NumericArray) KError!*HostDenseArray {
     if (!numericArrayIsTransposeView(handle)) return error.Type;
-    const value = Value.array(@constCast(handle));
+    const value = Value.numericArray(handle);
     const source = numericArrayTransposeSource(handle) orelse return error.Type;
     const source_shape = valueNumericMatrixShape(source) orelse return error.Type;
     const rows = source_shape.rows;
@@ -53457,7 +49657,7 @@ fn createHostArrayFromTransposeView(self: *Session, owner: HeapOwner, handle: *c
             .bit => |words| {
                 const source_bits = HostBitSlice{ .words = hostDenseLogicalBitWords(array, words), .len = array.logical_len };
                 if (source_bits.len == total_len) {
-                    var out = try self.allocOwnedHostIntResult(owner, .bit, total_len);
+                    var out = try self.allocHostIntResultForHandle(owner, handle, .bit, total_len);
                     if (fillBitTransposeResult(&out.bit, .{
                         .source_value = source,
                         .source_host = array,
@@ -53473,7 +49673,7 @@ fn createHostArrayFromTransposeView(self: *Session, owner: HeapOwner, handle: *c
             },
             .float32 => |items| {
                 if (items.len == total_len) {
-                    const out = try self.allocOwnedHostFloat32Result(owner, total_len);
+                    const out = try self.allocHostFloat32ResultForHandle(owner, handle, total_len);
                     transposeBlockedTypedTraced(self, f32, out.items, items, rows, cols);
                     const analysis = analyzeFloatSlice32(out.items);
                     hostDenseSetFlags(out.array, analysis.flags);
@@ -53482,7 +49682,7 @@ fn createHostArrayFromTransposeView(self: *Session, owner: HeapOwner, handle: *c
             },
             .float64 => |items| {
                 if (items.len == total_len) {
-                    const out = try self.allocOwnedHostFloatResult(owner, total_len);
+                    const out = try self.allocHostFloatResultForHandle(owner, handle, total_len);
                     transposeBlockedTypedTraced(self, f64, out.items, items, rows, cols);
                     const analysis = analyzeFloatSlice(out.items);
                     hostDenseSetFlags(out.array, analysis.flags);
@@ -53491,7 +49691,7 @@ fn createHostArrayFromTransposeView(self: *Session, owner: HeapOwner, handle: *c
             },
             .int8 => |items| {
                 if (items.len == total_len) {
-                    const out = try self.allocHostArrayTyped(i8, .int8, owner, total_len);
+                    const out = try self.allocHostArrayTypedForHandle(i8, .int8, owner, handle, total_len);
                     transposeBlockedTypedTraced(self, i8, out.items, items, rows, cols);
                     const host = out.array;
                     hostDenseSetFlags(host, host_dense_flag_normalized);
@@ -53501,7 +49701,7 @@ fn createHostArrayFromTransposeView(self: *Session, owner: HeapOwner, handle: *c
             },
             .int16 => |items| {
                 if (items.len == total_len) {
-                    const out = try self.allocHostArrayTyped(i16, .int16, owner, total_len);
+                    const out = try self.allocHostArrayTypedForHandle(i16, .int16, owner, handle, total_len);
                     transposeBlockedTypedTraced(self, i16, out.items, items, rows, cols);
                     const host = out.array;
                     hostDenseSetFlags(host, host_dense_flag_normalized);
@@ -53511,7 +49711,7 @@ fn createHostArrayFromTransposeView(self: *Session, owner: HeapOwner, handle: *c
             },
             .int32 => |items| {
                 if (items.len == total_len) {
-                    const out = try self.allocHostArrayTyped(i32, .int32, owner, total_len);
+                    const out = try self.allocHostArrayTypedForHandle(i32, .int32, owner, handle, total_len);
                     transposeBlockedTypedTraced(self, i32, out.items, items, rows, cols);
                     const host = out.array;
                     hostDenseSetFlags(host, host_dense_flag_normalized);
@@ -53521,7 +49721,7 @@ fn createHostArrayFromTransposeView(self: *Session, owner: HeapOwner, handle: *c
             },
             .int64 => |items| {
                 if (items.len == total_len) {
-                    const out = try self.allocHostArrayTyped(i64, .int64, owner, total_len);
+                    const out = try self.allocHostArrayTypedForHandle(i64, .int64, owner, handle, total_len);
                     transposeBlockedTypedTraced(self, i64, out.items, items, rows, cols);
                     const host = out.array;
                     hostDenseSetFlags(host, host_dense_flag_normalized);
@@ -53534,7 +49734,7 @@ fn createHostArrayFromTransposeView(self: *Session, owner: HeapOwner, handle: *c
 
     return switch (valueNumericMode(source) orelse return error.Type) {
         .float => blk: {
-            const out = try self.allocOwnedHostFloatResult(owner, total_len);
+            const out = try self.allocHostFloatResultForHandle(owner, handle, total_len);
             const transpose_view: HostTransposeView = .{
                 .source_value = source,
                 .source_host = source_host,
@@ -53557,7 +49757,7 @@ fn createHostArrayFromTransposeView(self: *Session, owner: HeapOwner, handle: *c
                 .kind = hostIntDenseViewKind(source_view),
                 .range = hostIntDenseValueRange(source, source_view),
             };
-            var out = try self.allocOwnedHostIntResult(owner, analysis.kind, total_len);
+            var out = try self.allocHostIntResultForHandle(owner, handle, analysis.kind, total_len);
             const transpose_view: HostTransposeView = .{
                 .source_value = source,
                 .source_host = source_host,
@@ -53576,7 +49776,7 @@ fn createHostArrayFromTransposeView(self: *Session, owner: HeapOwner, handle: *c
 
 fn createBackendArrayFromTransposeView(self: *Session, handle: *const NumericArray) KError!mlx.Array {
     if (!numericArrayIsTransposeView(handle)) return error.Type;
-    const value = Value.array(@constCast(handle));
+    const value = Value.numericArray(handle);
     const source = numericArrayTransposeSource(handle) orelse return error.Type;
     noteTransposeMaterializationDecision(self, value, numericArrayElementCount(handle), .mlx);
     var source_array = try self.materializeBackendArray(source);
@@ -53590,7 +49790,7 @@ fn createHostArrayFromRangeIota(self: *Session, owner: HeapOwner, handle: *const
     const len = numericArrayRangeLen(handle);
     const bounds = numericArrayRangeIotaBounds(handle);
     const kind = hostIntStorageKindForRange(bounds.min, bounds.max);
-    var out = try self.allocOwnedHostIntResult(owner, kind, len);
+    var out = try self.allocHostIntResultForHandle(owner, handle, kind, len);
     for (0..len) |idx| try out.set(idx, try numericArrayRangeIotaValueAt(handle, idx));
     const host = out.arrayPtr();
     if (kind == .bit) bitClearUnusedTail(host.storage.bit, host.logical_len);
@@ -53643,7 +49843,7 @@ fn createHostArrayFromFlatSlice(self: *Session, owner: HeapOwner, handle: *const
     if (!numericArrayIsFlatSlice(handle)) return error.Type;
     const source = numericArrayFlatSliceSource(handle) orelse return error.Type;
     const start = numericArrayFlatSliceStart(handle) orelse return error.Type;
-    const len = numericVectorLen(Value.array(@constCast(handle))) orelse return error.Type;
+    const len = numericVectorLen(Value.numericArray(handle)) orelse return error.Type;
     const collapsed = try tryCollapseHostFlatSlice(self, source, start, len);
     if (valueNumericHandle(source)) |source_handle| {
         if (source_handle.host == null and source_handle.mlx != null and
@@ -53667,14 +49867,14 @@ fn createHostArrayFromFlatSlice(self: *Session, owner: HeapOwner, handle: *const
                 .flat_slice => |items| {
                     if (items.source_host) |array| switch (array.storage) {
                         .float32 => |values| {
-                            const out = try self.allocHostArrayTyped(f32, .float32, owner, len);
+                            const out = try self.allocHostArrayTypedForHandle(f32, .float32, owner, handle, len);
                             @memcpy(out.items, values[items.start .. items.start + len]);
                             const analysis = analyzeFloatSlice32(out.items);
                             hostDenseSetFlags(out.array, analysis.flags);
                             break :blk out.array;
                         },
                         .float64 => |values| {
-                            const out = try self.allocHostArrayTyped(f64, .float64, owner, len);
+                            const out = try self.allocHostArrayTypedForHandle(f64, .float64, owner, handle, len);
                             @memcpy(out.items, values[items.start .. items.start + len]);
                             const analysis = analyzeFloatSlice(out.items);
                             hostDenseSetFlags(out.array, analysis.flags);
@@ -53682,7 +49882,7 @@ fn createHostArrayFromFlatSlice(self: *Session, owner: HeapOwner, handle: *const
                         },
                         else => {},
                     };
-                    const out = try self.allocHostArrayTyped(f64, .float64, owner, len);
+                    const out = try self.allocHostArrayTypedForHandle(f64, .float64, owner, handle, len);
                     for (0..len) |idx| out.items[idx] = try hostFlatSliceFloatItem(items, idx);
                     const analysis = analyzeFloatSlice(out.items);
                     hostDenseSetFlags(out.array, analysis.flags);
@@ -53691,7 +49891,7 @@ fn createHostArrayFromFlatSlice(self: *Session, owner: HeapOwner, handle: *const
                 .flat_stride => |items| {
                     if (items.source_host) |array| switch (array.storage) {
                         .float32 => {
-                            const out = try self.allocHostArrayTyped(f32, .float32, owner, len);
+                            const out = try self.allocHostArrayTypedForHandle(f32, .float32, owner, handle, len);
                             for (0..len) |idx| out.items[idx] = @floatCast(try hostFlatStrideFloatItem(items, idx));
                             const analysis = analyzeFloatSlice32(out.items);
                             hostDenseSetFlags(out.array, analysis.flags);
@@ -53699,7 +49899,7 @@ fn createHostArrayFromFlatSlice(self: *Session, owner: HeapOwner, handle: *const
                         },
                         else => {},
                     };
-                    const out = try self.allocHostArrayTyped(f64, .float64, owner, len);
+                    const out = try self.allocHostArrayTypedForHandle(f64, .float64, owner, handle, len);
                     for (0..len) |idx| out.items[idx] = try hostFlatStrideFloatItem(items, idx);
                     const analysis = analyzeFloatSlice(out.items);
                     hostDenseSetFlags(out.array, analysis.flags);
@@ -53708,14 +49908,14 @@ fn createHostArrayFromFlatSlice(self: *Session, owner: HeapOwner, handle: *const
             };
             if (hostDenseIfPresent(source)) |array| switch (array.storage) {
                 .float32 => |items| {
-                    const out = try self.allocHostArrayTyped(f32, .float32, owner, len);
+                    const out = try self.allocHostArrayTypedForHandle(f32, .float32, owner, handle, len);
                     @memcpy(out.items, items[start .. start + len]);
                     const analysis = analyzeFloatSlice32(out.items);
                     hostDenseSetFlags(out.array, analysis.flags);
                     break :blk out.array;
                 },
                 .float64 => |items| {
-                    const out = try self.allocHostArrayTyped(f64, .float64, owner, len);
+                    const out = try self.allocHostArrayTypedForHandle(f64, .float64, owner, handle, len);
                     @memcpy(out.items, items[start .. start + len]);
                     const analysis = analyzeFloatSlice(out.items);
                     hostDenseSetFlags(out.array, analysis.flags);
@@ -53723,7 +49923,7 @@ fn createHostArrayFromFlatSlice(self: *Session, owner: HeapOwner, handle: *const
                 },
                 else => {},
             };
-            const out = try self.allocHostArrayTyped(f64, .float64, owner, len);
+            const out = try self.allocHostArrayTypedForHandle(f64, .float64, owner, handle, len);
             for (0..len) |idx| out.items[idx] = try numericFloatAt(source, start + idx);
             const analysis = analyzeFloatSlice(out.items);
             hostDenseSetFlags(out.array, analysis.flags);
@@ -53734,7 +49934,7 @@ fn createHostArrayFromFlatSlice(self: *Session, owner: HeapOwner, handle: *const
                 .flat_slice => |items| {
                     if (items.source_host) |array| switch (array.storage) {
                         .bit => {
-                            const out = try self.allocHostBitArray(owner, len);
+                            const out = try self.allocHostBitArrayForHandle(owner, handle, len);
                             bitCopyRange(out.words, 0, .{ .words = array.storage.bit, .len = array.logical_len }, items.start, len);
                             const metadata = analyzeBitSlice(.{ .words = out.words, .len = out.len });
                             hostDenseSetFlags(out.array, metadata.flags);
@@ -53747,7 +49947,7 @@ fn createHostArrayFromFlatSlice(self: *Session, owner: HeapOwner, handle: *const
                     defer self.allocator.free(values);
                     for (0..len) |idx| values[idx] = try hostFlatSliceIntItem(items, idx);
                     const analysis = analyzeIntSlice(values);
-                    var out = try self.allocOwnedHostIntResult(owner, analysis.kind, len);
+                    var out = try self.allocHostIntResultForHandle(owner, handle, analysis.kind, len);
                     for (values, 0..) |item, idx| try out.set(idx, item);
                     const host = out.arrayPtr();
                     if (analysis.kind == .bit) bitClearUnusedTail(host.storage.bit, host.logical_len);
@@ -53758,7 +49958,7 @@ fn createHostArrayFromFlatSlice(self: *Session, owner: HeapOwner, handle: *const
                 .flat_stride => |items| {
                     if (items.source_host) |array| switch (array.storage) {
                         .bit => {
-                            const out = try self.allocHostBitArray(owner, len);
+                            const out = try self.allocHostBitArrayForHandle(owner, handle, len);
                             for (0..len) |idx| {
                                 bitSet(out.words, idx, bitGet(array.storage.bit, items.start + idx * items.step));
                             }
@@ -53773,7 +49973,7 @@ fn createHostArrayFromFlatSlice(self: *Session, owner: HeapOwner, handle: *const
                     defer self.allocator.free(values);
                     for (0..len) |idx| values[idx] = try hostFlatStrideIntItem(items, idx);
                     const analysis = analyzeIntSlice(values);
-                    var out = try self.allocOwnedHostIntResult(owner, analysis.kind, len);
+                    var out = try self.allocHostIntResultForHandle(owner, handle, analysis.kind, len);
                     for (values, 0..) |item, idx| try out.set(idx, item);
                     const host = out.arrayPtr();
                     if (analysis.kind == .bit) bitClearUnusedTail(host.storage.bit, host.logical_len);
@@ -53784,7 +49984,7 @@ fn createHostArrayFromFlatSlice(self: *Session, owner: HeapOwner, handle: *const
             };
             if (hostDenseIfPresent(source)) |array| switch (array.storage) {
                 .bit => {
-                    const out = try self.allocHostBitArray(owner, len);
+                    const out = try self.allocHostBitArrayForHandle(owner, handle, len);
                     bitCopyRange(out.words, 0, .{ .words = array.storage.bit, .len = array.logical_len }, start, len);
                     const metadata = analyzeBitSlice(.{ .words = out.words, .len = out.len });
                     hostDenseSetFlags(out.array, metadata.flags);
@@ -53797,7 +49997,7 @@ fn createHostArrayFromFlatSlice(self: *Session, owner: HeapOwner, handle: *const
             defer self.allocator.free(values);
             for (0..len) |idx| values[idx] = try numericIntAt(source, start + idx);
             const analysis = analyzeIntSlice(values);
-            var out = try self.allocOwnedHostIntResult(owner, analysis.kind, len);
+            var out = try self.allocHostIntResultForHandle(owner, handle, analysis.kind, len);
             for (values, 0..) |item, idx| try out.set(idx, item);
             const host = out.arrayPtr();
             if (analysis.kind == .bit) bitClearUnusedTail(host.storage.bit, host.logical_len);
@@ -53813,7 +50013,7 @@ fn createBackendArrayFromFlatSlice(self: *Session, handle: *const NumericArray) 
     const source = numericArrayFlatSliceSource(handle) orelse return error.Type;
     const source_len = numericFlatLen(source) orelse return error.Type;
     const start = numericArrayFlatSliceStart(handle) orelse return error.Type;
-    const len = numericVectorLen(Value.array(@constCast(handle))) orelse return error.Type;
+    const len = numericVectorLen(Value.numericArray(handle)) orelse return error.Type;
 
     var source_array = try self.materializeBackendArray(source);
     defer source_array.deinit();
@@ -53830,7 +50030,7 @@ fn createBackendArrayFromFlatSlice(self: *Session, handle: *const NumericArray) 
     return mlx.Array.slice(ctx.*, source_array, &start_buf, &stop_buf, &stride_buf) catch |err| return mapMlxError(err);
 }
 
-fn createHostArrayFromFlatValues(self: *Session, owner: HeapOwner, segments: []const Value) KError!*HostDenseArray {
+fn createHostArrayFromFlatValues(self: *Session, owner: HeapOwner, handle: *const NumericArray, segments: []const Value) KError!*HostDenseArray {
     if (segments.len == 0) return error.Type;
     const mode = valueNumericMode(segments[0]) orelse return error.Type;
     var total_len: usize = 0;
@@ -53850,7 +50050,7 @@ fn createHostArrayFromFlatValues(self: *Session, owner: HeapOwner, segments: []c
             }
         }
         if (all_bits) {
-            const out = try self.allocHostBitArray(owner, total_len);
+            const out = try self.allocHostBitArrayForHandle(owner, handle, total_len);
             var dst_start: usize = 0;
             for (segments) |segment| {
                 const bits = valueNumericBitSlice(segment) orelse return error.Type;
@@ -53874,7 +50074,7 @@ fn createHostArrayFromFlatValues(self: *Session, owner: HeapOwner, segments: []c
             }
         }
         const analysis = analyzeIntSlice(values);
-        var out = try self.allocOwnedHostIntResult(owner, analysis.kind, total_len);
+        var out = try self.allocHostIntResultForHandle(owner, handle, analysis.kind, total_len);
         for (values, 0..) |item, idx| try out.set(idx, item);
         const host = out.arrayPtr();
         if (analysis.kind == .bit) bitClearUnusedTail(host.storage.bit, host.logical_len);
@@ -53891,7 +50091,7 @@ fn createHostArrayFromFlatValues(self: *Session, owner: HeapOwner, segments: []c
         }
     }
     if (all_float32) {
-        const out = try self.allocOwnedHostFloat32Result(owner, total_len);
+        const out = try self.allocHostFloat32ResultForHandle(owner, handle, total_len);
         var out_idx: usize = 0;
         for (segments) |segment| {
             const items = valueNumericFloat32Slice(segment) orelse return error.Type;
@@ -53910,7 +50110,7 @@ fn createHostArrayFromFlatValues(self: *Session, owner: HeapOwner, segments: []c
         .float64 => saw_float64 = true,
     };
     if (saw_float32 and !saw_float64) {
-        const out = try self.allocOwnedHostFloat32Result(owner, total_len);
+        const out = try self.allocHostFloat32ResultForHandle(owner, handle, total_len);
         var out_idx: usize = 0;
         for (segments) |segment| {
             const len = numericVectorLen(segment) orelse return error.Type;
@@ -53924,7 +50124,7 @@ fn createHostArrayFromFlatValues(self: *Session, owner: HeapOwner, segments: []c
         return out.array;
     }
 
-    const out = try self.allocOwnedHostFloatResult(owner, total_len);
+    const out = try self.allocHostFloatResultForHandle(owner, handle, total_len);
     var out_idx: usize = 0;
     for (segments) |segment| {
         const len = numericVectorLen(segment) orelse return error.Type;
@@ -53938,11 +50138,11 @@ fn createHostArrayFromFlatValues(self: *Session, owner: HeapOwner, segments: []c
     return out.array;
 }
 
-fn createBackendArrayFromFlatValues(self: *Session, segments: []const Value) KError!mlx.Array {
+fn createBackendArrayFromFlatValues(self: *Session, handle: *const NumericArray, segments: []const Value) KError!mlx.Array {
     if (segments.len == 0) return error.Type;
     if (flatValuesPreferSingleHostUpload(segments)) {
-        const host = try createHostArrayFromFlatValues(self, .scratch, segments);
-        return try createBackendArrayFromHostArray(self, host);
+        const host = try createHostArrayFromFlatValues(self, .scratch, handle, segments);
+        return try createBackendArrayFromHostArray(self, Value.numericArray(handle), host);
     }
 
     var arrays = try self.allocator.alloc(mlx.Array, segments.len);
@@ -53969,26 +50169,26 @@ fn createHostArrayFromFlatConcat(self: *Session, owner: HeapOwner, handle: *cons
     if (!numericArrayIsFlatConcat(handle)) return error.Type;
     const left = numericArrayFlatConcatLeft(handle) orelse return error.Type;
     const right = numericArrayFlatConcatRight(handle) orelse return error.Type;
-    return try createHostArrayFromFlatValues(self, owner, &[_]Value{ left, right });
+    return try createHostArrayFromFlatValues(self, owner, handle, &[_]Value{ left, right });
 }
 
 fn createBackendArrayFromFlatConcat(self: *Session, handle: *const NumericArray) KError!mlx.Array {
     if (!numericArrayIsFlatConcat(handle)) return error.Type;
     const left = numericArrayFlatConcatLeft(handle) orelse return error.Type;
     const right = numericArrayFlatConcatRight(handle) orelse return error.Type;
-    return try createBackendArrayFromFlatValues(self, &[_]Value{ left, right });
+    return try createBackendArrayFromFlatValues(self, handle, &[_]Value{ left, right });
 }
 
 fn createHostArrayFromFlatSegments(self: *Session, owner: HeapOwner, handle: *const NumericArray) KError!*HostDenseArray {
     if (!numericArrayIsFlatSegments(handle)) return error.Type;
     const segments = numericArrayFlatSegmentsValues(handle) orelse return error.Type;
-    return try createHostArrayFromFlatValues(self, owner, segments);
+    return try createHostArrayFromFlatValues(self, owner, handle, segments);
 }
 
 fn createBackendArrayFromFlatSegments(self: *Session, handle: *const NumericArray) KError!mlx.Array {
     if (!numericArrayIsFlatSegments(handle)) return error.Type;
     const segments = numericArrayFlatSegmentsValues(handle) orelse return error.Type;
-    return try createBackendArrayFromFlatValues(self, segments);
+    return try createBackendArrayFromFlatValues(self, handle, segments);
 }
 
 fn createHostArrayFromFirstAxisSlice(self: *Session, owner: HeapOwner, handle: *const NumericArray) KError!*HostDenseArray {
@@ -54014,7 +50214,7 @@ fn createHostArrayFromFirstAxisSlice(self: *Session, owner: HeapOwner, handle: *
             }
         }
         const analysis = analyzeIntSlice(values);
-        var out = try self.allocOwnedHostIntResult(owner, analysis.kind, total_len);
+        var out = try self.allocHostIntResultForHandle(owner, handle, analysis.kind, total_len);
         for (values, 0..) |item, idx| try out.set(idx, item);
         const host = out.arrayPtr();
         if (analysis.kind == .bit) bitClearUnusedTail(host.storage.bit, host.logical_len);
@@ -54026,7 +50226,7 @@ fn createHostArrayFromFirstAxisSlice(self: *Session, owner: HeapOwner, handle: *
     const source_array = try hostStructuralArrayForHandle(self, try numericHandleRequired(slice.source));
     if (slice.step == 1) switch (source_array.storage) {
         .bit => {
-            const out = try self.allocHostBitArray(owner, total_len);
+            const out = try self.allocHostBitArrayForHandle(owner, handle, total_len);
             bitCopyRange(out.words, 0, .{ .words = source_array.storage.bit, .len = source_array.logical_len }, start, total_len);
             const metadata = analyzeBitSlice(.{ .words = out.words, .len = out.len });
             hostDenseSetFlags(out.array, metadata.flags);
@@ -54034,14 +50234,14 @@ fn createHostArrayFromFirstAxisSlice(self: *Session, owner: HeapOwner, handle: *
             return out.array;
         },
         .float32 => |items| {
-            const out = try self.allocHostArrayTyped(f32, .float32, owner, total_len);
+            const out = try self.allocHostArrayTypedForHandle(f32, .float32, owner, handle, total_len);
             @memcpy(out.items, items[start .. start + total_len]);
             const host = out.array;
             host.flags = source_array.flags;
             return host;
         },
         .float64 => |items| {
-            const out = try self.allocHostArrayTyped(f64, .float64, owner, total_len);
+            const out = try self.allocHostArrayTypedForHandle(f64, .float64, owner, handle, total_len);
             @memcpy(out.items, items[start .. start + total_len]);
             const host = out.array;
             host.flags = source_array.flags;
@@ -54049,7 +50249,7 @@ fn createHostArrayFromFirstAxisSlice(self: *Session, owner: HeapOwner, handle: *
         },
         else => {
             const kind = hostIntArrayViewKind(hostIntArrayView(source_array).?);
-            var out = try self.allocOwnedHostIntResult(owner, kind, total_len);
+            var out = try self.allocHostIntResultForHandle(owner, handle, kind, total_len);
             for (0..total_len) |idx| try out.set(idx, try hostDenseIntAt(source_array, start + idx));
             const host = out.arrayPtr();
             host.flags = source_array.flags;
@@ -54063,7 +50263,7 @@ fn createHostArrayFromFirstAxisSlice(self: *Session, owner: HeapOwner, handle: *
     switch (hostDenseNumericMode(source_array)) {
         .float => switch (source_array.storage) {
             .float32 => {
-                const out = try self.allocHostArrayTyped(f32, .float32, owner, total_len);
+                const out = try self.allocHostArrayTypedForHandle(f32, .float32, owner, handle, total_len);
                 var out_idx: usize = 0;
                 for (0..row_count) |row| {
                     const source_row_i64 = @as(i64, @intCast(slice.start)) + @as(i64, @intCast(row)) * @as(i64, slice.step);
@@ -54079,7 +50279,7 @@ fn createHostArrayFromFirstAxisSlice(self: *Session, owner: HeapOwner, handle: *
                 return out.array;
             },
             .float64 => {
-                const out = try self.allocHostArrayTyped(f64, .float64, owner, total_len);
+                const out = try self.allocHostArrayTypedForHandle(f64, .float64, owner, handle, total_len);
                 var out_idx: usize = 0;
                 for (0..row_count) |row| {
                     const source_row_i64 = @as(i64, @intCast(slice.start)) + @as(i64, @intCast(row)) * @as(i64, slice.step);
@@ -54098,7 +50298,7 @@ fn createHostArrayFromFirstAxisSlice(self: *Session, owner: HeapOwner, handle: *
         },
         .int => {
             if (std.meta.activeTag(source_array.storage) == .bit) {
-                const out = try self.allocHostBitArray(owner, total_len);
+                const out = try self.allocHostBitArrayForHandle(owner, handle, total_len);
                 for (0..row_count) |row| {
                     const source_row_i64 = @as(i64, @intCast(slice.start)) + @as(i64, @intCast(row)) * @as(i64, slice.step);
                     if (source_row_i64 < 0) return error.Type;
@@ -54128,7 +50328,7 @@ fn createHostArrayFromFirstAxisSlice(self: *Session, owner: HeapOwner, handle: *
                 }
             }
             const analysis = analyzeIntSlice(values);
-            var out = try self.allocOwnedHostIntResult(owner, analysis.kind, total_len);
+            var out = try self.allocHostIntResultForHandle(owner, handle, analysis.kind, total_len);
             for (values, 0..) |item, idx| try out.set(idx, item);
             const host = out.arrayPtr();
             if (analysis.kind == .bit) bitClearUnusedTail(host.storage.bit, host.logical_len);
@@ -54195,7 +50395,7 @@ fn createHostArrayFromFirstAxisIndex(self: *Session, owner: HeapOwner, handle: *
             const source_array_maybe = try ensureNumericHostAttachmentForDenseView(self, index.source);
             if (source_array_maybe) |source_array| switch (source_array.storage) {
                 .float32 => {
-                    const out = try self.allocHostArrayTyped(f32, .float32, owner, total_len);
+                    const out = try self.allocHostArrayTypedForHandle(f32, .float32, owner, handle, total_len);
                     var out_idx: usize = 0;
                     for (0..row_count) |row| {
                         const source_row_i64 = try numericIntAt(index.row_indices, row);
@@ -54212,7 +50412,7 @@ fn createHostArrayFromFirstAxisIndex(self: *Session, owner: HeapOwner, handle: *
                 },
                 else => {},
             };
-            const out = try self.allocHostArrayTyped(f64, .float64, owner, total_len);
+            const out = try self.allocHostArrayTypedForHandle(f64, .float64, owner, handle, total_len);
             var out_idx: usize = 0;
             for (0..row_count) |row| {
                 const source_row_i64 = try numericIntAt(index.row_indices, row);
@@ -54230,7 +50430,7 @@ fn createHostArrayFromFirstAxisIndex(self: *Session, owner: HeapOwner, handle: *
         .int => blk: {
             if (valueNumericBitSlice(index.source)) |bits| {
                 if (valueHostIntStructuralView(index.row_indices)) |view| {
-                    const out = try self.allocHostBitArray(owner, total_len);
+                    const out = try self.allocHostBitArrayForHandle(owner, handle, total_len);
                     try Session.copyBitMatrixRowsByDenseSelector(out.words, bits, view, @intCast(source_handle.shape[0]), row_width);
                     const metadata = analyzeBitSlice(.{ .words = out.words, .len = out.len });
                     hostDenseSetFlags(out.array, metadata.flags);
@@ -54251,7 +50451,7 @@ fn createHostArrayFromFirstAxisIndex(self: *Session, owner: HeapOwner, handle: *
                 }
             }
             const analysis = analyzeIntSlice(values);
-            var out = try self.allocOwnedHostIntResult(owner, analysis.kind, total_len);
+            var out = try self.allocHostIntResultForHandle(owner, handle, analysis.kind, total_len);
             for (values, 0..) |item, idx| try out.set(idx, item);
             const host = out.arrayPtr();
             if (analysis.kind == .bit) bitClearUnusedTail(host.storage.bit, host.logical_len);
@@ -54288,7 +50488,7 @@ fn createHostArrayFromFirstAxisConcat(self: *Session, owner: HeapOwner, handle: 
     const cols: usize = @intCast(handle.shape[1]);
     var segments = std.ArrayList(FirstAxisMatrixSegment).empty;
     defer segments.deinit(self.allocator);
-    try collectFirstAxisMatrixSegments(self.allocator, Value.array(@constCast(handle)), cols, &segments);
+    try collectFirstAxisMatrixSegments(self.allocator, Value.numericArray(handle), cols, &segments);
     if (segments.items.len == 0) return error.Type;
 
     const left = segments.items[0].value;
@@ -54310,7 +50510,7 @@ fn createHostArrayFromFirstAxisConcat(self: *Session, owner: HeapOwner, handle: 
             }
         }
         if (all_bits) {
-            const out = try self.allocHostBitArray(owner, total_len);
+            const out = try self.allocHostBitArrayForHandle(owner, handle, total_len);
             var dst_start: usize = 0;
             for (segments.items) |segment| {
                 const bits = valueNumericBitSlice(segment.value) orelse return error.Type;
@@ -54334,7 +50534,7 @@ fn createHostArrayFromFirstAxisConcat(self: *Session, owner: HeapOwner, handle: 
             }
         }
         const analysis = analyzeIntSlice(values);
-        var out = try self.allocOwnedHostIntResult(owner, analysis.kind, total_len);
+        var out = try self.allocHostIntResultForHandle(owner, handle, analysis.kind, total_len);
         for (values, 0..) |item, idx| try out.set(idx, item);
         const host = out.arrayPtr();
         if (analysis.kind == .bit) bitClearUnusedTail(host.storage.bit, host.logical_len);
@@ -54350,7 +50550,7 @@ fn createHostArrayFromFirstAxisConcat(self: *Session, owner: HeapOwner, handle: 
         .float64 => saw_float64 = true,
     };
     if (saw_float32 and !saw_float64) {
-        const out = try self.allocOwnedHostFloat32Result(owner, total_len);
+        const out = try self.allocHostFloat32ResultForHandle(owner, handle, total_len);
         var out_idx: usize = 0;
         for (segments.items) |segment| {
             const len = numericFlatLen(segment.value) orelse return error.Type;
@@ -54364,7 +50564,7 @@ fn createHostArrayFromFirstAxisConcat(self: *Session, owner: HeapOwner, handle: 
         return out.array;
     }
 
-    const out = try self.allocOwnedHostFloatResult(owner, total_len);
+    const out = try self.allocHostFloatResultForHandle(owner, handle, total_len);
     var out_idx: usize = 0;
     for (segments.items) |segment| {
         const len = numericFlatLen(segment.value) orelse return error.Type;
@@ -54414,7 +50614,7 @@ fn createBackendArrayFromFirstAxisConcat(self: *Session, handle: *const NumericA
     const cols: usize = @intCast(handle.shape[1]);
     var segments = std.ArrayList(FirstAxisMatrixSegment).empty;
     defer segments.deinit(self.allocator);
-    try collectFirstAxisMatrixSegments(self.allocator, Value.array(@constCast(handle)), cols, &segments);
+    try collectFirstAxisMatrixSegments(self.allocator, Value.numericArray(handle), cols, &segments);
     if (segments.items.len == 0) return error.Type;
 
     var arrays = try self.allocator.alloc(mlx.Array, segments.items.len);
@@ -54438,7 +50638,7 @@ fn createHostArrayFromReshapeView(self: *Session, owner: HeapOwner, handle: *con
         .float => switch (source_array.storage) {
             .float32 => |items| blk: {
                 if (items.len != total_len) return error.Type;
-                const out = try self.allocHostArrayTyped(f32, .float32, owner, total_len);
+                const out = try self.allocHostArrayTypedForHandle(f32, .float32, owner, handle, total_len);
                 @memcpy(out.items, items);
                 const analysis = analyzeFloatSlice32(out.items);
                 hostDenseSetFlags(out.array, analysis.flags);
@@ -54446,7 +50646,7 @@ fn createHostArrayFromReshapeView(self: *Session, owner: HeapOwner, handle: *con
             },
             .float64 => |items| blk: {
                 if (items.len != total_len) return error.Type;
-                const out = try self.allocHostArrayTyped(f64, .float64, owner, total_len);
+                const out = try self.allocHostArrayTypedForHandle(f64, .float64, owner, handle, total_len);
                 @memcpy(out.items, items);
                 const analysis = analyzeFloatSlice(out.items);
                 hostDenseSetFlags(out.array, analysis.flags);
@@ -54459,7 +50659,7 @@ fn createHostArrayFromReshapeView(self: *Session, owner: HeapOwner, handle: *con
             if (hostIntArrayViewLen(view) != total_len) return error.Type;
             if (view == .bit) {
                 const source_bits = view.bit;
-                const out = try self.allocHostBitArrayUninitialized(owner, total_len);
+                const out = try self.allocHostBitArrayForHandleUninitialized(owner, handle, total_len);
                 @memcpy(out.words, source_bits.words[0..out.words.len]);
                 bitClearUnusedTail(out.words, out.len);
                 hostDenseSetFlags(out.array, source_array.flags);
@@ -54470,7 +50670,7 @@ fn createHostArrayFromReshapeView(self: *Session, owner: HeapOwner, handle: *con
             defer self.allocator.free(values);
             for (0..total_len) |idx| values[idx] = hostIntViewItem(view, idx);
             const analysis = analyzeIntSlice(values);
-            var out = try self.allocOwnedHostIntResult(owner, analysis.kind, total_len);
+            var out = try self.allocHostIntResultForHandle(owner, handle, analysis.kind, total_len);
             for (values, 0..) |item, idx| try out.set(idx, item);
             const host = out.arrayPtr();
             if (analysis.kind == .bit) bitClearUnusedTail(host.storage.bit, host.logical_len);
@@ -54490,85 +50690,23 @@ fn createBackendArrayFromReshapeView(self: *Session, handle: *const NumericArray
     return mlx.Array.reshape(ctx.*, source_array, handle.shapeSlice()) catch |err| return mapMlxError(err);
 }
 
-fn createHostDenseArrayFromBackendArray(self: *Session, owner: HeapOwner, array: mlx.Array) KError!*HostDenseArray {
+fn createHostDenseArrayFromBackendArray(self: *Session, owner: HeapOwner, handle: *const NumericArray, array: mlx.Array) KError!*HostDenseArray {
     if (comptime runtime_has_mlx) {
-        return runtime_backend_materialize.createHostDenseArrayFromBackendArray(.{
-            .Session = Session,
-            .HeapOwner = HeapOwner,
-            .HostDenseArray = HostDenseArray,
-            .KError = KError,
-            .mlx = mlx,
-            .c = c,
-            .mapMlxError = mapMlxError,
-            .backendArrayElementCount = backendArrayElementCount,
-            .analyzeIntSlice = analyzeIntSlice,
-            .analyzeFloatSlice = analyzeFloatSlice,
-            .analyzeFloatSlice32 = analyzeFloatSlice32,
-            .allocOwnedHostIntResult = Session.allocOwnedHostIntResult,
-            .allocOwnedHostFloatResult = Session.allocOwnedHostFloatResult,
-            .allocOwnedHostFloat32Result = Session.allocOwnedHostFloat32Result,
-            .hostIntResultSet = hostIntResultSet,
-            .hostIntResultArrayPtr = hostIntResultArrayPtr,
-            .bitClearUnusedTail = bitClearUnusedTail,
-            .hostDenseSetFlags = hostDenseSetFlags,
-            .hostDenseSetCachedIntRange = hostDenseSetCachedIntRange,
-            .host_dense_flag_normalized = host_dense_flag_normalized,
-            .orderFlagsFromMonotonic = orderFlagsFromMonotonic,
-        }, self, owner, array);
+        return runtime_backend_materialize.createHostDenseArrayFromBackendArray(backend_materialize_api, self, owner, handle, array);
     }
     return error.Unsupported;
 }
 
 fn tryEnsureManagedBackendRealizationForHandle(self: *Session, handle: *NumericArray) KError!?*BackendArray {
     if (comptime runtime_has_mlx) {
-        return runtime_backend_materialize.tryEnsureManagedBackendRealizationForHandle(.{
-            .Session = Session,
-            .Value = Value,
-            .NumericArray = NumericArray,
-            .BackendArray = BackendArray,
-            .KError = KError,
-            .mlx = mlx,
-            .enable_probe_instrumentation = enable_probe_instrumentation,
-            .numericArrayIsRangeIota = numericArrayIsRangeIota,
-            .numericArrayIsFlatSlice = numericArrayIsFlatSlice,
-            .numericArrayIsFlatConcat = numericArrayIsFlatConcat,
-            .numericArrayIsFlatSegments = numericArrayIsFlatSegments,
-            .numericArrayIsFirstAxisSlice = numericArrayIsFirstAxisSlice,
-            .numericArrayIsFirstAxisIndex = numericArrayIsFirstAxisIndex,
-            .numericArrayIsFirstAxisConcat = numericArrayIsFirstAxisConcat,
-            .numericArrayIsReshapeView = numericArrayIsReshapeView,
-            .numericArrayIsTransposeView = numericArrayIsTransposeView,
-            .createBackendArrayFromRangeIota = createBackendArrayFromRangeIota,
-            .createBackendArrayFromFlatSlice = createBackendArrayFromFlatSlice,
-            .createBackendArrayFromFlatConcat = createBackendArrayFromFlatConcat,
-            .createBackendArrayFromFlatSegments = createBackendArrayFromFlatSegments,
-            .createBackendArrayFromFirstAxisSlice = createBackendArrayFromFirstAxisSlice,
-            .createBackendArrayFromFirstAxisIndex = createBackendArrayFromFirstAxisIndex,
-            .createBackendArrayFromFirstAxisConcat = createBackendArrayFromFirstAxisConcat,
-            .createBackendArrayFromReshapeView = createBackendArrayFromReshapeView,
-            .createBackendArrayFromTransposeView = createBackendArrayFromTransposeView,
-            .tryEnsureHostRealizationForHandle = tryEnsureHostRealizationForHandle,
-            .hostDenseNumericMode = hostDenseNumericMode,
-            .createBackendArrayFromHostArray = createBackendArrayFromHostArray,
-            .allocManagedBackendPayload = Session.allocManagedBackendPayload,
-            .syncNumericArrayChildren = syncNumericArrayChildren,
-            .touchBackendAttachment = Session.touchBackendAttachment,
-            .enforceDualResidentBudget = Session.enforceDualResidentBudget,
-        }, self, handle);
+        return runtime_backend_materialize.tryEnsureManagedBackendRealizationForHandle(backend_materialize_api, self, handle);
     }
     return null;
 }
 
 fn tryEnsureManagedBackendRealization(self: *Session, value: Value) KError!?*BackendArray {
     if (comptime runtime_has_mlx) {
-        return runtime_backend_materialize.tryEnsureManagedBackendRealization(.{
-            .Session = Session,
-            .Value = Value,
-            .BackendArray = BackendArray,
-            .KError = KError,
-            .mutableNumericHandle = mutableNumericHandle,
-            .tryEnsureManagedBackendRealizationForHandle = tryEnsureManagedBackendRealizationForHandle,
-        }, self, value);
+        return runtime_backend_materialize.tryEnsureManagedBackendRealization(backend_materialize_api, self, value);
     }
     return null;
 }
@@ -54577,7 +50715,7 @@ fn tryEnsureHostRealizationForHandle(self: *Session, handle: *NumericArray) KErr
     var profile_scope = self.beginSamplingProfileScope(.host_realization);
     defer profile_scope.end();
     if (numericHostAttachment(handle)) |array| {
-        if (comptime enable_probe_instrumentation) self.debug_host_realization_reuse_count += 1;
+        if (comptime enable_probe_instrumentation) self.debug.host_realization_reuse_count += 1;
         self.touchHostAttachment(handle);
         return @constCast(array);
     }
@@ -54605,29 +50743,22 @@ fn tryEnsureHostRealizationForHandle(self: *Session, handle: *NumericArray) KErr
     else blk: {
         const backend_array = numericBackendAttachment(handle) orelse return null;
         if (handle.rank == 0) numericArraySetShapeFromBackend(handle, backend_array.array);
-        break :blk try createHostDenseArrayFromBackendArray(self, handle.header.owner, backend_array.array);
+        break :blk try createHostDenseArrayFromBackendArray(self, handle.header.owner, handle, backend_array.array);
     };
     if (comptime enable_probe_instrumentation) {
-        self.debug_host_realization_count += 1;
-        if (numericArrayStructuralTag(handle) != .materialized) self.debug_structural_host_realization_count += 1;
-        if (had_mlx_attachment) self.debug_host_readback_count += 1;
+        self.debug.host_realization_count += 1;
+        if (numericArrayStructuralTag(handle) != .materialized) self.debug.structural_host_realization_count += 1;
+        if (had_mlx_attachment) self.debug.host_readback_count += 1;
     }
     handle.host = host;
-    syncNumericArrayChildren(handle);
     self.touchHostAttachment(handle);
     if (numericHasBackendAttachment(handle)) self.enforceDualResidentBudget(handle);
     return host;
 }
 
 fn tryEnsureHostRealization(self: *Session, value: Value) KError!?*HostDenseArray {
-    if (value.tag() != .array) return null;
-    if (valueNumericHandle(value)) |handle| {
-        return try tryEnsureHostRealizationForHandle(self, @constCast(handle));
-    }
-    return switch (value.arraySubkind()) {
-        .host_dense_array => @constCast(value.asHostDenseArray()),
-        else => null,
-    };
+    const handle = mutableNumericHandle(value) orelse return null;
+    return try tryEnsureHostRealizationForHandle(self, handle);
 }
 
 fn hostStructuralArrayForHandle(self: *Session, handle: *NumericArray) KError!*const HostDenseArray {
@@ -54635,14 +50766,8 @@ fn hostStructuralArrayForHandle(self: *Session, handle: *NumericArray) KError!*c
 }
 
 fn numericHostArrayValue(self: *Session, value: Value) KError!*const HostDenseArray {
-    if (value.tag() != .array) return error.Type;
-    if (valueNumericHandle(value)) |handle| {
-        return try hostStructuralArrayForHandle(self, @constCast(handle));
-    }
-    return switch (value.arrayKind()) {
-        .host_dense_array => value.asHostDenseArray(),
-        else => error.Type,
-    };
+    const handle = mutableNumericHandle(value) orelse return error.Type;
+    return try hostStructuralArrayForHandle(self, handle);
 }
 
 fn mutableNumericHostArrayValue(self: *Session, value: Value) KError!*HostDenseArray {
@@ -54661,8 +50786,8 @@ fn noteDensePlanDecision(self: *Session, kind: DenseRegionKind, planned_backend:
     if (comptime !enable_probe_instrumentation) {
         return;
     }
-    self.debug_dense_plan_counts[@intFromEnum(kind)][@intFromEnum(planned_backend)] += 1;
-    self.debug_dense_exec_counts[@intFromEnum(kind)][@intFromEnum(actual_backend)] += 1;
+    self.debug.dense_plan_counts[@backingInt(kind)][@backingInt(planned_backend)] += 1;
+    self.debug.dense_exec_counts[@backingInt(kind)][@backingInt(actual_backend)] += 1;
     self.last_dense_plan_region = kind;
     self.last_dense_plan_backend = planned_backend;
     self.last_dense_exec_backend = actual_backend;
@@ -54674,8 +50799,8 @@ fn countDensePlanDecision(self: *Session, kind: DenseRegionKind, planned_backend
     if (comptime !enable_probe_instrumentation) {
         return;
     }
-    self.debug_dense_plan_counts[@intFromEnum(kind)][@intFromEnum(planned_backend)] += 1;
-    self.debug_dense_exec_counts[@intFromEnum(kind)][@intFromEnum(actual_backend)] += 1;
+    self.debug.dense_plan_counts[@backingInt(kind)][@backingInt(planned_backend)] += 1;
+    self.debug.dense_exec_counts[@backingInt(kind)][@backingInt(actual_backend)] += 1;
 }
 
 fn planDenseRegionDecision(kind: DenseRegionKind, facts: DenseRegionFacts) DensePlanDecision {
@@ -54901,15 +51026,7 @@ fn valueHasFullReverseHostDensePlanning(value: Value) bool {
 fn valueSupportsHostDensePlanning(value: Value) bool {
     return switch (value.tag()) {
         .int, .bool, .float, .float32 => true,
-        .array => switch (value.arraySubkind()) {
-            .host_dense_array => true,
-            .numeric_array => handleSupportsHostDense(value.asNumericArray()),
-            .backend_array => if (value.asBackendArray().logical_handle) |handle|
-                handleSupportsHostDense(handle)
-            else
-                false,
-            else => false,
-        },
+        .array => if (valueNumericHandle(value)) |handle| handleSupportsHostDense(handle) else false,
         else => false,
     };
 }
@@ -54917,15 +51034,7 @@ fn valueSupportsHostDensePlanning(value: Value) bool {
 fn valueSupportsCheapHostDensePlanning(value: Value) bool {
     return switch (value.tag()) {
         .int, .bool, .float, .float32 => true,
-        .array => switch (value.arraySubkind()) {
-            .host_dense_array => true,
-            .numeric_array => handleSupportsCheapHostDense(value.asNumericArray()),
-            .backend_array => if (value.asBackendArray().logical_handle) |handle|
-                handleSupportsCheapHostDense(handle)
-            else
-                false,
-            else => false,
-        },
+        .array => if (valueNumericHandle(value)) |handle| handleSupportsCheapHostDense(handle) else false,
         else => false,
     };
 }
@@ -55060,19 +51169,9 @@ fn valueNumericMode(value: Value) ?HostDenseElem {
     return switch (value.tag()) {
         .int, .bool => .int,
         .float, .float32 => .float,
-        .array => if (valueNumericHandle(value)) |handle|
-            handleMode(handle)
-        else switch (value.arrayKind()) {
-            .host_dense_array => hostDenseNumericMode(value.asHostDenseArray()),
-            .backend_array => backendArrayNumericMode(value.asBackendArray().array),
-            else => null,
-        },
+        .array => if (valueNumericHandle(value)) |handle| handleMode(handle) else null,
         else => null,
     };
-}
-
-fn isBackendArrayValue(value: Value) bool {
-    return value.tag() == .array and value.arrayKind() == .backend_array;
 }
 
 fn arrayResultMode(op: BuiltinId, left: Value, right: Value) ?HostDenseElem {
@@ -55082,32 +51181,20 @@ fn arrayResultMode(op: BuiltinId, left: Value, right: Value) ?HostDenseElem {
     return .int;
 }
 
-fn denseResultMode(op: BuiltinId, left_mode: HostDenseElem, right_mode: HostDenseElem) HostDenseElem {
-    if (op == .div or left_mode == .float or right_mode == .float) return .float;
-    return .int;
-}
-
 fn numericFlatLen(value: Value) ?usize {
-    if (value.tag() != .array) return null;
-    if (valueNumericHandle(value)) |handle| {
-        if (numericHostAttachment(handle)) |array| return array.len();
-        if (handle.rank == 0) return null;
-        var total: usize = 1;
-        for (handle.shapeSlice()) |dim| total *= @as(usize, @intCast(dim));
-        return total;
-    }
-    return switch (value.arrayKind()) {
-        .host_dense_array => value.asHostDenseArray().len(),
-        .backend_array => backendArrayElementCount(value.asBackendArray().array),
-        else => null,
-    };
+    const handle = valueNumericHandle(value) orelse return null;
+    if (numericHostAttachment(handle)) |array| return array.len();
+    if (handle.rank == 0) return null;
+    var total: usize = 1;
+    for (handle.shapeSlice()) |dim| total *= @as(usize, @intCast(dim));
+    return total;
 }
 
 fn arrayResultLen(left: Value, right: Value) KError!usize {
     if (rowwiseMatrixVectorDyad(left, right)) |shape| return shape.rows * shape.cols;
     const left_len = switch (left.tag()) {
         .array => switch (left.arrayKind()) {
-            .host_dense_array, .backend_array, .numeric_array => if (numericArrayValueIsScalarLike(left)) null else numericFlatLen(left) orelse return error.Type,
+            .numeric_array => if (numericArrayValueIsScalarLike(left)) null else numericFlatLen(left) orelse return error.Type,
             .host_boxed_array => left.asHostBoxedArray().len(),
             else => return error.Type,
         },
@@ -55116,7 +51203,7 @@ fn arrayResultLen(left: Value, right: Value) KError!usize {
     };
     const right_len = switch (right.tag()) {
         .array => switch (right.arrayKind()) {
-            .host_dense_array, .backend_array, .numeric_array => if (numericArrayValueIsScalarLike(right)) null else numericFlatLen(right) orelse return error.Type,
+            .numeric_array => if (numericArrayValueIsScalarLike(right)) null else numericFlatLen(right) orelse return error.Type,
             .host_boxed_array => right.asHostBoxedArray().len(),
             else => return error.Type,
         },
@@ -55146,7 +51233,6 @@ fn isGenericArrayValue(value: Value) bool {
 }
 
 fn shouldUseGenericArrayDyad(left: Value, right: Value) bool {
-    if (isBackendArrayValue(left) or isBackendArrayValue(right)) return false;
     if ((left.tag() == .array and left.arrayKind() == .host_table_scalar) or
         (right.tag() == .array and right.arrayKind() == .host_table_scalar))
     {
@@ -55255,7 +51341,7 @@ const HostCollapsedFlatSlice = union(enum) {
     flat_stride: HostFlatStrideView,
 };
 
-fn hostDenseViewForHostArray(array: *const HostDenseArray) KError!HostDenseView {
+fn hostDenseViewForHostArray(source_value: Value, array: *const HostDenseArray) KError!HostDenseView {
     return switch (array.storage) {
         .bit => |words| .{ .int_array = .{ .dense = .{ .bit = .{ .words = hostDenseLogicalBitWords(array, words), .len = array.logical_len } } } },
         .int8 => |items| .{ .int_array = .{ .dense = .{ .int8 = hostDenseLogicalItems(i8, array, items) } } },
@@ -55263,7 +51349,7 @@ fn hostDenseViewForHostArray(array: *const HostDenseArray) KError!HostDenseView 
         .int32 => |items| .{ .int_array = .{ .dense = .{ .int32 = hostDenseLogicalItems(i32, array, items) } } },
         .int64 => |items| .{ .int_array = .{ .dense = .{ .int64 = hostDenseLogicalItems(i64, array, items) } } },
         .float32 => .{ .float_array = .{ .flat_slice = .{
-            .source_value = hostDenseSourceValue(array),
+            .source_value = source_value,
             .source_host = array,
             .start = 0,
             .len = array.logical_len,
@@ -55273,7 +51359,7 @@ fn hostDenseViewForHostArray(array: *const HostDenseArray) KError!HostDenseView 
 }
 
 fn hostDenseViewForNumericHandle(self: *Session, value: Value, handle: *const NumericArray) KError!HostDenseView {
-    if (numericHostAttachment(handle)) |array| return try hostDenseViewForHostArray(array);
+    if (numericHostAttachment(handle)) |array| return try hostDenseViewForHostArray(value, array);
     if (numericArrayIsRangeIota(handle)) {
         return .{ .int_array = .{ .range_iota = .{ .handle = handle } } };
     }
@@ -55316,7 +51402,7 @@ fn hostDenseViewForNumericHandle(self: *Session, value: Value, handle: *const Nu
         const right_len = numericVectorLen(right) orelse return error.Type;
         const left_host = try ensureNumericHostAttachmentForDenseView(self, left);
         const right_host = try ensureNumericHostAttachmentForDenseView(self, right);
-        if (comptime enable_probe_instrumentation) self.debug_flat_concat_dense_view_count += 1;
+        if (comptime enable_probe_instrumentation) self.debug.flat_concat_dense_view_count += 1;
         return switch (valueNumericMode(value) orelse return error.Type) {
             .float => .{ .float_array = .{ .flat_concat = .{
                 .left_value = left,
@@ -55375,7 +51461,7 @@ fn hostDenseViewForNumericHandle(self: *Session, value: Value, handle: *const Nu
                 } } },
             };
         }
-        if (comptime enable_probe_instrumentation) self.debug_first_axis_slice_dense_view_count += 1;
+        if (comptime enable_probe_instrumentation) self.debug.first_axis_slice_dense_view_count += 1;
         return switch (valueNumericMode(slice.source) orelse return error.Type) {
             .float => .{ .float_array = .{ .first_axis_slice = .{
                 .source_value = slice.source,
@@ -55401,7 +51487,7 @@ fn hostDenseViewForNumericHandle(self: *Session, value: Value, handle: *const Nu
         const row_width = numericShapeInnerBlockLen(source_handle);
         const flat_len = numericFlatLen(value) orelse return error.Type;
         const source_host = try ensureNumericHostAttachmentForDenseView(self, index.source);
-        if (comptime enable_probe_instrumentation) self.debug_first_axis_index_dense_view_count += 1;
+        if (comptime enable_probe_instrumentation) self.debug.first_axis_index_dense_view_count += 1;
         return switch (valueNumericMode(index.source) orelse return error.Type) {
             .float => .{ .float_array = .{ .first_axis_index = .{
                 .source_value = index.source,
@@ -55426,7 +51512,7 @@ fn hostDenseViewForNumericHandle(self: *Session, value: Value, handle: *const Nu
         const right_len = numericFlatLen(right) orelse return error.Type;
         const left_host = try ensureNumericHostAttachmentForDenseView(self, left);
         const right_host = try ensureNumericHostAttachmentForDenseView(self, right);
-        if (comptime enable_probe_instrumentation) self.debug_first_axis_concat_dense_view_count += 1;
+        if (comptime enable_probe_instrumentation) self.debug.first_axis_concat_dense_view_count += 1;
         return switch (valueNumericMode(value) orelse return error.Type) {
             .float => .{ .float_array = .{ .first_axis_concat = .{
                 .left_value = left,
@@ -55487,7 +51573,7 @@ fn hostDenseViewForNumericHandle(self: *Session, value: Value, handle: *const Nu
     }
     if (numericHasBackendAttachment(handle)) {
         _ = try tryEnsureHostRealizationForHandle(self, @constCast(handle)) orelse return error.Type;
-        return try hostDenseViewForHostArray(numericHostAttachment(handle) orelse return error.Type);
+        return try hostDenseViewForHostArray(value, numericHostAttachment(handle) orelse return error.Type);
     }
     return error.Type;
 }
@@ -55498,14 +51584,7 @@ fn hostDenseView(self: *Session, value: Value) KError!HostDenseView {
         .bool => .{ .scalar_int = @intFromBool(value.asBool()) },
         .float32 => .{ .scalar_float = @floatCast(value.asFloat32()) },
         .float => .{ .scalar_float = value.asFloat() },
-        .array => blk: {
-            if (valueNumericHandle(value)) |handle| break :blk try hostDenseViewForNumericHandle(self, value, handle);
-            break :blk switch (value.arrayKind()) {
-                .host_dense_array => try hostDenseViewForHostArray(value.asHostDenseArray()),
-                .backend_array => error.Type,
-                else => error.Internal,
-            };
-        },
+        .array => try hostDenseViewForNumericHandle(self, value, valueNumericHandle(value) orelse return error.Internal),
         else => error.Type,
     };
 }
@@ -55610,28 +51689,12 @@ fn hostDenseViewFloatStorageKind(view: HostDenseView) ?HostFloatStorageKind {
     };
 }
 
-fn hostFloatDyadResultStorageKind(left: HostDenseView, right: HostDenseView) HostFloatStorageKind {
-    const left_kind = hostDenseViewFloatStorageKind(left);
-    const right_kind = hostDenseViewFloatStorageKind(right);
-    if (left_kind == .float64 or right_kind == .float64) return .float64;
-    if (left_kind == .float32 or right_kind == .float32) return .float32;
-    return .float64;
-}
-
 fn hostFloatDyadResultStorageKindForValues(left_value: Value, right_value: Value, left: HostDenseView, right: HostDenseView) HostFloatStorageKind {
     const left_kind = mergeHostFloatStorageKind(valueFloatStorageKind(left_value), hostDenseViewFloatStorageKind(left));
     const right_kind = mergeHostFloatStorageKind(valueFloatStorageKind(right_value), hostDenseViewFloatStorageKind(right));
     if (left_kind == .float64 or right_kind == .float64) return .float64;
     if (left_kind == .float32 or right_kind == .float32) return .float32;
     return .float64;
-}
-
-fn hostDenseIntKind(view: HostDenseView) ?HostIntStorageKind {
-    return switch (view) {
-        .scalar_int => |value| hostIntStorageKindForValue(value),
-        .int_array => |items| hostIntDenseViewKind(items),
-        else => null,
-    };
 }
 
 fn hostFloatDenseViewLen(view: HostFloatDenseView) usize {
@@ -55727,14 +51790,6 @@ fn numericIntAt(value: Value, idx: usize) KError!i64 {
         .int => value.asInt(),
         .bool => @intFromBool(value.asBool()),
         .array => switch (value.arrayKind()) {
-            .host_dense_array => hostDenseIntAt(value.asHostDenseArray(), idx),
-            .backend_array => if (valueNumericHandle(value)) |handle|
-                if (numericHostAttachment(handle)) |array|
-                    hostDenseIntAt(array, idx)
-                else
-                    error.Type
-            else
-                error.Type,
             .numeric_array => blk: {
                 const handle = value.asNumericArray();
                 if (numericHostAttachment(handle)) |array| break :blk hostDenseIntAt(array, idx);
@@ -55817,14 +51872,6 @@ fn numericFloatAt(value: Value, idx: usize) KError!f64 {
         .float32 => @as(f64, @floatCast(value.asFloat32())),
         .float => value.asFloat(),
         .array => switch (value.arrayKind()) {
-            .host_dense_array => hostDenseFloatAt(value.asHostDenseArray(), idx),
-            .backend_array => if (valueNumericHandle(value)) |handle|
-                if (numericHostAttachment(handle)) |array|
-                    hostDenseFloatAt(array, idx)
-                else
-                    error.Type
-            else
-                error.Type,
             .numeric_array => blk: {
                 const handle = value.asNumericArray();
                 if (numericHostAttachment(handle)) |array| break :blk hostDenseFloatAt(array, idx);
@@ -57989,7 +54036,7 @@ fn applyDenseFloatTypedUnaryOp(comptime T: type, comptime op: BuiltinId, value: 
     };
 }
 
-fn DenseFloatProducerContext(comptime T: type) type {
+fn DenseProducerContext(comptime T: type) type {
     return struct {
         left_items: []const T,
         right_items: []const T,
@@ -57998,7 +54045,7 @@ fn DenseFloatProducerContext(comptime T: type) type {
     };
 }
 
-const DenseFloatSourceRole = enum {
+const DenseSourceRole = enum {
     left_array,
     right_array,
     left_reverse_array,
@@ -58007,7 +54054,7 @@ const DenseFloatSourceRole = enum {
     right_scalar,
 };
 
-fn DenseFloatSourceProducer(comptime T: type, comptime lane_count: usize, comptime role: DenseFloatSourceRole) type {
+fn DenseSourceProducer(comptime T: type, comptime lane_count: usize, comptime role: DenseSourceRole) type {
     const Vec = @Vector(lane_count, T);
     return struct {
         fn evalVec(ctx: anytype, idx: usize) Vec {
@@ -58068,7 +54115,7 @@ fn DenseFloatBinaryProducer(comptime T: type, comptime lane_count: usize, compti
     };
 }
 
-fn DenseFloatCompareProducer(comptime T: type, comptime lane_count: usize, comptime op: BuiltinId, comptime Left: type, comptime Right: type) type {
+fn DenseCompareProducer(comptime T: type, comptime lane_count: usize, comptime op: BuiltinId, comptime Left: type, comptime Right: type) type {
     const Mask = @Int(.unsigned, lane_count);
     return struct {
         fn evalMask(ctx: anytype, idx: usize) Mask {
@@ -58144,29 +54191,14 @@ fn DenseFloatAddReduceSink(comptime T: type, comptime lane_count: usize) type {
 
 fn runDenseFloatArrayArrayProducerSink(comptime T: type, comptime op: BuiltinId, left_items: []const T, right_items: []const T, sink: anytype) void {
     const lane_count = dense_host_simd_bytes / @sizeOf(T);
-    if (comptime dense_producer_mode == .direct) {
-        const Vec = @Vector(lane_count, T);
-        var idx: usize = 0;
-        const vector_limit = left_items.len - (left_items.len % lane_count);
-        while (idx < vector_limit) : (idx += lane_count) {
-            const lhs: Vec = left_items[idx..][0..lane_count].*;
-            const rhs: Vec = right_items[idx..][0..lane_count].*;
-            sink.consumeVec(idx, denseFloatTypedBinaryVec(T, op, lhs, rhs));
-        }
-        while (idx < left_items.len) : (idx += 1) {
-            sink.consumeScalar(idx, applyDenseFloatTypedOp(T, op, left_items[idx], right_items[idx]));
-        }
-        return;
-    }
-
-    const LoadLeft = DenseFloatSourceProducer(T, lane_count, .left_array);
-    const LoadRight = DenseFloatSourceProducer(T, lane_count, .right_array);
+    const LoadLeft = DenseSourceProducer(T, lane_count, .left_array);
+    const LoadRight = DenseSourceProducer(T, lane_count, .right_array);
     const Producer = DenseFloatBinaryProducer(T, lane_count, op, LoadLeft, LoadRight);
-    const ctx = DenseFloatProducerContext(T){ .left_items = left_items, .right_items = right_items };
+    const ctx = DenseProducerContext(T){ .left_items = left_items, .right_items = right_items };
     runDenseFloatProducerSink(lane_count, Producer, left_items.len, &ctx, sink);
 }
 
-fn DenseFloatResolvedSource(comptime T: type) type {
+fn DenseResolvedSource(comptime T: type) type {
     return union(enum) {
         array: []const T,
         reverse_array: []const T,
@@ -58174,8 +54206,8 @@ fn DenseFloatResolvedSource(comptime T: type) type {
     };
 }
 
-const DenseFloat64ResolvedSource = DenseFloatResolvedSource(f64);
-const DenseFloat32ResolvedSource = DenseFloatResolvedSource(f32);
+const DenseFloat64ResolvedSource = DenseResolvedSource(f64);
+const DenseFloat32ResolvedSource = DenseResolvedSource(f32);
 
 const DenseFloat64PromotedSource = union(enum) {
     array64: []const f64,
@@ -58305,7 +54337,7 @@ fn dispatchDenseFloat64PromotedSourceRolePair(comptime Return: type, role_pair: 
     unreachable;
 }
 
-fn denseIntFloatSourcesLen(comptime T: type, int_source: DenseIntResolvedSource(T), float_source: DenseFloat64PromotedSource) ?usize {
+fn denseIntFloatSourcesLen(comptime T: type, int_source: DenseResolvedSource(T), float_source: DenseFloat64PromotedSource) ?usize {
     const int_len = denseIntResolvedSourceLen(T, int_source);
     const float_len = denseFloat64PromotedSourceLen(float_source);
     if (int_len == null and float_len == null) return null;
@@ -58328,7 +54360,7 @@ fn DenseIntFloatProducerContext(comptime T: type) type {
     };
 }
 
-fn denseIntFloatSourceContext(comptime T: type, int_source: DenseIntResolvedSource(T), float_source: DenseFloat64PromotedSource) DenseIntFloatProducerContext(T) {
+fn denseIntFloatSourceContext(comptime T: type, int_source: DenseResolvedSource(T), float_source: DenseFloat64PromotedSource) DenseIntFloatProducerContext(T) {
     var ctx = DenseIntFloatProducerContext(T){};
     switch (int_source) {
         .array => |items| ctx.int_items = items,
@@ -58421,9 +54453,9 @@ fn denseIntFloatCompareSourceRolesWord(
     const Int = DenseIntAsFloat64SourceProducer(T, lane_count, int_role);
     const Float = DenseIntFloatPromotedSourceProducer(lane_count, float_role);
     const Producer = if (int_left)
-        DenseFloatCompareProducer(f64, lane_count, op, Int, Float)
+        DenseCompareProducer(f64, lane_count, op, Int, Float)
     else
-        DenseFloatCompareProducer(f64, lane_count, op, Float, Int);
+        DenseCompareProducer(f64, lane_count, op, Float, Int);
 
     var word: u64 = 0;
     var bit: usize = 0;
@@ -58486,7 +54518,7 @@ fn fillDenseIntFloatCompareSourcesOp(
     comptime op: BuiltinId,
     comptime int_left: bool,
     out: *HostBitAlloc,
-    int_source: DenseIntResolvedSource(T),
+    int_source: DenseResolvedSource(T),
     float_source: DenseFloat64PromotedSource,
     len: usize,
 ) ?HostCompareSummary {
@@ -58517,7 +54549,7 @@ fn runDenseIntFloatSourceMapSinkOp(
     comptime T: type,
     comptime op: BuiltinId,
     comptime int_left: bool,
-    int_source: DenseIntResolvedSource(T),
+    int_source: DenseResolvedSource(T),
     float_source: DenseFloat64PromotedSource,
     len: usize,
     sink: anytype,
@@ -58547,7 +54579,7 @@ fn fillDenseIntFloatSourcesStoreOp(
     comptime op: BuiltinId,
     comptime int_left: bool,
     out: []f64,
-    int_source: DenseIntResolvedSource(T),
+    int_source: DenseResolvedSource(T),
     float_source: DenseFloat64PromotedSource,
     len: usize,
 ) void {
@@ -58561,7 +54593,7 @@ fn fillDenseIntFloatSourcesStore(
     comptime int_left: bool,
     out: []f64,
     op: BuiltinId,
-    int_source: DenseIntResolvedSource(T),
+    int_source: DenseResolvedSource(T),
     float_source: DenseFloat64PromotedSource,
     len: usize,
 ) void {
@@ -58580,7 +54612,7 @@ fn fillDenseIntFloatSourcesStoreMorselKernel(comptime T: type, comptime op: Buil
     return struct {
         const Ctx = struct {
             out: []f64,
-            int_source: DenseIntResolvedSource(T),
+            int_source: DenseResolvedSource(T),
             float_source: DenseFloat64PromotedSource,
             len: usize,
         };
@@ -58599,7 +54631,7 @@ fn runDenseIntFloatSourcesStoreMorselOp(
     comptime op: BuiltinId,
     comptime int_left: bool,
     out: []f64,
-    int_source: DenseIntResolvedSource(T),
+    int_source: DenseResolvedSource(T),
     float_source: DenseFloat64PromotedSource,
     len: usize,
     workers_requested: usize,
@@ -58615,7 +54647,7 @@ fn fillDenseIntFloatSourcesStoreMorsel(
     comptime int_left: bool,
     out: []f64,
     op: BuiltinId,
-    int_source: DenseIntResolvedSource(T),
+    int_source: DenseResolvedSource(T),
     float_source: DenseFloat64PromotedSource,
     len: usize,
     workers_requested: usize,
@@ -58640,7 +54672,7 @@ fn DenseIntResolvedFloatProducerContext(comptime IntT: type, comptime FloatT: ty
     };
 }
 
-fn denseIntResolvedFloatSourcesLen(comptime IntT: type, comptime FloatT: type, int_source: DenseIntResolvedSource(IntT), float_source: DenseFloatResolvedSource(FloatT)) ?usize {
+fn denseIntResolvedFloatSourcesLen(comptime IntT: type, comptime FloatT: type, int_source: DenseResolvedSource(IntT), float_source: DenseResolvedSource(FloatT)) ?usize {
     const int_len = denseIntResolvedSourceLen(IntT, int_source);
     const float_len = denseFloatResolvedSourceLen(FloatT, float_source);
     if (int_len == null and float_len == null) return null;
@@ -58653,7 +54685,7 @@ fn denseIntResolvedFloatSourcesLen(comptime IntT: type, comptime FloatT: type, i
     return float_len.?;
 }
 
-fn denseIntResolvedFloatSourceContext(comptime IntT: type, comptime FloatT: type, int_source: DenseIntResolvedSource(IntT), float_source: DenseFloatResolvedSource(FloatT)) DenseIntResolvedFloatProducerContext(IntT, FloatT) {
+fn denseIntResolvedFloatSourceContext(comptime IntT: type, comptime FloatT: type, int_source: DenseResolvedSource(IntT), float_source: DenseResolvedSource(FloatT)) DenseIntResolvedFloatProducerContext(IntT, FloatT) {
     var ctx = DenseIntResolvedFloatProducerContext(IntT, FloatT){};
     switch (int_source) {
         .array => |items| ctx.int_items = items,
@@ -58668,7 +54700,7 @@ fn denseIntResolvedFloatSourceContext(comptime IntT: type, comptime FloatT: type
     return ctx;
 }
 
-fn denseResolvedFloatSourceRole(comptime T: type, source: DenseFloatResolvedSource(T)) DenseIntFloatIntSourceRole {
+fn denseResolvedFloatSourceRole(comptime T: type, source: DenseResolvedSource(T)) DenseIntFloatIntSourceRole {
     return switch (source) {
         .array => .array,
         .reverse_array => .reverse_array,
@@ -58676,7 +54708,7 @@ fn denseResolvedFloatSourceRole(comptime T: type, source: DenseFloatResolvedSour
     };
 }
 
-fn denseIntResolvedSourceRole(comptime T: type, source: DenseIntResolvedSource(T)) DenseIntFloatIntSourceRole {
+fn denseIntResolvedSourceRole(comptime T: type, source: DenseResolvedSource(T)) DenseIntFloatIntSourceRole {
     return switch (source) {
         .array => .array,
         .reverse_array => .reverse_array,
@@ -58760,8 +54792,8 @@ fn runDenseIntResolvedFloatSourceMapSinkOp(
     comptime FloatT: type,
     comptime op: BuiltinId,
     comptime int_left: bool,
-    int_source: DenseIntResolvedSource(IntT),
-    float_source: DenseFloatResolvedSource(FloatT),
+    int_source: DenseResolvedSource(IntT),
+    float_source: DenseResolvedSource(FloatT),
     len: usize,
     sink: anytype,
 ) void {
@@ -58781,7 +54813,7 @@ fn runDenseIntResolvedFloatSourceMapSinkOp(
     unreachable;
 }
 
-fn denseIntResolvedSourceFloatScalarItem(comptime IntT: type, comptime FloatT: type, source: DenseIntResolvedSource(IntT), idx: usize) FloatT {
+fn denseIntResolvedSourceFloatScalarItem(comptime IntT: type, comptime FloatT: type, source: DenseResolvedSource(IntT), idx: usize) FloatT {
     return @floatFromInt(denseIntResolvedSourceScalarItem(IntT, source, idx));
 }
 
@@ -58791,8 +54823,8 @@ fn fillDenseIntResolvedFloatSourcesStoreScalarOp(
     comptime op: BuiltinId,
     comptime int_left: bool,
     out: []FloatT,
-    int_source: DenseIntResolvedSource(IntT),
-    float_source: DenseFloatResolvedSource(FloatT),
+    int_source: DenseResolvedSource(IntT),
+    float_source: DenseResolvedSource(FloatT),
     len: usize,
 ) void {
     for (out[0..len], 0..) |*dest, idx| {
@@ -58811,8 +54843,8 @@ fn fillDenseIntResolvedFloatSourcesStoreScalar(
     comptime int_left: bool,
     out: []FloatT,
     op: BuiltinId,
-    int_source: DenseIntResolvedSource(IntT),
-    float_source: DenseFloatResolvedSource(FloatT),
+    int_source: DenseResolvedSource(IntT),
+    float_source: DenseResolvedSource(FloatT),
     len: usize,
 ) void {
     switch (op) {
@@ -58832,8 +54864,8 @@ fn fillDenseIntResolvedFloatSourcesStoreOp(
     comptime op: BuiltinId,
     comptime int_left: bool,
     out: []FloatT,
-    int_source: DenseIntResolvedSource(IntT),
-    float_source: DenseFloatResolvedSource(FloatT),
+    int_source: DenseResolvedSource(IntT),
+    float_source: DenseResolvedSource(FloatT),
     len: usize,
 ) void {
     const lane_count = dense_host_simd_bytes / @sizeOf(FloatT);
@@ -58847,8 +54879,8 @@ fn fillDenseIntResolvedFloatSourcesStore(
     comptime int_left: bool,
     out: []FloatT,
     op: BuiltinId,
-    int_source: DenseIntResolvedSource(IntT),
-    float_source: DenseFloatResolvedSource(FloatT),
+    int_source: DenseResolvedSource(IntT),
+    float_source: DenseResolvedSource(FloatT),
     len: usize,
 ) void {
     switch (op) {
@@ -58866,8 +54898,8 @@ fn fillDenseIntResolvedFloatSourcesStoreMorselKernel(comptime IntT: type, compti
     return struct {
         const Ctx = struct {
             out: []FloatT,
-            int_source: DenseIntResolvedSource(IntT),
-            float_source: DenseFloatResolvedSource(FloatT),
+            int_source: DenseResolvedSource(IntT),
+            float_source: DenseResolvedSource(FloatT),
             len: usize,
         };
 
@@ -58886,8 +54918,8 @@ fn runDenseIntResolvedFloatSourcesStoreMorselOp(
     comptime op: BuiltinId,
     comptime int_left: bool,
     out: []FloatT,
-    int_source: DenseIntResolvedSource(IntT),
-    float_source: DenseFloatResolvedSource(FloatT),
+    int_source: DenseResolvedSource(IntT),
+    float_source: DenseResolvedSource(FloatT),
     len: usize,
     workers_requested: usize,
 ) void {
@@ -58903,8 +54935,8 @@ fn fillDenseIntResolvedFloatSourcesStoreMorsel(
     comptime int_left: bool,
     out: []FloatT,
     op: BuiltinId,
-    int_source: DenseIntResolvedSource(IntT),
-    float_source: DenseFloatResolvedSource(FloatT),
+    int_source: DenseResolvedSource(IntT),
+    float_source: DenseResolvedSource(FloatT),
     len: usize,
     workers_requested: usize,
 ) void {
@@ -58924,7 +54956,7 @@ fn fillDenseIntFloatCompareSources(
     comptime int_left: bool,
     out: *HostBitAlloc,
     op: BuiltinId,
-    int_source: DenseIntResolvedSource(T),
+    int_source: DenseResolvedSource(T),
     float_source: DenseFloat64PromotedSource,
     len: usize,
 ) ?HostCompareSummary {
@@ -59089,7 +55121,7 @@ fn denseFloat64PromotedCompareSourceRolesWord(
     const lane_count = host_compare_zig_vector_bytes / @sizeOf(f64);
     const Left = DenseFloat64PromotedSourceProducer(lane_count, .left, left_role);
     const Right = DenseFloat64PromotedSourceProducer(lane_count, .right, right_role);
-    const Producer = DenseFloatCompareProducer(f64, lane_count, op, Left, Right);
+    const Producer = DenseCompareProducer(f64, lane_count, op, Left, Right);
 
     var word: u64 = 0;
     var bit: usize = 0;
@@ -59439,7 +55471,7 @@ fn countCompareFloat64PromotedSourcesMorselOp(session: *Session, op: BuiltinId, 
     return total;
 }
 
-fn denseFloatResolvedSourceLen(comptime T: type, source: DenseFloatResolvedSource(T)) ?usize {
+fn denseFloatResolvedSourceLen(comptime T: type, source: DenseResolvedSource(T)) ?usize {
     return switch (source) {
         .array => |items| items.len,
         .reverse_array => |items| items.len,
@@ -59447,7 +55479,7 @@ fn denseFloatResolvedSourceLen(comptime T: type, source: DenseFloatResolvedSourc
     };
 }
 
-fn denseFloatResolvedSourcesLen(comptime T: type, left: DenseFloatResolvedSource(T), right: DenseFloatResolvedSource(T)) ?usize {
+fn denseFloatResolvedSourcesLen(comptime T: type, left: DenseResolvedSource(T), right: DenseResolvedSource(T)) ?usize {
     const left_len = denseFloatResolvedSourceLen(T, left);
     const right_len = denseFloatResolvedSourceLen(T, right);
     if (left_len == null and right_len == null) return null;
@@ -59460,7 +55492,7 @@ fn denseFloatResolvedSourcesLen(comptime T: type, left: DenseFloatResolvedSource
     return right_len.?;
 }
 
-fn denseFloatSliceResolvedSource(comptime T: type, source: DenseFloatResolvedSource(T), range: MorselRange, full_len: usize) DenseFloatResolvedSource(T) {
+fn denseFloatSliceResolvedSource(comptime T: type, source: DenseResolvedSource(T), range: MorselRange, full_len: usize) DenseResolvedSource(T) {
     return switch (source) {
         .array => |items| .{ .array = items[range.start..range.end] },
         .reverse_array => |items| .{ .reverse_array = items[full_len - range.end .. full_len - range.start] },
@@ -59468,8 +55500,8 @@ fn denseFloatSliceResolvedSource(comptime T: type, source: DenseFloatResolvedSou
     };
 }
 
-fn denseFloatSourceContext(comptime T: type, left: DenseFloatResolvedSource(T), right: DenseFloatResolvedSource(T)) DenseFloatProducerContext(T) {
-    var ctx = DenseFloatProducerContext(T){
+fn denseFloatSourceContext(comptime T: type, left: DenseResolvedSource(T), right: DenseResolvedSource(T)) DenseProducerContext(T) {
+    var ctx = DenseProducerContext(T){
         .left_items = &.{},
         .right_items = &.{},
     };
@@ -59486,7 +55518,7 @@ fn denseFloatSourceContext(comptime T: type, left: DenseFloatResolvedSource(T), 
     return ctx;
 }
 
-fn denseFloatResolvedSourceScalarItem(comptime T: type, source: DenseFloatResolvedSource(T), idx: usize) T {
+fn denseFloatResolvedSourceScalarItem(comptime T: type, source: DenseResolvedSource(T), idx: usize) T {
     return switch (source) {
         .array => |items| items[idx],
         .reverse_array => |items| items[items.len - 1 - idx],
@@ -59497,15 +55529,15 @@ fn denseFloatResolvedSourceScalarItem(comptime T: type, source: DenseFloatResolv
 fn runDenseFloatMapSourceRolesSink(
     comptime T: type,
     comptime op: BuiltinId,
-    comptime left_role: DenseFloatSourceRole,
-    comptime right_role: DenseFloatSourceRole,
+    comptime left_role: DenseSourceRole,
+    comptime right_role: DenseSourceRole,
     len: usize,
-    ctx: *const DenseFloatProducerContext(T),
+    ctx: *const DenseProducerContext(T),
     sink: anytype,
 ) void {
     const lane_count = dense_host_simd_bytes / @sizeOf(T);
-    const Left = DenseFloatSourceProducer(T, lane_count, left_role);
-    const Right = DenseFloatSourceProducer(T, lane_count, right_role);
+    const Left = DenseSourceProducer(T, lane_count, left_role);
+    const Right = DenseSourceProducer(T, lane_count, right_role);
     const Producer = DenseFloatBinaryProducer(T, lane_count, op, Left, Right);
     runDenseFloatProducerSink(lane_count, Producer, len, ctx, sink);
 }
@@ -59513,34 +55545,34 @@ fn runDenseFloatMapSourceRolesSink(
 fn runDenseFloatUnarySourceRolesSink(
     comptime T: type,
     comptime op: BuiltinId,
-    comptime source_role: DenseFloatSourceRole,
+    comptime source_role: DenseSourceRole,
     len: usize,
-    ctx: *const DenseFloatProducerContext(T),
+    ctx: *const DenseProducerContext(T),
     sink: anytype,
 ) void {
     const lane_count = dense_host_simd_bytes / @sizeOf(T);
-    const Source = DenseFloatSourceProducer(T, lane_count, source_role);
+    const Source = DenseSourceProducer(T, lane_count, source_role);
     const Producer = DenseFloatUnaryProducer(T, lane_count, op, Source);
     runDenseFloatProducerSink(lane_count, Producer, len, ctx, sink);
 }
 
 fn runDenseFloatSquaredDiffSourceRolesSink(
     comptime T: type,
-    comptime left_role: DenseFloatSourceRole,
-    comptime right_role: DenseFloatSourceRole,
+    comptime left_role: DenseSourceRole,
+    comptime right_role: DenseSourceRole,
     len: usize,
-    ctx: *const DenseFloatProducerContext(T),
+    ctx: *const DenseProducerContext(T),
     sink: anytype,
 ) void {
     const lane_count = dense_host_simd_bytes / @sizeOf(T);
-    const Left = DenseFloatSourceProducer(T, lane_count, left_role);
-    const Right = DenseFloatSourceProducer(T, lane_count, right_role);
+    const Left = DenseSourceProducer(T, lane_count, left_role);
+    const Right = DenseSourceProducer(T, lane_count, right_role);
     const Diff = DenseFloatBinaryProducer(T, lane_count, .sub, Left, Right);
     const Producer = DenseFloatSquareProducer(T, lane_count, Diff);
     runDenseFloatProducerSink(lane_count, Producer, len, ctx, sink);
 }
 
-fn runDenseFloatSourceMapSinkOp(comptime T: type, comptime op: BuiltinId, left: DenseFloatResolvedSource(T), right: DenseFloatResolvedSource(T), len: usize, sink: anytype) void {
+fn runDenseFloatSourceMapSinkOp(comptime T: type, comptime op: BuiltinId, left: DenseResolvedSource(T), right: DenseResolvedSource(T), len: usize, sink: anytype) void {
     var ctx = denseFloatSourceContext(T, left, right);
     switch (left) {
         .array => switch (right) {
@@ -59564,16 +55596,16 @@ fn runDenseFloatSourceMapSinkOp(comptime T: type, comptime op: BuiltinId, left: 
 fn denseFloatCompareSourceRolesWord(
     comptime T: type,
     comptime op: BuiltinId,
-    comptime left_role: DenseFloatSourceRole,
-    comptime right_role: DenseFloatSourceRole,
-    ctx: *const DenseFloatProducerContext(T),
+    comptime left_role: DenseSourceRole,
+    comptime right_role: DenseSourceRole,
+    ctx: *const DenseProducerContext(T),
     base: usize,
     active: usize,
 ) u64 {
     const lane_count = host_compare_zig_vector_bytes / @sizeOf(T);
-    const Left = DenseFloatSourceProducer(T, lane_count, left_role);
-    const Right = DenseFloatSourceProducer(T, lane_count, right_role);
-    const Producer = DenseFloatCompareProducer(T, lane_count, op, Left, Right);
+    const Left = DenseSourceProducer(T, lane_count, left_role);
+    const Right = DenseSourceProducer(T, lane_count, right_role);
+    const Producer = DenseCompareProducer(T, lane_count, op, Left, Right);
 
     var word: u64 = 0;
     var bit: usize = 0;
@@ -59593,11 +55625,11 @@ fn denseFloatCompareSourceRolesWord(
 fn fillDenseFloatCompareSourceRolesOp(
     comptime T: type,
     comptime op: BuiltinId,
-    comptime left_role: DenseFloatSourceRole,
-    comptime right_role: DenseFloatSourceRole,
+    comptime left_role: DenseSourceRole,
+    comptime right_role: DenseSourceRole,
     out: *HostBitAlloc,
     len: usize,
-    ctx: *const DenseFloatProducerContext(T),
+    ctx: *const DenseProducerContext(T),
 ) HostCompareSummary {
     var summary = hostCompareSummaryEmpty();
     for (out.words, 0..) |*out_word, word_idx| {
@@ -59610,7 +55642,7 @@ fn fillDenseFloatCompareSourceRolesOp(
     return summary;
 }
 
-fn fillDenseFloatCompareSourcesOp(comptime T: type, comptime op: BuiltinId, out: *HostBitAlloc, left: DenseFloatResolvedSource(T), right: DenseFloatResolvedSource(T), len: usize) ?HostCompareSummary {
+fn fillDenseFloatCompareSourcesOp(comptime T: type, comptime op: BuiltinId, out: *HostBitAlloc, left: DenseResolvedSource(T), right: DenseResolvedSource(T), len: usize) ?HostCompareSummary {
     if (out.len != len) return null;
     const source_len = denseFloatResolvedSourcesLen(T, left, right) orelse return null;
     if (source_len != len) return null;
@@ -59635,7 +55667,7 @@ fn fillDenseFloatCompareSourcesOp(comptime T: type, comptime op: BuiltinId, out:
     };
 }
 
-fn fillDenseFloatCompareSources(comptime T: type, out: *HostBitAlloc, op: BuiltinId, left: DenseFloatResolvedSource(T), right: DenseFloatResolvedSource(T), len: usize) ?HostCompareSummary {
+fn fillDenseFloatCompareSources(comptime T: type, out: *HostBitAlloc, op: BuiltinId, left: DenseResolvedSource(T), right: DenseResolvedSource(T), len: usize) ?HostCompareSummary {
     return switch (op) {
         .equal => fillDenseFloatCompareSourcesOp(T, .equal, out, left, right, len),
         .less => fillDenseFloatCompareSourcesOp(T, .less, out, left, right, len),
@@ -59644,7 +55676,7 @@ fn fillDenseFloatCompareSources(comptime T: type, out: *HostBitAlloc, op: Builti
     };
 }
 
-fn runDenseFloatSourceUnarySinkOp(comptime T: type, comptime op: BuiltinId, source: DenseFloatResolvedSource(T), len: usize, sink: anytype) void {
+fn runDenseFloatSourceUnarySinkOp(comptime T: type, comptime op: BuiltinId, source: DenseResolvedSource(T), len: usize, sink: anytype) void {
     var ctx = denseFloatSourceContext(T, source, .{ .scalar = @as(T, 0) });
     switch (source) {
         .array => runDenseFloatUnarySourceRolesSink(T, op, .left_array, len, &ctx, sink),
@@ -59653,7 +55685,7 @@ fn runDenseFloatSourceUnarySinkOp(comptime T: type, comptime op: BuiltinId, sour
     }
 }
 
-fn runDenseFloatSquaredDiffSourceSink(comptime T: type, left: DenseFloatResolvedSource(T), right: DenseFloatResolvedSource(T), len: usize, sink: anytype) void {
+fn runDenseFloatSquaredDiffSourceSink(comptime T: type, left: DenseResolvedSource(T), right: DenseResolvedSource(T), len: usize, sink: anytype) void {
     var ctx = denseFloatSourceContext(T, left, right);
     switch (left) {
         .array => switch (right) {
@@ -59674,21 +55706,21 @@ fn runDenseFloatSquaredDiffSourceSink(comptime T: type, left: DenseFloatResolved
     }
 }
 
-fn foldAddMapFloatSourcesOp(comptime T: type, comptime op: BuiltinId, left: DenseFloatResolvedSource(T), right: DenseFloatResolvedSource(T), len: usize) T {
+fn foldAddMapFloatSourcesOp(comptime T: type, comptime op: BuiltinId, left: DenseResolvedSource(T), right: DenseResolvedSource(T), len: usize) T {
     const lane_count = dense_host_simd_bytes / @sizeOf(T);
     var sink = DenseFloatAddReduceSink(T, lane_count){};
     runDenseFloatSourceMapSinkOp(T, op, left, right, len, &sink);
     return sink.finish();
 }
 
-fn foldAddUnaryFloatSourceOp(comptime T: type, comptime op: BuiltinId, source: DenseFloatResolvedSource(T), len: usize) T {
+fn foldAddUnaryFloatSourceOp(comptime T: type, comptime op: BuiltinId, source: DenseResolvedSource(T), len: usize) T {
     const lane_count = dense_host_simd_bytes / @sizeOf(T);
     var sink = DenseFloatAddReduceSink(T, lane_count){};
     runDenseFloatSourceUnarySinkOp(T, op, source, len, &sink);
     return sink.finish();
 }
 
-fn foldAddMapFloatSources(comptime T: type, op: BuiltinId, left: DenseFloatResolvedSource(T), right: DenseFloatResolvedSource(T), len: usize) T {
+fn foldAddMapFloatSources(comptime T: type, op: BuiltinId, left: DenseResolvedSource(T), right: DenseResolvedSource(T), len: usize) T {
     return switch (op) {
         .add => foldAddMapFloatSourcesOp(T, .add, left, right, len),
         .sub => foldAddMapFloatSourcesOp(T, .sub, left, right, len),
@@ -59700,7 +55732,7 @@ fn foldAddMapFloatSources(comptime T: type, op: BuiltinId, left: DenseFloatResol
     };
 }
 
-fn foldAddUnaryFloatSource(comptime T: type, op: BuiltinId, source: DenseFloatResolvedSource(T), len: usize) T {
+fn foldAddUnaryFloatSource(comptime T: type, op: BuiltinId, source: DenseResolvedSource(T), len: usize) T {
     return switch (op) {
         .add => foldAddUnaryFloatSourceOp(T, .add, source, len),
         .sub => foldAddUnaryFloatSourceOp(T, .sub, source, len),
@@ -59709,7 +55741,7 @@ fn foldAddUnaryFloatSource(comptime T: type, op: BuiltinId, source: DenseFloatRe
     };
 }
 
-fn foldAddSquaredDiffFloatSources(comptime T: type, left: DenseFloatResolvedSource(T), right: DenseFloatResolvedSource(T), len: usize) T {
+fn foldAddSquaredDiffFloatSources(comptime T: type, left: DenseResolvedSource(T), right: DenseResolvedSource(T), len: usize) T {
     const lane_count = dense_host_simd_bytes / @sizeOf(T);
     var sink = DenseFloatAddReduceSink(T, lane_count){};
     runDenseFloatSquaredDiffSourceSink(T, left, right, len, &sink);
@@ -59719,8 +55751,8 @@ fn foldAddSquaredDiffFloatSources(comptime T: type, left: DenseFloatResolvedSour
 fn foldAddMapFloatSourcesMorselKernel(comptime T: type, comptime op: BuiltinId) type {
     return struct {
         const Ctx = struct {
-            left: DenseFloatResolvedSource(T),
-            right: DenseFloatResolvedSource(T),
+            left: DenseResolvedSource(T),
+            right: DenseResolvedSource(T),
             partials: []T,
             grain: usize,
             len: usize,
@@ -59738,7 +55770,7 @@ fn foldAddMapFloatSourcesMorselKernel(comptime T: type, comptime op: BuiltinId) 
 fn foldAddUnaryFloatSourceMorselKernel(comptime T: type, comptime op: BuiltinId) type {
     return struct {
         const Ctx = struct {
-            source: DenseFloatResolvedSource(T),
+            source: DenseResolvedSource(T),
             partials: []T,
             grain: usize,
             len: usize,
@@ -59755,8 +55787,8 @@ fn foldAddUnaryFloatSourceMorselKernel(comptime T: type, comptime op: BuiltinId)
 fn foldAddSquaredDiffFloatSourcesMorselKernel(comptime T: type) type {
     return struct {
         const Ctx = struct {
-            left: DenseFloatResolvedSource(T),
-            right: DenseFloatResolvedSource(T),
+            left: DenseResolvedSource(T),
+            right: DenseResolvedSource(T),
             partials: []T,
             grain: usize,
             len: usize,
@@ -59777,7 +55809,7 @@ fn denseFloatMorselPartials(session: *Session, comptime T: type, count: usize) K
     @compileError("unsupported dense float type");
 }
 
-fn foldAddMapFloatSourcesMorselOp(session: *Session, comptime T: type, op: BuiltinId, left: DenseFloatResolvedSource(T), right: DenseFloatResolvedSource(T), len: usize, workers_requested: usize) KError!T {
+fn foldAddMapFloatSourcesMorselOp(session: *Session, comptime T: type, op: BuiltinId, left: DenseResolvedSource(T), right: DenseResolvedSource(T), len: usize, workers_requested: usize) KError!T {
     if (len == 0) return error.Type;
     const grain = normalizeMorselGrain(len, default_morsel_grain);
     const morsel_count = countMorsels(len, grain);
@@ -59816,7 +55848,7 @@ fn foldAddMapFloatSourcesMorselOp(session: *Session, comptime T: type, op: Built
     return total;
 }
 
-fn foldAddUnaryFloatSourceMorselOp(session: *Session, comptime T: type, op: BuiltinId, source: DenseFloatResolvedSource(T), len: usize, workers_requested: usize) KError!T {
+fn foldAddUnaryFloatSourceMorselOp(session: *Session, comptime T: type, op: BuiltinId, source: DenseResolvedSource(T), len: usize, workers_requested: usize) KError!T {
     if (len == 0) return error.Type;
     const grain = normalizeMorselGrain(len, default_morsel_grain);
     const morsel_count = countMorsels(len, grain);
@@ -59843,7 +55875,7 @@ fn foldAddUnaryFloatSourceMorselOp(session: *Session, comptime T: type, op: Buil
     return total;
 }
 
-fn foldAddSquaredDiffFloatSourcesMorselOp(session: *Session, comptime T: type, left: DenseFloatResolvedSource(T), right: DenseFloatResolvedSource(T), len: usize, workers_requested: usize) KError!T {
+fn foldAddSquaredDiffFloatSourcesMorselOp(session: *Session, comptime T: type, left: DenseResolvedSource(T), right: DenseResolvedSource(T), len: usize, workers_requested: usize) KError!T {
     if (len == 0) return error.Type;
     const grain = normalizeMorselGrain(len, default_morsel_grain);
     const morsel_count = countMorsels(len, grain);
@@ -59857,7 +55889,7 @@ fn foldAddSquaredDiffFloatSourcesMorselOp(session: *Session, comptime T: type, l
     return total;
 }
 
-fn fillDenseFloatSourcesStoreOp(comptime T: type, comptime op: BuiltinId, out: []T, left: DenseFloatResolvedSource(T), right: DenseFloatResolvedSource(T), len: usize) void {
+fn fillDenseFloatSourcesStoreOp(comptime T: type, comptime op: BuiltinId, out: []T, left: DenseResolvedSource(T), right: DenseResolvedSource(T), len: usize) void {
     const lane_count = dense_host_simd_bytes / @sizeOf(T);
     var sink = DenseFloatStoreSink(T, lane_count){ .out = out };
     switch (left) {
@@ -59873,7 +55905,7 @@ fn fillDenseFloatSourcesStoreOp(comptime T: type, comptime op: BuiltinId, out: [
     runDenseFloatSourceMapSinkOp(T, op, left, right, len, &sink);
 }
 
-fn fillDenseFloatSourcesStoreScalarOp(comptime T: type, comptime op: BuiltinId, out: []T, left: DenseFloatResolvedSource(T), right: DenseFloatResolvedSource(T), len: usize) void {
+fn fillDenseFloatSourcesStoreScalarOp(comptime T: type, comptime op: BuiltinId, out: []T, left: DenseResolvedSource(T), right: DenseResolvedSource(T), len: usize) void {
     for (out[0..len], 0..) |*dest, idx| {
         dest.* = applyDenseFloatTypedOp(
             T,
@@ -59884,7 +55916,7 @@ fn fillDenseFloatSourcesStoreScalarOp(comptime T: type, comptime op: BuiltinId, 
     }
 }
 
-fn fillDenseFloatSourcesStoreScalar(comptime T: type, out: []T, op: BuiltinId, left: DenseFloatResolvedSource(T), right: DenseFloatResolvedSource(T), len: usize) void {
+fn fillDenseFloatSourcesStoreScalar(comptime T: type, out: []T, op: BuiltinId, left: DenseResolvedSource(T), right: DenseResolvedSource(T), len: usize) void {
     switch (op) {
         .add => fillDenseFloatSourcesStoreScalarOp(T, .add, out, left, right, len),
         .sub => fillDenseFloatSourcesStoreScalarOp(T, .sub, out, left, right, len),
@@ -59896,7 +55928,7 @@ fn fillDenseFloatSourcesStoreScalar(comptime T: type, out: []T, op: BuiltinId, l
     }
 }
 
-fn fillDenseFloatSourcesStore(comptime T: type, out: []T, op: BuiltinId, left: DenseFloatResolvedSource(T), right: DenseFloatResolvedSource(T), len: usize) void {
+fn fillDenseFloatSourcesStore(comptime T: type, out: []T, op: BuiltinId, left: DenseResolvedSource(T), right: DenseResolvedSource(T), len: usize) void {
     switch (op) {
         .add => fillDenseFloatSourcesStoreOp(T, .add, out, left, right, len),
         .sub => fillDenseFloatSourcesStoreOp(T, .sub, out, left, right, len),
@@ -59908,7 +55940,7 @@ fn fillDenseFloatSourcesStore(comptime T: type, out: []T, op: BuiltinId, left: D
     }
 }
 
-fn fillDenseFloatSourceUnaryStoreOp(comptime T: type, comptime op: BuiltinId, out: []T, source: DenseFloatResolvedSource(T), len: usize) void {
+fn fillDenseFloatSourceUnaryStoreOp(comptime T: type, comptime op: BuiltinId, out: []T, source: DenseResolvedSource(T), len: usize) void {
     const lane_count = dense_host_simd_bytes / @sizeOf(T);
     var sink = DenseFloatStoreSink(T, lane_count){ .out = out };
     runDenseFloatSourceUnarySinkOp(T, op, source, len, &sink);
@@ -59922,22 +55954,13 @@ fn applyDenseFloatTypedUnaryFallbackOp(comptime T: type, comptime op: BuiltinId,
     };
 }
 
-fn fillDenseFloatSourceUnaryStoreScalarOp(comptime T: type, comptime op: BuiltinId, out: []T, source: DenseFloatResolvedSource(T), len: usize) void {
+fn fillDenseFloatSourceUnaryStoreScalarOp(comptime T: type, comptime op: BuiltinId, out: []T, source: DenseResolvedSource(T), len: usize) void {
     for (out[0..len], 0..) |*dest, idx| {
         dest.* = applyDenseFloatTypedUnaryFallbackOp(T, op, denseFloatResolvedSourceScalarItem(T, source, idx));
     }
 }
 
-fn fillDenseFloatSourceUnaryStore(comptime T: type, out: []T, op: BuiltinId, source: DenseFloatResolvedSource(T), len: usize) void {
-    switch (op) {
-        .add => fillDenseFloatSourceUnaryStoreOp(T, .add, out, source, len),
-        .sub => fillDenseFloatSourceUnaryStoreOp(T, .sub, out, source, len),
-        .div => fillDenseFloatSourceUnaryStoreOp(T, .div, out, source, len),
-        else => unreachable,
-    }
-}
-
-fn fillDenseFloatSourceUnaryStoreAny(comptime T: type, out: []T, op: BuiltinId, source: DenseFloatResolvedSource(T), len: usize) void {
+fn fillDenseFloatSourceUnaryStoreAny(comptime T: type, out: []T, op: BuiltinId, source: DenseResolvedSource(T), len: usize) void {
     switch (op) {
         .add => fillDenseFloatSourceUnaryStoreOp(T, .add, out, source, len),
         .sub => fillDenseFloatSourceUnaryStoreOp(T, .sub, out, source, len),
@@ -59956,8 +55979,8 @@ fn fillDenseFloatSourcesStoreMorselKernel(comptime T: type, comptime op: Builtin
     return struct {
         const Ctx = struct {
             out: []T,
-            left: DenseFloatResolvedSource(T),
-            right: DenseFloatResolvedSource(T),
+            left: DenseResolvedSource(T),
+            right: DenseResolvedSource(T),
             len: usize,
         };
 
@@ -59969,7 +55992,7 @@ fn fillDenseFloatSourcesStoreMorselKernel(comptime T: type, comptime op: Builtin
     };
 }
 
-fn fillDenseFloatSourcesStoreMorsel(session: *Session, comptime T: type, out: []T, op: BuiltinId, left: DenseFloatResolvedSource(T), right: DenseFloatResolvedSource(T), len: usize, workers_requested: usize) void {
+fn fillDenseFloatSourcesStoreMorsel(session: *Session, comptime T: type, out: []T, op: BuiltinId, left: DenseResolvedSource(T), right: DenseResolvedSource(T), len: usize, workers_requested: usize) void {
     const grain = normalizeMorselGrain(len, default_morsel_grain);
     switch (op) {
         .add => {
@@ -60011,15 +56034,7 @@ fn denseIntBinaryVec(comptime op: BuiltinId, lhs: anytype, rhs: @TypeOf(lhs)) @T
     };
 }
 
-fn DenseIntResolvedSource(comptime T: type) type {
-    return union(enum) {
-        array: []const T,
-        reverse_array: []const T,
-        scalar: T,
-    };
-}
-
-fn denseIntResolvedSourceLen(comptime T: type, source: DenseIntResolvedSource(T)) ?usize {
+fn denseIntResolvedSourceLen(comptime T: type, source: DenseResolvedSource(T)) ?usize {
     return switch (source) {
         .array => |items| items.len,
         .reverse_array => |items| items.len,
@@ -60027,7 +56042,7 @@ fn denseIntResolvedSourceLen(comptime T: type, source: DenseIntResolvedSource(T)
     };
 }
 
-fn denseIntResolvedSourcesLen(comptime T: type, left: DenseIntResolvedSource(T), right: DenseIntResolvedSource(T)) ?usize {
+fn denseIntResolvedSourcesLen(comptime T: type, left: DenseResolvedSource(T), right: DenseResolvedSource(T)) ?usize {
     const left_len = denseIntResolvedSourceLen(T, left);
     const right_len = denseIntResolvedSourceLen(T, right);
     if (left_len == null and right_len == null) return null;
@@ -60040,7 +56055,7 @@ fn denseIntResolvedSourcesLen(comptime T: type, left: DenseIntResolvedSource(T),
     return right_len.?;
 }
 
-fn denseIntSliceResolvedSource(comptime T: type, source: DenseIntResolvedSource(T), range: MorselRange, full_len: usize) DenseIntResolvedSource(T) {
+fn denseIntSliceResolvedSource(comptime T: type, source: DenseResolvedSource(T), range: MorselRange, full_len: usize) DenseResolvedSource(T) {
     return switch (source) {
         .array => |items| .{ .array = items[range.start..range.end] },
         .reverse_array => |items| .{ .reverse_array = items[full_len - range.end .. full_len - range.start] },
@@ -60048,7 +56063,7 @@ fn denseIntSliceResolvedSource(comptime T: type, source: DenseIntResolvedSource(
     };
 }
 
-fn denseIntResolvedSourceScalarItem(comptime T: type, source: DenseIntResolvedSource(T), idx: usize) T {
+fn denseIntResolvedSourceScalarItem(comptime T: type, source: DenseResolvedSource(T), idx: usize) T {
     return switch (source) {
         .array => |items| items[idx],
         .reverse_array => |items| items[items.len - 1 - idx],
@@ -60063,26 +56078,8 @@ fn denseIntSourceStoreCanVectorize(comptime T: type, comptime op: BuiltinId) boo
     return true;
 }
 
-const DenseIntSourceRole = enum {
-    left_array,
-    right_array,
-    left_reverse_array,
-    right_reverse_array,
-    left_scalar,
-    right_scalar,
-};
-
-fn DenseIntProducerContext(comptime T: type) type {
-    return struct {
-        left_items: []const T,
-        right_items: []const T,
-        left_scalar: T = 0,
-        right_scalar: T = 0,
-    };
-}
-
-fn denseIntSourceContext(comptime T: type, left: DenseIntResolvedSource(T), right: DenseIntResolvedSource(T)) DenseIntProducerContext(T) {
-    var ctx = DenseIntProducerContext(T){
+fn denseIntSourceContext(comptime T: type, left: DenseResolvedSource(T), right: DenseResolvedSource(T)) DenseProducerContext(T) {
+    var ctx = DenseProducerContext(T){
         .left_items = &.{},
         .right_items = &.{},
     };
@@ -60099,41 +56096,6 @@ fn denseIntSourceContext(comptime T: type, left: DenseIntResolvedSource(T), righ
     return ctx;
 }
 
-fn DenseIntSourceProducer(comptime T: type, comptime lane_count: usize, comptime role: DenseIntSourceRole) type {
-    const Vec = @Vector(lane_count, T);
-    return struct {
-        fn evalVec(ctx: anytype, idx: usize) Vec {
-            return switch (role) {
-                .left_array => ctx.left_items[idx..][0..lane_count].*,
-                .right_array => ctx.right_items[idx..][0..lane_count].*,
-                .left_reverse_array => blk: {
-                    const reverse_base = ctx.left_items.len - idx - lane_count;
-                    const chunk: Vec = ctx.left_items[reverse_base..][0..lane_count].*;
-                    break :blk reversedDenseVector(T, lane_count, chunk);
-                },
-                .right_reverse_array => blk: {
-                    const reverse_base = ctx.right_items.len - idx - lane_count;
-                    const chunk: Vec = ctx.right_items[reverse_base..][0..lane_count].*;
-                    break :blk reversedDenseVector(T, lane_count, chunk);
-                },
-                .left_scalar => @splat(ctx.left_scalar),
-                .right_scalar => @splat(ctx.right_scalar),
-            };
-        }
-
-        fn evalScalar(ctx: anytype, idx: usize) T {
-            return switch (role) {
-                .left_array => ctx.left_items[idx],
-                .right_array => ctx.right_items[idx],
-                .left_reverse_array => ctx.left_items[ctx.left_items.len - 1 - idx],
-                .right_reverse_array => ctx.right_items[ctx.right_items.len - 1 - idx],
-                .left_scalar => ctx.left_scalar,
-                .right_scalar => ctx.right_scalar,
-            };
-        }
-    };
-}
-
 fn DenseIntBinaryProducer(comptime T: type, comptime lane_count: usize, comptime op: BuiltinId, comptime Left: type, comptime Right: type) type {
     const Vec = @Vector(lane_count, T);
     return struct {
@@ -60147,19 +56109,6 @@ fn DenseIntBinaryProducer(comptime T: type, comptime lane_count: usize, comptime
     };
 }
 
-fn DenseIntCompareProducer(comptime T: type, comptime lane_count: usize, comptime op: BuiltinId, comptime Left: type, comptime Right: type) type {
-    const Mask = @Int(.unsigned, lane_count);
-    return struct {
-        fn evalMask(ctx: anytype, idx: usize) Mask {
-            return hostCompareVectorMaskOp(T, lane_count, op, Left.evalVec(ctx, idx), Right.evalVec(ctx, idx));
-        }
-
-        fn evalScalar(ctx: anytype, idx: usize) bool {
-            return hostCompareScalarValueOp(T, op, Left.evalScalar(ctx, idx), Right.evalScalar(ctx, idx));
-        }
-    };
-}
-
 fn DenseMixedIntResolvedSource(comptime T: type) type {
     return union(enum) {
         array: []const T,
@@ -60167,7 +56116,7 @@ fn DenseMixedIntResolvedSource(comptime T: type) type {
     };
 }
 
-fn denseMixedIntSourceFromResolved(comptime T: type, source: DenseIntResolvedSource(T)) ?DenseMixedIntResolvedSource(T) {
+fn denseMixedIntSourceFromResolved(comptime T: type, source: DenseResolvedSource(T)) ?DenseMixedIntResolvedSource(T) {
     return switch (source) {
         .array => |items| .{ .array = items },
         .reverse_array => |items| .{ .reverse_array = items },
@@ -60267,16 +56216,16 @@ fn runDenseIntProducerSink(comptime lane_count: usize, comptime Producer: type, 
 fn denseIntCompareSourceRolesWord(
     comptime T: type,
     comptime op: BuiltinId,
-    comptime left_role: DenseIntSourceRole,
-    comptime right_role: DenseIntSourceRole,
-    ctx: *const DenseIntProducerContext(T),
+    comptime left_role: DenseSourceRole,
+    comptime right_role: DenseSourceRole,
+    ctx: *const DenseProducerContext(T),
     base: usize,
     active: usize,
 ) u64 {
     const lane_count = host_compare_zig_vector_bytes / @sizeOf(T);
-    const Left = DenseIntSourceProducer(T, lane_count, left_role);
-    const Right = DenseIntSourceProducer(T, lane_count, right_role);
-    const Producer = DenseIntCompareProducer(T, lane_count, op, Left, Right);
+    const Left = DenseSourceProducer(T, lane_count, left_role);
+    const Right = DenseSourceProducer(T, lane_count, right_role);
+    const Producer = DenseCompareProducer(T, lane_count, op, Left, Right);
 
     var word: u64 = 0;
     var bit: usize = 0;
@@ -60307,7 +56256,7 @@ fn denseMixedIntCompareSourceRolesWord(
     const lane_count = host_compare_zig_vector_bytes / @sizeOf(WideT);
     const Left = DenseMixedIntLeftSourceProducer(LeftT, WideT, lane_count, left_role);
     const Right = DenseMixedIntRightSourceProducer(RightT, WideT, lane_count, right_role);
-    const Producer = DenseIntCompareProducer(WideT, lane_count, op, Left, Right);
+    const Producer = DenseCompareProducer(WideT, lane_count, op, Left, Right);
 
     var word: u64 = 0;
     var bit: usize = 0;
@@ -60380,7 +56329,7 @@ fn DenseIntCastProducerContext(comptime LeftT: type, comptime RightT: type) type
     };
 }
 
-fn denseIntCastSourceContext(comptime LeftT: type, comptime RightT: type, left: DenseIntResolvedSource(LeftT), right: DenseIntResolvedSource(RightT)) DenseIntCastProducerContext(LeftT, RightT) {
+fn denseIntCastSourceContext(comptime LeftT: type, comptime RightT: type, left: DenseResolvedSource(LeftT), right: DenseResolvedSource(RightT)) DenseIntCastProducerContext(LeftT, RightT) {
     var ctx = DenseIntCastProducerContext(LeftT, RightT){};
     switch (left) {
         .array => |items| ctx.left_items = items,
@@ -60397,7 +56346,7 @@ fn denseIntCastSourceContext(comptime LeftT: type, comptime RightT: type, left: 
 
 const DenseIntCastSourceSide = enum { left, right };
 
-fn DenseIntCastSourceProducer(comptime InT: type, comptime OutT: type, comptime lane_count: usize, comptime role: DenseIntSourceRole, comptime side: DenseIntCastSourceSide) type {
+fn DenseIntCastSourceProducer(comptime InT: type, comptime OutT: type, comptime lane_count: usize, comptime role: DenseSourceRole, comptime side: DenseIntCastSourceSide) type {
     comptime {
         switch (side) {
             .left => switch (role) {
@@ -60436,7 +56385,7 @@ fn DenseIntCastSourceProducer(comptime InT: type, comptime OutT: type, comptime 
     };
 }
 
-fn denseIntCastSourceRole(comptime T: type, source: DenseIntResolvedSource(T), comptime side: DenseIntCastSourceSide) DenseIntSourceRole {
+fn denseIntCastSourceRole(comptime T: type, source: DenseResolvedSource(T), comptime side: DenseIntCastSourceSide) DenseSourceRole {
     return switch (side) {
         .left => switch (source) {
             .array => .left_array,
@@ -60456,8 +56405,8 @@ fn runDenseIntCastMapSourceRolesSink(
     comptime LeftT: type,
     comptime RightT: type,
     comptime op: BuiltinId,
-    comptime left_role: DenseIntSourceRole,
-    comptime right_role: DenseIntSourceRole,
+    comptime left_role: DenseSourceRole,
+    comptime right_role: DenseSourceRole,
     len: usize,
     ctx: *const DenseIntCastProducerContext(LeftT, RightT),
     sink: anytype,
@@ -60474,8 +56423,8 @@ fn runDenseIntCastSourceMapSinkOp(
     comptime LeftT: type,
     comptime RightT: type,
     comptime op: BuiltinId,
-    left: DenseIntResolvedSource(LeftT),
-    right: DenseIntResolvedSource(RightT),
+    left: DenseResolvedSource(LeftT),
+    right: DenseResolvedSource(RightT),
     len: usize,
     sink: anytype,
 ) void {
@@ -60495,11 +56444,11 @@ fn runDenseIntCastSourceMapSinkOp(
     unreachable;
 }
 
-fn denseIntCastSourceScalarItem(comptime InT: type, comptime OutT: type, source: DenseIntResolvedSource(InT), idx: usize) OutT {
+fn denseIntCastSourceScalarItem(comptime InT: type, comptime OutT: type, source: DenseResolvedSource(InT), idx: usize) OutT {
     return @intCast(denseIntResolvedSourceScalarItem(InT, source, idx));
 }
 
-fn fillDenseIntCastSourcesStoreScalarOp(comptime OutT: type, comptime LeftT: type, comptime RightT: type, comptime op: BuiltinId, out: []OutT, left: DenseIntResolvedSource(LeftT), right: DenseIntResolvedSource(RightT), len: usize) void {
+fn fillDenseIntCastSourcesStoreScalarOp(comptime OutT: type, comptime LeftT: type, comptime RightT: type, comptime op: BuiltinId, out: []OutT, left: DenseResolvedSource(LeftT), right: DenseResolvedSource(RightT), len: usize) void {
     for (out[0..len], 0..) |*dest, idx| {
         dest.* = applyIntOpUncheckedTyped(
             OutT,
@@ -60510,7 +56459,7 @@ fn fillDenseIntCastSourcesStoreScalarOp(comptime OutT: type, comptime LeftT: typ
     }
 }
 
-fn fillDenseIntCastSourcesStoreOp(comptime OutT: type, comptime LeftT: type, comptime RightT: type, comptime op: BuiltinId, out: []OutT, left: DenseIntResolvedSource(LeftT), right: DenseIntResolvedSource(RightT), len: usize) void {
+fn fillDenseIntCastSourcesStoreOp(comptime OutT: type, comptime LeftT: type, comptime RightT: type, comptime op: BuiltinId, out: []OutT, left: DenseResolvedSource(LeftT), right: DenseResolvedSource(RightT), len: usize) void {
     if (comptime !denseIntSourceStoreCanVectorize(OutT, op)) {
         fillDenseIntCastSourcesStoreScalarOp(OutT, LeftT, RightT, op, out, left, right, len);
         return;
@@ -60521,7 +56470,7 @@ fn fillDenseIntCastSourcesStoreOp(comptime OutT: type, comptime LeftT: type, com
     runDenseIntCastSourceMapSinkOp(OutT, LeftT, RightT, op, left, right, len, &sink);
 }
 
-fn fillDenseIntCastSourcesStore(comptime OutT: type, comptime LeftT: type, comptime RightT: type, out: []OutT, op: BuiltinId, left: DenseIntResolvedSource(LeftT), right: DenseIntResolvedSource(RightT), len: usize) void {
+fn fillDenseIntCastSourcesStore(comptime OutT: type, comptime LeftT: type, comptime RightT: type, out: []OutT, op: BuiltinId, left: DenseResolvedSource(LeftT), right: DenseResolvedSource(RightT), len: usize) void {
     switch (op) {
         .add => fillDenseIntCastSourcesStoreOp(OutT, LeftT, RightT, .add, out, left, right, len),
         .sub => fillDenseIntCastSourcesStoreOp(OutT, LeftT, RightT, .sub, out, left, right, len),
@@ -60536,8 +56485,8 @@ fn fillDenseIntCastSourcesStoreMorselKernel(comptime OutT: type, comptime LeftT:
     return struct {
         const Ctx = struct {
             out: []OutT,
-            left: DenseIntResolvedSource(LeftT),
-            right: DenseIntResolvedSource(RightT),
+            left: DenseResolvedSource(LeftT),
+            right: DenseResolvedSource(RightT),
             len: usize,
         };
 
@@ -60549,13 +56498,13 @@ fn fillDenseIntCastSourcesStoreMorselKernel(comptime OutT: type, comptime LeftT:
     };
 }
 
-fn runDenseIntCastSourcesStoreMorselOp(session: *Session, comptime OutT: type, comptime LeftT: type, comptime RightT: type, comptime op: BuiltinId, out: []OutT, left: DenseIntResolvedSource(LeftT), right: DenseIntResolvedSource(RightT), len: usize, workers_requested: usize) void {
+fn runDenseIntCastSourcesStoreMorselOp(session: *Session, comptime OutT: type, comptime LeftT: type, comptime RightT: type, comptime op: BuiltinId, out: []OutT, left: DenseResolvedSource(LeftT), right: DenseResolvedSource(RightT), len: usize, workers_requested: usize) void {
     const grain = normalizeMorselGrain(len, default_morsel_grain);
     const Kernel = fillDenseIntCastSourcesStoreMorselKernel(OutT, LeftT, RightT, op);
     session.runMorselRange(.{ .len = len, .grain = grain, .workers_requested = workers_requested }, Kernel.Ctx{ .out = out, .left = left, .right = right, .len = len }, Kernel.run) catch unreachable;
 }
 
-fn fillDenseIntCastSourcesStoreMorsel(session: *Session, comptime OutT: type, comptime LeftT: type, comptime RightT: type, out: []OutT, op: BuiltinId, left: DenseIntResolvedSource(LeftT), right: DenseIntResolvedSource(RightT), len: usize, workers_requested: usize) void {
+fn fillDenseIntCastSourcesStoreMorsel(session: *Session, comptime OutT: type, comptime LeftT: type, comptime RightT: type, out: []OutT, op: BuiltinId, left: DenseResolvedSource(LeftT), right: DenseResolvedSource(RightT), len: usize, workers_requested: usize) void {
     switch (op) {
         .add => runDenseIntCastSourcesStoreMorselOp(session, OutT, LeftT, RightT, .add, out, left, right, len, workers_requested),
         .sub => runDenseIntCastSourcesStoreMorselOp(session, OutT, LeftT, RightT, .sub, out, left, right, len, workers_requested),
@@ -60569,11 +56518,11 @@ fn fillDenseIntCastSourcesStoreMorsel(session: *Session, comptime OutT: type, co
 fn fillDenseIntCompareSourceRolesOp(
     comptime T: type,
     comptime op: BuiltinId,
-    comptime left_role: DenseIntSourceRole,
-    comptime right_role: DenseIntSourceRole,
+    comptime left_role: DenseSourceRole,
+    comptime right_role: DenseSourceRole,
     out: *HostBitAlloc,
     len: usize,
-    ctx: *const DenseIntProducerContext(T),
+    ctx: *const DenseProducerContext(T),
 ) HostCompareSummary {
     var summary = hostCompareSummaryEmpty();
     for (out.words, 0..) |*out_word, word_idx| {
@@ -60586,7 +56535,7 @@ fn fillDenseIntCompareSourceRolesOp(
     return summary;
 }
 
-fn fillDenseIntCompareSourcesOp(comptime T: type, comptime op: BuiltinId, out: *HostBitAlloc, left: DenseIntResolvedSource(T), right: DenseIntResolvedSource(T), len: usize) ?HostCompareSummary {
+fn fillDenseIntCompareSourcesOp(comptime T: type, comptime op: BuiltinId, out: *HostBitAlloc, left: DenseResolvedSource(T), right: DenseResolvedSource(T), len: usize) ?HostCompareSummary {
     if (out.len != len) return null;
     const source_len = denseIntResolvedSourcesLen(T, left, right) orelse return null;
     if (source_len != len) return null;
@@ -60611,7 +56560,7 @@ fn fillDenseIntCompareSourcesOp(comptime T: type, comptime op: BuiltinId, out: *
     };
 }
 
-fn fillDenseIntCompareSources(comptime T: type, out: *HostBitAlloc, op: BuiltinId, left: DenseIntResolvedSource(T), right: DenseIntResolvedSource(T), len: usize) ?HostCompareSummary {
+fn fillDenseIntCompareSources(comptime T: type, out: *HostBitAlloc, op: BuiltinId, left: DenseResolvedSource(T), right: DenseResolvedSource(T), len: usize) ?HostCompareSummary {
     return switch (op) {
         .equal => fillDenseIntCompareSourcesOp(T, .equal, out, left, right, len),
         .less => fillDenseIntCompareSourcesOp(T, .less, out, left, right, len),
@@ -60638,44 +56587,29 @@ fn DenseIntStoreSink(comptime T: type, comptime lane_count: usize) type {
 fn runDenseIntMapSourceRolesSink(
     comptime T: type,
     comptime op: BuiltinId,
-    comptime left_role: DenseIntSourceRole,
-    comptime right_role: DenseIntSourceRole,
+    comptime left_role: DenseSourceRole,
+    comptime right_role: DenseSourceRole,
     len: usize,
-    ctx: *const DenseIntProducerContext(T),
+    ctx: *const DenseProducerContext(T),
     sink: anytype,
 ) void {
     const lane_count = dense_host_simd_bytes / @sizeOf(T);
-    const Left = DenseIntSourceProducer(T, lane_count, left_role);
-    const Right = DenseIntSourceProducer(T, lane_count, right_role);
+    const Left = DenseSourceProducer(T, lane_count, left_role);
+    const Right = DenseSourceProducer(T, lane_count, right_role);
     const Producer = DenseIntBinaryProducer(T, lane_count, op, Left, Right);
     runDenseIntProducerSink(lane_count, Producer, len, ctx, sink);
 }
 
 fn runDenseIntArrayArrayProducerSink(comptime T: type, comptime op: BuiltinId, left_items: []const T, right_items: []const T, sink: anytype) void {
     const lane_count = dense_host_simd_bytes / @sizeOf(T);
-    if (comptime dense_producer_mode == .direct) {
-        const Vec = @Vector(lane_count, T);
-        var idx: usize = 0;
-        const vector_limit = left_items.len - (left_items.len % lane_count);
-        while (idx < vector_limit) : (idx += lane_count) {
-            const lhs: Vec = left_items[idx..][0..lane_count].*;
-            const rhs: Vec = right_items[idx..][0..lane_count].*;
-            sink.consumeVec(idx, denseIntBinaryVec(op, lhs, rhs));
-        }
-        while (idx < left_items.len) : (idx += 1) {
-            sink.consumeScalar(idx, applyIntOpUncheckedTyped(T, op, left_items[idx], right_items[idx]));
-        }
-        return;
-    }
-
-    const LoadLeft = DenseIntSourceProducer(T, lane_count, .left_array);
-    const LoadRight = DenseIntSourceProducer(T, lane_count, .right_array);
+    const LoadLeft = DenseSourceProducer(T, lane_count, .left_array);
+    const LoadRight = DenseSourceProducer(T, lane_count, .right_array);
     const Producer = DenseIntBinaryProducer(T, lane_count, op, LoadLeft, LoadRight);
-    const ctx = DenseIntProducerContext(T){ .left_items = left_items, .right_items = right_items };
+    const ctx = DenseProducerContext(T){ .left_items = left_items, .right_items = right_items };
     runDenseIntProducerSink(lane_count, Producer, left_items.len, &ctx, sink);
 }
 
-fn runDenseIntSourceMapSinkOp(comptime T: type, comptime op: BuiltinId, left: DenseIntResolvedSource(T), right: DenseIntResolvedSource(T), len: usize, sink: anytype) void {
+fn runDenseIntSourceMapSinkOp(comptime T: type, comptime op: BuiltinId, left: DenseResolvedSource(T), right: DenseResolvedSource(T), len: usize, sink: anytype) void {
     var ctx = denseIntSourceContext(T, left, right);
     switch (left) {
         .array => switch (right) {
@@ -60696,7 +56630,7 @@ fn runDenseIntSourceMapSinkOp(comptime T: type, comptime op: BuiltinId, left: De
     }
 }
 
-fn fillDenseIntSourcesStoreScalarOp(comptime T: type, comptime op: BuiltinId, out: []T, left: DenseIntResolvedSource(T), right: DenseIntResolvedSource(T), len: usize) void {
+fn fillDenseIntSourcesStoreScalarOp(comptime T: type, comptime op: BuiltinId, out: []T, left: DenseResolvedSource(T), right: DenseResolvedSource(T), len: usize) void {
     for (out[0..len], 0..) |*dest, idx| {
         dest.* = applyIntOpUncheckedTyped(
             T,
@@ -60707,7 +56641,7 @@ fn fillDenseIntSourcesStoreScalarOp(comptime T: type, comptime op: BuiltinId, ou
     }
 }
 
-fn fillDenseIntSourcesStoreOp(comptime T: type, comptime op: BuiltinId, out: []T, left: DenseIntResolvedSource(T), right: DenseIntResolvedSource(T), len: usize) void {
+fn fillDenseIntSourcesStoreOp(comptime T: type, comptime op: BuiltinId, out: []T, left: DenseResolvedSource(T), right: DenseResolvedSource(T), len: usize) void {
     if (comptime enable_dense_dyad_i8_mul_wasm_vectorized and T == i8 and op == .mul) {
         switch (left) {
             .array => |left_items| switch (right) {
@@ -60752,57 +56686,13 @@ fn fillDenseIntSourcesStoreOp(comptime T: type, comptime op: BuiltinId, out: []T
     runDenseIntSourceMapSinkOp(T, op, left, right, len, &sink);
 }
 
-fn fillDenseIntSourcesStore(comptime T: type, out: []T, op: BuiltinId, left: DenseIntResolvedSource(T), right: DenseIntResolvedSource(T), len: usize) void {
+fn fillDenseIntSourcesStore(comptime T: type, out: []T, op: BuiltinId, left: DenseResolvedSource(T), right: DenseResolvedSource(T), len: usize) void {
     switch (op) {
         .add => fillDenseIntSourcesStoreOp(T, .add, out, left, right, len),
         .sub => fillDenseIntSourcesStoreOp(T, .sub, out, left, right, len),
         .minimum => fillDenseIntSourcesStoreOp(T, .minimum, out, left, right, len),
         .maximum => fillDenseIntSourcesStoreOp(T, .maximum, out, left, right, len),
         .mul => fillDenseIntSourcesStoreOp(T, .mul, out, left, right, len),
-        else => unreachable,
-    }
-}
-
-fn fillDenseIntSourcesStoreMorselKernel(comptime T: type, comptime op: BuiltinId) type {
-    return struct {
-        const Ctx = struct {
-            out: []T,
-            left: DenseIntResolvedSource(T),
-            right: DenseIntResolvedSource(T),
-            len: usize,
-        };
-
-        fn run(ctx: Ctx, range: MorselRange) void {
-            const left = denseIntSliceResolvedSource(T, ctx.left, range, ctx.len);
-            const right = denseIntSliceResolvedSource(T, ctx.right, range, ctx.len);
-            fillDenseIntSourcesStoreOp(T, op, ctx.out[range.start..range.end], left, right, range.end - range.start);
-        }
-    };
-}
-
-fn fillDenseIntSourcesStoreMorsel(session: *Session, comptime T: type, out: []T, op: BuiltinId, left: DenseIntResolvedSource(T), right: DenseIntResolvedSource(T), len: usize, workers_requested: usize) void {
-    const grain = normalizeMorselGrain(len, default_morsel_grain);
-    switch (op) {
-        .add => {
-            const Kernel = fillDenseIntSourcesStoreMorselKernel(T, .add);
-            session.runMorselRange(.{ .len = len, .grain = grain, .workers_requested = workers_requested }, Kernel.Ctx{ .out = out, .left = left, .right = right, .len = len }, Kernel.run) catch unreachable;
-        },
-        .sub => {
-            const Kernel = fillDenseIntSourcesStoreMorselKernel(T, .sub);
-            session.runMorselRange(.{ .len = len, .grain = grain, .workers_requested = workers_requested }, Kernel.Ctx{ .out = out, .left = left, .right = right, .len = len }, Kernel.run) catch unreachable;
-        },
-        .minimum => {
-            const Kernel = fillDenseIntSourcesStoreMorselKernel(T, .minimum);
-            session.runMorselRange(.{ .len = len, .grain = grain, .workers_requested = workers_requested }, Kernel.Ctx{ .out = out, .left = left, .right = right, .len = len }, Kernel.run) catch unreachable;
-        },
-        .maximum => {
-            const Kernel = fillDenseIntSourcesStoreMorselKernel(T, .maximum);
-            session.runMorselRange(.{ .len = len, .grain = grain, .workers_requested = workers_requested }, Kernel.Ctx{ .out = out, .left = left, .right = right, .len = len }, Kernel.run) catch unreachable;
-        },
-        .mul => {
-            const Kernel = fillDenseIntSourcesStoreMorselKernel(T, .mul);
-            session.runMorselRange(.{ .len = len, .grain = grain, .workers_requested = workers_requested }, Kernel.Ctx{ .out = out, .left = left, .right = right, .len = len }, Kernel.run) catch unreachable;
-        },
         else => unreachable,
     }
 }
@@ -61207,30 +57097,7 @@ fn fillBitDenseDenseTransposeResult(out: *HostBitAlloc, op: BuiltinId, left_item
     }
 }
 
-fn fillIntScalarArrayResultGeneric(out: *HostIntResult, op: BuiltinId, scalar: i64, items: HostIntArrayView, scalar_left: bool, unchecked_safe: bool) KError!void {
-    for (0..hostIntArrayViewLen(items)) |idx| {
-        const item = hostIntViewItem(items, idx);
-        const result = if (unchecked_safe)
-            if (scalar_left) applyIntOpUnchecked(op, scalar, item) else applyIntOpUnchecked(op, item, scalar)
-        else
-            try checkedIntOp(op, if (scalar_left) scalar else item, if (scalar_left) item else scalar);
-        try out.set(idx, result);
-    }
-}
-
-fn fillIntArrayArrayResultGeneric(out: *HostIntResult, op: BuiltinId, left_items: HostIntArrayView, right_items: HostIntArrayView, unchecked_safe: bool) KError!void {
-    for (0..hostIntArrayViewLen(left_items)) |idx| {
-        const left = hostIntViewItem(left_items, idx);
-        const right = hostIntViewItem(right_items, idx);
-        const result = if (unchecked_safe)
-            applyIntOpUnchecked(op, left, right)
-        else
-            try checkedIntOp(op, left, right);
-        try out.set(idx, result);
-    }
-}
-
-fn denseIntArrayViewResolvedSource(comptime T: type, view: HostIntArrayView, comptime reverse: bool) ?DenseIntResolvedSource(T) {
+fn denseIntArrayViewResolvedSource(comptime T: type, view: HostIntArrayView, comptime reverse: bool) ?DenseResolvedSource(T) {
     return switch (view) {
         .bit => null,
         .int8 => |items| if (T == i8) (if (reverse) .{ .reverse_array = items } else .{ .array = items }) else null,
@@ -61287,32 +57154,24 @@ fn hostIntDenseViewContiguousArrayView(view: HostIntDenseView) ?HostIntArrayView
     };
 }
 
-fn denseIntFlatSliceResolvedSource(comptime T: type, view: HostFlatSliceView) ?DenseIntResolvedSource(T) {
+fn denseIntFlatSliceResolvedSource(comptime T: type, view: HostFlatSliceView) ?DenseResolvedSource(T) {
     return denseIntArrayViewResolvedSource(T, hostIntFlatSliceArrayView(view) orelse return null, false);
 }
 
-fn denseIntFirstAxisSliceResolvedSource(comptime T: type, view: HostFirstAxisSliceView) ?DenseIntResolvedSource(T) {
+fn denseIntFirstAxisSliceResolvedSource(comptime T: type, view: HostFirstAxisSliceView) ?DenseResolvedSource(T) {
     const source = fullFirstAxisSliceSourceIntView(view) orelse return null;
     if (view.row_step == 1) return denseIntArrayViewResolvedSource(T, source.view, false);
     if (view.row_step == -1) return denseIntArrayViewResolvedSource(T, source.view, true);
     return null;
 }
 
-fn denseIntDenseViewResolvedSource(comptime T: type, view: HostIntDenseView) ?DenseIntResolvedSource(T) {
+fn denseIntDenseViewResolvedSource(comptime T: type, view: HostIntDenseView) ?DenseResolvedSource(T) {
     return switch (view) {
         .dense => |items| denseIntArrayViewResolvedSource(T, items, false),
         .flat_slice => |items| denseIntFlatSliceResolvedSource(T, items),
         .first_axis_slice => |items| denseIntFirstAxisSliceResolvedSource(T, items),
         else => null,
     };
-}
-
-fn fillIntNegArrayResultGeneric(out: *HostIntResult, items: HostIntArrayView, unchecked_safe: bool) KError!void {
-    for (0..hostIntArrayViewLen(items)) |idx| {
-        const item = hostIntViewItem(items, idx);
-        const result = if (unchecked_safe) -item else try checkedIntOp(.sub, 0, item);
-        try out.set(idx, result);
-    }
 }
 
 fn fillIntScalarBitArrayTo(comptime OutT: type, out: []OutT, op: BuiltinId, scalar: i64, items: HostBitSlice, scalar_left: bool, unchecked_safe: bool) KError!void {
@@ -61428,8 +57287,8 @@ fn fillIntScalarArrayTo(comptime OutT: type, comptime InT: type, out: []OutT, op
             if (comptime hostIntStorageRank(hostIntStorageKindForDenseType(InT)) <= hostIntStorageRank(hostIntStorageKindForDenseType(OutT))) {
                 if (enable_dense_int_simd and comptime InT == OutT) {
                     if (denseIntSimdSupported(op)) {
-                        const scalar_source = DenseIntResolvedSource(OutT){ .scalar = scalar_value };
-                        const item_source = DenseIntResolvedSource(OutT){ .array = items };
+                        const scalar_source = DenseResolvedSource(OutT){ .scalar = scalar_value };
+                        const item_source = DenseResolvedSource(OutT){ .array = items };
                         fillDenseIntSourcesStore(
                             OutT,
                             out,
@@ -62038,33 +57897,33 @@ fn fillFloatArrayArray(comptime LT: type, comptime RT: type, out: []f64, op: Bui
     }
 }
 
-fn denseFloatUnaryStoreSource64(items: HostFloatDenseView) ?DenseFloatResolvedSource(f64) {
+fn denseFloatUnaryStoreSource64(items: HostFloatDenseView) ?DenseResolvedSource(f64) {
     if (items == .dense) return .{ .array = items.dense };
     if (fullReverseFloatDenseViewSource64(items)) |source| return .{ .reverse_array = source };
     return null;
 }
 
-fn denseFloatUnaryStoreSource32(items: HostFloatDenseView) ?DenseFloatResolvedSource(f32) {
+fn denseFloatUnaryStoreSource32(items: HostFloatDenseView) ?DenseResolvedSource(f32) {
     if (hostFloatDenseViewDirectFloat32Slice(items)) |source| return .{ .array = source };
     if (fullReverseFloatDenseViewSource32(items)) |source| return .{ .reverse_array = source };
     return null;
 }
 
-fn fillFloatScalarResolvedSource(comptime T: type, out: []f64, op: BuiltinId, scalar: f64, source: DenseFloatResolvedSource(T), scalar_left: bool) void {
+fn fillFloatScalarResolvedSource(comptime T: type, out: []f64, op: BuiltinId, scalar: f64, source: DenseResolvedSource(T), scalar_left: bool) void {
     for (out, 0..) |*dest, idx| {
         const item = toDenseFloat(denseFloatResolvedSourceScalarItem(T, source, idx));
         dest.* = if (scalar_left) applyFloatOp(op, scalar, item) else applyFloatOp(op, item, scalar);
     }
 }
 
-fn fillFloatScalarIntResolvedSource(comptime T: type, out: []f64, op: BuiltinId, scalar: f64, source: DenseIntResolvedSource(T), scalar_left: bool) void {
+fn fillFloatScalarIntResolvedSource(comptime T: type, out: []f64, op: BuiltinId, scalar: f64, source: DenseResolvedSource(T), scalar_left: bool) void {
     for (out, 0..) |*dest, idx| {
         const item: f64 = @floatFromInt(denseIntResolvedSourceScalarItem(T, source, idx));
         dest.* = if (scalar_left) applyFloatOp(op, scalar, item) else applyFloatOp(op, item, scalar);
     }
 }
 
-fn fillFloatResolvedSourcesScalar(out: []f64, op: BuiltinId, left: DenseFloatResolvedSource(f64), right: DenseFloatResolvedSource(f64), len: usize) void {
+fn fillFloatResolvedSourcesScalar(out: []f64, op: BuiltinId, left: DenseResolvedSource(f64), right: DenseResolvedSource(f64), len: usize) void {
     for (out[0..len], 0..) |*dest, idx| {
         dest.* = applyFloatOp(
             op,
@@ -62584,27 +58443,6 @@ fn scalarNumericResultStorageKind(left: Value, right: Value) HostFloatStorageKin
     return .float64;
 }
 
-fn scalarFloatMonadResultStorageKind(value: Value) HostFloatStorageKind {
-    return scalarFloatStorageKind(value) orelse .float64;
-}
-
-fn denseAutodiffProgramSumsq() Session.DenseAutodiffProgram {
-    var program = Session.DenseAutodiffProgram{};
-    const input = program.push(.input, .vector);
-    const squared = program.push(.{ .mul = .{ .left = input, .right = input } }, .vector);
-    program.root = program.push(.{ .reduce_add = squared }, .scalar);
-    return program;
-}
-
-fn denseAutodiffProgramScanSumsq() Session.DenseAutodiffProgram {
-    var program = Session.DenseAutodiffProgram{};
-    const input = program.push(.input, .vector);
-    const prefix = program.push(.{ .scan_add = input }, .vector);
-    const squared = program.push(.{ .mul = .{ .left = prefix, .right = prefix } }, .vector);
-    program.root = program.push(.{ .reduce_add = squared }, .scalar);
-    return program;
-}
-
 fn applyDenseAutodiffUnaryMap(op: BuiltinId, value: f64) f64 {
     return switch (op) {
         .exp, .log, .sin, .cos, .tanh, .sigmoid => applyFloatMonadOp(op, value),
@@ -62761,13 +58599,13 @@ fn executeDenseAutodiffProgram(allocator: std.mem.Allocator, program: *const Ses
                 }
             },
             .add => |value| {
-                try executeDenseAutodiffBinaryForward(program, idx, value.left, value.right, forward_vectors[0..], &scalar_values);
+                try executeDenseAutodiffBinaryForward(.add, program, idx, value.left, value.right, forward_vectors[0..], &scalar_values);
             },
             .sub => |value| {
-                try executeDenseAutodiffBinaryForwardSub(program, idx, value.left, value.right, forward_vectors[0..], &scalar_values);
+                try executeDenseAutodiffBinaryForward(.sub, program, idx, value.left, value.right, forward_vectors[0..], &scalar_values);
             },
             .mul => |value| {
-                try executeDenseAutodiffBinaryForwardMul(program, idx, value.left, value.right, forward_vectors[0..], &scalar_values);
+                try executeDenseAutodiffBinaryForward(.mul, program, idx, value.left, value.right, forward_vectors[0..], &scalar_values);
             },
             .reduce_add => |src| {
                 var total: f64 = 0.0;
@@ -62862,11 +58700,11 @@ fn executeDenseAutodiffProgram(allocator: std.mem.Allocator, program: *const Ses
     return scalar_values[program.root];
 }
 
-fn executeDenseAutodiffBinaryForward(program: *const Session.DenseAutodiffProgram, idx: usize, left: Session.DenseAutodiffNodeIndex, right: Session.DenseAutodiffNodeIndex, forward_vectors: []?[]f64, scalar_values: *[Session.dense_autodiff_max_nodes]f64) !void {
+fn executeDenseAutodiffBinaryForward(comptime op: DenseAutodiffScalarBinaryOp, program: *const Session.DenseAutodiffProgram, idx: usize, left: Session.DenseAutodiffNodeIndex, right: Session.DenseAutodiffNodeIndex, forward_vectors: []?[]f64, scalar_values: *[Session.dense_autodiff_max_nodes]f64) !void {
     const left_kind = program.kinds[left];
     const right_kind = program.kinds[right];
     if (program.kinds[idx] == .scalar) {
-        scalar_values[idx] = scalarValuesBinaryOp(.add, scalar_values[left], scalar_values[right]);
+        scalar_values[idx] = scalarValuesBinaryOp(op, scalar_values[left], scalar_values[right]);
         return;
     }
     const out = forward_vectors[idx].?;
@@ -62875,83 +58713,25 @@ fn executeDenseAutodiffBinaryForward(program: *const Session.DenseAutodiffProgra
             .vector => {
                 const left_values = forward_vectors[left].?;
                 const right_values = forward_vectors[right].?;
-                for (out, 0..) |*item, item_idx| item.* = left_values[item_idx] + right_values[item_idx];
+                for (out, 0..) |*item, item_idx| item.* = scalarValuesBinaryOp(op, left_values[item_idx], right_values[item_idx]);
             },
             .scalar => {
                 const left_values = forward_vectors[left].?;
                 const right_value = scalar_values[right];
-                for (out, 0..) |*item, item_idx| item.* = left_values[item_idx] + right_value;
+                for (out, 0..) |*item, item_idx| item.* = scalarValuesBinaryOp(op, left_values[item_idx], right_value);
             },
         },
         .scalar => {
             const left_value = scalar_values[left];
             const right_values = forward_vectors[right].?;
-            for (out, 0..) |*item, item_idx| item.* = left_value + right_values[item_idx];
-        },
-    }
-}
-
-fn executeDenseAutodiffBinaryForwardSub(program: *const Session.DenseAutodiffProgram, idx: usize, left: Session.DenseAutodiffNodeIndex, right: Session.DenseAutodiffNodeIndex, forward_vectors: []?[]f64, scalar_values: *[Session.dense_autodiff_max_nodes]f64) !void {
-    const left_kind = program.kinds[left];
-    const right_kind = program.kinds[right];
-    if (program.kinds[idx] == .scalar) {
-        scalar_values[idx] = scalarValuesBinaryOp(.sub, scalar_values[left], scalar_values[right]);
-        return;
-    }
-    const out = forward_vectors[idx].?;
-    switch (left_kind) {
-        .vector => switch (right_kind) {
-            .vector => {
-                const left_values = forward_vectors[left].?;
-                const right_values = forward_vectors[right].?;
-                for (out, 0..) |*item, item_idx| item.* = left_values[item_idx] - right_values[item_idx];
-            },
-            .scalar => {
-                const left_values = forward_vectors[left].?;
-                const right_value = scalar_values[right];
-                for (out, 0..) |*item, item_idx| item.* = left_values[item_idx] - right_value;
-            },
-        },
-        .scalar => {
-            const left_value = scalar_values[left];
-            const right_values = forward_vectors[right].?;
-            for (out, 0..) |*item, item_idx| item.* = left_value - right_values[item_idx];
-        },
-    }
-}
-
-fn executeDenseAutodiffBinaryForwardMul(program: *const Session.DenseAutodiffProgram, idx: usize, left: Session.DenseAutodiffNodeIndex, right: Session.DenseAutodiffNodeIndex, forward_vectors: []?[]f64, scalar_values: *[Session.dense_autodiff_max_nodes]f64) !void {
-    const left_kind = program.kinds[left];
-    const right_kind = program.kinds[right];
-    if (program.kinds[idx] == .scalar) {
-        scalar_values[idx] = scalarValuesBinaryOp(.mul, scalar_values[left], scalar_values[right]);
-        return;
-    }
-    const out = forward_vectors[idx].?;
-    switch (left_kind) {
-        .vector => switch (right_kind) {
-            .vector => {
-                const left_values = forward_vectors[left].?;
-                const right_values = forward_vectors[right].?;
-                for (out, 0..) |*item, item_idx| item.* = left_values[item_idx] * right_values[item_idx];
-            },
-            .scalar => {
-                const left_values = forward_vectors[left].?;
-                const right_value = scalar_values[right];
-                for (out, 0..) |*item, item_idx| item.* = left_values[item_idx] * right_value;
-            },
-        },
-        .scalar => {
-            const left_value = scalar_values[left];
-            const right_values = forward_vectors[right].?;
-            for (out, 0..) |*item, item_idx| item.* = left_value * right_values[item_idx];
+            for (out, 0..) |*item, item_idx| item.* = scalarValuesBinaryOp(op, left_value, right_values[item_idx]);
         },
     }
 }
 
 const DenseAutodiffScalarBinaryOp = enum { add, sub, mul };
 
-fn scalarValuesBinaryOp(op: DenseAutodiffScalarBinaryOp, left: f64, right: f64) f64 {
+fn scalarValuesBinaryOp(comptime op: DenseAutodiffScalarBinaryOp, left: f64, right: f64) f64 {
     return switch (op) {
         .add => left + right,
         .sub => left - right,
@@ -63125,8 +58905,8 @@ fn materializeAutogradTarget(allocator: std.mem.Allocator, value: Value) KError!
                 .backend = .host,
             };
         },
-        .array => switch (value.activeArrayKind()) {
-            .host_dense_array => blk: {
+        .array => switch ((valueNumericHandle(value) orelse return error.Type).activeAttachment()) {
+            .host => blk: {
                 const array = hostDenseIfPresent(value) orelse return error.Type;
                 const shape = try allocator.alloc(i32, 1);
                 shape[0] = @intCast(array.len());
@@ -63154,8 +58934,8 @@ fn materializeAutogradTarget(allocator: std.mem.Allocator, value: Value) KError!
                     else => return error.Type,
                 }
             },
-            .backend_array => blk: {
-                var owned = value.asBackendArray().array.clone() catch |err| return mapMlxError(err);
+            .mlx => blk: {
+                var owned = (backendArrayIfPresent(value) orelse return error.Type).array.clone() catch |err| return mapMlxError(err);
                 defer owned.deinit();
                 owned.eval() catch |err| return mapMlxError(err);
 
@@ -63227,7 +59007,7 @@ fn materializeAutogradTarget(allocator: std.mem.Allocator, value: Value) KError!
                     else => return error.Type,
                 };
             },
-            else => error.Type,
+            .none => error.Type,
         },
         else => error.Type,
     };
@@ -63346,7 +59126,6 @@ const max_scope_depth = if (embedded_runtime_limits) 8 else 32;
 const max_body_bytes = max_body_instructions * 10;
 const max_shaped_global_local_args = 64;
 const max_body_constants = if (embedded_runtime_limits) 64 else 256;
-const max_runtime_stack = if (embedded_runtime_limits) 128 else 512;
 const max_pooled_objects = if (embedded_runtime_limits) 8 else 128;
 
 comptime {
@@ -63497,6 +59276,25 @@ const ConsumeCandidates = struct {
         }
     }
 
+    fn noteBorrow(self: *ConsumeCandidates, slot: u16) void {
+        for (self.locals[0..self.local_count]) |*candidate| {
+            if (candidate.slot == slot) candidate.last_source = null;
+        }
+    }
+
+    fn patchOverwrittenLocal(self: *ConsumeCandidates, out: *CodeEmitter, slot: u16) void {
+        for (self.shaped_global_locals[0..self.shaped_global_local_count]) |site| {
+            if (site.source.slot == slot and self.localSourceShouldConsume(site.source))
+                out.patchGlobalCallArgConsumeBit(site.arg_kind_compact_offset);
+        }
+        for (self.locals[0..self.local_count]) |*candidate| {
+            if (candidate.slot == slot) {
+                if (candidate.last_source) |source| out.patchLoadLocalToTake(source);
+                candidate.last_source = null;
+            }
+        }
+    }
+
     fn localSourceShouldConsume(self: ConsumeCandidates, source: CompactLocalSourceRef) bool {
         for (self.locals[0..self.local_count]) |candidate| {
             if (candidate.last_source) |last_source| {
@@ -63620,9 +59418,16 @@ const AstVector = struct {
     count: u8,
 };
 
-const AstDiscardLeft = struct {
-    left: AstNodeId,
-    right: AstNodeId,
+const AstAssignment = struct {
+    ident: IdentRef,
+    selector: ?AstNodeId = null,
+    rhs: AstNodeId,
+    mode: NameAssignmentMode = .bind,
+    builtin: BuiltinId = .add,
+};
+
+const AstBlock = struct {
+    body_source: []const u8,
 };
 
 const AstAmend = struct {
@@ -63681,7 +59486,8 @@ const AstNodeData = union(enum) {
     adverb: AstAdverb,
     synthetic_lambda: AstSyntheticLambda,
     vector: AstVector,
-    discard_left: AstDiscardLeft,
+    assignment: AstAssignment,
+    block: AstBlock,
     amend: AstAmend,
     cond: AstCond,
 };
@@ -63781,21 +59587,6 @@ const NameAssignmentMode = enum {
     bind,
     modified,
     explicit_global,
-};
-
-const LocalAssignment = struct {
-    ident: IdentRef,
-    rhs_source: []const u8,
-    mode: NameAssignmentMode = .bind,
-    builtin: BuiltinId = .add,
-};
-
-const IndexedAssignment = struct {
-    ident: IdentRef,
-    selector_source: []const u8,
-    rhs_source: []const u8,
-    mode: AmendMode,
-    builtin: BuiltinId = .add,
 };
 
 const InnerProductInfo = struct {
@@ -64057,13 +59848,6 @@ const CodeEmitter = struct {
         return self.compact_bytes.items[0..self.compact_len];
     }
 
-    fn directCompactMaxStack(self: *const CodeEmitter) ?u8 {
-        const bytes = self.directCompactSlice() orelse return null;
-        const state = compactStackState(bytes) orelse return null;
-        if (state.max_depth > max_code_stack_slots) return null;
-        return @intCast(state.max_depth);
-    }
-
     fn position(self: *const CodeEmitter) InstructionPosition {
         return .{
             .compact_offset = std.math.cast(u16, self.compact_len) orelse std.math.maxInt(u16),
@@ -64258,7 +60042,7 @@ const CodeEmitter = struct {
     fn compactAppendConstBuiltin(self: *CodeEmitter, compact_start: usize, builtin: BuiltinId) void {
         if (!self.compactBeginAppend(compact_start)) return;
         const saved_len = self.compact_len;
-        if (!self.compactAppendByte(ck_const_builtin_u8) or !self.compactAppendByte(@intFromEnum(builtin)) or !self.compactAdjustStack(0, 1)) {
+        if (!self.compactAppendByte(ck_const_builtin_u8) or !self.compactAppendByte(@backingInt(builtin)) or !self.compactAdjustStack(0, 1)) {
             self.compact_len = saved_len;
             self.invalidateCompact();
             return;
@@ -64332,14 +60116,14 @@ const CodeEmitter = struct {
                     self.compactAppendI64(value.const_value);
             },
             .local_local_op => |value| self.compactAppendByte(global_call_arg_kind_byte(.local_local_op, false)) and
-                self.compactAppendByte(@intFromEnum(value.op)) and
+                self.compactAppendByte(@backingInt(value.op)) and
                 self.compactAppendByte(value.left_slot) and
                 self.compactAppendByte(value.right_slot),
             .local_local_const_op => |value| self.compactAppendByte(global_call_arg_kind_byte(.local_local_const_op, false)) and
-                self.compactAppendByte(@intFromEnum(value.op)) and
+                self.compactAppendByte(@backingInt(value.op)) and
                 self.compactAppendByte(value.left_slot) and
                 self.compactAppendByte(value.right_slot) and
-                self.compactAppendByte(@intFromEnum(value.const_op)) and
+                self.compactAppendByte(@backingInt(value.const_op)) and
                 self.compactAppendI64(value.const_value),
             .scalar_dyad_op => |value| blk: {
                 switch (value.op) {
@@ -64348,7 +60132,7 @@ const CodeEmitter = struct {
                 }
                 var ok = self.compactAppendByte(global_call_arg_kind_byte(.scalar_dyad_op, false)) and
                     self.compactAppendByte(value.shape) and
-                    self.compactAppendByte(@intFromEnum(value.op));
+                    self.compactAppendByte(@backingInt(value.op));
                 ok = ok and switch (value.shape) {
                     compact_scalar_dyad_local_const_i64 => self.compactAppendByte(value.left_slot) and
                         self.compactAppendI64(value.const_value),
@@ -64465,7 +60249,7 @@ const CodeEmitter = struct {
         const saved = self.compactBeginDirectPayloadAppend(compact_start) orelse return;
         const ok = compactFitsGlobal(slot) and
             self.compactAppendGlobalSlotOp(ck_modify_global_stack_u8, slot) and
-            self.compactAppendByte(@intFromEnum(builtin)) and
+            self.compactAppendByte(@backingInt(builtin)) and
             self.compactAppendByte(@intFromBool(want_result)) and
             self.compactAdjustStack(1, if (want_result) 1 else 0);
         self.compactFinishDirectPayloadAppend(saved, ok);
@@ -64476,7 +60260,7 @@ const CodeEmitter = struct {
         const ok = compactFitsLocal(slot) and
             self.compactAppendByte(ck_modify_local_stack_u8) and
             self.compactAppendByte(slot) and
-            self.compactAppendByte(@intFromEnum(builtin)) and
+            self.compactAppendByte(@backingInt(builtin)) and
             self.compactAppendByte(@intFromBool(want_result)) and
             self.compactAdjustStack(1, if (want_result) 1 else 0);
         self.compactFinishDirectPayloadAppend(saved, ok);
@@ -64486,7 +60270,7 @@ const CodeEmitter = struct {
         const saved = self.compactBeginDirectPayloadAppend(compact_start) orelse return;
         const ok = compactFitsGlobal(slot) and
             self.compactAppendGlobalSlotOp(ck_modify_global_const_i64, slot) and
-            self.compactAppendByte(@intFromEnum(builtin)) and
+            self.compactAppendByte(@backingInt(builtin)) and
             self.compactAppendByte(@intFromBool(want_result)) and
             self.compactAppendI64(rhs) and
             self.compactAdjustStack(0, if (want_result) 1 else 0);
@@ -64498,7 +60282,7 @@ const CodeEmitter = struct {
         const ok = compactFitsLocal(slot) and
             self.compactAppendByte(ck_modify_local_const_i64) and
             self.compactAppendByte(slot) and
-            self.compactAppendByte(@intFromEnum(builtin)) and
+            self.compactAppendByte(@backingInt(builtin)) and
             self.compactAppendByte(@intFromBool(want_result)) and
             self.compactAppendI64(rhs) and
             self.compactAdjustStack(0, if (want_result) 1 else 0);
@@ -64518,11 +60302,11 @@ const CodeEmitter = struct {
         const saved = self.compactBeginDirectPayloadAppend(compact_start) orelse return;
         const ok = compactFitsGlobal(slot) and
             self.compactAppendGlobalSlotOp(ck_assign_index_global_sources_u8, slot) and
-            self.compactAppendByte(@intFromEnum(mode)) and
-            self.compactAppendByte(@intFromEnum(builtin)) and
+            self.compactAppendByte(@backingInt(mode)) and
+            self.compactAppendByte(@backingInt(builtin)) and
             self.compactAppendByte(@intFromBool(want_result)) and
-            self.compactAppendGlobalCallArgSourceDirect(selector_source) != null and
             self.compactAppendGlobalCallArgSourceDirect(rhs_source) != null and
+            self.compactAppendGlobalCallArgSourceDirect(selector_source) != null and
             self.compactAdjustStack(0, if (want_result) 1 else 0);
         self.compactFinishDirectPayloadAppend(saved, ok);
     }
@@ -64541,11 +60325,11 @@ const CodeEmitter = struct {
         const ok = compactFitsLocal(slot) and
             self.compactAppendByte(ck_assign_index_local_sources_u8) and
             self.compactAppendByte(slot) and
-            self.compactAppendByte(@intFromEnum(mode)) and
-            self.compactAppendByte(@intFromEnum(builtin)) and
+            self.compactAppendByte(@backingInt(mode)) and
+            self.compactAppendByte(@backingInt(builtin)) and
             self.compactAppendByte(@intFromBool(want_result)) and
-            self.compactAppendGlobalCallArgSourceDirect(selector_source) != null and
             self.compactAppendGlobalCallArgSourceDirect(rhs_source) != null and
+            self.compactAppendGlobalCallArgSourceDirect(selector_source) != null and
             self.compactAdjustStack(0, if (want_result) 1 else 0);
         self.compactFinishDirectPayloadAppend(saved, ok);
     }
@@ -64555,8 +60339,8 @@ const CodeEmitter = struct {
         const ok = mode != .unary and
             compactFitsGlobal(slot) and
             self.compactAppendGlobalSlotOp(ck_assign_index_global_stack_u8, slot) and
-            self.compactAppendByte(@intFromEnum(mode)) and
-            self.compactAppendByte(@intFromEnum(builtin)) and
+            self.compactAppendByte(@backingInt(mode)) and
+            self.compactAppendByte(@backingInt(builtin)) and
             self.compactAppendByte(@intFromBool(want_result)) and
             self.compactAdjustStack(2, if (want_result) 1 else 0);
         self.compactFinishDirectPayloadAppend(saved, ok);
@@ -64568,8 +60352,8 @@ const CodeEmitter = struct {
             compactFitsLocal(slot) and
             self.compactAppendByte(ck_assign_index_local_stack_u8) and
             self.compactAppendByte(slot) and
-            self.compactAppendByte(@intFromEnum(mode)) and
-            self.compactAppendByte(@intFromEnum(builtin)) and
+            self.compactAppendByte(@backingInt(mode)) and
+            self.compactAppendByte(@backingInt(builtin)) and
             self.compactAppendByte(@intFromBool(want_result)) and
             self.compactAdjustStack(2, if (want_result) 1 else 0);
         self.compactFinishDirectPayloadAppend(saved, ok);
@@ -64592,8 +60376,10 @@ const CodeEmitter = struct {
             self.compactAppendGlobalSlotOp(ck_call_global_slots_u8, slot) and
             self.compactAppendByte(flags);
         if (ok) {
-            for (sources, 0..) |source, idx| {
-                if (self.compactAppendGlobalCallArgSourceDirect(source)) |offset| {
+            var idx = sources.len;
+            while (idx != 0) {
+                idx -= 1;
+                if (self.compactAppendGlobalCallArgSourceDirect(sources[idx])) |offset| {
                     arg_kind_compact_offsets[idx] = offset;
                 } else {
                     ok = false;
@@ -64622,11 +60408,13 @@ const CodeEmitter = struct {
             sources.len == argc and
             arg_kind_compact_offsets.len == sources.len and
             self.compactAppendGlobalSlotOp(ck_call_global_derived_slots_u8, slot) and
-            self.compactAppendByte(@intFromEnum(kind)) and
+            self.compactAppendByte(@backingInt(kind)) and
             self.compactAppendByte(argc);
         if (ok) {
-            for (sources, 0..) |source, idx| {
-                if (self.compactAppendGlobalCallArgSourceDirect(source)) |offset| {
+            var idx = sources.len;
+            while (idx != 0) {
+                idx -= 1;
+                if (self.compactAppendGlobalCallArgSourceDirect(sources[idx])) |offset| {
                     arg_kind_compact_offsets[idx] = offset;
                 } else {
                     ok = false;
@@ -64728,7 +60516,7 @@ const CodeEmitter = struct {
         const ok = compactFitsLocal(left_slot) and
             compactFitsLocal(right_slot) and
             self.compactAppendByte(ck_scalar_dyad_i64) and
-            self.compactAppendByte(@intFromEnum(op)) and
+            self.compactAppendByte(@backingInt(op)) and
             self.compactAppendByte(compact_scalar_dyad_local_local) and
             self.compactAppendByte(left_slot) and
             self.compactAppendByte(right_slot) and
@@ -64744,7 +60532,7 @@ const CodeEmitter = struct {
         const saved = self.compactBeginDirectPayloadAppend(compact_start) orelse return;
         const ok = compactFitsLocal(slot) and
             self.compactAppendByte(ck_scalar_dyad_i64) and
-            self.compactAppendByte(@intFromEnum(op)) and
+            self.compactAppendByte(@backingInt(op)) and
             self.compactAppendByte(compact_scalar_dyad_local_const_i64) and
             self.compactAppendByte(slot) and
             self.compactAppendI64(rhs) and
@@ -64760,7 +60548,7 @@ const CodeEmitter = struct {
         const saved = self.compactBeginDirectPayloadAppend(compact_start) orelse return;
         const ok = compactFitsLocal(slot) and
             self.compactAppendByte(ck_scalar_dyad_i64) and
-            self.compactAppendByte(@intFromEnum(op)) and
+            self.compactAppendByte(@backingInt(op)) and
             self.compactAppendByte(compact_scalar_dyad_const_local_i64) and
             self.compactAppendI64(lhs) and
             self.compactAppendByte(slot) and
@@ -64800,7 +60588,7 @@ const CodeEmitter = struct {
         const saved = self.compactBeginDirectPayloadAppend(compact_start) orelse return;
         const ok = argc <= max_direct_apply_args and
             self.compactAppendByte(ck_call_adverb_stack_u8) and
-            self.compactAppendByte(@intFromEnum(kind)) and
+            self.compactAppendByte(@backingInt(kind)) and
             self.compactAppendByte(argc) and
             self.compactAdjustStack(@as(usize, argc) + 1, 1);
         self.compactFinishDirectPayloadAppend(saved, ok);
@@ -64854,7 +60642,7 @@ const CodeEmitter = struct {
             argc != 0 and
             argc <= max_direct_apply_args and
             self.compactAppendGlobalSlotOp(ck_call_global_derived_stack_u8, slot) and
-            self.compactAppendByte(@intFromEnum(kind)) and
+            self.compactAppendByte(@backingInt(kind)) and
             self.compactAppendByte(argc) and
             self.compactAdjustStack(argc, 1);
         self.compactFinishDirectPayloadAppend(saved, ok);
@@ -64871,7 +60659,7 @@ const CodeEmitter = struct {
     fn compactAppendMakeAdverb(self: *CodeEmitter, compact_start: usize, kind: DerivedVerbKind) void {
         const saved = self.compactBeginDirectPayloadAppend(compact_start) orelse return;
         const ok = self.compactAppendByte(ck_make_adverb_u8) and
-            self.compactAppendByte(@intFromEnum(kind)) and
+            self.compactAppendByte(@backingInt(kind)) and
             self.compactAdjustStack(1, 1);
         self.compactFinishDirectPayloadAppend(saved, ok);
     }
@@ -64901,7 +60689,7 @@ const CodeEmitter = struct {
         };
         const saved = self.compactBeginDirectPayloadAppend(compact_start) orelse return;
         const ok = self.compactAppendByte(if (deep) ck_deep_amend_u8 else ck_amend_u8) and
-            self.compactAppendByte(@intFromEnum(mode)) and
+            self.compactAppendByte(@backingInt(mode)) and
             self.compactAdjustStack(argc, 1);
         self.compactFinishDirectPayloadAppend(saved, ok);
     }
@@ -64909,8 +60697,8 @@ const CodeEmitter = struct {
     fn compactAppendCallBuiltinDerived2(self: *CodeEmitter, compact_start: usize, builtin: BuiltinId, kind: DerivedVerbKind) void {
         const saved = self.compactBeginDirectPayloadAppend(compact_start) orelse return;
         const ok = self.compactAppendByte(ck_call_builtin_derived2_u8) and
-            self.compactAppendByte(@intFromEnum(builtin)) and
-            self.compactAppendByte(@intFromEnum(kind)) and
+            self.compactAppendByte(@backingInt(builtin)) and
+            self.compactAppendByte(@backingInt(kind)) and
             self.compactAdjustStack(2, 1);
         self.compactFinishDirectPayloadAppend(saved, ok);
     }
@@ -64996,7 +60784,7 @@ const CodeEmitter = struct {
         const ok = compactFitsLocal(left_slot) and
             compactFitsLocal(right_slot) and
             self.compactAppendExtU16Op(ck_jump_if_false_compare_local_local_i64) and
-            self.compactAppendByte(@intFromEnum(op)) and
+            self.compactAppendByte(@backingInt(op)) and
             self.compactAppendByte(left_slot) and
             self.compactAppendByte(right_slot) and
             self.compactAppendU16(0) and
@@ -65028,8 +60816,8 @@ const CodeEmitter = struct {
         };
         var ok = self.compactAppendExtU16Op(ck_jump_if_false_scalar_dyad_const_i64) and
             self.compactAppendByte(inst.shape) and
-            self.compactAppendByte(@intFromEnum(inst.op)) and
-            self.compactAppendByte(@intFromEnum(inst.const_op));
+            self.compactAppendByte(@backingInt(inst.op)) and
+            self.compactAppendByte(@backingInt(inst.const_op));
         ok = ok and switch (inst.shape) {
             compact_scalar_dyad_local_const_i64 => compactFitsLocal(inst.left_slot) and
                 self.compactAppendByte(inst.left_slot) and
@@ -65195,7 +60983,6 @@ const CodeEmitter = struct {
     fn appendShapedCall1(self: *CodeEmitter) KError!void {
         if (try self.tryShapeCall1()) return;
         try self.appendStackCall(1);
-        _ = try self.tryShapeArgmaxSuffix();
     }
 
     fn appendStackCall(self: *CodeEmitter, argc: u8) KError!void {
@@ -65379,11 +61166,11 @@ const CodeEmitter = struct {
         selector: ProducedValue,
         rhs: ProducedValue,
     ) KError!bool {
-        if (!self.simpleIsAdjacent(selector, rhs) or !self.simpleEndsAtCurrent(rhs)) return false;
+        if (!self.simpleIsAdjacent(rhs, selector) or !self.simpleEndsAtCurrent(selector)) return false;
         const selector_source = simpleGlobalCallArg(selector) orelse return false;
         const rhs_source = simpleGlobalCallArg(rhs) orelse return false;
 
-        if (!self.truncateCompactToOffset(selector.start())) return false;
+        if (!self.truncateCompactToOffset(rhs.start())) return false;
         self.invalidateSimple();
         const compact_start = try self.beginCompactPayload(.none);
         self.references_globals = true;
@@ -65407,12 +61194,12 @@ const CodeEmitter = struct {
         selector: ProducedValue,
         rhs: ProducedValue,
     ) KError!bool {
-        if (!self.simpleIsAdjacent(selector, rhs) or !self.simpleEndsAtCurrent(rhs)) return false;
+        if (!self.simpleIsAdjacent(rhs, selector) or !self.simpleEndsAtCurrent(selector)) return false;
         const selector_source = simpleGlobalCallArg(selector) orelse return false;
         const rhs_source = simpleGlobalCallArg(rhs) orelse return false;
         const pooled = std.math.cast(u8, slot) orelse return error.Unsupported;
 
-        if (!self.truncateCompactToOffset(selector.start())) return false;
+        if (!self.truncateCompactToOffset(rhs.start())) return false;
         self.invalidateSimple();
         const compact_start = try self.beginCompactPayload(.none);
         self.compactAppendAssignIndexLocalSources(compact_start, pooled, mode, builtin, want_result, selector_source, rhs_source);
@@ -65709,9 +61496,9 @@ const CodeEmitter = struct {
     }
 
     fn tryFoldConstIntDyad(self: *CodeEmitter, op: BuiltinId) KError!bool {
-        const left = self.previous_simple orelse return false;
-        const right = self.last_simple orelse return false;
-        if (!self.simpleIsAdjacent(left, right) or !self.simpleEndsAtCurrent(right)) return false;
+        const left = self.last_simple orelse return false;
+        const right = self.previous_simple orelse return false;
+        if (!self.simpleIsAdjacent(right, left) or !self.simpleEndsAtCurrent(left)) return false;
         const left_value = simpleNumericInt(left) orelse return false;
         const right_value = simpleNumericInt(right) orelse return false;
 
@@ -65725,7 +61512,7 @@ const CodeEmitter = struct {
         };
         if (result[1] != 0 or !Value.fitsInlineInt(result[0])) return false;
 
-        if (!self.truncateCompactToOffset(left.start())) return false;
+        if (!self.truncateCompactToOffset(right.start())) return false;
         self.invalidateSimple();
         try self.emitConstInt(result[0]);
         return true;
@@ -65745,9 +61532,9 @@ const CodeEmitter = struct {
     }
 
     fn tryShapeDyad(self: *CodeEmitter, op: BuiltinId) KError!bool {
-        const left = self.previous_simple orelse return false;
-        const right = self.last_simple orelse return false;
-        if (!self.simpleIsAdjacent(left, right) or !self.simpleEndsAtCurrent(right)) return false;
+        const left = self.last_simple orelse return false;
+        const right = self.previous_simple orelse return false;
+        if (!self.simpleIsAdjacent(right, left) or !self.simpleEndsAtCurrent(left)) return false;
 
         const shaped: ?struct { op: BuiltinId, left_slot: u8, right_slot: u8 } = switch (left) {
             .load_local => |left_inst| switch (right) {
@@ -65762,7 +61549,7 @@ const CodeEmitter = struct {
         };
         if (shaped == null) return false;
 
-        if (!self.truncateCompactToOffset(left.start())) return false;
+        if (!self.truncateCompactToOffset(right.start())) return false;
         const selector_shape: ?struct { left_slot: u8, right_slot: u8, op: BuiltinId } = switch (left) {
             .load_local => |left_inst| switch (right) {
                 .load_local => |right_inst| switch (op) {
@@ -65778,7 +61565,7 @@ const CodeEmitter = struct {
             self.compactAppendLocalLocalOp(start, shaped.?.op, shaped.?.left_slot, shaped.?.right_slot);
             self.replaceSimpleTail(2, .{
                 .local_local_op = .{
-                    .start = left.start(),
+                    .start = right.start(),
                     .end = self.compact_len,
                     .left_slot = selector.left_slot,
                     .right_slot = selector.right_slot,
@@ -65793,7 +61580,7 @@ const CodeEmitter = struct {
             self.compactAppendLocalLocalOp(start, shaped.?.op, shaped.?.left_slot, shaped.?.right_slot);
             self.replaceSimpleTail(2, .{
                 .scalar_dyad_op = .{
-                    .start = left.start(),
+                    .start = right.start(),
                     .end = self.compact_len,
                     .shape = compact_scalar_dyad_local_local,
                     .op = shaped.?.op,
@@ -65812,9 +61599,9 @@ const CodeEmitter = struct {
     }
 
     fn tryShapeConstDyad(self: *CodeEmitter, op: BuiltinId) KError!bool {
-        const left = self.previous_simple orelse return false;
-        const right = self.last_simple orelse return false;
-        if (!self.simpleIsAdjacent(left, right) or !self.simpleEndsAtCurrent(right)) return false;
+        const left = self.last_simple orelse return false;
+        const right = self.previous_simple orelse return false;
+        if (!self.simpleIsAdjacent(right, left) or !self.simpleEndsAtCurrent(left)) return false;
 
         if (switch (left) {
             .scalar_dyad_op => true,
@@ -65838,7 +61625,7 @@ const CodeEmitter = struct {
             try self.emitDyadBuiltinCall(op);
             self.replaceSimpleTail(2, .{
                 .scalar_dyad_const_op = .{
-                    .start = left_inst.start,
+                    .start = right_inst.start,
                     .end = self.compact_len,
                     .shape = left_inst.shape,
                     .op = left_inst.op,
@@ -65878,7 +61665,7 @@ const CodeEmitter = struct {
             try self.emitDyadBuiltinCall(op);
             self.replaceSimpleTail(2, .{
                 .scalar_dyad_const_op = .{
-                    .start = left_inst.start,
+                    .start = right_inst.start,
                     .end = self.compact_len,
                     .shape = compact_scalar_dyad_local_const_i64,
                     .op = left_inst.op,
@@ -65912,7 +61699,7 @@ const CodeEmitter = struct {
                     try self.emitDyadBuiltinCall(op);
                     self.replaceSimpleTail(2, .{
                         .scalar_dyad_const_op = .{
-                            .start = left_inst.start,
+                            .start = right_inst.start,
                             .end = self.compact_len,
                             .shape = compact_scalar_dyad_local_local,
                             .op = left_inst.op,
@@ -65931,7 +61718,7 @@ const CodeEmitter = struct {
             try self.emitDyadBuiltinCall(op);
             self.replaceSimpleTail(2, .{
                 .local_local_const_op = .{
-                    .start = left_inst.start,
+                    .start = right_inst.start,
                     .end = self.compact_len,
                     .left_slot = left_inst.left_slot,
                     .right_slot = left_inst.right_slot,
@@ -65974,7 +61761,7 @@ const CodeEmitter = struct {
         };
         if (shaped == null) return false;
 
-        if (!self.truncateCompactToOffset(left.start())) return false;
+        if (!self.truncateCompactToOffset(right.start())) return false;
         const local_const_shape: ?struct { slot: u8, op: BuiltinId, const_value: i64 } = if (!shaped.?.const_first) switch (left) {
             .load_local => |left_inst| .{
                 .slot = left_inst.slot,
@@ -65989,7 +61776,7 @@ const CodeEmitter = struct {
             if (shaped.?.op == .iota) {
                 self.replaceSimpleTail(2, .{
                     .scalar_dyad_op = .{
-                        .start = left.start(),
+                        .start = right.start(),
                         .end = self.compact_len,
                         .shape = compact_scalar_dyad_local_const_i64,
                         .op = local_const.op,
@@ -66001,7 +61788,7 @@ const CodeEmitter = struct {
             } else {
                 self.replaceSimpleTail(2, .{
                     .local_const_op = .{
-                        .start = left.start(),
+                        .start = right.start(),
                         .end = self.compact_len,
                         .slot = local_const.slot,
                         .op = local_const.op,
@@ -66035,7 +61822,7 @@ const CodeEmitter = struct {
             self.compactAppendConstLocalOp(start, shaped.?.op, shaped.?.const_value, shaped.?.slot);
             self.replaceSimpleTail(2, .{
                 .local_const_op = .{
-                    .start = left.start(),
+                    .start = right.start(),
                     .end = self.compact_len,
                     .slot = local_const.slot,
                     .op = local_const.op,
@@ -66052,7 +61839,7 @@ const CodeEmitter = struct {
             if (shaped.?.op == .iota) {
                 self.noteSimple(.{
                     .scalar_dyad_op = .{
-                        .start = left.start(),
+                        .start = right.start(),
                         .end = self.compact_len,
                         .shape = compact_scalar_dyad_const_local_i64,
                         .op = shaped.?.op,
@@ -66067,7 +61854,7 @@ const CodeEmitter = struct {
             if (shaped.?.op == .iota) {
                 self.noteSimple(.{
                     .scalar_dyad_op = .{
-                        .start = left.start(),
+                        .start = right.start(),
                         .end = self.compact_len,
                         .shape = compact_scalar_dyad_local_const_i64,
                         .op = shaped.?.op,
@@ -66116,36 +61903,15 @@ const CodeEmitter = struct {
         return true;
     }
 
-    fn tryShapeArgmaxSuffix(self: *CodeEmitter) KError!bool {
-        if (self.compact_len == 0 or !self.compact_valid) return false;
-        var best_operand_end: ?usize = null;
-        var compact_start: usize = 0;
-        while (compact_start < self.compact_len) {
-            const inst_len = compactInstructionLen(self.compact_bytes.items[0..self.compact_len], compact_start) orelse return false;
-            if (Session.compactArgmaxBytecodeOperandLen(self.compact_bytes.items[compact_start..self.compact_len], self.constantSlice())) |compact_operand_len| {
-                const operand_end = compact_start + compact_operand_len;
-                if (self.compactHasInstructionBoundary(operand_end)) best_operand_end = operand_end;
-            }
-            compact_start += inst_len;
-        }
-        if (best_operand_end) |operand_end| {
-            if (!self.truncateCompactToOffset(operand_end)) return false;
-            self.invalidateSimple();
-            try self.appendArgmax();
-            return true;
-        }
-        return false;
-    }
-
     fn tryShapeCall1(self: *CodeEmitter) KError!bool {
-        const callee = self.previous_simple orelse return false;
-        const arg = self.last_simple orelse return false;
-        if (!self.simpleIsAdjacent(callee, arg) or !self.simpleEndsAtCurrent(arg)) return false;
+        const callee = self.last_simple orelse return false;
+        const arg = self.previous_simple orelse return false;
+        if (!self.simpleIsAdjacent(arg, callee) or !self.simpleEndsAtCurrent(callee)) return false;
 
         switch (callee) {
             .load_local => |callee_inst| {
                 const source = simpleGlobalCallArg(arg) orelse return false;
-                if (!self.truncateCompactToOffset(callee.start())) return false;
+                if (!self.truncateCompactToOffset(arg.start())) return false;
                 self.invalidateSimple();
                 const start = try self.beginCompactPayload(.index_local_source);
                 self.compactAppendIndexLocalSource(start, callee_inst.slot, source);
@@ -66153,17 +61919,6 @@ const CodeEmitter = struct {
             },
             else => return false,
         }
-    }
-
-    fn simpleTail(self: *const CodeEmitter, count: usize) ?[]const ProducedValue {
-        if (count == 0 or count > self.simple_history_len) return null;
-        const start = self.simple_history_len - count;
-        const tail = self.simple_history[start..self.simple_history_len];
-        if (!self.simpleEndsAtCurrent(tail[tail.len - 1])) return null;
-        for (1..tail.len) |idx| {
-            if (!self.simpleIsAdjacent(tail[idx - 1], tail[idx])) return null;
-        }
-        return tail;
     }
 
     fn simpleGlobalCallArg(simple: ProducedValue) ?GlobalCallArgSource {
@@ -66215,76 +61970,6 @@ const CodeEmitter = struct {
             else => null,
         };
         return supportedGlobalCallArgSource(source orelse return null);
-    }
-
-    fn tryShapeGlobalIndexSource(self: *CodeEmitter, slot: u16, arg: ProducedValue, candidates: *ConsumeCandidates) KError!bool {
-        if (!self.simpleEndsAtCurrent(arg)) return false;
-        const source = simpleGlobalCallArg(arg) orelse return false;
-        if (!self.truncateCompactToOffset(arg.start())) return false;
-        self.invalidateSimple();
-        const compact_start = try self.beginCompactPayload(.index_global_source);
-        self.references_globals = true;
-        const arg_kind_compact_offset = self.compactAppendIndexGlobalSource(compact_start, slot, source);
-        switch (arg) {
-            .load_local => |inst| try candidates.noteShapedGlobalLocalArg(CompactLocalSourceRef.init(inst.slot, arg.compactStart()), arg_kind_compact_offset),
-            .local_const_op => |inst| try candidates.noteShapedGlobalLocalArg(CompactLocalSourceRef.init(inst.slot, arg.compactStart()), arg_kind_compact_offset),
-            else => {},
-        }
-        return true;
-    }
-
-    fn tryShapeGlobalCallSlotsFromSimples(self: *CodeEmitter, slot: u16, args: []const ProducedValue, candidates: *ConsumeCandidates) KError!bool {
-        if (args.len == 0 or args.len > max_direct_apply_args) return false;
-        if (!self.simpleEndsAtCurrent(args[args.len - 1])) return false;
-        const start = args[0].start();
-        var sources: [max_direct_apply_args]GlobalCallArgSource = undefined;
-        for (args, 0..) |arg, idx| {
-            if (idx != 0 and !self.simpleIsAdjacent(args[idx - 1], arg)) return false;
-            sources[idx] = simpleGlobalCallArg(arg) orelse return false;
-        }
-
-        if (!self.truncateCompactToOffset(start)) return false;
-        self.invalidateSimple();
-        const compact_start = try self.beginCompactPayload(.call_global_slots);
-        self.references_globals = true;
-        var arg_kind_compact_offsets: [max_direct_apply_args]u16 = undefined;
-        if (self.compactAppendGlobalCallSlots(compact_start, slot, @intCast(args.len), sources[0..args.len], arg_kind_compact_offsets[0..args.len])) {
-            for (args, 0..) |arg, idx| {
-                switch (arg) {
-                    .load_local => |inst| try candidates.noteShapedGlobalLocalArg(CompactLocalSourceRef.init(inst.slot, arg.compactStart()), arg_kind_compact_offsets[idx]),
-                    .local_const_op => |inst| try candidates.noteShapedGlobalLocalArg(CompactLocalSourceRef.init(inst.slot, arg.compactStart()), arg_kind_compact_offsets[idx]),
-                    else => {},
-                }
-            }
-        }
-        return true;
-    }
-
-    fn tryShapeGlobalDerivedCallSlotsDirect(self: *CodeEmitter, slot: u16, kind: DerivedVerbKind, args: []const ProducedValue, candidates: *ConsumeCandidates) KError!bool {
-        if (args.len == 0 or args.len > max_direct_apply_args) return false;
-        if (!self.simpleEndsAtCurrent(args[args.len - 1])) return false;
-        const start = args[0].start();
-        var sources: [max_direct_apply_args]GlobalCallArgSource = undefined;
-        for (args, 0..) |arg, idx| {
-            if (idx != 0 and !self.simpleIsAdjacent(args[idx - 1], arg)) return false;
-            sources[idx] = simpleGlobalCallArg(arg) orelse return false;
-        }
-
-        if (!self.truncateCompactToOffset(start)) return false;
-        self.invalidateSimple();
-        const compact_start = try self.beginCompactPayload(.none);
-        self.references_globals = true;
-        var arg_kind_compact_offsets: [max_direct_apply_args]u16 = undefined;
-        if (self.compactAppendGlobalDerivedCallSlots(compact_start, slot, kind, @intCast(args.len), sources[0..args.len], arg_kind_compact_offsets[0..args.len])) {
-            for (args, 0..) |arg, idx| {
-                switch (arg) {
-                    .load_local => |inst| try candidates.noteShapedGlobalLocalArg(CompactLocalSourceRef.init(inst.slot, arg.compactStart()), arg_kind_compact_offsets[idx]),
-                    .local_const_op => |inst| try candidates.noteShapedGlobalLocalArg(CompactLocalSourceRef.init(inst.slot, arg.compactStart()), arg_kind_compact_offsets[idx]),
-                    else => {},
-                }
-            }
-        }
-        return true;
     }
 
     fn appendGlobalDerivedStackCall(self: *CodeEmitter, slot: u16, kind: DerivedVerbKind, argc: u8) KError!void {
@@ -66501,11 +62186,17 @@ fn hostStringListConstantMatches(left: *const HostStringList, right: *const Host
 
 fn arrayConstantMatches(stored: Value, query: Value) bool {
     if (stored.raw == query.raw) return true;
-    const stored_kind = stored.activeArrayKind();
-    const query_kind = query.activeArrayKind();
+    const stored_numeric = valueNumericHandle(stored);
+    const query_numeric = valueNumericHandle(query);
+    if (stored_numeric != null or query_numeric != null) {
+        if (stored_numeric == null or query_numeric == null) return false;
+        if (stored_numeric.?.activeAttachment() != .host or query_numeric.?.activeAttachment() != .host) return false;
+        return hostDenseConstantMatches(stored, query);
+    }
+    const stored_kind = stored.arrayKind();
+    const query_kind = query.arrayKind();
     if (stored_kind != query_kind) return false;
     return switch (stored_kind) {
-        .host_dense_array => hostDenseConstantMatches(stored, query),
         .host_boxed_array => hostBoxedConstantMatches(stored.asHostBoxedArray(), query.asHostBoxedArray()),
         .host_string, .host_symbol => hostTextConstantMatches(stored, query, stored_kind),
         .host_string_list, .host_symbol_list => hostStringListConstantMatches(stored.asHostStringList(), query.asHostStringList()),
@@ -66704,21 +62395,8 @@ const Compiler = struct {
     }
 
     fn compileSingleTopLevelStatementInto(self: *Compiler, instructions: *CodeEmitter, scope: *Scope) KError!void {
-        if (try self.scanIndexedAssignmentStatement(self.source)) |assignment| {
-            try self.compileIndexedAssignmentInto(instructions, scope, assignment, true);
-            self.index = self.source.len;
-        } else if (try self.scanLocalAssignmentStatement(self.source)) |assignment| {
-            switch (assignment.mode) {
-                .bind, .explicit_global => try self.compileExplicitGlobalAssignmentInto(instructions, scope, assignment, true),
-                .modified => try self.compileModifiedAssignmentInto(instructions, scope, assignment, true),
-            }
-            self.index = self.source.len;
-        } else {
-            try self.compileExprSliceInto(instructions, scope, self.source);
-            self.index = self.source.len;
-        }
-
-        if (!self.atEnd()) return error.Parse;
+        try self.compileExprSliceInto(instructions, scope, self.source);
+        self.index = self.source.len;
     }
 
     fn compileExprSliceInto(self: *Compiler, out: *CodeEmitter, scope: *Scope, source_slice: []const u8) KError!void {
@@ -66777,22 +62455,37 @@ const Compiler = struct {
         return .{};
     }
 
-    fn compileLambdaBodyIntoWithConsumeCandidates(
-        self: *Compiler,
-        out: *CodeEmitter,
-        scope: *Scope,
-        body_source: []const u8,
-        candidates: ConsumeCandidates,
-    ) KError!ConsumeCandidates {
-        var body_compiler = try Compiler.init(
-            self.session,
-            body_source,
-            self.code_allocator,
-            self.compile_mode,
-        );
-        body_compiler.consume_candidates = candidates;
-        try body_compiler.compileLambdaBodyInto(out, scope, body_source);
-        return body_compiler.consume_candidates;
+    fn compileTopLevelBlockInto(self: *Compiler, out: *CodeEmitter, scope: *Scope, body_source: []const u8) KError!void {
+        var statement_start: usize = 0;
+        var compiled_any = false;
+
+        while (nextTopLevelStatement(body_source, &statement_start)) |statement| {
+            if (compiled_any) try out.appendDiscard();
+
+            var statement_compiler = try Compiler.init(
+                self.session,
+                statement,
+                self.code_allocator,
+                self.compile_mode,
+            );
+            try statement_compiler.compileSingleTopLevelStatementInto(out, scope);
+            compiled_any = true;
+        }
+
+        if (!compiled_any) try self.emitLiteralValue(out, Value.builtin(.identity));
+    }
+
+    fn compileStatementBlockInto(self: *Compiler, out: *CodeEmitter, scope: *Scope, body_source: []const u8) KError!void {
+        const trimmed = std.mem.trim(u8, body_source, " \t\r\n");
+        if (trimmed.len == 0) {
+            try self.emitLiteralValue(out, Value.builtin(.identity));
+            return;
+        }
+        if (scope.isPureGlobalScope()) {
+            try self.compileTopLevelBlockInto(out, scope, trimmed);
+        } else {
+            try self.compileLambdaBodyInto(out, scope, trimmed);
+        }
     }
 
     fn emitResolvedLoad(self: *Compiler, out: *CodeEmitter, resolved: ResolveResult) KError!void {
@@ -66808,14 +62501,7 @@ const Compiler = struct {
         candidates.patchInto(out);
     }
 
-    fn addScopeParamConsumeCandidates(candidates: *ConsumeCandidates, scope: *Scope) KError!void {
-        var slot: u16 = 0;
-        while (slot < scope.arity) : (slot += 1) {
-            try candidates.addResolved(scope.resolveLocal(slot));
-        }
-    }
-
-    fn addLocalBindingRhsConsumeCandidates(
+    fn addStatementConsumeCandidates(
         candidates: *ConsumeCandidates,
         scope: *Scope,
         rhs_source: []const u8,
@@ -66856,111 +62542,98 @@ const Compiler = struct {
         }
     }
 
-    fn directAmendBaseConsumeCandidates(self: *Compiler, scope: *Scope, body_source: []const u8) KError!ConsumeCandidates {
-        const trimmed = std.mem.trim(u8, body_source, " \t\r\n");
-        if (!(std.mem.startsWith(u8, trimmed, "@[") or std.mem.startsWith(u8, trimmed, ".["))) return .{};
-
-        const base_start = skipSpacesInSource(trimmed, 2);
-        var source_compiler = try Compiler.init(
-            self.session,
-            trimmed,
-            self.code_allocator,
-            self.compile_mode,
-        );
-        const scanned = source_compiler.scanIdentifierPathAt(base_start) orelse return .{};
-        const after_ident = skipSpacesInSource(trimmed, scanned.next_index);
-        if (after_ident >= trimmed.len or trimmed[after_ident] != ';') return .{};
-
-        var candidates = ConsumeCandidates{};
-        try candidates.addResolved(try scope.resolveLoad(scanned.ident));
-        return candidates;
-    }
-
     fn compileLambdaBodyInto(self: *Compiler, out: *CodeEmitter, scope: *Scope, body_source: []const u8) KError!void {
         const split = splitLambdaBodyHead(body_source) orelse return error.Parse;
-        if (try self.scanIndexedAssignmentStatement(split.head)) |assignment| {
-            try self.compileIndexedAssignmentInto(out, scope, assignment, split.tail == null);
-            if (split.tail) |tail| try self.compileLambdaBodyInto(out, scope, tail);
-            return;
-        }
-        if (try self.scanLocalAssignmentStatement(split.head)) |assignment| {
-            switch (assignment.mode) {
-                .bind => {
-                    if (identIsDottedPath(assignment.ident)) {
-                        try self.compileExplicitGlobalAssignmentInto(out, scope, assignment, split.tail == null);
-                        if (split.tail) |tail| try self.compileLambdaBodyInto(out, scope, tail);
-                    } else {
-                        const tail_source = split.tail orelse assignment.ident.text;
-                        try self.compileLocalBindingInto(out, scope, assignment.ident, assignment.rhs_source, tail_source);
-                    }
-                },
-                .modified => {
-                    try self.compileModifiedAssignmentInto(out, scope, assignment, split.tail == null);
-                    if (split.tail) |tail| try self.compileLambdaBodyInto(out, scope, tail);
-                },
-                .explicit_global => {
-                    try self.compileExplicitGlobalAssignmentInto(out, scope, assignment, split.tail == null);
-                    if (split.tail) |tail| try self.compileLambdaBodyInto(out, scope, tail);
-                },
-            }
-            return;
-        }
-        if (split.tail) |tail| {
-            try self.compileExprSliceInto(out, scope, split.head);
-            try out.appendDiscard();
-            try self.compileLambdaBodyInto(out, scope, tail);
-            return;
-        }
-        var final_candidates = self.consume_candidates;
-        try final_candidates.mergeFrom(try self.directAmendBaseConsumeCandidates(scope, split.head));
-        try addScopeParamConsumeCandidates(&final_candidates, scope);
-        const final_control_before = out.control_flow_op_count;
-        const updated_final_candidates = try self.compileExprSliceIntoWithConsumeCandidates(out, scope, split.head, final_candidates);
-        self.consume_candidates = updated_final_candidates;
-        if (out.control_flow_op_count == final_control_before) patchConsumeCandidates(out, updated_final_candidates);
+        var candidates = self.consume_candidates.withoutRecordedUses();
+        try addStatementConsumeCandidates(&candidates, scope, split.head, split.tail orelse "");
+        var expr_compiler = try Compiler.init(self.session, split.head, self.code_allocator, self.compile_mode);
+        expr_compiler.consume_candidates = candidates;
+        var arena = AstArena.init(self.code_allocator);
+        const root = try expr_compiler.parseAstExpr(&arena);
+        if (!expr_compiler.atEnd()) return error.Parse;
+        const control_before = out.control_flow_op_count;
+        try expr_compiler.lowerAstResult(&arena, root.node, out, scope, split.tail == null);
+        if (out.control_flow_op_count == control_before) patchConsumeCandidates(out, expr_compiler.consume_candidates);
+        self.consume_candidates = .{};
+        if (split.tail) |tail| try self.compileLambdaBodyInto(out, scope, tail);
     }
 
-    fn compileIndexedAssignmentInto(
-        self: *Compiler,
-        out: *CodeEmitter,
-        scope: *Scope,
-        assignment: IndexedAssignment,
-        want_result: bool,
-    ) KError!void {
-        if (try self.tryCompileIndexedReadModifyAssignInto(out, scope, assignment, want_result)) return;
-
-        const selector_start = out.position();
-        try self.compileIndexedAssignmentSelectorInto(out, scope, assignment.selector_source);
-        const selector_simple = if (out.last_simple) |simple|
-            if (out.simpleStartsAtOrAfterPosition(simple, selector_start) and out.simpleEndsAtCurrent(simple)) simple else null
+    fn lowerAstAssignment(self: *Compiler, arena: *const AstArena, assignment: AstAssignment, out: *CodeEmitter, scope: *Scope, want_result: bool) KError!void {
+        var rhs = assignment.rhs;
+        var mode: AmendMode = if (assignment.mode == .modified) .binary else .assign;
+        var builtin = assignment.builtin;
+        if (assignment.selector) |selector| {
+            if (mode == .assign) {
+                if (self.indexedReadModifyRewrite(arena, rhs, arena, selector, assignment.ident)) |rewrite| {
+                    rhs = rewrite.rhs_node;
+                    mode = .binary;
+                    builtin = rewrite.builtin;
+                }
+            }
+        }
+        // An overwritten local's old value dies at the end of its RHS, even
+        // when the new binding is used by following statements.
+        const overwritten = if (!want_result and assignment.selector == null and assignment.mode == .bind and !scope.isPureGlobalScope())
+            scope.lookupLocal(assignment.ident)
         else
             null;
+        if (overwritten) |slot| try self.consume_candidates.addLocal(slot);
+        const rhs_control_before = out.control_flow_op_count;
         const rhs_start = out.position();
-        _ = try self.compileExprSliceIntoWithConsumeCandidates(out, scope, assignment.rhs_source, .{});
+        _ = try self.lowerAstExpr(arena, rhs, out, scope);
+        if (overwritten) |slot| {
+            if (out.control_flow_op_count == rhs_control_before) self.consume_candidates.patchOverwrittenLocal(out, slot);
+        }
         const rhs_simple = if (out.last_simple) |simple|
             if (out.simpleStartsAtOrAfterPosition(simple, rhs_start) and out.simpleEndsAtCurrent(simple)) simple else null
         else
             null;
-
-        switch (try scope.resolveLoad(assignment.ident)) {
-            .local => |slot| {
-                scope.markParamRequired(slot);
-                if (selector_simple) |selector| {
-                    if (rhs_simple) |rhs| {
-                        if (try out.tryShapeIndexedAssignLocalSources(slot, assignment.mode, assignment.builtin, want_result, selector, rhs)) return;
+        if (assignment.selector) |selector| {
+            const selector_start = out.position();
+            _ = try self.lowerAstExpr(arena, selector, out, scope);
+            const selector_simple = if (out.last_simple) |simple|
+                if (out.simpleStartsAtOrAfterPosition(simple, selector_start) and out.simpleEndsAtCurrent(simple)) simple else null
+            else
+                null;
+            const resolved = if (assignment.mode == .explicit_global) ResolveResult.global else try scope.resolveLoad(assignment.ident);
+            switch (resolved) {
+                .local => |slot| {
+                    scope.markParamRequired(slot);
+                    self.consume_candidates.noteBorrow(slot);
+                    if (selector_simple) |sel| {
+                        if (rhs_simple) |value| {
+                            if (try out.tryShapeIndexedAssignLocalSources(slot, mode, builtin, want_result, sel, value)) return;
+                        }
                     }
-                }
-                try out.emitIndexedAssignLocal(slot, assignment.mode, assignment.builtin, want_result);
-            },
-            .global => {
-                const slot = try self.globalSlot(assignment.ident.text);
-                if (selector_simple) |selector| {
-                    if (rhs_simple) |rhs| {
-                        if (try out.tryShapeIndexedAssignGlobalSources(slot, assignment.mode, assignment.builtin, want_result, selector, rhs)) return;
+                    try out.emitIndexedAssignLocal(slot, mode, builtin, want_result);
+                },
+                .global => {
+                    const slot = try self.globalSlot(assignment.ident.text);
+                    if (selector_simple) |sel| {
+                        if (rhs_simple) |value| {
+                            if (try out.tryShapeIndexedAssignGlobalSources(slot, mode, builtin, want_result, sel, value)) return;
+                        }
                     }
-                }
-                try out.emitIndexedAssignGlobal(slot, assignment.mode, assignment.builtin, want_result);
-            },
+                    try out.emitIndexedAssignGlobal(slot, mode, builtin, want_result);
+                },
+            }
+            return;
+        }
+        if (assignment.mode == .modified) {
+            switch (try scope.resolveLoad(assignment.ident)) {
+                .local => |slot| {
+                    scope.markParamRequired(slot);
+                    self.consume_candidates.noteBorrow(slot);
+                    try out.emitModifiedAssignLocal(slot, builtin, want_result, rhs_simple);
+                },
+                .global => try out.emitModifiedAssignGlobal(try self.globalSlot(assignment.ident.text), builtin, want_result, rhs_simple),
+            }
+        } else if (assignment.mode == .explicit_global or scope.isPureGlobalScope() or identIsDottedPath(assignment.ident)) {
+            try out.emitStoreGlobal(try self.globalSlot(assignment.ident.text), want_result);
+        } else {
+            const slot = try scope.declareLocal(assignment.ident);
+            try out.emitStoreLocal(slot);
+            if (want_result) try self.emitResolvedLoad(out, .{ .local = slot });
         }
     }
 
@@ -66969,80 +62642,19 @@ const Compiler = struct {
         rhs_node: AstNodeId,
     };
 
-    fn tryCompileIndexedReadModifyAssignInto(
-        self: *Compiler,
-        out: *CodeEmitter,
-        scope: *Scope,
-        assignment: IndexedAssignment,
-        want_result: bool,
-    ) KError!bool {
-        if (assignment.mode != .assign) return false;
-
-        var selector_arena = AstArena.init(self.code_allocator);
-        const selector_node = (try self.parseSingleSelectorAst(&selector_arena, assignment.selector_source)) orelse return false;
-
-        var rhs_arena = AstArena.init(self.code_allocator);
-        var rhs_compiler = try Compiler.init(
-            self.session,
-            assignment.rhs_source,
-            self.code_allocator,
-            self.compile_mode,
-        );
-        const rhs_parsed = try rhs_compiler.parseAstExpr(&rhs_arena);
-        if (!rhs_compiler.atEnd()) return false;
-
-        const rewrite = self.indexedReadModifyRewrite(&rhs_arena, rhs_parsed.node, &selector_arena, selector_node, assignment.ident) orelse return false;
-
-        const selector_start = out.position();
-        try self.compileIndexedAssignmentSelectorInto(out, scope, assignment.selector_source);
-        const selector_simple = if (out.last_simple) |simple|
-            if (out.simpleStartsAtOrAfterPosition(simple, selector_start) and out.simpleEndsAtCurrent(simple)) simple else null
-        else
-            null;
-
-        const rhs_start = out.position();
-        _ = try self.lowerAstExpr(&rhs_arena, rewrite.rhs_node, out, scope);
-        const rhs_simple = if (out.last_simple) |simple|
-            if (out.simpleStartsAtOrAfterPosition(simple, rhs_start) and out.simpleEndsAtCurrent(simple)) simple else null
-        else
-            null;
-
-        switch (try scope.resolveLoad(assignment.ident)) {
-            .local => |slot| {
-                scope.markParamRequired(slot);
-                if (selector_simple) |selector| {
-                    if (rhs_simple) |rhs| {
-                        if (try out.tryShapeIndexedAssignLocalSources(slot, .binary, rewrite.builtin, want_result, selector, rhs)) return true;
-                    }
-                }
-                try out.emitIndexedAssignLocal(slot, .binary, rewrite.builtin, want_result);
+    fn astReadOnly(arena: *const AstArena, node_id: AstNodeId) bool {
+        return switch (arena.node(node_id).data) {
+            .value, .ident, .global, .builtin => true,
+            .monad => |m| switch (m.builtin) {
+                .sub, .div, .count, .floor, .not, .type_of, .stringify, .grade_up, .grade_down, .reverse => astReadOnly(arena, m.arg),
+                else => false,
             },
-            .global => {
-                const slot = try self.globalSlot(assignment.ident.text);
-                if (selector_simple) |selector| {
-                    if (rhs_simple) |rhs| {
-                        if (try out.tryShapeIndexedAssignGlobalSources(slot, .binary, rewrite.builtin, want_result, selector, rhs)) return true;
-                    }
-                }
-                try out.emitIndexedAssignGlobal(slot, .binary, rewrite.builtin, want_result);
+            .dyad => |d| d.derived == null and switch (d.op) {
+                '+', '-', '*', '%', '&', '|', '=', '<', '>', '#', '_', ',' => astReadOnly(arena, d.left) and astReadOnly(arena, d.right),
+                else => false,
             },
-        }
-        return true;
-    }
-
-    fn parseSingleSelectorAst(self: *Compiler, arena: *AstArena, selector_source: []const u8) KError!?AstNodeId {
-        if (selectorSourceHasTopLevelSeparator(selector_source)) return null;
-        const trimmed = std.mem.trim(u8, selector_source, " \t\r\n");
-        if (trimmed.len == 0) return null;
-        var selector_compiler = try Compiler.init(
-            self.session,
-            trimmed,
-            self.code_allocator,
-            self.compile_mode,
-        );
-        const parsed = try selector_compiler.parseAstExpr(arena);
-        if (!selector_compiler.atEnd()) return null;
-        return parsed.node;
+            else => false,
+        };
     }
 
     fn indexedReadModifyRewrite(
@@ -67053,6 +62665,7 @@ const Compiler = struct {
         selector_node: AstNodeId,
         assignment_ident: IdentRef,
     ) ?IndexedReadModifyRewrite {
+        if (!astReadOnly(selector_arena, selector_node)) return null;
         const node = rhs_arena.node(rhs_node);
         const dyad = switch (node.data) {
             .dyad => |value| value,
@@ -67065,7 +62678,7 @@ const Compiler = struct {
             else => return null,
         }
 
-        if (self.astIsSameIndexedSelector(rhs_arena, dyad.left, selector_arena, selector_node, assignment_ident)) {
+        if (astReadOnly(rhs_arena, dyad.right) and self.astIsSameIndexedSelector(rhs_arena, dyad.left, selector_arena, selector_node, assignment_ident)) {
             return .{
                 .builtin = builtin,
                 .rhs_node = dyad.right,
@@ -67073,7 +62686,7 @@ const Compiler = struct {
         }
         switch (builtin) {
             .add, .mul, .minimum, .maximum => {
-                if (self.astIsSameIndexedSelector(rhs_arena, dyad.right, selector_arena, selector_node, assignment_ident)) {
+                if (astReadOnly(rhs_arena, dyad.left) and self.astIsSameIndexedSelector(rhs_arena, dyad.right, selector_arena, selector_node, assignment_ident)) {
                     return .{
                         .builtin = builtin,
                         .rhs_node = dyad.left,
@@ -67155,17 +62768,6 @@ const Compiler = struct {
         };
     }
 
-    fn compileIndexedAssignmentSelectorInto(self: *Compiler, out: *CodeEmitter, scope: *Scope, selector_source: []const u8) KError!void {
-        if (!selectorSourceHasTopLevelSeparator(selector_source) and std.mem.trim(u8, selector_source, " \t\r\n").len != 0) {
-            _ = try self.compileExprSliceIntoWithConsumeCandidates(out, scope, selector_source, .{});
-            return;
-        }
-
-        var arena = AstArena.init(self.code_allocator);
-        const node = try self.parseSelectorPathVectorAst(&arena, selector_source);
-        _ = try self.lowerAstExpr(&arena, node, out, scope);
-    }
-
     fn parseSelectorPathVectorAst(self: *Compiler, arena: *AstArena, selector_source: []const u8) KError!AstNodeId {
         var items: [max_body_instructions]AstNodeId = undefined;
         var count: u8 = 1;
@@ -67222,101 +62824,6 @@ const Compiler = struct {
                 .count = count,
             },
         });
-    }
-
-    fn compileExplicitGlobalAssignmentInto(
-        self: *Compiler,
-        out: *CodeEmitter,
-        scope: *Scope,
-        assignment: LocalAssignment,
-        want_result: bool,
-    ) KError!void {
-        _ = try self.compileExprSliceIntoWithConsumeCandidates(out, scope, assignment.rhs_source, .{});
-        try out.emitStoreGlobal(try self.globalSlot(assignment.ident.text), want_result);
-    }
-
-    fn compileModifiedAssignmentInto(
-        self: *Compiler,
-        out: *CodeEmitter,
-        scope: *Scope,
-        assignment: LocalAssignment,
-        want_result: bool,
-    ) KError!void {
-        const rhs_start = out.position();
-        _ = try self.compileExprSliceIntoWithConsumeCandidates(out, scope, assignment.rhs_source, .{});
-        const rhs_simple = if (out.last_simple) |simple|
-            if (out.simpleStartsAtOrAfterPosition(simple, rhs_start) and out.simpleEndsAtCurrent(simple)) simple else null
-        else
-            null;
-
-        switch (try scope.resolveLoad(assignment.ident)) {
-            .local => |slot| {
-                scope.markParamRequired(slot);
-                try out.emitModifiedAssignLocal(slot, assignment.builtin, want_result, rhs_simple);
-            },
-            .global => try out.emitModifiedAssignGlobal(try self.globalSlot(assignment.ident.text), assignment.builtin, want_result, rhs_simple),
-        }
-    }
-
-    fn compileLocalBindingInto(
-        self: *Compiler,
-        out: *CodeEmitter,
-        parent: *Scope,
-        ident: IdentRef,
-        rhs_source: []const u8,
-        body_source: []const u8,
-    ) KError!void {
-        var rhs_candidates = ConsumeCandidates{};
-        try rhs_candidates.addResolved(try parent.resolveLoad(ident));
-        try addLocalBindingRhsConsumeCandidates(&rhs_candidates, parent, rhs_source, body_source);
-        const rhs_control_before = out.control_flow_op_count;
-        const updated_rhs_candidates = try self.compileExprSliceIntoWithConsumeCandidates(out, parent, rhs_source, rhs_candidates);
-        if (out.control_flow_op_count == rhs_control_before) patchConsumeCandidates(out, updated_rhs_candidates);
-        const slot = try parent.declareLocal(ident);
-        try out.emitStoreLocal(slot);
-        try self.compileLambdaBodyInto(out, parent, body_source);
-    }
-
-    fn scanLocalAssignmentStatement(self: *Compiler, source_slice: []const u8) KError!?LocalAssignment {
-        var statement_compiler = try Compiler.init(
-            self.session,
-            source_slice,
-            self.code_allocator,
-            self.compile_mode,
-        );
-        const scanned = statement_compiler.scanIdentifierPathAt(statement_compiler.index) orelse return null;
-        var after = skipSpacesInSource(source_slice, scanned.next_index);
-        if (after >= source_slice.len) return null;
-
-        var mode: NameAssignmentMode = .bind;
-        var builtin: BuiltinId = .add;
-        if (source_slice[after] == ':') {
-            if (after + 1 < source_slice.len and source_slice[after + 1] == ':') {
-                mode = .explicit_global;
-                after += 2;
-            } else {
-                after += 1;
-            }
-        } else if (indexedAssignmentBuiltin(source_slice[after])) |id| {
-            mode = .modified;
-            builtin = id;
-            after = skipSpacesInSource(source_slice, after + 1);
-            if (after >= source_slice.len or source_slice[after] != ':') return null;
-            after += 1;
-        } else {
-            return null;
-        }
-
-        const rhs_start = skipSpacesInSource(source_slice, after);
-        if (rhs_start >= source_slice.len) return error.Parse;
-        const rhs_source = std.mem.trim(u8, source_slice[rhs_start..], " \t\r\n");
-        if (rhs_source.len == 0) return error.Parse;
-        return .{
-            .ident = scanned.ident,
-            .rhs_source = rhs_source,
-            .mode = mode,
-            .builtin = builtin,
-        };
     }
 
     fn findIndexedAssignmentClose(source_slice: []const u8, open_index: usize) ?usize {
@@ -67390,57 +62897,46 @@ const Compiler = struct {
         };
     }
 
-    fn scanIndexedAssignmentStatement(self: *Compiler, source_slice: []const u8) KError!?IndexedAssignment {
-        var statement_compiler = try Compiler.init(
-            self.session,
-            source_slice,
-            self.code_allocator,
-            self.compile_mode,
-        );
-        const scanned = statement_compiler.scanIdentifierPathAt(statement_compiler.index) orelse return null;
-        const open_index = skipSpacesInSource(source_slice, scanned.next_index);
-        if (open_index >= source_slice.len or source_slice[open_index] != '[') return null;
-        const close_index = findIndexedAssignmentClose(source_slice, open_index) orelse return error.Parse;
-        const selector_source = std.mem.trim(u8, source_slice[open_index + 1 .. close_index], " \t\r\n");
-
-        var after = skipSpacesInSource(source_slice, close_index + 1);
-        if (after >= source_slice.len) return null;
-
-        var mode: AmendMode = .assign;
-        var builtin: BuiltinId = .add;
-        if (source_slice[after] == ':') {
-            after += 1;
-        } else if (indexedAssignmentBuiltin(source_slice[after])) |id| {
-            mode = .binary;
-            builtin = id;
-            after = skipSpacesInSource(source_slice, after + 1);
-            if (after >= source_slice.len or source_slice[after] != ':') return null;
-            after += 1;
-        } else {
-            return null;
+    fn tryParseAstAssignment(self: *Compiler, arena: *AstArena) KError!?AstParseResult {
+        const start = self.index;
+        const scanned = self.scanIdentifierPathAt(start) orelse return null;
+        var after = skipSpacesInSource(self.source, scanned.next_index);
+        var selector_source: ?[]const u8 = null;
+        if (after < self.source.len and self.source[after] == '[') {
+            const close = findIndexedAssignmentClose(self.source, after) orelse return error.Parse;
+            selector_source = self.source[after + 1 .. close];
+            after = skipSpacesInSource(self.source, close + 1);
         }
-
-        const rhs_start = skipSpacesInSource(source_slice, after);
-        if (rhs_start >= source_slice.len) return error.Parse;
-        const rhs_source = std.mem.trim(u8, source_slice[rhs_start..], " \t\r\n");
-        if (rhs_source.len == 0) return error.Parse;
-        return .{
-            .ident = scanned.ident,
-            .selector_source = selector_source,
-            .rhs_source = rhs_source,
-            .mode = mode,
-            .builtin = builtin,
-        };
-    }
-
-    fn lambdaBodyStartsWithLocalBinding(self: *Compiler, body_source: []const u8) KError!bool {
-        const split = splitLambdaBodyHead(body_source) orelse return error.Parse;
-        const assignment = (try self.scanLocalAssignmentStatement(split.head)) orelse return false;
-        return assignment.mode == .bind;
-    }
-
-    fn emitGlobalLoadByName(self: *Compiler, out: *CodeEmitter, name: []const u8) KError!void {
-        try out.emitLoadGlobal(try self.globalSlot(name));
+        if (after >= self.source.len) return null;
+        var mode: NameAssignmentMode = .bind;
+        var builtin: BuiltinId = .add;
+        if (self.source[after] == ':') {
+            after += 1;
+            if (after < self.source.len and self.source[after] == ':') {
+                mode = .explicit_global;
+                after += 1;
+            }
+        } else if (indexedAssignmentBuiltin(self.source[after])) |id| {
+            builtin = id;
+            mode = .modified;
+            after = skipSpacesInSource(self.source, after + 1);
+            if (after >= self.source.len or self.source[after] != ':') return null;
+            after += 1;
+            // A monadic verb with an adverb is not modified assignment.
+            if (self.startsDerivedVerbAt(skipSpacesInSource(self.source, after))) return null;
+        } else return null;
+        self.index = skipSpacesInSource(self.source, after);
+        const selector = if (selector_source) |source| blk: {
+            break :blk if (selectorSourceHasTopLevelSeparator(source) or std.mem.trim(u8, source, " \t\r\n").len == 0)
+                try self.parseSelectorPathVectorAst(arena, source)
+            else
+                try self.parseAstListItem(arena, source);
+        } else null;
+        const rhs = try self.parseAstDyadExpr(arena);
+        const node = try arena.add(.nounish, .{ .start = start, .end = self.index }, .{
+            .assignment = .{ .ident = scanned.ident, .selector = selector, .rhs = rhs.node, .mode = mode, .builtin = builtin },
+        });
+        return .{ .node = node, .form = .nounish };
     }
 
     fn emitSimpleAtom(self: *Compiler, out: *CodeEmitter, scope: *Scope, atom: SimpleAtom) KError!void {
@@ -67641,14 +63137,14 @@ const Compiler = struct {
 
             if (builtinFromName(callee_ident.text)) |builtin| {
                 if (builtinCanEmitDirectCall(builtin, 2)) {
-                    try self.emitSimpleAtom(out, scope, arg0.atom);
                     try self.emitSimpleAtom(out, scope, arg1.atom);
+                    try self.emitSimpleAtom(out, scope, arg0.atom);
                     if (!(try self.tryEmitBuiltinCall(out, builtin, 2))) return error.Unsupported;
                     return true;
                 }
-                try self.emitPendingPrimary(out, scope, .{ .builtin = builtin });
-                try self.emitSimpleAtom(out, scope, arg0.atom);
                 try self.emitSimpleAtom(out, scope, arg1.atom);
+                try self.emitSimpleAtom(out, scope, arg0.atom);
+                try self.emitPendingPrimary(out, scope, .{ .builtin = builtin });
                 try out.appendStackCall(2);
                 return true;
             }
@@ -67664,8 +63160,8 @@ const Compiler = struct {
         };
         const second = scanSimpleAtom(text, first.next + 1) orelse return false;
         if (second.next != text.len) return false;
-        try self.emitSimpleAtom(out, scope, first.atom);
         try self.emitSimpleAtom(out, scope, second.atom);
+        try self.emitSimpleAtom(out, scope, first.atom);
         try out.appendShapedDyad(op);
         return true;
     }
@@ -67703,6 +63199,7 @@ const Compiler = struct {
     }
 
     fn parseAstDyadExpr(self: *Compiler, arena: *AstArena) KError!AstParseResult {
+        if (try self.tryParseAstAssignment(arena)) |assignment| return assignment;
         const left = try self.parseAstApply(arena);
         const op = self.peekDyadOp() orelse return left;
         const op_start = self.index;
@@ -67762,15 +63259,6 @@ const Compiler = struct {
         }
         const derived = if (op != '.') self.matchDerivedVerb() else null;
         const right = try self.parseAstDyadExpr(arena);
-        if (op == ':' and derived == null) {
-            const node = try arena.add(.nounish, .{ .start = arena.node(left.node).span.start, .end = arena.node(right.node).span.end }, .{
-                .discard_left = .{
-                    .left = left.node,
-                    .right = right.node,
-                },
-            });
-            return .{ .node = node, .form = .nounish };
-        }
         const node = try arena.add(.nounish, .{ .start = arena.node(left.node).span.start, .end = arena.node(right.node).span.end }, .{
             .dyad = .{
                 .op = op,
@@ -68397,23 +63885,12 @@ const Compiler = struct {
             },
             '[' => {
                 _ = self.consumeByte();
-                var items: [max_body_instructions]AstNodeId = undefined;
-                var count: u8 = 0;
-                if (!self.matchChar(']')) {
-                    while (true) {
-                        if (count >= items.len) return error.Unsupported;
-                        const item = try self.parseAstExpr(arena);
-                        items[count] = item.node;
-                        count = std.math.add(u8, count, 1) catch return error.Unsupported;
-                        if (self.matchChar(']')) break;
-                        try self.expectChar(';');
-                    }
-                }
-                const first_item = try arena.appendExtra(items[0..count]);
+                const body_start = self.index;
+                const body_end = try self.findBracketBodyEnd(body_start);
+                self.index = skipSpacesInSource(self.source, body_end + 1);
                 const node = try arena.add(.nounish, .{ .start = start, .end = self.index }, .{
-                    .vector = .{
-                        .first_item = first_item,
-                        .count = count,
+                    .block = .{
+                        .body_source = self.source[body_start..body_end],
                     },
                 });
                 return .{ .node = node, .form = .nounish };
@@ -68608,8 +64085,58 @@ const Compiler = struct {
         return true;
     }
 
+    fn astArgmaxSource(self: *Compiler, arena: *const AstArena, node_id: AstNodeId) ?AstNodeId {
+        switch (arena.node(node_id).data) {
+            .call => |call| {
+                if (call.argc != 1) return null;
+                const arg = arena.extraSlice(call.first_arg, 1)[0];
+                if (self.astIntLiteral(arena, arg) != 0) return null;
+                const monad = switch (arena.node(call.callee).data) {
+                    .monad => |m| m,
+                    else => return null,
+                };
+                if (monad.builtin == .grade_down) return monad.arg;
+            },
+            .dyad => |dyad| {
+                if (dyad.op != '?' or dyad.derived != null) return null;
+                // Repeated effectful expressions must still execute twice.
+                switch (arena.node(dyad.left).data) {
+                    .value, .ident, .global => {},
+                    else => return null,
+                }
+                const call = switch (arena.node(dyad.right).data) {
+                    .call => |call_node| call_node,
+                    else => return null,
+                };
+                if (call.argc != 1) return null;
+                const adverb = switch (arena.node(call.callee).data) {
+                    .adverb => |a| a,
+                    else => return null,
+                };
+                if (adverb.kind != .fold or self.astBuiltinId(arena, adverb.base) != .maximum) return null;
+                if (astNodesEquivalent(arena, dyad.left, arena, arena.extraSlice(call.first_arg, 1)[0])) return dyad.left;
+            },
+            else => {},
+        }
+        return null;
+    }
+
+    fn lowerAstResult(self: *Compiler, arena: *const AstArena, node: AstNodeId, out: *CodeEmitter, scope: *Scope, want_result: bool) KError!void {
+        if (arena.node(node).data == .assignment) {
+            try self.lowerAstAssignment(arena, arena.node(node).data.assignment, out, scope, want_result);
+        } else {
+            _ = try self.lowerAstExpr(arena, node, out, scope);
+            if (!want_result) try out.appendDiscard();
+        }
+    }
+
     fn lowerAstExpr(self: *Compiler, arena: *const AstArena, node_id: AstNodeId, out: *CodeEmitter, scope: *Scope) KError!ExprForm {
         const node = arena.node(node_id);
+        if (self.astArgmaxSource(arena, node_id)) |source| {
+            _ = try self.lowerAstExpr(arena, source, out, scope);
+            try out.appendArgmax();
+            return node.form;
+        }
         switch (node.data) {
             .value => |value| try self.emitLiteralValue(out, value),
             .ident => |ident| try self.lowerAstIdent(out, scope, ident),
@@ -68626,8 +64153,8 @@ const Compiler = struct {
             },
             .dyad => |dyad| {
                 if (self.astContainsIdiom(arena, node_id)) |contains| {
-                    _ = try self.lowerAstExpr(arena, contains.needle, out, scope);
                     _ = try self.lowerAstExpr(arena, contains.haystack, out, scope);
+                    _ = try self.lowerAstExpr(arena, contains.needle, out, scope);
                     try out.appendDyadBuiltinCall(.contains);
                     return node.form;
                 }
@@ -68637,19 +64164,19 @@ const Compiler = struct {
                         return node.form;
                     }
                     if (try self.astWhereMaskArg(arena, dyad.right)) |where_mask| {
-                        _ = try self.lowerAstExpr(arena, dyad.left, out, scope);
                         try self.lowerAstWhereMaskArg(arena, where_mask, out, scope);
+                        _ = try self.lowerAstExpr(arena, dyad.left, out, scope);
                         try out.appendIndexWhereMaskCall();
                         return node.form;
                     }
                 }
-                _ = try self.lowerAstExpr(arena, dyad.left, out, scope);
-                const left_simple = out.last_simple;
                 _ = try self.lowerAstExpr(arena, dyad.right, out, scope);
-                if (left_simple) |left| {
-                    if (out.last_simple) |right| {
-                        if (out.simpleIsAdjacent(left, right)) {
-                            out.previous_simple = left;
+                const right_simple = out.last_simple;
+                _ = try self.lowerAstExpr(arena, dyad.left, out, scope);
+                if (right_simple) |right| {
+                    if (out.last_simple) |left| {
+                        if (out.simpleIsAdjacent(right, left)) {
+                            out.previous_simple = right;
                         }
                     }
                 }
@@ -68660,16 +64187,16 @@ const Compiler = struct {
             .adverb => |adverb| try self.lowerAstAdverb(arena, adverb, out, scope),
             .synthetic_lambda => |synthetic| try self.lowerAstSyntheticLambda(synthetic, out, scope),
             .vector => |vector| {
-                for (arena.extraSlice(vector.first_item, vector.count)) |item| {
-                    _ = try self.lowerAstExpr(arena, item, out, scope);
+                const items = arena.extraSlice(vector.first_item, vector.count);
+                var idx = items.len;
+                while (idx != 0) {
+                    idx -= 1;
+                    _ = try self.lowerAstExpr(arena, items[idx], out, scope);
                 }
                 try out.appendMakeVector(vector.count);
             },
-            .discard_left => |discard| {
-                _ = try self.lowerAstExpr(arena, discard.left, out, scope);
-                try out.appendDiscard();
-                _ = try self.lowerAstExpr(arena, discard.right, out, scope);
-            },
+            .assignment => |assignment| try self.lowerAstAssignment(arena, assignment, out, scope, true),
+            .block => |block| try self.compileStatementBlockInto(out, scope, block.body_source),
             .amend => |amend| try self.lowerAstAmend(arena, amend, out, scope),
             .cond => |cond| try self.lowerAstCond(arena, cond, out, scope),
         }
@@ -68852,36 +64379,134 @@ const Compiler = struct {
         }
     }
 
-    const LoweredAstArgs = struct {
-        argc: u8,
-        simples: [max_direct_apply_args]ProducedValue = undefined,
-        simples_valid: bool = true,
+    fn astCallArgSource(self: *Compiler, arena: *const AstArena, node: AstNodeId, scope: *Scope) KError!?GlobalCallArgSource {
+        return switch (arena.node(node).data) {
+            .value => |value| switch (value.tag()) {
+                .int => .{ .const_int = value.asInt() },
+                .bool => .{ .const_bool = value.asBool() },
+                else => null,
+            },
+            .ident => |ident| blk: {
+                if (builtinFromName(ident.text) != null) break :blk null;
+                const slot = scope.lookupLocal(ident) orelse break :blk null;
+                scope.markParamRequired(slot);
+                break :blk .{ .local = .{ .slot = @intCast(slot), .consume = false } };
+            },
+            .monad => |monad| blk: {
+                if (monad.builtin != .sub) break :blk null;
+                const arg = (try self.astCallArgSource(arena, monad.arg, scope)) orelse break :blk null;
+                if (arg != .const_int) break :blk null;
+                const result = @subWithOverflow(@as(i64, 0), arg.const_int);
+                break :blk if (result[1] == 0 and Value.fitsInlineInt(result[0])) .{ .const_int = result[0] } else null;
+            },
+            .dyad => |dyad| blk: {
+                if (dyad.derived != null) break :blk null;
+                const op = builtinFromChar(dyad.op) orelse break :blk null;
+                const right = (try self.astCallArgSource(arena, dyad.right, scope)) orelse break :blk null;
+                const left = (try self.astCallArgSource(arena, dyad.left, scope)) orelse break :blk null;
+                break :blk callArgDyadSource(op, left, right);
+            },
+            .call => |call| blk: {
+                if (call.argc != 2) break :blk null;
+                const op = self.astBuiltinId(arena, call.callee) orelse break :blk null;
+                const args = arena.extraSlice(call.first_arg, call.argc);
+                const right = (try self.astCallArgSource(arena, args[1], scope)) orelse break :blk null;
+                const left = (try self.astCallArgSource(arena, args[0], scope)) orelse break :blk null;
+                break :blk callArgDyadSource(op, left, right);
+            },
+            else => null,
+        };
+    }
 
-        fn simpleSlice(self: *const LoweredAstArgs) []const ProducedValue {
-            if (!self.simples_valid) return &[_]ProducedValue{};
-            return self.simples[0..self.argc];
+    fn callArgDyadSource(op: BuiltinId, left: GlobalCallArgSource, right: GlobalCallArgSource) ?GlobalCallArgSource {
+        if (left == .const_int and right == .const_int) {
+            const result = switch (op) {
+                .add => @addWithOverflow(left.const_int, right.const_int),
+                .sub => @subWithOverflow(left.const_int, right.const_int),
+                .mul => @mulWithOverflow(left.const_int, right.const_int),
+                .iota => .{ bangIntOp(left.const_int, right.const_int), @as(u1, 0) },
+                else => return null,
+            };
+            return if (result[1] == 0 and Value.fitsInlineInt(result[0])) .{ .const_int = result[0] } else null;
         }
-    };
+        if (left == .local and right == .const_int) return switch (op) {
+            .add, .sub, .mul => .{ .local_const_op = .{ .slot = left.local.slot, .consume = false, .op = op, .const_value = right.const_int } },
+            .iota => .{ .scalar_dyad_op = .{ .shape = compact_scalar_dyad_local_const_i64, .op = op, .left_slot = left.local.slot, .right_slot = 0, .const_value = right.const_int } },
+            else => null,
+        };
+        if (left == .const_int and right == .local and op == .iota) return .{ .scalar_dyad_op = .{ .shape = compact_scalar_dyad_const_local_i64, .op = op, .left_slot = 0, .right_slot = right.local.slot, .const_value = left.const_int } };
+        if (left == .local and right == .local) return switch (op) {
+            .add, .sub => .{ .local_local_op = .{ .left_slot = left.local.slot, .right_slot = right.local.slot, .op = op } },
+            .iota => .{ .scalar_dyad_op = .{ .shape = compact_scalar_dyad_local_local, .op = op, .left_slot = left.local.slot, .right_slot = right.local.slot, .const_value = 0 } },
+            else => null,
+        };
+        if (left == .local_local_op and right == .const_int and CodeEmitter.selectorDyadArgSourceOpSupported(op)) return .{ .local_local_const_op = .{ .left_slot = left.local_local_op.left_slot, .right_slot = left.local_local_op.right_slot, .op = left.local_local_op.op, .const_op = op, .const_value = right.const_int } };
+        return null;
+    }
 
-    fn lowerAstArgs(self: *Compiler, arena: *const AstArena, first_arg: AstExtraId, argc: u8, out: *CodeEmitter, scope: *Scope) KError!LoweredAstArgs {
-        var lowered = LoweredAstArgs{ .argc = argc };
-        const args = arena.extraSlice(first_arg, argc);
-        for (args, 0..) |arg, idx| {
-            const arg_start = out.position();
-            _ = try self.lowerAstExpr(arena, arg, out, scope);
-            if (lowered.simples_valid) {
-                if (out.last_simple) |simple| {
-                    if (!out.simpleStartsAtOrAfterPosition(simple, arg_start) or !out.simpleEndsAtCurrent(simple)) {
-                        lowered.simples_valid = false;
-                    } else {
-                        lowered.simples[idx] = simple;
-                    }
-                } else {
-                    lowered.simples_valid = false;
-                }
+    // Only pure frame/literal sources qualify. Their descriptors are emitted
+    // directly, in evaluation order, without speculative argument bytecode.
+    fn tryLowerAstSourceCall(self: *Compiler, arena: *const AstArena, call: AstCall, out: *CodeEmitter, scope: *Scope) KError!bool {
+        if (call.argc == 0) return false;
+        const derived = try self.astGlobalDerived(arena, call.callee, scope);
+        const slot = if (derived) |value| value.slot else (try self.astGlobalSlot(arena, call.callee, scope)) orelse return false;
+        const args = arena.extraSlice(call.first_arg, call.argc);
+        var sources: [max_direct_apply_args]GlobalCallArgSource = undefined;
+        var idx = args.len;
+        while (idx != 0) {
+            idx -= 1;
+            sources[idx] = (try self.astCallArgSource(arena, args[idx], scope)) orelse return false;
+        }
+        out.invalidateSimple();
+        out.references_globals = true;
+        const kind: PatchableInstructionKind = if (derived != null) .none else if (call.argc == 1) .index_global_source else .call_global_slots;
+        const start = try out.beginCompactPayload(kind);
+        var offsets: [max_direct_apply_args]u16 = undefined;
+        if (derived) |value| {
+            if (!out.compactAppendGlobalDerivedCallSlots(start, slot, value.kind, call.argc, sources[0..call.argc], offsets[0..call.argc])) return error.Unsupported;
+        } else if (call.argc == 1) {
+            offsets[0] = out.compactAppendIndexGlobalSource(start, slot, sources[0]) orelse return error.Unsupported;
+        } else {
+            if (!out.compactAppendGlobalCallSlots(start, slot, call.argc, sources[0..call.argc], offsets[0..call.argc])) return error.Unsupported;
+        }
+        idx = args.len;
+        while (idx != 0) {
+            idx -= 1;
+            switch (sources[idx]) {
+                .local => |value| try self.noteDirectCallLocal(value.slot, offsets[idx]),
+                .local_const_op => |value| try self.noteDirectCallLocal(value.slot, offsets[idx]),
+                .local_local_op => |value| {
+                    self.consume_candidates.noteBorrow(value.right_slot);
+                    self.consume_candidates.noteBorrow(value.left_slot);
+                },
+                .local_local_const_op => |value| {
+                    self.consume_candidates.noteBorrow(value.right_slot);
+                    self.consume_candidates.noteBorrow(value.left_slot);
+                },
+                .scalar_dyad_op => |value| {
+                    if (value.shape != compact_scalar_dyad_const_local_i64) self.consume_candidates.noteBorrow(value.left_slot);
+                    if (value.shape != compact_scalar_dyad_local_const_i64) self.consume_candidates.noteBorrow(value.right_slot);
+                },
+                .const_int, .const_bool => {},
             }
         }
-        return lowered;
+        return true;
+    }
+
+    fn noteDirectCallLocal(self: *Compiler, slot: u8, offset: u16) KError!void {
+        // Arg-kind bytes cannot equal compact local-load opcodes; patchInto's
+        // load patch is therefore inert, and the argument consume bit is patched.
+        self.consume_candidates.noteLoad(.{ .local = slot }, offset);
+        try self.consume_candidates.noteShapedGlobalLocalArg(CompactLocalSourceRef.init(slot, offset), offset);
+    }
+
+    fn lowerAstArgs(self: *Compiler, arena: *const AstArena, first_arg: AstExtraId, argc: u8, out: *CodeEmitter, scope: *Scope) KError!void {
+        const args = arena.extraSlice(first_arg, argc);
+        var idx = args.len;
+        while (idx != 0) {
+            idx -= 1;
+            _ = try self.lowerAstExpr(arena, args[idx], out, scope);
+        }
     }
 
     fn builtinCanEmitDirectCall(builtin: BuiltinId, argc: u8) bool {
@@ -68908,19 +64533,16 @@ const Compiler = struct {
             }
         }
 
+        if (try self.tryLowerAstSourceCall(arena, call, out, scope)) return;
+        try self.lowerAstArgs(arena, call.first_arg, call.argc, out, scope);
         if (try self.astGlobalDerived(arena, call.callee, scope)) |derived| {
-            const lowered = try self.lowerAstArgs(arena, call.first_arg, call.argc, out, scope);
-            const simple_args = lowered.simpleSlice();
-            if (!(lowered.simples_valid and try out.tryShapeGlobalDerivedCallSlotsDirect(derived.slot, derived.kind, simple_args, &self.consume_candidates))) {
-                try out.appendGlobalDerivedStackCall(derived.slot, derived.kind, call.argc);
-            }
+            try out.appendGlobalDerivedStackCall(derived.slot, derived.kind, call.argc);
             return;
         }
 
         switch (arena.node(call.callee).data) {
             .adverb => |adverb| {
                 _ = try self.lowerAstExpr(arena, adverb.base, out, scope);
-                _ = try self.lowerAstArgs(arena, call.first_arg, call.argc, out, scope);
                 try out.appendAdverbStackCall(adverb.kind, call.argc);
                 return;
             },
@@ -68929,12 +64551,10 @@ const Compiler = struct {
 
         if (self.astBuiltinId(arena, call.callee)) |builtin| {
             if (builtinCanEmitDirectCall(builtin, call.argc)) {
-                _ = try self.lowerAstArgs(arena, call.first_arg, call.argc, out, scope);
                 if (!(try self.tryEmitBuiltinCall(out, builtin, call.argc))) return error.Unsupported;
                 return;
             }
             try self.emitPendingPrimary(out, scope, .{ .builtin = builtin });
-            _ = try self.lowerAstArgs(arena, call.first_arg, call.argc, out, scope);
             switch (call.argc) {
                 1 => try out.appendShapedCall1(),
                 else => try out.appendStackCall(call.argc),
@@ -68943,19 +64563,11 @@ const Compiler = struct {
         }
 
         if (try self.astGlobalSlot(arena, call.callee, scope)) |slot| {
-            const lowered = try self.lowerAstArgs(arena, call.first_arg, call.argc, out, scope);
-            const simple_args = lowered.simpleSlice();
-            if (lowered.simples_valid and call.argc == 1 and try out.tryShapeGlobalIndexSource(slot, simple_args[0], &self.consume_candidates)) {
-                return;
-            }
-            if (!(lowered.simples_valid and try out.tryShapeGlobalCallSlotsFromSimples(slot, simple_args, &self.consume_candidates))) {
-                try out.appendGlobalStackCall(slot, call.argc);
-            }
+            try out.appendGlobalStackCall(slot, call.argc);
             return;
         }
 
         _ = try self.lowerAstExpr(arena, call.callee, out, scope);
-        _ = try self.lowerAstArgs(arena, call.first_arg, call.argc, out, scope);
         switch (call.argc) {
             1 => try out.appendShapedCall1(),
             else => try out.appendStackCall(call.argc),
@@ -68963,10 +64575,13 @@ const Compiler = struct {
     }
 
     fn lowerAstProjection(self: *Compiler, arena: *const AstArena, projection: AstProjection, out: *CodeEmitter, scope: *Scope) KError!void {
-        _ = try self.lowerAstExpr(arena, projection.callee, out, scope);
-        for (arena.extraSlice(projection.first_bound, projection.bound_count)) |bound| {
-            _ = try self.lowerAstExpr(arena, bound, out, scope);
+        const bounds = arena.extraSlice(projection.first_bound, projection.bound_count);
+        var idx = bounds.len;
+        while (idx != 0) {
+            idx -= 1;
+            _ = try self.lowerAstExpr(arena, bounds[idx], out, scope);
         }
+        _ = try self.lowerAstExpr(arena, projection.callee, out, scope);
         try out.appendMakeProjection(projection.slot_count, projection.hole_mask);
     }
 
@@ -68988,8 +64603,6 @@ const Compiler = struct {
     }
 
     fn lowerAstAmend(self: *Compiler, arena: *const AstArena, amend: AstAmend, out: *CodeEmitter, scope: *Scope) KError!void {
-        _ = try self.lowerAstExpr(arena, amend.target, out, scope);
-        _ = try self.lowerAstExpr(arena, amend.selector, out, scope);
         switch (amend.mode) {
             .unary => {
                 if (amend.func == ast_node_id_none) return error.Parse;
@@ -69001,10 +64614,12 @@ const Compiler = struct {
             },
             .binary => {
                 if (amend.func == ast_node_id_none or amend.value == ast_node_id_none) return error.Parse;
-                _ = try self.lowerAstExpr(arena, amend.func, out, scope);
                 _ = try self.lowerAstExpr(arena, amend.value, out, scope);
+                _ = try self.lowerAstExpr(arena, amend.func, out, scope);
             },
         }
+        _ = try self.lowerAstExpr(arena, amend.selector, out, scope);
+        _ = try self.lowerAstExpr(arena, amend.target, out, scope);
         try out.appendAmend(amend.mode, amend.deep);
     }
 
@@ -69081,14 +64696,13 @@ const Compiler = struct {
             '~' => try out.appendDyadBuiltinCall(.not),
             '?' => {
                 try out.appendDyadBuiltinCall(.find);
-                _ = try out.tryShapeArgmaxSuffix();
             },
             '$' => try out.appendDyadBuiltinCall(.cast),
             '*' => try out.appendShapedDyad(.mul),
             '%' => try out.appendShapedDyad(.div),
             '.' => try out.appendDot(),
             '@' => try out.appendShapedCall1(),
-            ':' => unreachable,
+            ':' => try out.appendDiscard(),
             else => unreachable,
         }
     }
@@ -69279,6 +64893,38 @@ const Compiler = struct {
         return error.Parse;
     }
 
+    fn findBracketBodyEnd(self: *const Compiler, start: usize) KError!usize {
+        var index = start;
+        var bracket_depth: usize = 0;
+        var paren_depth: usize = 0;
+        var brace_depth: usize = 0;
+        while (index < self.source.len) : (index += 1) {
+            switch (self.source[index]) {
+                '"' => {
+                    index = scanStringLiteralEnd(self.source, index) orelse return error.Parse;
+                },
+                '[' => bracket_depth += 1,
+                ']' => {
+                    if (bracket_depth == 0 and paren_depth == 0 and brace_depth == 0) return index;
+                    if (bracket_depth == 0) return error.Parse;
+                    bracket_depth -= 1;
+                },
+                '(' => paren_depth += 1,
+                ')' => {
+                    if (paren_depth == 0) return error.Parse;
+                    paren_depth -= 1;
+                },
+                '{' => brace_depth += 1,
+                '}' => {
+                    if (brace_depth == 0) return error.Parse;
+                    brace_depth -= 1;
+                },
+                else => {},
+            }
+        }
+        return error.Parse;
+    }
+
     fn startsDerivedVerb(self: *const Compiler) bool {
         if (self.index >= self.source.len) return false;
         return switch (self.source[self.index]) {
@@ -69352,13 +64998,6 @@ const Compiler = struct {
             },
             else => return false,
         }
-    }
-
-    fn builtinCallRequiresPreEmit(builtin: BuiltinId) bool {
-        return switch (builtin) {
-            .pow, .exp, .log, .sin, .cos, .tanh, .sigmoid, .bytes, .utf8, .char, .grad, .valuegrad, .prng, .open, .close, .read, .write, .flush, .run, .stat, .load, .save, .sql, .exec, .register, .rotcache, .rotcacheupdate, .rotcacheview, .rope, .ropeflat, .ropecisflat, .rmsnorm, .layernorm, .gelu, .geluapprox, .mlpdense, .conv2d, .convtranspose2d, .upsamplenearest2d, .groupnorm, .softmax, .sdpa, .sam3boxrpb, .sdpamask, .sdpaflat => true,
-            else => false,
-        };
     }
 
     fn tryParseBuiltinInnerProduct(self: *Compiler) KError!?PendingPrimary {
@@ -69514,13 +65153,8 @@ const Compiler = struct {
             break :blk &body_storage;
         };
 
-        var body_candidates = try self.directAmendBaseConsumeCandidates(&scope, body_source);
-        if (!(try self.lambdaBodyStartsWithLocalBinding(body_source))) {
-            try addScopeParamConsumeCandidates(&body_candidates, &scope);
-        }
-        const body_control_before = body.control_flow_op_count;
-        const updated_body_candidates = try self.compileLambdaBodyIntoWithConsumeCandidates(body, &scope, body_source, body_candidates);
-        if (body.control_flow_op_count == body_control_before) patchConsumeCandidates(body, updated_body_candidates);
+        var body_compiler = try Compiler.init(self.session, body_source, self.code_allocator, self.compile_mode);
+        try body_compiler.compileLambdaBodyInto(body, &scope, body_source);
         try finishCodeEmitter(body, .tail_position);
 
         const code = if (self.compile_mode == .scratch) blk: {
@@ -69697,7 +65331,7 @@ const Compiler = struct {
         const index = skipSpacesInSource(self.source, start);
         if (index >= self.source.len) return false;
         return switch (self.source[index]) {
-            '0'...'9', '"', '`', '[' => true,
+            '0'...'9', '"', '`' => true,
             '-' => index + 1 < self.source.len and std.ascii.isDigit(self.source[index + 1]),
             '(' => blk: {
                 const inner = skipSpacesInSource(self.source, index + 1);
@@ -69786,30 +65420,6 @@ const Compiler = struct {
                 return null;
             }
             return first;
-        }
-        if (ch == '[') {
-            const saved_index = self.index;
-            _ = self.consumeByte();
-            var values = std.ArrayList(Value).empty;
-            defer values.deinit(self.session.allocator);
-            if (!self.matchChar(']')) {
-                while (true) {
-                    const item = (try self.tryParseLiteralExprValue()) orelse {
-                        self.index = saved_index;
-                        return null;
-                    };
-                    try values.append(self.session.allocator, item);
-                    if (self.matchChar(']')) break;
-                    if (!self.matchChar(';')) {
-                        self.index = saved_index;
-                        return null;
-                    }
-                }
-            }
-            return (try self.session.makeConstantArrayFromValues(self.compileConstantOwner(), values.items)) orelse {
-                self.index = saved_index;
-                return null;
-            };
         }
         if (ch == '"') return try self.parseStringLiteralValue();
         if (ch == '`') {

@@ -23,7 +23,6 @@ fi
 PREFIX="${KIWI_ARRAY_WHEEL_PREFIX:-$KIWI_ROOT/out/python-wheels/native-prefix}"
 OPTIMIZE="${KIWI_ARRAY_WHEEL_OPTIMIZE:-ReleaseFast}"
 TARGET="${KIWI_ARRAY_WHEEL_TARGET:-}"
-ZIG_MAKER_OPT="${KIWI_ARRAY_WHEEL_ZIG_MAKER_OPT:-}"
 RUNTIME_BACKEND="${KIWI_ARRAY_WHEEL_RUNTIME_BACKEND:-host}"
 MLX_BACKEND="${KIWI_ARRAY_WHEEL_MLX_BACKEND:-auto}"
 MLXC_MINI_BRIDGE="${KIWI_ARRAY_WHEEL_MLXC_MINI_BRIDGE:-}"
@@ -193,8 +192,6 @@ DUCKDB_PREFIX="${KIWI_DUCKDB_PREFIX:-}"
 
 BUILD_ARGS=(
   build
-  "--seed"
-  "0"
   "-Doptimize=$OPTIMIZE"
   "-Dpublic-cli=true"
   "-Dcli-name=kiwi"
@@ -208,10 +205,6 @@ BUILD_ARGS=(
   "--prefix"
   "$PREFIX"
 )
-
-if [ -n "$ZIG_MAKER_OPT" ]; then
-  BUILD_ARGS+=("--maker-opt=$ZIG_MAKER_OPT")
-fi
 
 if [ -n "$TARGET" ]; then
   BUILD_ARGS+=("-Dtarget=$TARGET")

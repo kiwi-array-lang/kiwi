@@ -18,24 +18,6 @@ const MlxLinkage = enum {
     dynamic,
 };
 
-const DenseProducerMode = enum {
-    composed,
-    direct,
-};
-
-const DenseMaterializeF32Mode = enum {
-    generic,
-    scalar,
-    simd,
-    morsel,
-};
-
-const HostCompareMode = enum {
-    auto,
-    c,
-    zig,
-};
-
 const wasm_base_export_symbols = &.{
     "kiwi_alloc_bytes",
     "kiwi_reset_input_arena",
@@ -112,7 +94,6 @@ fn addWasmBuildOptions(
 ) void {
     options.addOption(bool, "enable_probe_instrumentation", false);
     options.addOption(bool, "enable_sampling_profile", false);
-    options.addOption(bool, "enable_string_instrumentation", false);
     options.addOption([]const u8, "cli_invocation", "kiwi");
     options.addOption(bool, "enable_bench_cli", false);
     options.addOption(bool, "runtime_has_mlx", runtime_has_mlx);
@@ -120,10 +101,6 @@ fn addWasmBuildOptions(
     options.addOption(bool, "runtime_has_wasm_duckdb_bridge", runtime_has_wasm_duckdb_bridge);
     options.addOption(bool, "duckdb_external", false);
     options.addOption(bool, "wasm_exports_accelerator_handles", wasm_exports_accelerator_handles);
-    options.addOption([]const u8, "dense_producer_mode", "composed");
-    options.addOption(bool, "dense_materialize_source_sinks", true);
-    options.addOption([]const u8, "dense_materialize_f32_mode", "morsel");
-    options.addOption([]const u8, "host_compare_mode", "auto");
 }
 
 fn addBuildOptions(root_module: *std.Build.Module, options: *std.Build.Step.Options) void {
@@ -593,11 +570,11 @@ fn addWasmModuleBuild(
     const wasm_module = b.createModule(.{
         .root_source_file = b.path("src/wasm_api.zig"),
         .target = target,
-        .optimize = .ReleaseFast,
+        .optimize = .fast,
         .strip = wasm_strip_symbols,
     });
     addBuildOptions(wasm_module, build_options);
-    wasm_module.addImport("duckdb_runtime", createDuckDbRuntimeModule(b, target, .ReleaseSmall, null, false));
+    wasm_module.addImport("duckdb_runtime", createDuckDbRuntimeModule(b, target, .small, null, false));
     wasm_module.export_symbol_names = export_symbols;
 
     const wasm_exe = b.addExecutable(.{
@@ -640,28 +617,8 @@ pub fn build(b: *std.Build) void {
         b.option([]const u8, "mlx-linkage", "Preferred MLX link mode: auto, static, or dynamic."),
         .auto,
     );
-    const dense_producer_mode = parseEnumOption(
-        DenseProducerMode,
-        "dense-producer-mode",
-        b.option([]const u8, "dense-producer-mode", "Dense float producer code shape for benchmark A/B: composed or direct."),
-        .composed,
-    );
-    const dense_materialize_source_sinks = b.option(bool, "dense-materialize-source-sinks", "Use dense float source/store-sink materialization fast paths for benchmark A/B.") orelse true;
-    const dense_materialize_f32_mode = parseEnumOption(
-        DenseMaterializeF32Mode,
-        "dense-materialize-f32-mode",
-        b.option([]const u8, "dense-materialize-f32-mode", "Dense f32 materializing dyad code shape for benchmark A/B: generic, scalar, simd, or morsel."),
-        .morsel,
-    );
-    const host_compare_mode = parseEnumOption(
-        HostCompareMode,
-        "host-compare-mode",
-        b.option([]const u8, "host-compare-mode", "Host compare-mask implementation for benchmark A/B: auto, c, or zig."),
-        .auto,
-    );
     const cli_name = b.option([]const u8, "cli-name", "Installed CLI executable name.") orelse if (public_cli) "kiwi" else "kiwi-zig";
     const install_sdk = b.option(bool, "install-sdk", "Install bridge libs and headers.") orelse !public_cli;
-    _ = b.option(bool, "install-probes", "Deprecated compatibility option; standalone probe executables are no longer built.");
     const mlx_prefix = configuredPathOrDefault(
         b,
         b.option([]const u8, "mlx-prefix", "Installed MLX prefix to link against. Defaults to .deps/mlx."),
@@ -693,7 +650,6 @@ pub fn build(b: *std.Build) void {
     const build_options = b.addOptions();
     build_options.addOption(bool, "enable_probe_instrumentation", !strip_instrumentation);
     build_options.addOption(bool, "enable_sampling_profile", !strip_instrumentation);
-    build_options.addOption(bool, "enable_string_instrumentation", optimize == .Debug and !strip_instrumentation);
     build_options.addOption([]const u8, "cli_invocation", cli_name);
     build_options.addOption(bool, "enable_bench_cli", !public_cli and has_bench_sources);
     build_options.addOption(bool, "runtime_has_mlx", runtime_backend == .mlx);
@@ -701,10 +657,6 @@ pub fn build(b: *std.Build) void {
     build_options.addOption(bool, "runtime_has_wasm_duckdb_bridge", false);
     build_options.addOption(bool, "duckdb_external", duckdb_prefix != null);
     build_options.addOption(bool, "wasm_exports_accelerator_handles", false);
-    build_options.addOption([]const u8, "dense_producer_mode", @tagName(dense_producer_mode));
-    build_options.addOption(bool, "dense_materialize_source_sinks", dense_materialize_source_sinks);
-    build_options.addOption([]const u8, "dense_materialize_f32_mode", @tagName(dense_materialize_f32_mode));
-    build_options.addOption([]const u8, "host_compare_mode", @tagName(host_compare_mode));
     const wasm_webgpu_build_options = b.addOptions();
     addWasmBuildOptions(wasm_webgpu_build_options, true, true, true);
     const wasm_host_min_build_options = b.addOptions();
@@ -856,12 +808,12 @@ pub fn build(b: *std.Build) void {
     const embedded_module = b.createModule(.{
         .root_source_file = b.path("src/embedded_api.zig"),
         .target = embedded_target,
-        .optimize = .ReleaseSmall,
+        .optimize = .small,
         .strip = false,
     });
     addBuildOptions(embedded_module, embedded_build_options);
-    addRuntimeImports(b, embedded_module, .host, embedded_target, .ReleaseSmall, mlx_c_include, mlx_prefix, null);
-    embedded_module.addImport("duckdb_runtime", createDuckDbRuntimeModule(b, embedded_target, .ReleaseSmall, null, false));
+    addRuntimeImports(b, embedded_module, .host, embedded_target, .small, mlx_c_include, mlx_prefix, null);
+    embedded_module.addImport("duckdb_runtime", createDuckDbRuntimeModule(b, embedded_target, .small, null, false));
 
     const embedded_lib = b.addLibrary(.{
         .linkage = .static,
@@ -873,12 +825,12 @@ pub fn build(b: *std.Build) void {
     const embedded_probe_module = b.createModule(.{
         .root_source_file = b.path("src/embedded_probe_main.zig"),
         .target = embedded_target,
-        .optimize = .ReleaseSmall,
+        .optimize = .small,
         .strip = false,
     });
     addBuildOptions(embedded_probe_module, embedded_build_options);
-    addRuntimeImports(b, embedded_probe_module, .host, embedded_target, .ReleaseSmall, mlx_c_include, mlx_prefix, null);
-    embedded_probe_module.addImport("duckdb_runtime", createDuckDbRuntimeModule(b, embedded_target, .ReleaseSmall, null, false));
+    addRuntimeImports(b, embedded_probe_module, .host, embedded_target, .small, mlx_c_include, mlx_prefix, null);
+    embedded_probe_module.addImport("duckdb_runtime", createDuckDbRuntimeModule(b, embedded_target, .small, null, false));
 
     const embedded_probe = b.addExecutable(.{
         .name = "kiwi_embedded_riscv32_probe",

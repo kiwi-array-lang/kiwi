@@ -60,6 +60,8 @@ EXPECTED_SOURCE_DIR="$MLX_SRC_DIR"
 configure_clang_toolchain() {
   local clang_bin="${CC:-$(command -v clang || true)}"
   local clangxx_bin="${CXX:-$(command -v clang++ || true)}"
+  clang_bin="$(command -v "$clang_bin" || true)"
+  clangxx_bin="$(command -v "$clangxx_bin" || true)"
 
   if [[ -z "$clang_bin" || -z "$clangxx_bin" ]]; then
     printf 'clang/clang++ are required for Linux MLX builds; install them or set CC/CXX\n' >&2

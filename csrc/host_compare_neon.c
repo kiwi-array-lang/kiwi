@@ -98,11 +98,6 @@ static inline uint8_t kiwi_host_compare_pack_u64x2_quad(uint64x2_t a, uint64x2_t
   return kiwi_host_compare_pack_u32x4_pair(lo, hi);
 }
 
-static inline uint64_t kiwi_host_compare_mask_u8x16(uint8x16_t cmp) {
-  return kiwi_host_compare_pack_u8x8(vget_low_u8(cmp)) |
-      (kiwi_host_compare_pack_u8x8(vget_high_u8(cmp)) << 8);
-}
-
 static inline uint64_t kiwi_host_compare_mask_u16x8(uint16x8_t cmp) {
   return kiwi_host_compare_pack_u8x8(vmovn_u16(cmp));
 }
@@ -404,30 +399,11 @@ static inline uint16x8_t kiwi_host_compare_i16_i32_cmp8_neon(
   return vcombine_u16(vmovn_u32(cmp_low), vmovn_u32(cmp_high));
 }
 
-static inline uint64_t kiwi_host_compare_i16_i32_mask_neon(
-    const int16_t* narrow, const int32_t* wide, size_t idx, int narrow_left, int op) {
-  return kiwi_host_compare_mask_u16x8(kiwi_host_compare_i16_i32_cmp8_neon(narrow, wide, idx, narrow_left, op));
-}
-
 static inline uint16_t kiwi_host_compare_i16_i32_pack16_neon(
     const int16_t* narrow, const int32_t* wide, size_t idx, int narrow_left, int op) {
   return kiwi_host_compare_pack_u16x8_pair(
       kiwi_host_compare_i16_i32_cmp8_neon(narrow, wide, idx, narrow_left, op),
       kiwi_host_compare_i16_i32_cmp8_neon(narrow, wide, idx + 8, narrow_left, op));
-}
-
-static inline uint64_t kiwi_host_compare_i32_i64_mask_neon(
-    const int32_t* narrow, const int64_t* wide, size_t idx, int narrow_left, int op) {
-  const int32x4_t narrow32 = vld1q_s32(narrow + idx);
-  const int64x2_t narrow_low = vmovl_s32(vget_low_s32(narrow32));
-  const int64x2_t narrow_high = vmovl_s32(vget_high_s32(narrow32));
-  const int64x2_t wide_low = vld1q_s64(wide + idx);
-  const int64x2_t wide_high = vld1q_s64(wide + idx + 2);
-  const uint64x2_t cmp_low = narrow_left ? kiwi_host_compare_i64_cmp_neon(narrow_low, wide_low, op)
-                                         : kiwi_host_compare_i64_cmp_neon(wide_low, narrow_low, op);
-  const uint64x2_t cmp_high = narrow_left ? kiwi_host_compare_i64_cmp_neon(narrow_high, wide_high, op)
-                                          : kiwi_host_compare_i64_cmp_neon(wide_high, narrow_high, op);
-  return kiwi_host_compare_mask_u64x2(cmp_low) | (kiwi_host_compare_mask_u64x2(cmp_high) << 2);
 }
 
 static inline uint8_t kiwi_host_compare_i32_i64_pack8_neon(

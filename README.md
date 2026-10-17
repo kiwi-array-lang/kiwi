@@ -59,7 +59,7 @@ uv run --managed-python python -m kiwi_array_jupyter_kernel.install --user
 
 ### Requirements
 
-- Zig on `PATH` or `ZIG_BIN` set explicitly
+- Zig matching the snapshot in `tools/zig-version`, on `PATH` or with `ZIG_BIN` set explicitly
 - CMake for MLX dependency builds
 - a supported host toolchain for Zig and MLX
 

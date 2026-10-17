@@ -13,11 +13,6 @@ var configured_heap_len: usize = 0;
 export var kiwi_embedded_panic_return_address: usize = 0;
 export var kiwi_embedded_probe_stage: usize = 0;
 
-fn embeddedPanic(_: []const u8, return_address: ?usize) noreturn {
-    kiwi_embedded_panic_return_address = return_address orelse 0;
-    @trap();
-}
-
 pub export fn kiwi_embedded_heap_bytes() usize {
     return heap_bytes;
 }

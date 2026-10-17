@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "kiwi-array-host"
-version = "0.2.62"
+version = "0.4.1"
 description = "Host native runtime payload for Kiwi Array."
 readme = "README.md"
 requires-python = ">=3.11"

@@ -86,10 +86,6 @@ const bench_tools = if (enable_bench_cli) @import("bench_internal.zig") else str
         return error.InvalidArgument;
     }
 
-    pub fn auditHostCompareCli(_: std.mem.Allocator, _: f64, _: usize) !void {
-        return error.InvalidArgument;
-    }
-
     pub fn auditHostScanCli(_: std.mem.Allocator, _: f64, _: usize) !void {
         return error.InvalidArgument;
     }
@@ -166,12 +162,6 @@ pub const ProfileRequest = struct {
 
 pub const DebugRequest = enum {
     audit_dense_autodiff,
-    find_lookup_stages,
-    host_compare_stages,
-    host_where_stages,
-    host_scan_stages,
-    host_transpose_stages,
-    host_matmul_stages,
     layout,
 };
 
@@ -278,30 +268,6 @@ fn run(allocator: std.mem.Allocator, process_args: std.process.Args) !void {
             .audit_dense_autodiff => {
                 if (!enable_debug_cli) return invalidArgument();
                 try bench_tools.auditDenseAutodiffCli(allocator);
-            },
-            .find_lookup_stages => {
-                if (!enable_debug_cli) return invalidArgument();
-                try bench_tools.auditFindLookupCli(allocator, parsed.target_batch_ms, parsed.vector_size);
-            },
-            .host_compare_stages => {
-                if (!enable_debug_cli) return invalidArgument();
-                try bench_tools.auditHostCompareCli(allocator, parsed.target_batch_ms, parsed.vector_size);
-            },
-            .host_where_stages => {
-                if (!enable_debug_cli) return invalidArgument();
-                try bench_tools.auditHostWhereCli(allocator, parsed.target_batch_ms, parsed.vector_size);
-            },
-            .host_scan_stages => {
-                if (!enable_debug_cli) return invalidArgument();
-                try bench_tools.auditHostScanCli(allocator, parsed.target_batch_ms, parsed.vector_size);
-            },
-            .host_transpose_stages => {
-                if (!enable_debug_cli) return invalidArgument();
-                try bench_tools.auditHostTransposeCli(allocator, parsed.target_batch_ms);
-            },
-            .host_matmul_stages => {
-                if (!enable_debug_cli) return invalidArgument();
-                try bench_tools.auditHostMatmulCli(allocator, parsed.target_batch_ms, parsed.matmul_size);
             },
             .layout => {
                 if (!enable_debug_cli) return invalidArgument();
@@ -545,18 +511,6 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Cli
                 if (debug_request != null) return invalidArgument();
                 if (std.mem.eql(u8, arg, "audit-dense-autodiff")) {
                     debug_request = .audit_dense_autodiff;
-                } else if (std.mem.eql(u8, arg, "find-lookup-stages")) {
-                    debug_request = .find_lookup_stages;
-                } else if (std.mem.eql(u8, arg, "host-compare-stages")) {
-                    debug_request = .host_compare_stages;
-                } else if (std.mem.eql(u8, arg, "host-where-stages")) {
-                    debug_request = .host_where_stages;
-                } else if (std.mem.eql(u8, arg, "host-scan-stages")) {
-                    debug_request = .host_scan_stages;
-                } else if (std.mem.eql(u8, arg, "host-transpose-stages")) {
-                    debug_request = .host_transpose_stages;
-                } else if (std.mem.eql(u8, arg, "host-matmul-stages")) {
-                    debug_request = .host_matmul_stages;
                 } else if (std.mem.eql(u8, arg, "layout")) {
                     debug_request = .layout;
                 } else {
@@ -627,8 +581,8 @@ fn writeUsage(writer: anytype) !void {
     }
     if (comptime enable_debug_cli) {
         try writer.print(
-            "  {s} debug audit-dense-autodiff\n  {s} debug [--target-batch-ms N] [--size N] find-lookup-stages\n  {s} debug [--target-batch-ms N] [--size N] host-compare-stages\n  {s} debug [--target-batch-ms N] [--size N] host-where-stages\n  {s} debug [--target-batch-ms N] [--size N] host-scan-stages\n  {s} debug [--target-batch-ms N] host-transpose-stages\n  {s} debug [--target-batch-ms N] [--matmul-size N] host-matmul-stages\n  {s} debug layout\n",
-            .{ cli_invocation, cli_invocation, cli_invocation, cli_invocation, cli_invocation, cli_invocation, cli_invocation, cli_invocation },
+            "  {s} debug audit-dense-autodiff\n  {s} debug layout\n",
+            .{ cli_invocation, cli_invocation },
         );
     }
 }
@@ -769,9 +723,9 @@ fn denseCountSummary(session: *runtime.Session, device: runtime_device.DevicePre
     for (kinds) |kind| {
         for (backends) |backend| {
             const count = if (use_exec_counts)
-                session.debugDenseExecCount(kind, backend)
+                session.debugRuntimeStats().dense_exec_counts[@backingInt(kind)][@backingInt(backend)]
             else
-                session.debugDensePlanCount(kind, backend);
+                session.debugRuntimeStats().dense_plan_counts[@backingInt(kind)][@backingInt(backend)];
             if (count == 0) continue;
             if (!first) writer.writeByte(',') catch return "overflow";
             writer.print("{s}:{s}={d}", .{
@@ -797,7 +751,7 @@ fn emitBackendReport(session: *runtime.Session, device: runtime_device.DevicePre
         session.lastDenseAutodiffExecPath().?
     else if (session.lastDenseExecBackend() != null)
         session.lastDenseExecBackend().?
-    else if (session.debugBackendRealizationCount() != 0 and session.debugHostReadbackCount() == 0)
+    else if (session.debugRuntimeStats().mlx_realization_count != 0 and session.debugRuntimeStats().host_readback_count == 0)
         "mlx"
     else
         "host";
@@ -1422,6 +1376,11 @@ fn sanitizeLine(raw: []const u8) ?[]const u8 {
 
     var idx: usize = 0;
     while (idx < line.len) : (idx += 1) {
+        if (line[idx] == '"') {
+            idx += 1;
+            while (idx < line.len and line[idx] != '"') : (idx += 1) {}
+            continue;
+        }
         if (line[idx] == '/' and idx > 0 and std.ascii.isWhitespace(line[idx - 1])) {
             const trimmed = std.mem.trimEnd(u8, line[0..idx], " \t");
             if (trimmed.len == 0) return null;
